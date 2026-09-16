@@ -1,0 +1,7 @@
+[[passes]]
+kind = "fullscreen"
+label = "wrong-entry"
+shader = "px_grade"
+entry = "fs_wrong"
+reads = ["view"]
+writes = ["view"]

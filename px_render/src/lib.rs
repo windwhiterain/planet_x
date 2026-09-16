@@ -2,6 +2,7 @@ pub mod art_cache;
 pub mod digest;
 pub mod material;
 pub mod mesh;
+pub mod passes;
 pub mod reflect;
 pub mod scene;
 pub mod shaders;

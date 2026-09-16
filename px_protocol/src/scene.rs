@@ -485,7 +485,49 @@ impl Default for Environment {
     }
 }
 
-/// 一般渲染文档：环境 + 相机表 + 灯表 + 物体表。
+pub const VIEW_BUILTIN: &str = "view";
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PassResource {
+    pub name: String,
+    pub format: String,
+    pub size: String,
+    #[serde(default)]
+    pub usage: Vec<String>,
+}
+
+fn fragment_entry() -> String {
+    "fs_main".to_string()
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PassSpec {
+    pub kind: String,
+    pub shader: Member,
+    #[serde(default)]
+    pub label: String,
+    #[serde(default = "fragment_entry")]
+    pub entry: String,
+    #[serde(default)]
+    pub reads: Vec<String>,
+    pub writes: Vec<String>,
+}
+
+impl PassSpec {
+    pub fn writes_view(&self) -> bool {
+        self.writes.first().map(String::as_str) == Some(VIEW_BUILTIN)
+    }
+
+    pub fn label_or(&self, index: usize) -> String {
+        if self.label.is_empty() {
+            format!("{index}:{}/{}", self.shader.graph, self.shader.node)
+        } else {
+            self.label.clone()
+        }
+    }
+}
+
+/// 一般渲染文档：环境 + 相机表 + 灯表 + 物体表 + pass 表。
 /// 渲染器只吃这一份，不再从命令行接收内容。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SceneSpec {
@@ -501,6 +543,12 @@ pub struct SceneSpec {
     /// `clouds`。这样"该看见什么"仍然由内容说，而不是渲染器猜 —— 猜的那一天它就又认识行星了。
     #[serde(default)]
     pub expects: Vec<String>,
+    /// pass 表要读写的中间目标。一个资源在这里声明一次，pass 按名字引用。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resources: Vec<PassResource>,
+    /// pass 表：**数组顺序就是执行顺序**。空表 = 只有主 pass，与没有这一节时逐字节相同。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub passes: Vec<PassSpec>,
     #[serde(default)]
     pub lights: Vec<Light>,
     pub objects: Vec<Object>,
@@ -523,6 +571,9 @@ impl SceneSpec {
         }
         if let Some(skybox) = &self.environment.skybox {
             out.push(skybox);
+        }
+        for pass in &self.passes {
+            out.push(&pass.shader);
         }
         out
     }
@@ -586,6 +637,92 @@ impl SceneSpec {
                 ));
             }
         }
+        let mut resources: Vec<&str> = Vec::new();
+        for resource in &self.resources {
+            if resource.name.is_empty() {
+                return Err("有个 pass 资源没给名字".to_string());
+            }
+            if resource.name == VIEW_BUILTIN {
+                return Err(format!(
+                    "pass 资源名 '{VIEW_BUILTIN}' 是内建名（相机自己的目标），不许重名"
+                ));
+            }
+            if resources.contains(&resource.name.as_str()) {
+                return Err(format!("pass 资源名重了：'{}'", resource.name));
+            }
+            if resource.format.trim().is_empty() || resource.size.trim().is_empty() {
+                return Err(format!(
+                    "pass 资源 '{}' 没给格式或尺寸规则（两样都要：执行器按它建中间目标）",
+                    resource.name
+                ));
+            }
+            resources.push(&resource.name);
+        }
+        let declared = if resources.is_empty() {
+            "（一个都没有）".to_string()
+        } else {
+            resources.join(" / ")
+        };
+        let mut labelled: Vec<String> = Vec::new();
+        for (index, pass) in self.passes.iter().enumerate() {
+            let label = pass.label_or(index);
+            let at = format!("第 {index} 条 pass '{label}'");
+            match pass.kind.as_str() {
+                "fullscreen" | "compute" => {}
+                other => {
+                    return Err(format!(
+                        "{at} 的 kind 是 '{other}'：认 'fullscreen' 与 'compute'"
+                    ));
+                }
+            }
+            if pass.entry.trim().is_empty() {
+                return Err(format!("{at} 没给入口点名字（@fragment 那个函数叫什么）"));
+            }
+            if pass.writes.is_empty() {
+                return Err(format!("{at} 没有 writes：它不写任何东西，画了也没人看得见"));
+            }
+            if pass.writes.len() > 1 {
+                return Err(format!(
+                    "{at} 写了 {} 个目标：一条 pass 只画一个颜色附件",
+                    pass.writes.len()
+                ));
+            }
+            if labelled.contains(&label) {
+                return Err(format!("pass 标签重了：'{label}'"));
+            }
+            labelled.push(label);
+            for name in pass.reads.iter().chain(pass.writes.iter()) {
+                if name == VIEW_BUILTIN {
+                    continue;
+                }
+                if !resources.contains(&name.as_str()) {
+                    return Err(format!(
+                        "{at} 用了 '{name}'，但 resources 里没声明它。声明了的：{declared}"
+                    ));
+                }
+            }
+            if pass.reads.iter().any(|read| pass.writes.contains(read)) {
+                let shared: Vec<&String> = pass
+                    .reads
+                    .iter()
+                    .filter(|read| pass.writes.contains(read))
+                    .collect();
+                for name in shared {
+                    if resources.contains(&name.as_str()) {
+                        return Err(format!(
+                            "{at} 同时读和写 '{name}'：它是一条 resources 声明（只有一张纹理）\
+                             ；读写同一张画面要靠宿主给两张（例如 'view' 的 ping-pong）"
+                        ));
+                    }
+                }
+            }
+        }
+        if !self.passes.is_empty() && !self.passes.iter().any(PassSpec::writes_view) {
+            return Err(format!(
+                "这份文档有 {} 条 pass，但没有一条写 '{VIEW_BUILTIN}'：画面不会被改动",
+                self.passes.len()
+            ));
+        }
         Ok(())
     }
 
@@ -603,6 +740,22 @@ impl SceneSpec {
             self.lights.len(),
             self.objects.len()
         )];
+        if !self.passes.is_empty() {
+            lines.push(format!(
+                "  pass 表 {} 条（数组顺序即执行顺序）：",
+                self.passes.len()
+            ));
+            for (index, pass) in self.passes.iter().enumerate() {
+                lines.push(format!(
+                    "    [{index}] {}｜{}｜读 [{}]｜写 [{}]｜shader {}",
+                    pass.label_or(index),
+                    pass.kind,
+                    pass.reads.join(" / "),
+                    pass.writes.join(" / "),
+                    pass.shader
+                ));
+            }
+        }
         for light in &self.lights {
             lines.push(format!(
                 "  [{}] 灯 {:?}｜位置 ({:.2},{:.2},{:.2})｜色 ({:.2},{:.2},{:.2})｜强度 {:.3e}{}",

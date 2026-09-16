@@ -243,6 +243,8 @@ fn canonical() -> String {
         },
         cameras: vec![Camera::new([0.0, 1.0, 0.0], 3.15, "review")],
         expects: vec!["clouds".to_string()],
+        resources: Vec::new(),
+        passes: Vec::new(),
         lights: vec![
             px_protocol::Light::point("sun", [-4.2, 1.15, 2.35], [1.0, 1.0, 1.0], 7.6e5)
                 .with_shadows(true),

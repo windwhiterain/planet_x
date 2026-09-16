@@ -4422,6 +4422,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "px_pass"
+version = "0.1.0"
+dependencies = [
+ "wgpu",
+]
+
+[[package]]
 name = "px_probe"
 version = "0.1.0"
 dependencies = [
@@ -4449,6 +4456,7 @@ version = "0.1.0"
 dependencies = [
  "bevy",
  "naga",
+ "px_pass",
  "px_protocol",
  "px_shader",
  "serde",

@@ -5,7 +5,13 @@ use px_ops::{GraphSpec, ManifestEntry};
 const GRAPH_VERSION: u32 = 1;
 const SOURCE_HASH: u64 = px_ops::noise::fnv1a(include_str!("shaders.rs"));
 
-const SLOTS: [&str; 3] = ["clouds", "atmosphere", "surface"];
+const SLOTS: [&str; 5] = [
+    "clouds",
+    "atmosphere",
+    "surface",
+    "px_grade",
+    "px_vignette",
+];
 
 fn main() {
     px_ops::begin(GraphSpec {

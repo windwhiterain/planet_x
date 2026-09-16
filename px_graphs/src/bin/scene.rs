@@ -954,6 +954,8 @@ fn compile(file: &SceneFile, root: &Path) -> Result<Compiled, String> {
         } else {
             Vec::new()
         },
+        resources: Vec::new(),
+        passes: Vec::new(),
         lights: vec![sun],
         objects,
     };

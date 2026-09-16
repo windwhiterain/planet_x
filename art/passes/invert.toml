@@ -1,0 +1,6 @@
+[[passes]]
+kind = "fullscreen"
+label = "invert"
+shader = "px_grade"
+reads = ["view"]
+writes = ["view"]

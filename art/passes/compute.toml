@@ -1,0 +1,7 @@
+[[passes]]
+kind = "compute"
+label = "reduce"
+shader = "px_grade"
+entry = "cs_main"
+reads = ["view"]
+writes = ["view"]

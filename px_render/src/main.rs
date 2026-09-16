@@ -36,7 +36,7 @@ use px_protocol::sim::WorldView;
 use px_protocol::stream::{self, Frame};
 use px_protocol::ProtocolId;
 use px_render::{
-    Canvas, OrbitCamera, ScenePart, art_cache, asset_root, material, scene, shaders, slots,
+    Canvas, OrbitCamera, ScenePart, art_cache, asset_root, material, passes, scene, shaders, slots,
 };
 
 const GOOD_COLORS: [Srgba; 3] = [
@@ -559,6 +559,8 @@ struct Built {
     watch: Vec<Handle<Shader>>,
     /// 可以现场改的仪器参数（窗口那一套键）。
     instruments: Vec<scene::Instrument>,
+    /// 这一步文档声明的 pass 表（None = 没有这一节）。
+    passes: Option<Arc<px_pass::Plan>>,
 }
 
 /// 对照图里的一格（列/行 + 格子尺寸）。相机表来自 `.pxart`，格子的排布是渲染器的事。
@@ -1191,6 +1193,7 @@ fn serve(options: Options) -> Result<(), String> {
         )
         .add_plugins(material::DocMaterialPlugin)
         .add_plugins(shaders::ShaderLibraryPlugin)
+        .add_plugins(passes::PassPlugin)
         // 渲染侧的 GPU 时间戳/管线统计。Bevy 只在开了 `tracing-tracy` 时自己加它
         // （`bevy_render/src/lib.rs` 381 行），所以这里显式加一次：我们不用 tracy，
         // 但要它写进 `DiagnosticsStore` 的 `render/**/elapsed_gpu`。
@@ -1521,7 +1524,7 @@ fn accept_jobs(
     mut scene_assets: SceneAssets,
     mut instruments: ResMut<SceneInstruments>,
     parts: Query<Entity, With<ScenePart>>,
-    tools: SceneTools,
+    mut tools: SceneTools,
 ) {
     // 这条系统一次走完「这一步」：上一步的图写完了就接着搭下一步，队空才回话；
     // 手上没有活儿才去收件箱拿新请求。两条路共用下面这一份搭场景的代码。
@@ -1642,6 +1645,7 @@ fn accept_jobs(
             declared_clouds: false,
             watch: Vec::new(),
             instruments: Vec::new(),
+            passes: None,
         }),
         StepScene::Artifact(path) => scene::spawn_document(
             &mut cache,
@@ -1664,6 +1668,7 @@ fn accept_jobs(
                 declared_clouds: document.declared_clouds,
                 watch: document.watched,
                 instruments: document.instruments,
+                passes: document.passes,
             }
         }),
     };
@@ -1779,6 +1784,10 @@ fn accept_jobs(
         StepScene::World { .. } => "0".to_string(),
     };
     job.watched = built.watch;
+    // 这一步声明的 pass 表进渲染世界（`extract_passes` 抄过去，`run_passes` 逐条录）。
+    // 上一步证到的坏跟着重建一起清：明细不是锁（§62）。
+    tools.failure.clear();
+    tools.passes.0 = built.passes;
     // 窗口那一套键要改的就是它们（渲染器不认识这些参数是什么意思，只按名字与偏移改）。
     instruments.0 = built.instruments;
     if built.installed_shaders {
@@ -1920,6 +1929,10 @@ struct SceneTools<'w> {
     root: Res<'w, PcgRoot>,
     /// 帧时间探针开着没有（`--fps`）：性能请求没有它就是在量 60 Hz 的上限。
     probe: Res<'w, FrameProbe>,
+    /// 这一步声明的 pass 表（空 = 只有主 pass）。
+    passes: ResMut<'w, passes::DocumentPasses>,
+    /// pass 执行器证到的坏（有它就不出图，与 `RenderReady.failure` 同一条路）。
+    failure: Res<'w, passes::PassFailure>,
 }
 
 /// 搭一个场景要往里塞的那些资产。同样的理由打包（§ 上面那条）：
@@ -2322,11 +2335,15 @@ enum PipelineGate {
 fn pipeline_gate(
     job: &ActiveJob,
     ready: &RenderReady,
+    failure: &passes::PassFailure,
     assets: &AssetServer,
     libraries: &[Handle<Shader>],
 ) -> PipelineGate {
     if let Some(detail) = ready.failure() {
         return PipelineGate::Refuse(format!("渲染管线失败，拒绝出图：{detail}"));
+    }
+    if let Some(detail) = failure.get() {
+        return PipelineGate::Refuse(format!("pass 表失败，拒绝出图：{detail}"));
     }
     let state = ready.get();
     if state == PIPELINES_FAILED {
@@ -2391,6 +2408,7 @@ fn drive(
     assets: Res<AssetServer>,
     libraries: Res<shaders::ShaderLibraries>,
     store: Res<DiagnosticsStore>,
+    pass_failure: Res<passes::PassFailure>,
 ) {
     let Some(job) = active.0.as_mut() else {
         return;
@@ -2400,7 +2418,7 @@ fn drive(
         return;
     }
 
-    match pipeline_gate(job, &ready, &assets, &libraries.0) {
+    match pipeline_gate(job, &ready, &pass_failure, &assets, &libraries.0) {
         PipelineGate::Ready => {}
         PipelineGate::Waiting => return,
         PipelineGate::Refuse(reason) => {
@@ -3236,6 +3254,7 @@ fn view(options: Options) -> Result<(), String> {
     )
     .add_plugins(material::DocMaterialPlugin)
     .add_plugins(shaders::ShaderLibraryPlugin)
+    .add_plugins(passes::PassPlugin)
     .insert_resource(ClearColor(Color::srgb(0.004, 0.005, 0.010)))
     .insert_resource(PcgRoot(options.pcg_root.clone()))
     .insert_resource(Viewer {
@@ -3620,6 +3639,8 @@ mod tests {
             },
             cameras: Vec::new(),
             expects: vec!["clouds".to_string()],
+            resources: Vec::new(),
+            passes: Vec::new(),
             lights: vec![px_protocol::Light::point("sun", [1.0, 2.0, 3.0], [1.0; 3], 1.0)],
             objects: vec![px_protocol::Object {
                 id: "云".to_string(),

@@ -52,6 +52,8 @@ pub struct DocumentScene {
     pub watched: Vec<Handle<Shader>>,
     /// 可以现场改的仪器参数（窗口那一套键）。
     pub instruments: Vec<Instrument>,
+    /// 这一份文档声明的 pass 表（空 = 没有这一节，只有主 pass）。
+    pub passes: Option<std::sync::Arc<px_pass::Plan>>,
 }
 
 pub fn read_document(path: &str) -> Result<SceneSpec, String> {
@@ -243,6 +245,7 @@ pub fn spawn_document(
 ) -> Result<DocumentScene, String> {
     let document = read_document(scene_path)?;
     let (installed_shaders, watched) = preload_shaders(server, cache, pcg_root, &document)?;
+    let (passes, pass_audit) = crate::passes::resolve(&document, cache, pcg_root)?;
 
     let skybox = match &document.environment.skybox {
         Some(member) => {
@@ -268,6 +271,7 @@ pub fn spawn_document(
         document.lights.len(),
         document.environment.ambient,
     )];
+    lines.push(pass_audit);
 
     for light in &document.lights {
         spawn_light(commands, light)?;
@@ -431,6 +435,7 @@ pub fn spawn_document(
         declared_clouds: document.expects.iter().any(|tag| tag == "clouds"),
         watched,
         instruments,
+        passes,
     })
 }
 
