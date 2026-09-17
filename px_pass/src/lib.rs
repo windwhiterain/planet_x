@@ -1452,6 +1452,20 @@ pub struct ResolvedMaterial<'a> {
 pub struct Frame<'a> {
     pub width: u32,
     pub height: u32,
+    /// 这一帧落在**宿主那块目标**里的哪一块：像素矩形 `(x, y, w, h)`（`set_viewport` 的口径）。
+    ///
+    /// `None` = 整幅。**单张那条路给的就是 `None`**：执行器一个 `set_viewport` /
+    /// `set_scissor_rect` 都不发，行为与没有这一格时逐字节相同。
+    ///
+    /// 为什么它在**帧**上、不在 pass 上：一块格子说的是"宿主把这一帧画到哪儿"，
+    /// 而这一帧里每条 pass 的位置是同一个 —— 挂到 pass 上就是同一件事两处说。
+    /// 今天的用处只有一处（`--sheet` 的 12 格），依据是**oracle 实测**
+    /// （仪器 `target/sheet/e-c.ps1`、`e-d.ps1`，target/ 下不入 git，同一个规矩）：
+    /// Bevy 的 12 台相机共用一张全尺寸中间目标、各自 `set_viewport` 画自己那一格，
+    /// 而**格子里的像素与"同一台相机单独渲一张"并不逐字节相同**（差 49–289 个像素，
+    /// 最大通道差 2–14；cell 0 因为偏移是 0 才恰好逐字节相同）。
+    /// ⇒ "12 次独立出图再拼起来"那条路在逐字节判据上**是错的**：位置必须真的交给光栅化。
+    pub viewport: Option<[f32; 4]>,
     pub sets: &'a [Vec<External<'a>>],
     /// 这一帧解析好的几何（按名字）。pass 的 `draws` 里点名谁就取谁。
     pub geometries: &'a [ResolvedGeometry<'a>],
@@ -1464,6 +1478,97 @@ pub struct Frame<'a> {
     /// 代价是组 0 有了**两个来源**，也就是 §66.1 那颗"同一件事两处说"的雷 ——
     /// 而静默的优先级正是我们两次裁定不可接受的那一类（`Role::Depth` 退役、`seed` 顶替）。
     pub materials: &'a [ResolvedMaterial<'a>],
+}
+
+/// 这一条 pass 在宿主那块**格子**里怎么落（见 [`Frame::viewport`]）。
+///
+/// 三种，每一条都有实测依据（仪器 `target/sheet/e-c.ps1`、`e-d.ps1`）：
+///
+/// - [`CellSpace::Whole`]：整幅。两种情形：`Frame::viewport` 是 `None`（单张那条路），
+///   或者这条 pass 画的资源**不是**按 `view` 定尺寸的 —— 影子 cube 那种 `1024x1024`
+///   的资源**不是格子的一部分**，硬套一个格子视口会落到附件外面（wgpu 当场拒）。
+/// - [`CellSpace::Viewport`]：`set_viewport(格子)`。这是**内容**那几条 pass 的形状：
+///   Bevy 给每台相机一个 `Viewport`，几何 / 天空盒 / 后处理全都按它投影。
+///   ⚠ 正是这一步让"格子里的像素与单独渲一张不一样"——光栅化的定点子像素位置
+///   是从**绝对**帧坐标算出来的，偏移 0 与偏移 960 在最后几位上不同。
+/// - [`CellSpace::Scissor`]：只 `set_scissor_rect(格子)`，**不设 viewport**。
+///   这是**交给宿主目标那一条**（`Role::Write` 的外部目标）的形状，也是 oracle 的形状：
+///   Bevy 的 upscaling 节点对相机视口做的是 `set_scissor_rect`
+///   （`bevy_core_pipeline-0.19.1/src/upscaling/node.rs:96-101`），全屏三角照样盖满整幅目标、
+///   uv 取的是**整幅**的坐标 ⇒ 它就是"把全尺寸源图原样搬到这一格"的一次拷贝。
+///   给它设 viewport 会变成"把整张源图缩进这一格"（uv 成了格内 0..1），那是另一张图。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum CellSpace {
+    Whole,
+    Viewport([f32; 4]),
+    Scissor([f32; 4]),
+}
+
+/// 这一条 pass 落在哪（纯数据，不碰 GPU —— 判据不必建设备）。
+///
+/// ⚠ 判据（`Frame`）与**规则**（这里）分成两层：规则只看三个事实 ——
+/// "这一帧有没有格子"、"这条 pass 写不写宿主的外部目标"、"它画的资源是不是按 `view` 定尺寸"。
+/// 那三个事实从 `Frame` 里读出来的那一步在 [`cell_space`]，而"读得对不对"由 GPU 判据
+/// （`the_frame_cell_moves_the_geometry_and_not_only_the_audit`）钉着：纯数据判据钉不到
+/// "宿主给了 External 却没被认出来"这一类错。
+fn cell_space_for(
+    pass: &PassPlan,
+    index: usize,
+    plan: &Plan,
+    cell: [f32; 4],
+    external_write: bool,
+) -> Result<CellSpace, String> {
+    if external_write {
+        // ⚠ 几何写宿主目标 + 格子这一档**说不通**：几何的落点靠 viewport 把 NDC 摊开，
+        //    而这条路的规则是"不设 viewport、只用 scissor"（那是给全屏拷贝用的）。
+        //    两者同时要的时候，画出来的东西会被摊到整幅目标再被 scissor 裁掉一角 ——
+        //    症状是"图看着像被裁了一半"，而门不会响。当场拒，并说清是哪一条 pass。
+        if pass.kind != PassKind::Fullscreen {
+            return Err(format!(
+                "第 {index} 条 pass '{}' 是 {}，它写的是宿主这一帧的外部目标，而这一帧带**格子**\
+                 （`Frame::viewport` = {:?}）：格子里的几何必须靠 viewport 落位，而写外部目标的那一条\
+                 按 oracle 的形状只设 scissor（不设 viewport）⇒ 这条路走不通",
+                pass.label,
+                pass.kind.name(),
+                cell
+            ));
+        }
+        return Ok(CellSpace::Scissor(cell));
+    }
+    // 附件跟着格子走的判据是**尺寸规则**：只有按 `view` 定尺寸的资源才是这一帧那幅画的一部分。
+    let view_sized = pass
+        .target()
+        .and_then(|name| plan.resource(name))
+        .is_some_and(|resource| resource.size == SizeRule::View)
+        || pass
+            .depth_target
+            .as_deref()
+            .and_then(|name| plan.resource(name))
+            .is_some_and(|resource| resource.size == SizeRule::View);
+    Ok(if view_sized {
+        CellSpace::Viewport(cell)
+    } else {
+        CellSpace::Whole
+    })
+}
+
+/// 这一条 pass 落在哪：从 `Frame` 里读出那三个事实，再交给 [`cell_space_for`]。
+fn cell_space(
+    pass: &PassPlan,
+    index: usize,
+    plan: &Plan,
+    frame: &Frame<'_>,
+) -> Result<CellSpace, String> {
+    let Some(cell) = frame.viewport else {
+        return Ok(CellSpace::Whole);
+    };
+    let external_write = pass.target().is_some_and(|name| {
+        frame.sets.get(index).is_some_and(|set| {
+            set.iter()
+                .any(|external| external.name == name && external.role == Role::Write)
+        })
+    });
+    cell_space_for(pass, index, plan, cell, external_write)
 }
 
 struct Pooled {
@@ -2436,6 +2541,11 @@ impl Executor {
                 fullscreen_draw = Some((pipeline, bind_group));
             }
 
+            // ---- 这一条 pass 落在宿主那块格子的哪一块（J2 的对照图；单张时是 `Whole`）----
+            //
+            // ⚠ 在 `begin_render_pass` **之前**算：它可能当场拒（几何写外部目标 + 格子），
+            //    而那时编码器还没被借走 —— 出错路径要干净。
+            let space = cell_space(pass, index, plan, frame)?;
             let pass_label = format!("px_pass {}", pass.label);
             // 附件状态是**数据**（§121 第 1 件）：这里只做"状态 → LoadOp"的翻译，
             // 一个常量都不许再写死 —— 写死的那天，`plan` 说的与实际画的就是两回事。
@@ -2479,6 +2589,24 @@ impl Executor {
                 multiview_mask: None,
             };
             let mut render_pass = encoder.begin_render_pass(&descriptor);
+            // 格子：内容那一条按 viewport 落位，交给宿主目标那一条只按 scissor 裁剪。
+            match space {
+                CellSpace::Whole => {}
+                CellSpace::Viewport(rect) => render_pass.set_viewport(
+                    rect[0],
+                    rect[1],
+                    rect[2],
+                    rect[3],
+                    0.0,
+                    1.0,
+                ),
+                CellSpace::Scissor(rect) => render_pass.set_scissor_rect(
+                    rect[0] as u32,
+                    rect[1] as u32,
+                    rect[2] as u32,
+                    rect[3] as u32,
+                ),
+            }
             if let Some((pipeline, bind_group)) = &fullscreen_draw {
                 render_pass.set_pipeline(pipeline);
                 render_pass.set_bind_group(layout.group, bind_group, &[]);
@@ -2507,7 +2635,7 @@ impl Executor {
             drop(render_pass);
 
             audit.push(format!(
-                "pass {index} '{}'（{}）读 [{}] 写 '{}'｜颜色 {}｜深度 {}｜层 {}｜画的：{}",
+                "pass {index} '{}'（{}）读 [{}] 写 '{}'｜颜色 {}｜深度 {}｜层 {}｜格子 {}｜画的：{}",
                 pass.label,
                 pass.kind.name(),
                 pass.reads.join(" / "),
@@ -2528,6 +2656,17 @@ impl Executor {
                 match pass.layer {
                     Some(layer) => format!("第 {layer} 层（{} 的）", pass.depth_target.as_deref().unwrap_or("?")),
                     None => "不分层".to_string(),
+                },
+                match space {
+                    CellSpace::Whole => "整幅".to_string(),
+                    CellSpace::Viewport(rect) => format!(
+                        "viewport ({}, {}, {}, {})",
+                        rect[0], rect[1], rect[2], rect[3]
+                    ),
+                    CellSpace::Scissor(rect) => format!(
+                        "scissor ({}, {}, {}, {})（不设 viewport：宿主目标那一条按 oracle 的形状搬）",
+                        rect[0], rect[1], rect[2], rect[3]
+                    ),
                 },
                 if fullscreen {
                     format!("全屏三角｜参数 {} 字节｜格 {}", pass.params.len(), pass.slots.len())
@@ -3224,6 +3363,285 @@ fn vs_main(@location(0) position: vec3<f32>) -> Out {
     }
 
     // -----------------------------------------------------------------------
+    // 格子（J2 的对照图）：**这一条 pass 落在哪一块**
+    //
+    // ⚠ 规则那几条在这里**不必建设备**（`cell_space_for` 只吃三个事实）；而
+    //    "那三个事实从 `Frame` 里读得对不对"由下面那一条 GPU 判据钉着 ——
+    //    只钉规则不钉读数，就会漏掉"宿主给了 External 却没被认出来"那一类错。
+    // -----------------------------------------------------------------------
+
+    /// 一份计划：资源表 + 几条 pass。
+    fn plan_with(resources: Vec<ResourceSpec>, passes: Vec<PassPlan>) -> Plan {
+        Plan {
+            layout: Layout::default(),
+            resources,
+            passes,
+        }
+    }
+
+    fn resource(name: &str, size: SizeRule) -> ResourceSpec {
+        ResourceSpec {
+            name: name.to_string(),
+            format: Format::Rgba8UnormSrgb,
+            size,
+            layers: 1,
+            usage: vec![Use::RenderAttachment, Use::TextureBinding],
+        }
+    }
+
+    /// 一条画到某个颜色目标上的几何 pass。
+    fn geometry_into(label: &str, target: &str) -> PassPlan {
+        PassPlan {
+            kind: PassKind::Geometry,
+            label: label.to_string(),
+            vertex_shader: TEST_VERTEX.to_string(),
+            vertex_entry: "vs_main".to_string(),
+            draws: vec![Draw {
+                geometry: "planet".to_string(),
+                material: String::new(),
+            }],
+            writes: vec![target.to_string()],
+            render: RenderState {
+                color: Attachment::Clear(Color::TRANSPARENT),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    const CELL: [f32; 4] = [960.0, 0.0, 960.0, 640.0];
+
+    /// **按 `view` 定尺寸的附件**跟着格子走：`set_viewport(格子)`。
+    #[test]
+    fn a_view_sized_attachment_follows_the_cell() {
+        let plan = plan_with(
+            vec![resource("scene_color_a", SizeRule::View)],
+            vec![geometry_into("opaque", "scene_color_a")],
+        );
+        assert_eq!(
+            cell_space_for(&plan.passes[0], 0, &plan, CELL, false).unwrap(),
+            CellSpace::Viewport(CELL)
+        );
+    }
+
+    /// **固定尺寸的附件不是格子的一部分**：影子 cube（1024×1024）跟着格子走的话，
+    /// 格子视口会落到附件外面 —— 那是 wgpu 当场拒，不是一张错图。
+    #[test]
+    fn a_fixed_size_attachment_is_not_part_of_the_cell() {
+        let mut shadow = depth_only("point_shadow");
+        shadow.depth_target = Some("point_shadow_textures".to_string());
+        let plan = plan_with(
+            vec![resource("point_shadow_textures", SizeRule::Fixed(1024, 1024))],
+            vec![shadow],
+        );
+        assert_eq!(
+            cell_space_for(&plan.passes[0], 0, &plan, CELL, false).unwrap(),
+            CellSpace::Whole,
+            "影子图不跟着格子走"
+        );
+    }
+
+    /// 交给**宿主目标**的那一条：只 `set_scissor_rect(格子)`。
+    ///
+    /// ⚠ 这一格是 J2 判据的关键：给它设 viewport，全屏三角的 uv 就从"整幅的 uv"
+    /// 变成"格内 0..1"，blit 会把整张源图缩进一格（那是另一张图，而且看着还挺像）。
+    #[test]
+    fn the_pass_that_hands_over_to_the_host_target_is_scissored() {
+        let plan = plan_with(
+            vec![resource("scene_color_a", SizeRule::View)],
+            vec![fullscreen("blit")],
+        );
+        assert_eq!(
+            cell_space_for(&plan.passes[0], 0, &plan, CELL, true).unwrap(),
+            CellSpace::Scissor(CELL)
+        );
+    }
+
+    /// **几何写宿主目标 + 格子**：当场拒，而且拒词要说清是哪一条 pass、是什么形状。
+    #[test]
+    fn a_geometry_pass_writing_the_host_target_is_refused() {
+        let plan = plan_with(vec![], vec![geometry_into("opaque", "view")]);
+        let why = cell_space_for(&plan.passes[0], 0, &plan, CELL, true).unwrap_err();
+        assert!(why.contains("opaque"), "要说清是哪一条：{why}");
+        assert!(why.contains("geometry"), "要说清是什么形状：{why}");
+        assert!(why.contains("scissor"), "要说清冲突在哪：{why}");
+    }
+
+    /// **`Frame::viewport` 真的落到了光栅化上**（J2 的对照图那一条）。
+    ///
+    /// 为什么非要有这一条 GPU 判据：上面那几条纯数据判据只钉"规则"，钉不到
+    /// "宿主给了 `Frame::viewport`、而执行器**没发** `set_viewport`"这一类错 ——
+    /// 而那一类错在画面上是"12 格画的全是左上角那一格的视角"，看着像内容问题。
+    ///
+    /// 做法：一格 = 右半幅（SIDE=8 ⇒ `[4, 0, 4, 8]`），几何是那个 ±0.6 的三角。
+    /// 三角在 NDC y=0 那一行上横跨 x∈[-0.3, 0.3]：
+    /// - **带格子**：映射到 x∈[5.4, 6.6] ⇒ 像素 (6,4) 白、(4,4) 红；
+    /// - **不带格子**：映射到 x∈[2.8, 5.2] ⇒ 像素 (4,4) 白。
+    /// 所以 (4,4) 与 (6,4) 这两个读数的组合把"viewport 发了没有"钉死。
+    #[test]
+    fn the_frame_cell_moves_the_geometry_and_not_only_the_audit() {
+        let (device, queue) = test_device();
+        let mut executor = Executor::new();
+        let side = SIDE;
+        let target = device.create_texture(&TextureDescriptor {
+            label: Some("px_pass 判据：格子里的中间目标"),
+            size: Extent3d {
+                width: side,
+                height: side,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: GpuDimension::D2,
+            format: TextureFormat::Rgba8UnormSrgb,
+            usage: TextureUsages::RENDER_ATTACHMENT
+                | TextureUsages::TEXTURE_BINDING
+                | TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let spec = ResourceSpec {
+            name: "a".to_string(),
+            format: Format::Rgba8UnormSrgb,
+            size: SizeRule::View,
+            layers: 1,
+            usage: vec![Use::RenderAttachment, Use::TextureBinding, Use::CopySrc],
+        };
+        executor
+            .seed(&spec, side, side, target.clone())
+            .expect("把中间目标 seed 进池子");
+
+        let plan = plan_with(
+            vec![spec],
+            vec![PassPlan {
+                kind: PassKind::Geometry,
+                label: "opaque".to_string(),
+                vertex_shader: TRIANGLE_VERTEX.to_string(),
+                vertex_entry: "vs_main".to_string(),
+                writes: vec!["a".to_string()],
+                draws: vec![draw("near", "white")],
+                render: RenderState::parse(STATE_BASE).expect("状态文本"),
+                ..Default::default()
+            }],
+        );
+
+        let near = vertex_buffer(&device, 0.5);
+        let vertex_layout = VertexBufferLayout {
+            array_stride: 12,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &TINT_ATTRIBUTES,
+        };
+        let geometries = [ResolvedGeometry {
+            name: "near",
+            vertices: Some((&near, vertex_layout.clone())),
+            indices: None,
+            vertex_count: 3,
+            instances: 0..1,
+        }];
+        let tint_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+            label: Some("px_pass 判据材质布局（格子）"),
+            entries: &[BindGroupLayoutEntry {
+                binding: 0,
+                visibility: ShaderStages::FRAGMENT,
+                ty: BindingType::Buffer {
+                    ty: BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+        let white = test_material(&device, &tint_layout, [1.0, 1.0, 1.0, 1.0]);
+        let materials = [resolved_material("white", &white, &tint_layout, Cull::None)];
+
+        // 一帧、一条 pass、**带格子**；读回三个像素。
+        let frame = Frame {
+            width: side,
+            height: side,
+            viewport: Some([4.0, 0.0, 4.0, 8.0]),
+            sets: &[],
+            geometries: &geometries,
+            materials: &materials,
+        };
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("px_pass 判据（格子）"),
+        });
+        let audit = executor
+            .execute(&device, &mut encoder, &plan, &frame)
+            .unwrap_or_else(|err| panic!("execute 失败：{err}"));
+        println!("{audit}");
+        assert!(
+            audit.contains("viewport (4, 0, 4, 8)"),
+            "审计要说清这一条落在格子里：{audit}"
+        );
+        let pixels = read_points(&device, &queue, encoder, &target, &[(6, 4), (4, 4), (0, 4)]);
+        assert_eq!(pixels[0], WHITE, "格子里那一笔应当被移到右半幅（(6,4) 白）");
+        assert_eq!(pixels[1], RED, "(4,4) 落在三角外面 ⇒ 清屏色（不带格子时它是白的）");
+        assert_eq!(pixels[2], RED, "格子外面一个像素都不许动");
+    }
+
+    /// 把 `encoder` 里录好的东西交出去，回读指定的几个像素。
+    fn read_points(
+        device: &Device,
+        queue: &wgpu::Queue,
+        mut encoder: wgpu::CommandEncoder,
+        target: &Texture,
+        points: &[(u32, u32)],
+    ) -> Vec<[u8; 4]> {
+        let padded = u64::from(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
+        let readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("px_pass 判据回读（格子）"),
+            size: padded * u64::from(SIDE),
+            usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: target,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &readback,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT),
+                    rows_per_image: Some(SIDE),
+                },
+            },
+            Extent3d {
+                width: SIDE,
+                height: SIDE,
+                depth_or_array_layers: 1,
+            },
+        );
+        queue.submit(Some(encoder.finish()));
+        let slice = readback.slice(..);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = sender.send(result);
+        });
+        device
+            .poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: Some(std::time::Duration::from_secs(60)),
+            })
+            .expect("等回读超时");
+        receiver.recv().expect("映射没有回调").expect("映射失败");
+        let data = slice.get_mapped_range();
+        let out = points
+            .iter()
+            .map(|(x, y)| {
+                let at = (y * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT + x * 4) as usize;
+                [data[at], data[at + 1], data[at + 2], data[at + 3]]
+            })
+            .collect();
+        drop(data);
+        readback.unmap();
+        out
+    }
+
+    // -----------------------------------------------------------------------
     // copy（§131）：一次搬运。**形状那几条先拒，像素那一条真跑**
     // -----------------------------------------------------------------------
 
@@ -3428,6 +3846,7 @@ fn vs_main(@location(0) position: vec3<f32>) -> Out {
         let frame = Frame {
             width: SIDE,
             height: SIDE,
+            viewport: None,
             sets: &[],
             geometries: &[],
             materials: &[],
@@ -4099,6 +4518,7 @@ fn fs_main(@location(0) tint: vec4<f32>) -> @location(0) vec4<f32> {
         let frame = Frame {
             width: SIDE,
             height: SIDE,
+            viewport: None,
             sets,
             geometries,
             materials,
@@ -4343,6 +4763,7 @@ fn fs_main(@location(0) tint: vec4<f32>) -> @location(0) vec4<f32> {
         let frame = Frame {
             width: SIDE,
             height: SIDE,
+            viewport: None,
             sets: &sets,
             geometries: &geometries,
             materials: &blind_materials,
@@ -4368,6 +4789,7 @@ fn fs_main(@location(0) tint: vec4<f32>) -> @location(0) vec4<f32> {
         let frame = Frame {
             width: SIDE,
             height: SIDE,
+            viewport: None,
             sets: &sets,
             geometries: &geometries,
             materials: &materials,

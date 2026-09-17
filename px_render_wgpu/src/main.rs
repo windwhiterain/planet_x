@@ -54,6 +54,10 @@ fn usage() -> String {
         "        而 `tools/` 那套仪器（frame-probe / harness）就是这么调本 exe 的。",
         "        两套语义共用一个写法，等于让'这张图是谁画的'变成一条要靠猜的事。",
         "      --stats：报回读字节的逐通道 min/max 与颜色数（平场那种判据靠它）。",
+        "  px_render_wgpu --scene 文档.pxart --out sheet.png --sheet [--columns N] [--offline]",
+        "      **对照图**（J2）：12 格 × 960×640 拼成一张 3840×1920 —— 相机表来自产物",
+        "      （`.pxart` 的 `cameras`），格子的排布是渲染器的事（缺省 4 列）。",
+        "      ⚠ 与 --cam 互斥：相机表与 --cam 是两处会漂开的真相。",
         "  px_render_wgpu --diff A.png B.png",
         "      两张 PNG 逐像素比（不要 GPU）：差异像素数 / 最大与平均通道差 / 差异区域 /",
         "      剪影内的像素是不是逐位相同。",
@@ -68,7 +72,6 @@ fn usage() -> String {
         "  px_render_wgpu --help",
         "",
         "⚠ 这一版没有的（各自都会**当场拒**，而且拒词指路）：",
-        "  --sheet            对照图（J2 那一档：12 格 viewport + 逐格乒乓）",
         "  --perf/--windows/--frames",
         "                     性能那两路要的是**帧循环**（逐帧采样 / 丢窗 / 等 K 帧），",
         "                     而帧循环是 viewer（S7）的交付物 —— 在那之前 gpu_ms/pair 没有可比对象",
@@ -132,8 +135,14 @@ struct Options {
     height: u32,
     /// 报告 JSON 写哪儿（空 = 只回给调用方，不落盘）。
     report: String,
-    /// 用产物自带的相机表出一张多视角对照图（**这一版没有**：服务端当场拒）。
+    /// 用产物自带的相机表出一张多视角对照图（J2：12 格 × 960×640 ⇒ 3840×1920）。
+    ///
+    /// ⚠ 它**不是"另一台相机"**：相机表住在产物里（`.pxart` 的 `cameras`），
+    /// 格子的排布（4 列、行优先、目标尺寸）是**渲染器的事**（Bevy 的 `SheetCell` 就是这句话）。
+    /// 所以 `--cam` 与它互斥：两个来源就是两处会漂开的真相（`Options::parse` 当场拒）。
     sheet: bool,
+    /// 对照图的列数（`sheet` 为真时有效）。缺省 4 —— 与 Bevy 宿主同一条（那是**策略**，
+    /// 不是内容：产物里只有相机表，没有"排几列"）。
     columns: u32,
     /// `--perf`：这一路请求要收帧（默认是 `--shots`）。
     perf: bool,
@@ -446,9 +455,19 @@ fn check_content_shaders() -> i32 {
 }
 
 /// `--scene`（离线）：按文档画一帧、回读、落 PNG。**失败就大声说**（返回非 0）。
-fn run_scene(scene: &Path, out: &Path, width: u32, height: u32, stats: bool, cam: Option<[f32; 3]>) -> i32 {
+///
+/// ⚠ 落盘的尺寸用 `rendered.width/height`，不是命令行的 `--width/--height`：
+/// 对照图那一档命令行给的是**一格**的尺寸（960×640），而落盘那张是 3840×1920。
+fn run_scene(
+    scene: &Path,
+    out: &Path,
+    width: u32,
+    height: u32,
+    stats: bool,
+    views: render::Views,
+) -> i32 {
     let gpu = gpu::connect();
-    let rendered = match render::run(&gpu, scene, &art::default_pcg_root(), cam, width, height) {
+    let rendered = match render::run(&gpu, scene, &art::default_pcg_root(), views, width, height) {
         Ok(rendered) => rendered,
         Err(message) => {
             eprintln!("渲染失败：{message}");
@@ -458,6 +477,8 @@ fn run_scene(scene: &Path, out: &Path, width: u32, height: u32, stats: bool, cam
     for line in &rendered.audit {
         println!("{line}");
     }
+    let width = rendered.width;
+    let height = rendered.height;
     // 首像素要在把 pixels 交出去之前抄下来：写 PNG 会把它移走。
     let first = [
         rendered.pixels[0],
@@ -678,8 +699,22 @@ fn run_offline(options: &Options) -> i32 {
         options.width,
         options.height,
         options.stats,
-        options.view_cam(),
+        // ⚠ 离线这条路**也要走 `--sheet`**：判据那一张对照图就是它出的（J2）。
+        //    两处各写一份"怎么看"的翻译就是两处会漂开的真相（服务那条路在 `serve::views_of`）。
+        views_of(options),
     )
+}
+
+/// 命令行那一档「怎么看」→ `render::Views`（**离线**那条路的翻译；服务那条路在
+/// `serve::views_of`，因为那里拿的是请求而不是命令行）。
+fn views_of(options: &Options) -> render::Views {
+    if options.sheet {
+        render::Views::Sheet {
+            columns: options.columns,
+        }
+    } else {
+        render::Views::Single(options.view_cam())
+    }
 }
 
 /// `--device [--shot PNG]`：报设备就绪读数，给了 `--shot` 就再清一张纯色图。

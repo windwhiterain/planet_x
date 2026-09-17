@@ -584,13 +584,18 @@ pub fn frame(
     camera: &crate::camera::Camera,
     ambient: f32,
     cluster: &[ClusteredLight],
-    width: u32,
-    height: u32,
+    viewport: [f32; 4],
     depth: &wgpu::TextureView,
     shadow_cube: &wgpu::TextureView,
     shadow_sampler: &wgpu::Sampler,
     shadow_note: &str,
 ) -> Result<GroupZero, String> {
+    // ⚠ `viewport` 是 **`view.viewport`**：**绝对像素矩形** `(x, y, w, h)`
+    //    （Bevy 的 `ExtractedView::viewport`），**不是**"这一格的尺寸"：
+    //    单张那条路是 `(0, 0, 宽, 高)`，而对照图里第 k 格是
+    //    `(格列×格宽, 格行×格高, 格宽, 格高)` —— 片元坐标是**绝对**的，内容 shader 拿它
+    //    反算出格内 NDC（`clouds.wgsl:537` / `atmosphere.wgsl:32` / `skybox.wgsl:98` 都是那条算式）。
+    //    传成 `(0,0,格宽,格高)` 的症状是"每格都画成了左上角那一格的视角"，而门不会响。
     let (group, binding) = CLUSTERED_LIGHTS_BINDING;
     let array = storage_array_layout(module, group, binding)
         .map_err(|err| format!("反射聚类缓冲失败：{err}"))?;
@@ -613,7 +618,7 @@ pub fn frame(
         ));
     }
 
-    let view = ViewUniform::from_camera(camera, [0.0, 0.0, width as f32, height as f32]);
+    let view = ViewUniform::from_camera(camera, viewport);
     let lights = LightsUniform::ambient(ambient);
     let globals = globals_zero();
     // 长度与步长来自**反射**（`array`），不是写死的 64 / 80：能放几盏灯写在 shader 里。

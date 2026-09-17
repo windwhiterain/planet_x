@@ -312,6 +312,8 @@ pub fn run_passes(
     let frame = px_pass::Frame {
         width: target.main_texture().width(),
         height: target.main_texture().height(),
+        // 这一版没有对照图（J2 是 wgpu 宿主那一档）：整幅。
+        viewport: None,
         sets: &sets,
         // 这一版的文档 pass 表里一条几何 pass 都没有（全是全屏后处理）⇒ 解析结果为空表。
         // 要画几何时，宿主在这里把 `Draw { geometry, material }` 里的名字解析成 GPU 句柄。

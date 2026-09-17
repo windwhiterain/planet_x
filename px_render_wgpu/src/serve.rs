@@ -205,7 +205,11 @@ fn serve_connection(server: &mut Server, mut stream: TcpStream) {
 struct Step {
     scene: String,
     out: String,
-    cam: Option<[f32; 3]>,
+    /// 这一步**怎么看**：`--cam` 那一台，或者产物自带的相机表（`--sheet` / J2）。
+    ///
+    /// ⚠ 它是 `render::Views`，不是 `Option<[f32; 3]>`：对照图不是"另一台相机"，
+    /// 而是"12 台相机 + 12 块格子"（格子的排布是渲染器的事，见 `SheetCell` 的注释）。
+    views: render::Views,
 }
 
 impl Server {
@@ -227,7 +231,7 @@ impl Server {
                 &self.gpu,
                 path,
                 &self.pcg_root,
-                step.cam,
+                step.views,
                 request.width,
                 request.height,
             )?;
@@ -235,9 +239,12 @@ impl Server {
                 println!("{line}");
             }
             let label = rendered.audit.join("\n");
+            // ⚠ 三个读数从**回读出来的字节**算，尺寸也要用**画出来的那张**的
+            //    （对照图是 3840×1920，而请求给的 960×640 只是**一格**的大小）。
+            let width = rendered.width;
+            let height = rendered.height;
 
-            // ⚠ 三个读数从**回读出来的字节**算，PNG 是有损压缩后的东西（`report` 模块头）。
-            let stat = report::measure(&rendered.pixels, request.width, request.height);
+            let stat = report::measure(&rendered.pixels, width, height);
             let declared = rendered.declared_clouds;
             let is_reference = reference.is_none();
             let reference_grid = reference.get_or_insert_with(|| stat.grid.clone());
@@ -253,13 +260,13 @@ impl Server {
             });
 
             let out = PathBuf::from(&step.out);
-            let bytes = shot::write_png(&out, request.width, request.height, rendered.pixels)?;
+            let bytes = shot::write_png(&out, width, height, rendered.pixels)?;
             let sha256 = digest::sha256_file(&out)?;
             println!(
                 "出图：{label} → {}（{}×{}，{} 字节，{} ms，sha256 {}）",
                 out.display(),
-                request.width,
-                request.height,
+                width,
+                height,
                 bytes,
                 started.elapsed().as_millis(),
                 &sha256[..sha256.len().min(16)],
@@ -277,8 +284,8 @@ impl Server {
                 scene: step.scene.clone(),
                 label: label.clone(),
                 out: out.display().to_string(),
-                width: request.width,
-                height: request.height,
+                width,
+                height,
                 bytes,
                 sha256,
                 placeholder_px: stat.placeholder_px,
@@ -290,8 +297,8 @@ impl Server {
             });
             last = (
                 label,
-                request.width,
-                request.height,
+                width,
+                height,
                 std::fs::metadata(&out).map(|meta| meta.len()).unwrap_or(0),
             );
         }
@@ -348,7 +355,7 @@ impl Server {
 
 /// 把一次请求摊成一队「要出的图」，并把**能力之外**的东西当场拒掉。
 ///
-/// 两条拒词的理由要说对（§146.3 ③：「拦住了不等于说对了」）：
+/// 一条拒词的理由要说对（§146.3 ③：「拦住了不等于说对了」）：
 ///
 /// - **性能那两路**（`Perf` / `Stable`）：它们要的是**帧循环**——逐帧采样、丢窗、等
 ///   "重建后已渲染 K 帧"。本宿主现在**按需渲染**（一条请求画一帧就回话），帧循环是
@@ -357,15 +364,12 @@ impl Server {
 ///   `prepass` / mip / tonemapping / upscaling 那几条编码器级 span 的**求和**（§104 第 4 条），
 ///   而 app 逐帧毫秒是"GPU 在飞 4 帧"那条流水线的周期。在按需渲染上凑一个同名的数
 ///   = 一个数放进一个语义不同的字段里，比没有这个数坏。
-/// - **`view.sheet`**（对照图）：那是 J2 那一档（12 格 viewport / 乒乓）。
+///
+/// ⚠ `view.sheet`（对照图）**不再是拒词**（J2 那一档已经落地）：它现在是**一步怎么看**
+/// 的一档，等价于 Bevy 那边 `View { sheet, columns }` —— 相机表住在产物里（`.pxart`），
+/// 格子的排布是渲染器的事（`SheetCell` 的注释）。产物没带相机表时由
+/// `render::placements` 当场拒，而且那句话说的是"这一步没带相机表"（与 Bevy 逐字同一条）。
 fn steps_of(request: &Request) -> Result<Vec<Step>, String> {
-    if request.view.sheet {
-        return Err(
-            "这一版没有对照图（`view.sheet`）：J2 那一档（产物自带相机表 12 格 + 逐格乒乓）\
-             还没做。要那一张图请走 Bevy 宿主：target/oracle/px_render-bevy.exe --sheet"
-                .to_string(),
-        );
-    }
     if !matches!(request.job, Job::Shots) {
         return Err(format!(
             "`{}` 那一路不在这一版：它要的是**帧循环**（逐帧采样 / 丢窗 / 等 K 帧），\
@@ -389,7 +393,7 @@ fn steps_of(request: &Request) -> Result<Vec<Step>, String> {
             Ok(vec![Step {
                 scene: scene.clone(),
                 out: request.out.clone(),
-                cam: request.view.cam,
+                views: views_of(request, request.view.cam),
             }])
         }
         Scene::Sequence { shots } => {
@@ -409,12 +413,27 @@ fn steps_of(request: &Request) -> Result<Vec<Step>, String> {
                     scene: shot.scene.clone(),
                     out: shot.out.clone(),
                     // 这一步给了相机就用它的，没给就沿用请求上那一档（Bevy 的 `ActiveJob::steps`）。
-                    cam: shot.cam.or(request.view.cam),
+                    views: views_of(request, shot.cam.or(request.view.cam)),
                 });
             }
             Ok(steps)
         }
         Scene::World { .. } => Err(WORLD_REFUSAL.to_string()),
+    }
+}
+
+/// 这一次请求**怎么看**：`--sheet` 那一档优先（它本来就是"用产物自带的相机表"，
+/// 所以两步都不会带 `cam` —— 客户端那一侧已经在本地拒了 `--cam` + `--sheet`）。
+///
+/// ⚠ `columns` 在这里**不兜底**：0 交给 `render::placements` 按 Bevy 同一条 `.max(1)` 处理，
+/// 两处各兜一次就是"同一个数两个来源"。
+fn views_of(request: &Request, cam: Option<[f32; 3]>) -> render::Views {
+    if request.view.sheet {
+        render::Views::Sheet {
+            columns: request.view.columns,
+        }
+    } else {
+        render::Views::Single(cam)
     }
 }
 
@@ -460,18 +479,28 @@ mod tests {
         assert_eq!(steps.len(), 2);
         assert_eq!(steps[0].scene, "a.pxart");
         assert_eq!(steps[1].out, "b.png");
-        assert_eq!(steps[0].cam, Some([1.0, 2.0, 3.0]), "这一步自己的相机");
-        assert_eq!(steps[1].cam, Some([9.0, 9.0, 9.0]), "没给就沿用请求上那一档");
+        assert_eq!(
+            steps[0].views,
+            render::Views::Single(Some([1.0, 2.0, 3.0])),
+            "这一步自己的相机"
+        );
+        assert_eq!(
+            steps[1].views,
+            render::Views::Single(Some([9.0, 9.0, 9.0])),
+            "没给就沿用请求上那一档"
+        );
     }
 
-    /// 三条**能力拒词**各钉一次，而且钉的是"理由对不对"而不是"有没有拒"：
-    /// 性能那两路要说的必须是"需要帧循环"，不是"还没做"。
+    /// `--sheet` 从**拒词**变成了**一档怎么看**：它落到每一步上是 `Views::Sheet`，
+    /// 而且**吞掉 `cam`** —— 产物自带的相机表与 `--cam` 是两处会漂开的真相
+    /// （客户端那一侧已经在本地拒了同时给两个，服务端这一侧不能"cam 赢"或者"sheet 赢"）。
     #[test]
-    fn the_capability_refusals_name_the_real_reason() {
+    fn a_sheet_request_becomes_the_artifact_camera_table() {
         let sheet = Request {
             view: View {
                 sheet: true,
-                ..View::default()
+                columns: 4,
+                cam: Some([1.0, 2.0, 3.0]),
             },
             ..request(
                 Scene::Artifact {
@@ -480,9 +509,18 @@ mod tests {
                 "a.png",
             )
         };
-        let why = steps_of(&sheet).unwrap_err();
-        assert!(why.contains("对照图"), "{why}");
+        let steps = steps_of(&sheet).expect("对照图这一档已经落地，不该再拒");
+        assert_eq!(
+            steps[0].views,
+            render::Views::Sheet { columns: 4 },
+            "对照图这一步是「按产物自带的相机表排格子」"
+        );
+    }
 
+    /// 能力拒词钉的是"理由对不对"，不是"有没有拒"：性能那两路要说的必须是
+    /// "需要帧循环"、并且指路 S7。
+    #[test]
+    fn the_capability_refusals_name_the_real_reason() {
         let perf = Request {
             job: Job::Stable { frames: 60 },
             ..request(

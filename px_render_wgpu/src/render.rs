@@ -241,6 +241,11 @@ const SHADOW_TEXTURE_RESOURCE: &str = "point_shadow_textures";
 /// ⚠ 不留目标纹理：回读在 [`run`] 里就做完了，"目标还在手上"是这一档用不到的余量。
 pub struct Rendered {
     pub pixels: Vec<u8>,
+    /// 这张图的尺寸。⚠ **不是**请求里的 `width/height`：对照图的请求给的是**一格**的尺寸，
+    /// 而落盘那张是 `(格宽×列数) × (格高×行数)`（Bevy 那边 `job.width/height` 也是这么改的）。
+    /// 报告与 PNG 两处都从这两个数走 —— 少一处对上就是"报告说 960×640、文件是 3840×1920"。
+    pub width: u32,
+    pub height: u32,
     pub audit: Vec<String>,
     pub executed: Vec<String>,
     /// 这一档**没执行**的 pass 与原因。⚠ §136 起它是空的（六条全跑）——
@@ -418,6 +423,119 @@ fn cull_of(cull: CullMode) -> Cull {
     }
 }
 
+/// 这一次出图**要几台相机、怎么摆**（"怎么看"那一栏；内容一律来自文档）。
+///
+/// ⚠ 它就是 Bevy 那边的 `job.view`（`View { cam, sheet, columns }`）：`sheet = false` 那一路是
+/// `probe_camera(step.cam)`，`sheet = true` 那一路是产物自带的相机表（§110.1）。
+/// 两路**共用**同一段渲染代码，差别只有"相机从哪来"与"落在哪一块"。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Views {
+    /// 一张：`--cam`（`None` = 固定探针机位）。
+    Single(Option<[f32; 3]>),
+    /// 对照图（J2）：产物自带的评审相机表，按 `columns` 列排开。
+    Sheet { columns: u32 },
+}
+
+/// 一台相机 + 它落在**宿主目标**里的那一块。
+struct Placement {
+    camera: crate::camera::Camera,
+    /// 这一格的绝对像素矩形 `(x, y, w, h)`；`None` = 整幅（单张那条路）。
+    ///
+    /// ⚠ 它同时是 `Frame::viewport`（交给执行器）与 `view.viewport`（交给内容 shader）那一份：
+    /// 两个数必须**同源**。分成两处算的话，"pass 画在哪儿"与"shader 以为自己在哪儿"
+    /// 会各自漂开，而症状是每格都像左上角那一格的视角 —— 门不会响。
+    rect: Option<[u32; 4]>,
+    /// 第几格（审计用；单张时是 0）。
+    index: usize,
+    /// 这一格是谁（审计用：相机来自产物表时带上 tag）。
+    note: String,
+}
+
+impl Placement {
+    /// 交给执行器/`view` uniform 的那一份（f32；单张是 `None`）。
+    fn viewport(&self) -> Option<[f32; 4]> {
+        self.rect
+            .map(|rect| [rect[0] as f32, rect[1] as f32, rect[2] as f32, rect[3] as f32])
+    }
+
+    /// `view.viewport`：单张那条路是整幅 `(0, 0, 宽, 高)`（与加格子之前逐字节相同）。
+    fn uniform_viewport(&self, cell: (u32, u32)) -> [f32; 4] {
+        let rect = self.rect.unwrap_or([0, 0, cell.0, cell.1]);
+        [rect[0] as f32, rect[1] as f32, rect[2] as f32, rect[3] as f32]
+    }
+}
+
+/// 相机表 → 一台台相机 + 它们各自那一块；顺带算**宿主目标**的尺寸。
+///
+/// 两条路的规则都逐字照搬 Bevy 宿主（`px_render/src/main.rs:1686-1732`）：
+///
+/// - `Single`：一台探针相机，整幅，目标 = 请求的尺寸；
+/// - `Sheet`：`columns = view.columns.max(1)`（Bevy 同一条），
+///   `rows = 相机数.div_ceil(columns)`，目标 = `(格宽 × columns, 格高 × rows)`，
+///   **第 i 台相机落在 `(i % columns, i / columns)`**（行优先，`SheetCell` 的排布就是它）。
+///   ⚠ `columns = 0` 兜成 1 不是"随手"：协议那一栏的缺省是 0，而 0 列排不出格子
+///   （Bevy 也是 `.max(1)`）。
+///
+/// ⚠ 长宽比取的是**格子的**尺寸（`width/height`），不是整幅目标：Bevy 的投影是
+/// `camera_projection.update(logical_viewport_size)`（`bevy_render-0.19.1/src/camera.rs:425-433`），
+/// 带 viewport 的相机拿到的是 **viewport 的大小**。拿整幅去算，12 格的视野会一起变宽。
+fn placements(
+    views: Views,
+    spec: &px_protocol::scene::SceneSpec,
+    width: u32,
+    height: u32,
+) -> Result<(Vec<Placement>, (u32, u32)), String> {
+    let aspect = width as f32 / height as f32;
+    match views {
+        Views::Single(cam) => Ok((
+            vec![Placement {
+                camera: crate::camera::probe_camera(cam, aspect),
+                rect: None,
+                index: 0,
+                note: match cam {
+                    Some([yaw, pitch, distance]) => {
+                        format!("--cam {yaw},{pitch},{distance}")
+                    }
+                    None => "探针机位（不给 --cam）".to_string(),
+                },
+            }],
+            (width, height),
+        )),
+        Views::Sheet { columns } => {
+            if spec.cameras.is_empty() {
+                // 与 Bevy 同一句话：它说的是"这一步没带相机表"，不是"这一版没做"。
+                return Err(
+                    "--sheet 用的是产物自带的相机表：这一步没带（烘场景时用 \
+                     px_ops::cameras::review() 灌进 .pxart）"
+                        .to_string(),
+                );
+            }
+            let columns = columns.max(1);
+            let rows = (spec.cameras.len() as u32).div_ceil(columns);
+            let mut out = Vec::with_capacity(spec.cameras.len());
+            for (index, camera) in spec.cameras.iter().enumerate() {
+                let column = index as u32 % columns;
+                let row = index as u32 / columns;
+                out.push(Placement {
+                    camera: crate::camera::review_camera(camera, aspect),
+                    rect: Some([
+                        column * width,
+                        row * height,
+                        width,
+                        height,
+                    ]),
+                    index,
+                    note: format!(
+                        "第 {} 格（{columns} 列排开的第 {row} 行第 {column} 列）｜产物相机 '{}'",
+                        index, camera.tag
+                    ),
+                });
+            }
+            Ok((out, (width * columns, height * rows)))
+        }
+    }
+}
+
 /// 跑这一帧。
 ///
 /// ⚠ 四个「从哪儿来」的参数都是**调用方给的**，一个都不在这里取缺省：
@@ -425,13 +543,15 @@ fn cull_of(cull: CullMode) -> Cull {
 /// - `pcg_root`：CAS 根。`--scene` 那条离线路传 [`art::default_pcg_root`]，服务那条路传
 ///   租约进程自己的 `--pcg-root`（**服务端说了算**，客户端的同名旗标只报一声 ——
 ///   解析成员的是渲染进程，这是协议里就定下的）。
-/// - `cam`：`Request::view.cam`（`None` = 用探针机位，Bevy 的 `probe_camera(step.cam)`）。
-///   它是**怎么看**，所以住在请求上，不住在文档里（§110.1：产物自带的相机表只给 `--sheet`）。
+/// - `views`：`Request::view`（`cam` / `sheet` / `columns`）。它是**怎么看**，所以住在请求上，
+///   不住在文档里（§110.1：产物自带的相机表只给 `--sheet`）。
+/// - `width` / `height`：**一格的**尺寸。对照图那张图是 `(格宽×列数) × (格高×行数)`，
+///   格子怎么排是**渲染器的事**（`SheetCell` 的注释：相机表来自 `.pxart`，格子的排布是渲染器的）。
 pub fn run(
     gpu: &Gpu,
     scene_path: &Path,
     pcg_root: &Path,
-    cam: Option<[f32; 3]>,
+    views: Views,
     width: u32,
     height: u32,
 ) -> Result<Rendered, String> {
@@ -470,16 +590,32 @@ pub fn run(
     }
     let executed_plan = all_passes(&plan, &mut audit)?;
 
-    // ---- 相机：`camera.rs` 原样（逐位对齐 oracle），只有长宽比来自命令行 ----
-    let camera = crate::camera::probe_camera(cam, width as f32 / height as f32);
+    // ---- 相机与格子：产物自带的那 12 台（`--sheet`）或者一台探针相机 ----
+    let (placements, target) = placements(views, &spec, width, height)?;
     audit.push(format!(
-        "相机：from_xyz({}, {}, {}).looking_at(ZERO, Y)｜aspect {}（位模式 {:08X}）｜无限 reverse-Z / Depth32Float / 清 0.0 / GreaterEqual",
-        camera.position.x,
-        camera.position.y,
-        camera.position.z,
+        "怎么看：{:?}｜{} 台相机｜一格 {}×{}（aspect {}，位模式 {:08X}）⇒ 目标 {}×{}\
+         ｜无限 reverse-Z / Depth32Float / 清 0.0 / GreaterEqual",
+        views,
+        placements.len(),
+        width,
+        height,
         width as f32 / height as f32,
-        (width as f32 / height as f32).to_bits()
+        (width as f32 / height as f32).to_bits(),
+        target.0,
+        target.1
     ));
+    for placement in &placements {
+        audit.push(format!(
+            "  {}｜from_xyz({}, {}, {}).looking_at(ZERO, Y)｜viewport {}",
+            placement.note,
+            placement.camera.position.x,
+            placement.camera.position.y,
+            placement.camera.position.z,
+            match placement.uniform_viewport((width, height)) {
+                [x, y, w, h] => format!("({x}, {y}, {w}, {h})"),
+            }
+        ));
+    }
 
     // ---- 灯：文档那几盏 → 聚类缓冲的那几格（`group0::lights_of`，逐字复刻 oracle 的打包）----
     //
@@ -514,7 +650,7 @@ pub fn run(
     //    没有投影的灯时没有任何一条路会去采它（`surface.wgsl` 那个 `shadow_maps` 位）。
     let (shadow_texture, shadow_view, shadow_note) = match plan.resource(SHADOW_TEXTURE_RESOURCE) {
         Some(resource) => {
-            let (cube_width, cube_height) = resource.size.resolve(width, height);
+            let (cube_width, cube_height) = resource.size.resolve(target.0, target.1);
             let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
                 label: Some(resource.name.as_str()),
                 size: wgpu::Extent3d {
@@ -587,15 +723,21 @@ pub fn run(
         &format!("{}（group 0 契约）", contract.id),
         &contract.shader.assembled,
     )?;
-    let build_zero = |view: &wgpu::TextureView| -> Result<group0::GroupZero, String> {
+    // ⚠ 每一格各建一份 group 0：`view` 那一格里**相机与 viewport 都是每格不同的**
+    //    （`view.viewport` 是绝对矩形，见 `group0::frame`）。其余六格（灯 / 聚类 /
+    //    globals / 影图 / 采样器 / 深度快照）内容一样，但绑定组是每格一个 ——
+    //    "一份组给 12 格用"这件事在 wgpu 里不存在（组里的 uniform 就是那一格的）。
+    let build_zero = |camera: &crate::camera::Camera,
+                      view: &wgpu::TextureView,
+                      viewport: [f32; 4]|
+     -> Result<group0::GroupZero, String> {
         group0::frame(
             &gpu.device,
             &contract_module,
-            &camera,
+            camera,
             scene.ambient,
             &cluster,
-            width,
-            height,
+            viewport,
             view,
             &shadow_view,
             &shadow_sampler,
@@ -627,7 +769,11 @@ pub fn run(
                     .join(" / ")
             ));
         };
-        let (depth_width, depth_height) = resource.size.resolve(width, height);
+        // ⚠ 解析用的是**目标**尺寸（对照图那张整幅 3840×1920），不是一格的尺寸：
+        //    `view` 这条尺寸规则说的是"跟这一帧的画布一样大"，而画布就是那张整幅 ——
+        //    拿格子尺寸去建，12 格的中间目标就只剩 960×640，而 pass 的 attachment
+        //    却要按格子视口画到整幅上（wgpu 当场拒，或者更糟：视口落到附件外面）。
+        let (depth_width, depth_height) = resource.size.resolve(target.0, target.1);
         let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
             label: Some(name),
             size: wgpu::Extent3d {
@@ -721,9 +867,16 @@ pub fn run(
             pass.label
         ));
     }
-    let zero = build_zero(&sampled_view)?;
-    audit.push("group 0（七格全绑，哪怕 shader 只声明了一部分）：".to_string());
-    audit.extend(zero.audit.iter().map(|line| format!("  {line}")));
+    // ---- group 0 **每格一份**（相机与 viewport 都在它里面），所以这里不建 ----
+    //
+    // ⚠ 别把它提前建一份给 12 格用：`view.viewport` 是**每格不同**的绝对矩形，
+    //    一份组给 12 格用 = 后 11 格的片元坐标反算全错（每格画成左上角那一格的视角），
+    //    而画面上只是"格子里的东西位置偏了"。组 0 的建法见下面逐格那一段。
+    audit.push(
+        "group 0（七格全绑，哪怕 shader 只声明了一部分）：**每格一份**（相机与 `view.viewport` \
+         都在里面），逐格建在下面那一段"
+            .to_string(),
+    );
 
     // ---- 点光 cube 的**每一面**：一套 view；那一面的 `PassView` 由 §148 那一节按面建 ----
     //
@@ -1002,6 +1155,10 @@ pub fn run(
         }
     };
     // 影子那几面（`face_stages[k]` 与 `faces[k]` 同一次序 —— `face_of` 查的就是它）。
+    //
+    // ⚠ 面那一份 `PassView` **与格子无关**：影子图是灯的东西（六面各自的矩阵来自灯位），
+    //    12 台相机共用同一张 cube ⇒ 每一格重画一遍影子图，画出来的字节也一模一样。
+    //    所以它建一次、12 格共用（相机那一份 `PassView` 才是每格一份的）。
     let face_stages: Vec<Stage> = faces
         .iter()
         .map(|face| {
@@ -1011,23 +1168,20 @@ pub fn run(
             )
         })
         .collect();
-    // 相机那一份：不带 `cube_face` 的 pass 用它（不透明/透明/预通道/天空盒那一档）。
-    let camera_stage = make_stage("组 1：PassView（相机）", &camera);
-    // ⚠ 实例数组要活到这一帧画完（`wgpu::BindGroup` 持的是它的引用 —— 引用计数保证它不会
-    //    先死；这里留一个绑定只是让"谁活着"这件事看得见，同下面那条 `_shadow_texture`）。
-    let _instance_buffer = instance_buffer;
+    // 相机那一份 `PassView` 是**每格一份**的（见下面逐格那一段），所以这里不建。
     audit.push(format!(
         "组 1（§142 的两类参数）：**super** = 每视图一份 `PassView`（{} 份 × 64 B = {} B：\
-         相机 1 + 影子面 {}）｜**instance** = 全帧**一份**实例数组（{} 个物体 × 112 B = {} B，\
-         按 `@builtin(instance_index)` 选格）。拆之前是每 (物体, 视图) 一份 176 B 的 \
-         `MeshStage`（{} 份 = {} B）⇒ 数据从 (物体 × 视图) 那一维上下来了",
-        faces.len() + 1,
-        (faces.len() + 1) * 64,
+         相机 **每格一份**（{} 格）+ 影子面 {}）｜**instance** = 全帧**一份**实例数组\
+         （{} 个物体 × 112 B = {} B，按 `@builtin(instance_index)` 选格）。拆之前是每 \
+         (物体, 视图) 一份 176 B 的 `MeshStage`（{} 份 = {} B）⇒ 数据从 (物体 × 视图) 那一维上下来了",
+        faces.len() + placements.len(),
+        (faces.len() + placements.len()) * 64,
+        placements.len(),
         faces.len(),
         scene.objects.len(),
         instance_stream.len(),
-        (faces.len() + 1) * scene.objects.len(),
-        (faces.len() + 1) * scene.objects.len() * 176,
+        (faces.len() + placements.len()) * scene.objects.len(),
+        (faces.len() + placements.len()) * scene.objects.len() * 176,
     ));
 
     let mut bindings = Vec::with_capacity(scene.objects.len());
@@ -1148,6 +1302,148 @@ pub fn run(
         frame_materials.push((loaded, binding));
     }
 
+    // ---- 外部目标：宿主这一帧那张图（**整幅**：对照图就是 12 格拼出来的那一张）----
+    let host_target = shot::Target::new(&gpu.device, target.0, target.1);
+    let mut sets: Vec<Vec<External<'_>>> = Vec::with_capacity(executed_plan.passes.len());
+    for (index, pass) in executed_plan.passes.iter().enumerate() {
+        let mut set: Vec<External<'_>> = Vec::new();
+        // ⚠ **`Role::Depth` 那条外部目标的路，这一档不再走**（§132）。
+        //
+        // 它没错，只是这一档不再需要：那条规则说的是"宿主给的外部目标顶掉同名声明资源"，
+        // 将来谁真需要"宿主提供一张**池子拥有**的视图"，它还在、还是对的。
+        // 这一档改成了 `Executor::seed` —— 因为深度那张图**必须只有一张**（拷贝要纹理、
+        // 绑定要同一张纹理的视图），而 seed 才保证得了"一张"。
+        // 两条路同时开着就是"同一个东西两套机制"，那是漂移的温床，所以这里**空着**。
+        let _ = (index, &pass.label);
+        if pass.writes.first().map(String::as_str) == Some(px_protocol::scene::VIEW_BUILTIN) {
+            set.push(External {
+                name: px_protocol::scene::VIEW_BUILTIN,
+                role: Role::Write,
+                view: &host_target.view,
+                format: shot::FORMAT,
+            });
+        }
+        sets.push(set);
+    }
+
+    // ---- 逐格执行：每一格一套 group 0 / `PassView` / 材质表，格子交给 `Frame::viewport` ----
+    //
+    // ⚠ 12 次执行共用**同一个执行器**（池子与管线缓存都是它的）：12 格因此共用同一批
+    //    中间纹理（`scene_color_a/b` 与两张深度）。那正是 oracle 的形状 —— Bevy 的 12 台相机
+    //    虽然各有 `ViewTarget`，但主纹理是按**目标**（`camera.target`）从纹理池里取的
+    //    （`bevy_render-0.19.1/src/view/mod.rs:1253-1284` 的 `MainTextureKey`：键里没有 viewport），
+    //    12 台相机同指一张 Image ⇒ **同一对 a/b 纹理**，各自 `set_viewport` 画自己那一格。
+    //
+    // ⚠ 每一格都把**整份计划**跑完（含 prepass / 影子 / copy / blit）：少跑一条就是
+    //    "有些格子的图没画全"，而那种错不会有任何门响。
+    //
+    // ⚠ 一格清一次 `scene_color_a` 是安全的：清屏发生在**上一格的 blit 已经记进编码器之后**
+    //    （命令按记录次序执行），而中间目标里的内容本来就只在"这一格的那一块"有意义。
+    let mut encoder = gpu
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("px_render_wgpu 的一帧（一格一次）"),
+        });
+    for placement in &placements {
+        let viewport = placement.uniform_viewport((width, height));
+        let zero = build_zero(&placement.camera, &sampled_view, viewport)?;
+        audit.push(format!(
+            "—— {} 的 group 0（`view.viewport` = ({}, {}, {}, {})）——",
+            placement.note, viewport[0], viewport[1], viewport[2], viewport[3]
+        ));
+        audit.extend(zero.audit.iter().map(|line| format!("  {line}")));
+        // 这一格的 `PassView`：`view_proj` 是"每一条 pass 一份"的 super，而它是每格一份的。
+        let camera_stage = make_stage(
+            &format!("组 1：PassView（相机，第 {} 格）", placement.index),
+            &placement.camera,
+        );
+        // ⚠ 那些守卫（"一个名字恰好一套组"那三条）判的是**文档说不说得通**，与格子无关：
+        //    第 0 格把话说进 `audit`，其余各格写进一份丢弃的 Vec —— 守卫照跑（坏了当场拒），
+        //    话只说一遍（每条实例一行 × 12 格会把审计淹掉）。
+        let mut quiet: Vec<String> = Vec::new();
+        let audit_sink: &mut Vec<String> = if placement.index == 0 {
+            &mut audit
+        } else {
+            &mut quiet
+        };
+        let cell = cell_materials(
+            &zero,
+            &camera_stage,
+            &scene,
+            &bindings,
+            &spec,
+            &executed_plan,
+            &faces,
+            &face_stages,
+            &stage_layout,
+            &material_layout,
+            &frame_materials,
+            audit_sink,
+        )?;
+        let frame = Frame {
+            // ⚠ **整幅**的尺寸：池子里那些 `size = "view"` 的资源按它建（对照图是 3840×1920），
+            //    每一格靠 `frame.viewport` 落到自己那一块上。
+            width: target.0,
+            height: target.1,
+            viewport: placement.viewport(),
+            sets: &sets,
+            geometries: &resolved_geometry,
+            materials: &cell,
+        };
+        let audit_text = executor.execute(&gpu.device, &mut encoder, &executed_plan, &frame)?;
+        audit.push(format!("第 {} 格的执行器审计：\n{audit_text}", placement.index));
+    }
+    // ⚠ 实例数组要活到这一帧画完（`wgpu::BindGroup` 持的是它的引用 —— 引用计数保证它不会
+    //    先死）。这一行只是让"谁活着"这件事看得见（同上面那条 `_shadow_texture`），
+    //    而且它必须落在 `make_stage` 最后一次被调用**之后**：`make_stage` 那个闭包借的
+    //    就是这块缓冲，提前 move 会变成编译错误（本单元实测：E0505）。
+    let _instance_buffer = instance_buffer;
+    gpu.queue.submit(Some(encoder.finish()));
+
+    let pixels = shot::read_back(&gpu.device, &gpu.queue, &host_target)?;
+    Ok(Rendered {
+        pixels,
+        width: target.0,
+        height: target.1,
+        audit,
+        executed: executed_plan
+            .passes
+            .iter()
+            .map(|pass| pass.label.clone())
+            .collect(),
+        // ⚠ §136 起这一栏是空的：文档里六条 pass 全部执行，**一条都不跳**。
+        //    留着它是为了那条纪律（"绿是因为跳过了它"）：真开始跳的时候，
+        //    理由必须跟着名字一起出来 —— 那时候这里要重新有内容。
+        skipped: Vec::new(),
+        declared_clouds: spec.expects.iter().any(|tag| tag == "clouds"),
+    })
+}
+
+/// 一格的材质表：名字 → 那几套组（`zero` 与 `camera_stage` 是**这一格**的那两份）。
+///
+/// ⚠ 为什么它是**一个函数**而不是 `run` 里的一段：J2 的对照图要同一份文档画 12 格，
+/// 而"名字 → 一套组"这张表是**每格一份**的（组 0 的 `view`、组 1 的 `PassView` 都在里面）。
+/// `zero` / `camera_stage` 之外的几张表（材质的绑定、帧自有材质、影子六面的组）与格无关，
+/// 由调用方建一次、逐格传进来。
+///
+/// ⚠ 里面那三条守卫（"一个名字恰好一套组"那一族）判的是**文档说不说得通**，与格子无关：
+/// 调用方对第 0 格把审计写进真 `audit`，其余各格写进一份丢弃的 Vec —— 守卫照跑（坏了当场拒），
+/// 话只说一遍（12 格 × 每条实例一行会把审计淹掉）。
+#[allow(clippy::too_many_arguments)]
+fn cell_materials<'a>(
+    zero: &'a group0::GroupZero,
+    camera_stage: &'a Stage,
+    scene: &'a art::LoadedScene,
+    bindings: &'a [material::MaterialBinding],
+    spec: &'a px_protocol::scene::SceneSpec,
+    plan: &'a Plan,
+    faces: &'a [Face],
+    face_stages: &'a [Stage],
+    stage_layout: &'a wgpu::BindGroupLayout,
+    material_layout: &'a wgpu::BindGroupLayout,
+    frame_materials: &'a [(art::LoadedFrameMaterial, material::MaterialBinding)],
+    audit: &mut Vec<String>,
+) -> Result<Vec<ResolvedMaterial<'a>>, String> {
     // ⚠ 一笔 draw 的组：**group 0 + group 1 + group 3**。group 1 现在是**每个视图**一份的
     //    （§142：super = 那一条 pass 的 `view_proj`；instance = 全帧那一份数组，
     //    靠 `@builtin(instance_index)` 选格），所以内容材质那一档**共用同一份组 1** ——
@@ -1421,61 +1717,7 @@ pub fn run(
         }
     }
 
-    // ---- 外部目标：深度图与最终目标 ----
-    let target = shot::Target::new(&gpu.device, width, height);
-    let mut sets: Vec<Vec<External<'_>>> = Vec::with_capacity(executed_plan.passes.len());
-    for (index, pass) in executed_plan.passes.iter().enumerate() {
-        let mut set: Vec<External<'_>> = Vec::new();
-        // ⚠ **`Role::Depth` 那条外部目标的路，这一档不再走**（§132）。
-        //
-        // 它没错，只是这一档不再需要：那条规则说的是"宿主给的外部目标顶掉同名声明资源"，
-        // 将来谁真需要"宿主提供一张**池子拥有**的视图"，它还在、还是对的。
-        // 这一档改成了 `Executor::seed` —— 因为深度那张图**必须只有一张**（拷贝要纹理、
-        // 绑定要同一张纹理的视图），而 seed 才保证得了"一张"。
-        // 两条路同时开着就是"同一个东西两套机制"，那是漂移的温床，所以这里**空着**。
-        let _ = (index, &pass.label);
-        if pass.writes.first().map(String::as_str) == Some(px_protocol::scene::VIEW_BUILTIN) {
-            set.push(External {
-                name: px_protocol::scene::VIEW_BUILTIN,
-                role: Role::Write,
-                view: &target.view,
-                format: shot::FORMAT,
-            });
-        }
-        sets.push(set);
-    }
-
-    let frame = Frame {
-        width,
-        height,
-        sets: &sets,
-        geometries: &resolved_geometry,
-        materials: &resolved_materials,
-    };
-    let mut encoder = gpu
-        .device
-        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("切片 1 的一帧"),
-        });
-    let audit_text = executor.execute(&gpu.device, &mut encoder, &executed_plan, &frame)?;
-    gpu.queue.submit(Some(encoder.finish()));
-    audit.push(format!("执行器审计：\n{audit_text}"));
-
-    let pixels = shot::read_back(&gpu.device, &gpu.queue, &target)?;
-    Ok(Rendered {
-        pixels,
-        audit,
-        executed: executed_plan
-            .passes
-            .iter()
-            .map(|pass| pass.label.clone())
-            .collect(),
-        // ⚠ §136 起这一栏是空的：文档里六条 pass 全部执行，**一条都不跳**。
-        //    留着它是为了那条纪律（"绿是因为跳过了它"）：真开始跳的时候，
-        //    理由必须跟着名字一起出来 —— 那时候这里要重新有内容。
-        skipped: Vec::new(),
-        declared_clouds: spec.expects.iter().any(|tag| tag == "clouds"),
-    })
+    Ok(resolved_materials)
 }
 
 /// 交给执行器的那一份计划：**文档声明的每一条 pass**（见 [`EXECUTED`] 那一段）。
@@ -1688,6 +1930,93 @@ mod tests {
             frames.iter().map(|name| frame(name)).collect::<Vec<_>>().join(",")
         );
         serde_json::from_str(&text).expect("夹具文档")
+    }
+
+    // -----------------------------------------------------------------------
+    // 对照图（J2）：**相机表 → 一台台相机 + 它们各自那一块**
+    //
+    // ⚠ 这一档的判据必须在**仓库里**（不像 §148 那样只在 target/ 下的仪器里）：
+    //    "第 i 台相机落在第几行第几列、目标多大"是**渲染器的策略**，
+    //    而它与 oracle 的关系只有一条（判据那张图的哈希）；策略本身的形状要能被单测钉住。
+    // -----------------------------------------------------------------------
+
+    /// 12 台相机、4 列 ⇒ 4×3 格、每格 960×640、目标 3840×1920，**行优先**。
+    #[test]
+    fn the_sheet_is_four_columns_of_three_rows_for_twelve_cameras() {
+        let mut spec = spec_of(&["planet"], &[]);
+        spec.cameras = (0..12)
+            .map(|index| {
+                px_protocol::art::Camera::raw([0.0, 0.0, 1.0], 3.15, format!("c{index}"))
+            })
+            .collect();
+        let (placements, target) = placements(Views::Sheet { columns: 4 }, &spec, 960, 640)
+            .expect("12 台相机排得下");
+        assert_eq!(target, (3840, 1920));
+        assert_eq!(placements.len(), 12);
+        for (index, placement) in placements.iter().enumerate() {
+            let column = (index % 4) as u32;
+            let row = (index / 4) as u32;
+            assert_eq!(
+                placement.rect,
+                Some([column * 960, row * 640, 960, 640]),
+                "第 {index} 台相机落在第 {row} 行第 {column} 列"
+            );
+            // 内容 shader 看到的 `view.viewport` 是**绝对**矩形（片元坐标也是绝对的）。
+            assert_eq!(
+                placement.uniform_viewport((960, 640)),
+                [
+                    (column * 960) as f32,
+                    (row * 640) as f32,
+                    960.0,
+                    640.0
+                ]
+            );
+        }
+    }
+
+    /// 单张那条路：一台相机、整幅、`viewport = None`（执行器一个调用都不发）。
+    #[test]
+    fn a_single_view_has_no_cell() {
+        let spec = spec_of(&["planet"], &[]);
+        let (placements, target) = placements(Views::Single(None), &spec, 960, 640).unwrap();
+        assert_eq!(target, (960, 640));
+        assert_eq!(placements.len(), 1);
+        assert_eq!(placements[0].rect, None);
+        assert_eq!(placements[0].viewport(), None, "单张那条路不设 viewport");
+        assert_eq!(
+            placements[0].uniform_viewport((960, 640)),
+            [0.0, 0.0, 960.0, 640.0],
+            "`view.viewport` 仍然是整幅（与加格子之前逐字节相同）"
+        );
+    }
+
+    /// 产物**没带相机表** ⇒ 拒，而且拒词说的是"这一步没带"（与 Bevy 逐字同一条），
+    /// 不是"这一版没做"。
+    #[test]
+    fn a_sheet_without_a_camera_table_names_the_real_reason() {
+        let spec = spec_of(&["planet"], &[]);
+        // ⚠ 不用 `unwrap_err()`：那要求 `Ok` 那一半实现 `Debug`，而 `Placement` 里是相机
+        //    （`camera::Camera` 没有 `Debug`，也不该为了一个测试给它加一个）。
+        let Err(why) = placements(Views::Sheet { columns: 4 }, &spec, 960, 640) else {
+            panic!("没有相机表时 --sheet 必须当场拒");
+        };
+        assert!(why.contains("产物自带的相机表"), "{why}");
+        assert!(why.contains("px_ops::cameras::review()"), "要指路：{why}");
+    }
+
+    /// 列数 = 0 兜成 1（协议那一栏的缺省就是 0）：12 台相机 ⇒ 1 列 12 行，
+    /// 目标 960×7680。**兜底只有这一处** —— Bevy 也是 `.max(1)`。
+    #[test]
+    fn zero_columns_fall_back_to_one_column() {
+        let mut spec = spec_of(&["planet"], &[]);
+        spec.cameras = (0..12)
+            .map(|index| {
+                px_protocol::art::Camera::raw([0.0, 0.0, 1.0], 3.15, format!("c{index}"))
+            })
+            .collect();
+        let (placements, target) = placements(Views::Sheet { columns: 0 }, &spec, 960, 640).unwrap();
+        assert_eq!(target, (960, 7680));
+        assert_eq!(placements[7].rect, Some([0, 7 * 640, 960, 640]));
     }
 
     /// 名字落在**哪张表**：物体 id 与帧自有材质各自的名字空间。

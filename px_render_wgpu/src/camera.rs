@@ -58,7 +58,47 @@ pub fn probe_camera(cam: Option<[f32; 3]>, aspect: f32) -> Camera {
             (translation, rotation)
         }
     };
+    from_pose(translation, rotation, aspect)
+}
 
+/// 产物自带的**评审相机** → 一台相机：`px_render::scene::camera_for` 的逐字转写。
+///
+/// 那一边是：
+/// ```ignore
+/// let direction = Vec3::from_array(camera.direction);
+/// let direction = if direction.length_squared() > 1e-12 { direction.normalize() } else { Vec3::Z };
+/// Transform::from_translation(direction * camera.distance.max(1e-3)).looking_at(Vec3::ZERO, Vec3::Y)
+/// ```
+///
+/// ⚠ 三处**不许"理顺"**：
+///
+/// 1. `normalize()` 是 glam 那条（乘 `length().recip()`），**不是**除法 ——
+///    本文件下面 `dir3()` 那一条（Bevy 的 `Dir3::new`）才是除法。两个函数长得像、
+///    结果差 1 ulp，而这里差 1 ulp 就是"相机位置差 1 ulp"⇒ 顶点裁剪坐标差 1 ulp ⇒ 逐字节判据红。
+/// 2. 退化判定用的是 `length_squared() > 1e-12`（**平方**，不是长度），兜底方向是 `Vec3::Z`。
+///    `NaN > 1e-12` 是 false ⇒ 非有限方向也走兜底 —— 那是 Bevy 的行为，不是一个巧合。
+/// 3. 距离的保底 `max(1e-3)` 在**乘法之前**：`direction * distance.max(1e-3)`。
+///
+/// 方向在产物里是**世界系**的（烘图侧已经把倾斜乘进去了，见 `px_ops::cameras`），
+/// 所以这里一个渲染器常数都不需要 —— 与 `camera_for` 的注释同一条口径。
+pub fn review_camera(camera: &px_protocol::art::Camera, aspect: f32) -> Camera {
+    let direction = Vec3::from_array(camera.direction);
+    let direction = if direction.dot(direction) > 1e-12 {
+        direction.normalize()
+    } else {
+        Vec3::Z
+    };
+    let translation = direction * camera.distance.max(1e-3);
+    let rotation = looking_at(translation, Vec3::ZERO, Vec3::Y);
+    from_pose(translation, rotation, aspect)
+}
+
+/// 位姿（平移 + 旋转）+ 长宽比 → 相机。
+///
+/// ⚠ 两条路（探针机位 / 产物相机）**共用这一段**：矩阵链只要有一份，
+/// "另一个方向也算一遍"这种漂移就不可能发生（`probe_camera` 与 `review_camera` 的差别
+/// 只允许是"位姿怎么来的"）。
+fn from_pose(translation: Vec3, rotation: Quat, aspect: f32) -> Camera {
     let world_from_view =
         Mat4::from_scale_rotation_translation(Vec3::splat(1.0), rotation, translation);
     let clip_from_view =
@@ -180,7 +220,7 @@ fn dir3(value: Vec3, fallback: Vec3) -> Vec3 {
 
 #[cfg(test)]
 mod tests {
-    use super::probe_camera;
+    use super::{probe_camera, review_camera};
     use crate::mat4::Mat4;
 
     fn bits(m: &Mat4) -> [u32; 16] {
@@ -299,5 +339,53 @@ mod tests {
         assert!(cam.clip_from_world.w_axis.w.is_finite());
         // yaw=35°, pitch=20°, distance=8 → z = cos(20°)cos(35°)*8 > 0
         assert!(cam.position.z > 0.0);
+    }
+
+    /// **"格子 = 单独渲一张"这条等式的另一半**：产物那台 `[0,0,1] × 3.15` 的评审相机
+    /// 与 `--cam 0,0,3.15` 的探针机位必须是**逐位**同一台。
+    ///
+    /// 为什么钉这一格：J2（`--sheet`）的 oracle 实验就是靠它成立的 —— 12 格全填这台相机，
+    /// 再拿 `--cam 0,0,3.15` 单独渲一张比。要是两台相机的矩阵差 1 ulp，那条实验量到的
+    /// 就不是"格子与单张的差别"，而是"两台相机本来就不同"（§131.2 那一族：仪器先说清自己量的是什么）。
+    /// `[0,0,1]` 的 `normalize()` 精确（长度恰好 1）、乘 3.15 也精确 ⇒ 两条路必须逐位相等。
+    #[test]
+    fn the_review_camera_at_the_probe_pose_is_bit_identical_to_the_probe_camera() {
+        let aspect = 960.0f32 / 640.0f32;
+        let review = review_camera(
+            &px_protocol::art::Camera::raw([0.0, 0.0, 1.0], 3.15, "probe"),
+            aspect,
+        );
+        let probe = probe_camera(Some([0.0, 0.0, 3.15]), aspect);
+        assert_eq!(
+            review.position.to_array(),
+            probe.position.to_array(),
+            "位置要么逐位相同，要么这条实验不成立"
+        );
+        for (what, a, b) in [
+            ("world_from_view", &review.world_from_view, &probe.world_from_view),
+            ("view_from_world", &review.view_from_world, &probe.view_from_world),
+            ("clip_from_view", &review.clip_from_view, &probe.clip_from_view),
+            ("view_from_clip", &review.view_from_clip, &probe.view_from_clip),
+            ("clip_from_world", &review.clip_from_world, &probe.clip_from_world),
+        ] {
+            assert_eq!(bits(a), bits(b), "{what} 不逐位相同");
+        }
+    }
+
+    /// 退化方向走 Bevy 的兜底：`length_squared() > 1e-12` **不成立** ⇒ `Vec3::Z`；
+    /// 距离的保底是 `max(1e-3)`。⚠ 判的是**平方**：`1e-7` 这种长度（平方 1e-14）也走兜底。
+    #[test]
+    fn a_degenerate_direction_falls_back_to_z_and_the_distance_has_a_floor() {
+        let degenerate = review_camera(
+            &px_protocol::art::Camera::raw([0.0, 0.0, 0.0], 0.0, "degenerate"),
+            // `direction` 全零；距离 0 ⇒ 保底 1e-3
+            1.0,
+        );
+        assert_eq!(degenerate.position.to_array(), [0.0, 0.0, 1e-3]);
+        let tiny = review_camera(
+            &px_protocol::art::Camera::raw([1e-7, 0.0, 0.0], 4.0, "tiny"),
+            1.0,
+        );
+        assert_eq!(tiny.position.to_array(), [0.0, 0.0, 4.0], "平方 1e-14 不够 1e-12");
     }
 }
