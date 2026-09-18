@@ -1,0 +1,62 @@
+# 判据靶子的登记表（art/anchor/）
+#
+# ⚠ 这份表是"记录"，不是"证据"。每一条都要能**重跑出来**才算数（§131.2）。
+# ⚠ 量法必须连"拿哪份产物量的"一起写 —— 这一条在本工程被咬过四次。
+
+## 一、J1 判据图（整份 PNG 的 sha256 前 16）
+
+# 量法：
+#   cargo run -q -p px_graphs --bin scene <档>
+#   cargo run -q -p px_render_wgpu -- --offline --scene <产物> --out x.png --width 960 --height 640
+#   (Get-FileHash x.png -Algorithm SHA256).Hash.Substring(0,16)
+#
+# ⚠ 两半都不能省：产物必须是**刚烘的**，图的字节数要一起核（字节数是"图没被换过"的第二道锁）。
+
+orbit-bare             = 63184151909371A5   300012 B   960x640   不给 --cam
+orbit-bare-nolight     = 7BBB18CE3612D4F7   215193 B   960x640   不给 --cam
+orbit-bare-shadow      = C03FFF3235264DD5   298289 B   960x640   不给 --cam
+orbit-rings            = B5799E4F1649535C   508562 B   960x640   不给 --cam
+orbit-soft             = FA20FAD37BC61EA2   358066 B   960x640   不给 --cam
+orbit-proxy-fine-bound = 32872F80AC867BE3   405380 B   960x640   不给 --cam
+
+# 出处：§105（S-1 用**锚宿主**在六份**冻产物**上取的；锚 exe sha256 D7ED54FDB8323EDD…，
+#       Vulkan 后端，960×640，不给 --cam）。⚠ 那一支锚 exe 已于 2026-09-18 丢失（见 README）。
+# 复现人：本表每个数都由 reviewer 在 2026-09-18 用**当时的源码**重出并逐字节比过。
+
+## 二、J2 对照图
+
+# 量法：--sheet（4 列 × 3 行），12 台相机来自产物自带的相机表。
+sheet                  = A94F9F2D1437C06C   3159948 B   3840x1920
+# ⚠ 老形状与新形状**都出这个哈希**（2026-09-18 两侧各出一次，逐像素 0 / 7372800）。
+# ⚠ 12 格**共用同一批全尺寸中间纹理**、逐格 set_viewport —— "12 次独立出图再拼"实测差 49–289 像素（§149）。
+
+## 三、逃生门：老形状冻产物的**文件字节**哈希
+
+# 量法：
+#   cargo run -q -p px_graphs --bin scene <档> --no-frame-graph
+#   (Get-FileHash <产物> -Algorithm SHA256).Hash.Substring(0,16)      ← **文件字节**，不是文件名的 CAS 键
+#
+# ⚠ 这一格我自己量错过一次：拿 `Split-Path -Leaf` 的 CAS 键（28a9b516c132…）去比，
+#   于是六格全报 ✗ —— 而真值是文件字节的 sha256。**"量的是哪个量"与"量了什么"一样重要。**
+
+orbit-bare             = 2795F948E6987E11
+orbit-bare-nolight     = F60B19B0AE7E229F
+orbit-bare-shadow      = 1A27679882A10D6B
+orbit-proxy-fine-bound = ACB824E9EC0BA893
+orbit-rings            = CB363DA74A90F63E
+orbit-soft             = 2C6C8592AD45214B
+
+## 四、J3 pass 表（判据图在 `art/passes/` 那七份配方上跑）
+
+# 量法：cargo run -q -p px_graphs --bin passes -- <基准产物> <配方> <出>  然后出图
+none             = 63184151909371A5   300012 B
+invert           = 733408200119C203   176865 B
+invert_vignette  = 745BE24FE1467192   390223 B
+scratch          = 2D61519C6544E3C1   349759 B
+grade_half       = 平场：min = max = 188（1 种颜色，614400/614400）  ← strength = 0.5 在纯反相上数学恒为 0.5
+
+## 五、已丢失、且**找不回来**的
+
+anchor exe             = D7ED54FDB8323EDD…  (被钉住的那一支；冻结的构建产物，重建不是同一个字节序列)
+# 它的读数都在上面；但"向 oracle 提问"那个能力随之消失（§143 靠它测出透明相位的次序规则）。
+# 要用就得重建一支，而重建的那支**必须先把这六张判据图重出一遍、逐字节对上**，才够格当 oracle。
