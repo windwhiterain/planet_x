@@ -558,15 +558,62 @@ pub fn bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
     })
 }
 
-/// 这一帧的 group 0：布局 + 绑定组。
+/// 这一帧的 group 0：布局 + 绑定组 + **`view` 那一格的缓冲**。
 ///
-/// ⚠ 缓冲不在这里留字段：`wgpu::BindGroup` **自己持有**它绑的那些资源（引用计数），
-/// 建完之后缓冲就可以放手 —— 这是 wgpu 的契约，不是"大概不会出事"。
+/// ⚠ 缓冲**留一个字段**（bind group 自己也持有它，引用计数保证它不会先死）：保留态那一档
+/// 每帧要换的是**内容**（相机与视口），而 `queue.write_buffer` 要的正是那块缓冲本身。
+/// 原来这里写着"缓冲不在这里留字段"—— 那句话在"一份组只画一帧"的形状下是对的，
+/// 一旦要跨帧复用，它就变成了"每帧重建一份组"的许可（§151：保留态的边界）。
 pub struct GroupZero {
     pub layout: wgpu::BindGroupLayout,
     pub bind_group: wgpu::BindGroup,
-    /// 这一帧真的填了什么（进审计文本：出问题时先看这一行）。
+    /// `view` 那一格的 uniform（`view_proj` 与那几条逆矩阵都在里面）。
+    ///
+    /// ⚠ 用途里**必须**有 `COPY_DST`：`DeviceExt::create_buffer_init` 只加 `mapped_at_creation`，
+    /// **不会**替你加 `COPY_DST`（那一句"Implicitly adds the COPY_DST usage"是
+    /// `create_texture_with_data` 的说明，不是这个函数的 —— 一手核过 wgpu 29.0.4 的
+    /// `src/util/device.rs:40`；而 `wgpu-core` 的 `validate_write_buffer_impl` 第一行就是
+    /// `buffer.check_usage(COPY_DST)?`）。少了它，第一次拖动的 `write_buffer` 才当场拒。
+    pub view_buffer: wgpu::Buffer,
+    /// 与"哪台相机"**无关**的那几行审计（lights / globals / clustered_lights / 影图）。
+    ///
+    /// ⚠ `view` 那一行**不在**这里：它每帧都变（相机与视口都在里面），由 [`GroupZero::set_view`]
+    /// 现算 —— 一份会过期的审计比没有审计更坏。
     pub audit: Vec<String>,
+}
+
+impl GroupZero {
+    /// 换一台相机、换一块视口：**只写那 64 字节**，一个对象都不建。
+    ///
+    /// 返回 `view` 那一行的审计（格式与 [`frame`] 里那一行逐字相同）。
+    /// 保留态那一档每帧走的就是这里 —— 拖一下鼠标的代价因此是"两次 64 字节的写"，
+    /// 而不是"重建一份绑定组 + 重编每一条管线"。
+    pub fn set_view(
+        &self,
+        queue: &wgpu::Queue,
+        camera: &crate::camera::Camera,
+        viewport: [f32; 4],
+    ) -> String {
+        let view = ViewUniform::from_camera(camera, viewport);
+        queue.write_buffer(&self.view_buffer, 0, &to_uniform_bytes(&view));
+        view_line(&view, camera)
+    }
+}
+
+/// `view` 那一行的审计文本。**只有这一处**（建组时与每帧换相机时读的是同一份格式）。
+fn view_line(view: &ViewUniform, camera: &crate::camera::Camera) -> String {
+    format!(
+        "view：world_position ({:.3}, {:.3}, {:.3})｜exposure {:.9e}（位模式 {:08X}）｜viewport ({}, {}, {}, {})",
+        camera.position.x,
+        camera.position.y,
+        camera.position.z,
+        view.exposure,
+        view.exposure.to_bits(),
+        view.viewport[0],
+        view.viewport[1],
+        view.viewport[2],
+        view.viewport[3]
+    )
 }
 
 /// 按这一帧的值建 group 0。
@@ -637,7 +684,14 @@ pub fn frame(
             contents: bytes,
         })
     };
-    let view_buffer = uniform("组 0：view", &to_uniform_bytes(&view));
+    // ⚠ `view` 那一格与另外三块**不是同一档**：它每帧都要换内容（相机 + 视口），
+    //    所以用途里要 `COPY_DST`（见 `GroupZero::view_buffer` 那段 —— 一手核过，
+    //    `create_buffer_init` 不会替你加）。另外三块是文档那一侧的，写完就不动了。
+    let view_buffer = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("组 0：view（每帧只写它）"),
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        contents: &to_uniform_bytes(&view),
+    });
     let lights_buffer = uniform("组 0：lights", &to_uniform_bytes(&lights));
     let globals_buffer = uniform("组 0：globals", &to_uniform_bytes(&globals));
     let cluster_buffer = device.create_buffer_init(&BufferInitDescriptor {
@@ -681,20 +735,10 @@ pub fn frame(
             },
         ],
     });
-    let viewport = view.viewport;
+    // ⚠ 审计里**没有** `view` 那一行：它是每帧变的（见 `GroupZero::audit`）。
+    //    调用方按 [`GroupZero::set_view`] 现取那一行，把它排在
+    //    这几行**前面**（次序与加保留态之前逐字相同）。
     let mut audit = vec![
-            format!(
-                "view：world_position ({:.3}, {:.3}, {:.3})｜exposure {:.9e}（位模式 {:08X}）｜viewport ({}, {}, {}, {})",
-                camera.position.x,
-                camera.position.y,
-                camera.position.z,
-                view.exposure,
-                view.exposure.to_bits(),
-                viewport[0],
-                viewport[1],
-                viewport[2],
-                viewport[3]
-            ),
             format!(
                 "lights：ambient_color ({}, {}, {}, {})",
                 lights.ambient_color[0],
@@ -758,6 +802,7 @@ pub fn frame(
     Ok(GroupZero {
         layout,
         bind_group,
+        view_buffer,
         audit,
     })
 }

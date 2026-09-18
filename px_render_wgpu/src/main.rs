@@ -55,6 +55,8 @@ fn usage() -> String {
         "        而 `tools/` 那套仪器（frame-probe / harness）就是这么调本 exe 的。",
         "        两套语义共用一个写法，等于让'这张图是谁画的'变成一条要靠猜的事。",
         "      --stats：报回读字节的逐通道 min/max 与颜色数（平场那种判据靠它）。",
+        "      --time N：**保留态的读数** —— 准备一次、连画 N 帧，报「准备 / 第 1 帧（含建管线）/",
+        "        第 2..N 帧（中位）」三段墙钟；落盘的是最后一帧（与不带 --time 的那张逐字节相同）。",
         "  px_render_wgpu --scene 文档.pxart --out sheet.png --sheet [--columns N] [--offline]",
         "      **对照图**（J2）：12 格 × 960×640 拼成一张 3840×1920 —— 相机表来自产物",
         "      （`.pxart` 的 `cameras`），格子的排布是渲染器的事（缺省 4 列）。",
@@ -123,6 +125,12 @@ struct Options {
     /// （`mix(x, 1−x, 0.5) ≡ 0.5`）⇒ `min = max = 188 = sRGB(0.5)`，于是"uniform 里到的
     /// 到底是不是 0.5"从一个推断变成一个读数。
     stats: bool,
+    /// `--time N`：**保留态的读数** —— 准备一次、连画 N 帧，逐帧报墙钟。
+    ///
+    /// ⚠ 它量的是"准备"与"每帧"的**分界**，而那正是保留态这个单元要回答的问题：
+    /// 从前一条 `render::run` = 从读文档到建管线重来一遍，量到的只有"重新准备一帧"的代价。
+    /// 0 = 不开（缺省）；缺省不是"画一帧" —— 那是 `--offline` 那条路本来的行为。
+    time: u32,
     // ---- 服务 ----
     serve: bool,
     port: u16,
@@ -197,6 +205,7 @@ impl Default for Options {
             diff: None,
             offline: false,
             stats: false,
+            time: 0,
             serve: false,
             port: 0,
             // ⚠ 缺省 CAS 根**不是** `PathBuf::from("target/pcg")`：那是**当前目录**，
@@ -259,6 +268,11 @@ impl Options {
                 "--shaders" => options.shaders = true,
                 "--offline" => options.offline = true,
                 "--stats" => options.stats = true,
+                "--time" => {
+                    options.time = next("--time")?
+                        .parse()
+                        .map_err(|_| "--time 需要一个整数（连画几帧）".to_string())?
+                }
                 "--serve" => options.serve = true,
                 "--autostart" => options.autostart = true,
                 // 收下但不生效：见 `Options::fps` 那段（harness 起性能那两路时会传它）。
@@ -555,10 +569,17 @@ fn run_scene(
     width: u32,
     height: u32,
     stats: bool,
+    time: u32,
     views: render::Views,
 ) -> i32 {
     let gpu = gpu::connect();
-    let rendered = match render::run(&gpu, scene, &art::default_pcg_root(), views, width, height) {
+    // `--time N`：准备一次、连画 N 帧（**保留态**那条路）；不给就是原来的"一条 `run`"。
+    let rendered = if time == 0 {
+        render::run(&gpu, scene, &art::default_pcg_root(), views, width, height)
+    } else {
+        run_frames(&gpu, scene, views, width, height, time)
+    };
+    let rendered = match rendered {
         Ok(rendered) => rendered,
         Err(message) => {
             eprintln!("渲染失败：{message}");
@@ -775,6 +796,13 @@ fn main() {
         std::process::exit(64);
     }
 
+    // ⚠ `--time` 与 `--stats` 同一族：它读的是**本进程**准备一次、连画 N 帧的墙钟。
+    //    服务那条路一条请求只画一帧，那里没有"后续帧"可量 —— 收下不说就是"说了没做"。
+    if options.time > 0 {
+        eprintln!("--time 是离线那条路（--offline）的读数：它量的是「准备一次、连画 N 帧」，而服务那条路一条请求只画一帧");
+        std::process::exit(64);
+    }
+
     if options.shots.is_empty() {
         eprintln!("{WORLD_REFUSAL}");
         std::process::exit(64);
@@ -820,10 +848,65 @@ fn run_offline(options: &Options) -> i32 {
         options.width,
         options.height,
         options.stats,
+        options.time,
         // ⚠ 离线这条路**也要走 `--sheet`**：判据那一张对照图就是它出的（J2）。
         //    两处各写一份"怎么看"的翻译就是两处会漂开的真相（服务那条路在 `serve::views_of`）。
         views_of(options),
     )
+}
+
+/// `--time N`：**准备一次、连画 N 帧**，把"准备"与"每帧"的分界读出来。
+///
+/// ⚠ 三件事必须一起报，否则这个读数会被读错（本工程为"量错了什么"付过学费）：
+/// ① **准备**花了多久（它只发生一次，含文档 / CAS 成员 / 句柄 / 那一层）；
+/// ② **第 1 帧**（它含着执行器**第一次建管线** —— 管线缓存是空的）；
+/// ③ 第 2..N 帧的中位/最小/最大（**保留态真正的每帧代价**）。
+///
+/// ⚠ 每一帧的相机都是一样的（同一次请求的 `views`）：这里量的是**帧循环**的成本，
+/// 不是"换一个视角"的成本 —— 后者与前者只差一次 64 字节的 `write_buffer`（见
+/// `render::Cell::set_view`）。
+fn run_frames(
+    gpu: &gpu::Gpu,
+    scene: &Path,
+    views: render::Views,
+    width: u32,
+    height: u32,
+    frames: u32,
+) -> Result<render::Rendered, String> {
+    use std::time::Instant;
+    let started = Instant::now();
+    let mut session = render::Session::open(gpu, scene, &art::default_pcg_root(), views, width, height)?;
+    println!(
+        "[计时] 准备 = {:.1} ms（文档 → CAS 成员 → 计划 → 句柄 → 第一层）",
+        started.elapsed().as_secs_f64() * 1e3
+    );
+    let mut drawn: Vec<f64> = Vec::with_capacity(frames as usize);
+    let mut last: Option<render::Rendered> = None;
+    for index in 0..frames {
+        let started = Instant::now();
+        let rendered = session.draw(gpu, views, width, height)?;
+        let ms = started.elapsed().as_secs_f64() * 1e3;
+        drawn.push(ms);
+        if index == 0 {
+            println!("[计时] 第 1 帧 = {ms:.1} ms（含执行器**第一次建管线**：缓存是空的）");
+        }
+        last = Some(rendered);
+    }
+    if let Some(rest) = drawn.get(1..).filter(|rest| !rest.is_empty()) {
+        let mut sorted = rest.to_vec();
+        sorted.sort_by(|one, two| one.partial_cmp(two).expect("墙钟不会是 NaN"));
+        println!(
+            "[计时] 第 2..{frames} 帧（n = {}）：中位 {:.1} ms｜最小 {:.1}｜最大 {:.1}",
+            rest.len(),
+            sorted[sorted.len() / 2],
+            sorted[0],
+            sorted[sorted.len() - 1]
+        );
+    }
+    println!(
+        "⚠ 落盘的是**最后一帧**那张图，而它必须与不带 --time 的那一次逐字节相同（同一条渲染路）"
+    );
+    last.ok_or_else(|| "--time 至少要 1 帧".to_string())
 }
 
 /// 命令行那一档「怎么看」→ `render::Views`（**离线**那条路的翻译；服务那条路在

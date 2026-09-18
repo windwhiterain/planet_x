@@ -403,6 +403,8 @@ pub fn view(options: &crate::Options) -> Result<(), String> {
         present: None,
         dragging: false,
         cursor: None,
+        session: None,
+        session_key: None,
         dirty: true,
         last: None,
         scene_modified: std::fs::metadata(&request.scene)
@@ -755,6 +757,14 @@ struct Viewer {
 
     dragging: bool,
     cursor: Option<(f64, f64)>,
+    /// **保留态**（S7-b 的前置）：一份文档 → 一次准备 → 每一帧只写相机那两块 uniform。
+    ///
+    /// ⚠ 它属于"哪一份文档"由 [`Viewer::session_key`] 说（路径 + 内容键）：换了场景、
+    /// 或者产物被重烘成**别的内容**（键变了），这一份就作废重开。相机一动**不作废** ——
+    /// 那正是这个单元要的东西。
+    session: Option<render::Session>,
+    /// 上面那一份是按**哪一份产物**开的：`(路径, 内容键)`。
+    session_key: Option<(String, u64)>,
     /// 画面脏了：下一次 `RedrawRequested` 要重画一帧。
     dirty: bool,
     /// 上一次画出来的尺寸（`--shot` 与"重呈一次"都要用它）。
@@ -1115,6 +1125,8 @@ impl Viewer {
             return;
         }
 
+        // 这一帧那一段"渲染"的描述（打完呈现在同一行补上"呈现"那一段，见下面）。
+        let mut note: Option<String> = None;
         if self.dirty {
             self.dirty = false;
             // 先把"这一帧要什么"全部抄成局部量（这一批读都是 `&self`，必须在改之前做完）。
@@ -1127,14 +1139,49 @@ impl Viewer {
                 let Some(gpu) = self.gpu.as_ref() else {
                     return;
                 };
-                render::run(
-                    gpu,
-                    Path::new(&scene),
-                    &pcg_root,
-                    views,
-                    width,
-                    height,
-                )
+                // ---- **保留态**：一份文档准备一次，之后每一帧只写相机那两块 uniform ----
+                //
+                // ⚠ 从前这里是 `render::run(...)`：**每帧**重读文档、重载 CAS 成员、重编
+                //    每一条管线（实测 0.75–2.0 s/帧）—— 拖一下要等一帧（§150 记的就是它）。
+                //    现在：① 换场景（或内容键变了）才 `Session::open`；② 相机一动只是
+                //    `session.draw(...)`（同一份文档、同一批组，两次 64 字节的写）。
+                //
+                // ⚠ 判据是**场景路径 + 内容键**，不是 `dirty`：`dirty` 有三条来源
+                //    （换场景 / 相机动 / 窗口改大小），而只有第一条要重开这一份。
+                //    尺寸那一条由 `Session::draw` 自己认（层结构对不上就重开）。
+                let stale = match (&self.session, &self.session_key) {
+                    (Some(_), Some(key)) => *key != (scene.clone(), self.key),
+                    _ => true,
+                };
+                let mut failed: Option<String> = None;
+                if stale {
+                    match render::Session::open(
+                        gpu,
+                        Path::new(&scene),
+                        &pcg_root,
+                        views,
+                        width,
+                        height,
+                    ) {
+                        Ok(session) => {
+                            self.session = Some(session);
+                            self.session_key = Some((scene.clone(), self.key));
+                        }
+                        Err(message) => {
+                            self.session = None;
+                            self.session_key = None;
+                            failed = Some(message);
+                        }
+                    }
+                }
+                match failed {
+                    Some(message) => Err(message),
+                    // 不重开的那条路：留着的那一份**画一帧**（相机就是在这一步进去的）。
+                    None => match self.session.as_mut() {
+                        Some(session) => session.draw(gpu, views, width, height),
+                        None => Err("保留态不见了（内部不一致）".to_string()),
+                    },
+                }
             };
             match rendered {
                 Ok(rendered) => {
@@ -1167,14 +1214,27 @@ impl Viewer {
                     }
                     self.last = Some((width, height));
                     self.frames += 1;
-                    println!(
-                        "第 {} 帧：{}×{}｜{}｜{} ms",
+                    // ⚠ 这一行**分成两段报**，而且整行挪到 `present()` 之后才打：两个数说的是
+                    //    两件事，而"拖动一帧多少钱"这个问题只有两段都有答案。
+                    //
+                    //    ① `画+上传`：从 [`render::Session::draw`] 进去到**把回读出来的那张图
+                    //       上传进呈现纹理**（`Present::upload` 也在这段里 —— 它每次要写
+                    //       宽×高×4 字节）。⚠ 名字里写"上传"就是为了不让它看着像纯渲染。
+                    //    ② `呈现`：拿交换链那张图、录一个全屏三角、提交、`present()`
+                    //       （Fifo 等 vblank 的那一笔就在这里面）。
+                    //
+                    //    实测（orbit-soft，960×640，保留态）：① 34–44 ms、② ~1 ms；
+                    //    而**离线** `--time` 那条路量到的每帧是 14.9 ms —— 那一段只有
+                    //    [`render::Session::draw`]：两条路的差在"窗口在跑"这件事上
+                    //    （DWM 合成、上传、机器状态），不是保留态本身的代价。
+                    note = Some(format!(
+                        "第 {} 帧：{}×{}｜{}｜画+上传 {} ms",
                         self.frames,
                         width,
                         height,
                         describe_orbit(self.orbit),
                         started.elapsed().as_millis()
-                    );
+                    ));
                 }
                 Err(message) => {
                     // 画不出来就**留着窗口里现在这张图**（Bevy 的 `rebuild_scene` 同一条）。
@@ -1186,6 +1246,9 @@ impl Viewer {
         let Some(gpu) = self.gpu.as_ref() else {
             return;
         };
+        // ⚠ 呈现那一段单独计时，而且**与渲染报在同一行**：拖动一帧 = 渲染 + 呈现，
+        //    两个数各有各的瓶颈（渲染那一段就是 [`render::Session::draw`]）。
+        let present_started = Instant::now();
         let (device, queue) = (&gpu.device, &gpu.queue);
         let Some(surface) = self.surface.as_ref() else {
             return;
@@ -1219,6 +1282,9 @@ impl Viewer {
         }
         queue.submit(Some(encoder.finish()));
         frame.present();
+        if let Some(note) = note {
+            println!("{note}｜呈现 {} ms", present_started.elapsed().as_millis());
+        }
     }
 
     /// 只重呈一次（不重画）：窗口露出来 / 尺寸没变但要刷一下时用。

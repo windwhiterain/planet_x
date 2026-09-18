@@ -301,9 +301,23 @@ impl Geometry {
 /// ⚠ 布局不在这里：它是**一份**（见 `run` 里那段），所有视图共用 —— 每个视图各建一份
 /// "内容相同、对象不同"的布局会让管线缓存键与 wgpu 的布局比对说不到一块去。
 struct Stage {
-    /// 这一份 `PassView` 的 uniform 缓冲。只为了活着（绑进组里的是它的引用）。
-    _view: wgpu::Buffer,
+    /// 这一份 `PassView` 的 uniform 缓冲：**保留**着，每帧只写它的内容。
+    ///
+    /// ⚠ 它原来叫 `_view`，注释写着"只为了活着"—— 那在"一份 `PassView` 只画一帧"的形状下
+    /// 是对的。保留态要跨帧换相机 ⇒ 它必须**能被写**，而"能被写"要求用途里有 `COPY_DST`
+    /// （见 `group0::GroupZero::view_buffer` 那段：`create_buffer_init` **不会**替你加）。
+    view_buffer: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
+}
+
+impl Stage {
+    /// 换一台相机：**只写那 64 字节**（`view_proj` 是 super —— 一条 pass 一份，§148）。
+    ///
+    /// ⚠ 写的是 [`view_bytes`] 那份字节，与建它时逐字同源：换相机与"从头建一份"必须给出
+    /// 同一个字节序列，否则拖动过的画面与离线那张就不是同一张图了。
+    fn set_view(&self, queue: &wgpu::Queue, camera: &crate::camera::Camera) {
+        queue.write_buffer(&self.view_buffer, 0, &view_bytes(camera));
+    }
 }
 
 /// 点光 cube 的**一面**：那个面当相机时的一套状态（§139）。
@@ -536,7 +550,7 @@ fn placements(
     }
 }
 
-/// 跑这一帧。
+/// 跑这一帧（**一次**）：准备 + 画一帧，画完就把准备的东西全放下。
 ///
 /// ⚠ 四个「从哪儿来」的参数都是**调用方给的**，一个都不在这里取缺省：
 ///
@@ -547,6 +561,10 @@ fn placements(
 ///   不住在文档里（§110.1：产物自带的相机表只给 `--sheet`）。
 /// - `width` / `height`：**一格的**尺寸。对照图那张图是 `(格宽×列数) × (格高×行数)`，
 ///   格子怎么排是**渲染器的事**（`SheetCell` 的注释：相机表来自 `.pxart`，格子的排布是渲染器的）。
+///
+/// ⚠ 它就是 [`Session::open`] + [`Session::draw`]：**服务与离线那两条路每条请求都从零准备一次**
+/// （§147.2 的 R 判据要的就是"一个会话吃多份文档、互不污染"）。要"准备一次、画很多帧"的
+/// 那几条路（预览窗口、`--time`）拿 [`Session`] 直接用。
 pub fn run(
     gpu: &Gpu,
     scene_path: &Path,
@@ -555,6 +573,182 @@ pub fn run(
     width: u32,
     height: u32,
 ) -> Result<Rendered, String> {
+    let mut session = Session::open(gpu, scene_path, pcg_root, views, width, height)?;
+    session.draw(gpu, views, width, height)
+}
+
+/// **保留态**：一份文档 → 一次准备 → 每一帧只写 uniform、录命令、回读。
+///
+/// ## 边界是从**依赖**里推出来的，不是划出来的
+///
+/// 只有一条判据：**这件事是谁的函数？**
+///
+/// | 谁 | 什么 | 什么时候做 |
+/// |---|---|---|
+/// | **文档**（+ CAS 成员 + `pcg_root`） | 解析好的文档 / 计划 / 组装并校验过的 WGSL / 几何缓冲 / 贴图与材质绑定 / 灯与影子六面 / **执行器（管线缓存与池子都在它里面）** | [`Session::open`]，一次 |
+/// | **尺寸与格数** | 深度图与影图（尺寸按 `size` 规则解到**目标**尺寸）/ 宿主目标 / 每格的 group 0 与 `PassView` | 结构变了才重建（[`Session::draw`] 里那一格判断） |
+/// | **相机** | `view` 与 `PassView` 那两块 uniform 的**内容** | 每帧 `write_buffer`（64 字节 × 2） |
+/// | 一帧一次 | 命令录制 / 提交 / 回读 | 每帧 |
+///
+/// ⚠ **为什么"文档"那一档必须整体留下**（实测，2026-09-18，960×640，探针机位，
+/// 逐相位计时）：一次 `run` 在 `orbit-bare` 上是 **748 ms**、`orbit-soft` 上 **1064 ms**，
+/// 而其中：
+///
+/// | 相位 | orbit-bare | orbit-soft |
+/// |---|---|---|
+/// | 装载（读文档 + CAS 成员 + 组装/校验/反射 + 几何 + 贴图） | **574 ms** | **802 ms** |
+/// | 计划与 GPU 句柄（`plan::build` + naga 对账 + 缓冲/绑定组/目标） | 132 ms | 161 ms |
+/// | 建管线（执行器的缓存里一条都没有） | 28 ms | 77 ms |
+/// | 录命令 + 回读 | 13 ms | 24 ms |
+///
+/// 大头是**装载**，而装载里的大头是网格解码与那几份审计（`planet` 一份 529 ms）。
+/// ⇒ 把"相机换了一台"也变成一次全量准备，是这笔账里唯一不该付的那一部分。
+///
+/// ⚠ 跨帧复用有**一处**因此必须改形状：`group0::GroupZero` 与 [`Stage`] 里那两块 uniform
+/// 缓冲要留着（原来是"建完就交给 bind group 的引用计数"），因为每帧要写的是**内容**；
+/// 而"能写"这件事要求用途里有 `COPY_DST` —— 见 `GroupZero::view_buffer` 那段。
+///
+/// ⚠ 这一档**没有**跨请求的保留：服务那条路每条请求都 `Session::open` 一次。
+/// 那不是"还没做"：§147.2 的 R 判据（一个会话吃四份文档 + 两份坏文档、互不污染）
+/// 靠的正是"按构造就没有污染源"。要跨请求留，得先回答"文档换了算不算同一份"。
+pub struct Session {
+    // ---- 文档层：只跟文档、CAS 成员与 `pcg_root` 有关（换相机、换尺寸都不动它）----
+    spec: px_protocol::scene::SceneSpec,
+    scene: art::LoadedScene,
+    executed_plan: Plan,
+    /// 执行器：**管线缓存与池子都在它里面**（池子里还住着 seed 进来的深度图与影图）。
+    executor: px_pass::Executor,
+    geometries: Vec<Geometry>,
+    bindings: Vec<material::MaterialBinding>,
+    frame_materials: Vec<(art::LoadedFrameMaterial, material::MaterialBinding)>,
+    faces: Vec<Face>,
+    /// 影子六面的 `PassView`：**灯的东西，与格子无关**（12 格共用同一张 cube）。
+    face_stages: Vec<Stage>,
+    stage_layout: wgpu::BindGroupLayout,
+    material_layout: wgpu::BindGroupLayout,
+    /// ---- 下面这一组**没有读者**：它们活着，是因为**别人绑着它们的东西** ----
+    ///
+    /// ⚠ wgpu 的契约：`BindGroup` 自己持有它绑的缓冲/视图/采样器（引用计数），所以它们在
+    /// 技术上不需要这几个字段。留着它们是那条纪律的延续（原来那两行
+    /// `let _shadow_texture` / `let _instance_buffer` 就是它）：**"谁活着"这件事要看得见**。
+    /// `dead_code` 因此会报这四个 —— 那是这条纪律的代价，不是缺陷（就地注明，免得下一个人
+    /// 顺手删掉其中一个，然后在某次"看起来无关"的改动里踩到"用了一张已经没了的图"）。
+    ///
+    /// `materials`：兜底白图与它缓存的那些纹理（材质绑定组绑的就是它们）。
+    /// `instance_buffer`：全帧**一份**实例数组（§148 的 instance 那一半），每格组 1 绑它。
+    /// `shadow_view` / `shadow_sampler`：group 0 第 2/3 格绑的那份 cube 视图与比较采样器
+    /// （纹理本身住在执行器的池子里）。
+    #[allow(dead_code)]
+    materials: Materials,
+    #[allow(dead_code)]
+    instance_buffer: wgpu::Buffer,
+    #[allow(dead_code)]
+    shadow_view: wgpu::TextureView,
+    #[allow(dead_code)]
+    shadow_sampler: wgpu::Sampler,
+    /// 开这一份用的那两个入参。**只为一件事**：换尺寸/换格数时**重开**一份
+    /// （见 [`Session::draw`] 里那条判断）。
+    scene_path: std::path::PathBuf,
+    pcg_root: std::path::PathBuf,
+    /// 审计：`head` 是"怎么看"**之前**那几行（文档 / 计划），`rest` 是之后的一切
+    /// （灯 / 影图 / 深度图 / 几何 / 材质 / 帧材质 …）。
+    ///
+    /// ⚠ 断成两截只为一件事：每帧重放时"怎么看"那几行要**现算**并插在中间，
+    /// 于是整份审计的次序与加保留态之前**逐字相同**（那几行里写着相机的位置）。
+    audit_head: Vec<String>,
+    audit_rest: Vec<String>,
+    /// "第一笔写就是 `load`"的那几个资源名（[`loads_before_write`] 推出来的）。
+    ///
+    /// ⚠ 非空 ⇒ **池子不能跨帧复用** ⇒ [`Session::draw`] 每一帧重开一份。
+    /// 空 ⇒ 这一份走保留那条路。
+    ///
+    /// ⚠ 实测（2026-09-18，本仓全部判据文档）：**这一栏今天是空的** —— 六档场景、帧图、
+    /// 以及 `art/passes/*.toml` 那四份 pass 表（`none`/`invert`/`invert_vignette`/`scratch`）
+    /// 都没有"第一笔写就是 `load`"的资源：内容 pass 的状态是 `color=clear(0,0,0,0)`
+    /// （链上那一笔由帧图规则给清屏），而 `blit` 那一笔的 `color=load` 打的是 `view`
+    /// —— 宿主自己的目标，被这一条排除在外。⇒ 判据那几档走的就是保留那条路。
+    /// 这条守卫是**网**不是**路**：它今天不响，而它响的那一天必须响对（四个单测钉着它）。
+    loads_first: Vec<String>,
+    // ---- 尺寸/格数那一层（换尺寸、换格数才重建）----
+    layer: Option<Layer>,
+}
+
+/// 与**目标大小**绑在一起的那一层（换窗口尺寸、换 `--sheet` 才重建）。
+struct Layer {
+    /// 目标尺寸 —— 这一层的身份之一。
+    target: (u32, u32),
+    /// 每格的绝对矩形 —— 这一层的身份的**另一半**。
+    ///
+    /// ⚠ 相机**不在**这张身份里：它每帧都换，而它换了**不改变任何 GPU 对象的形状**
+    /// （两块 uniform 的内容而已）。把相机也塞进身份，就是"拖一下鼠标重建一层"。
+    rects: Vec<Option<[u32; 4]>>,
+    /// 宿主这一帧那张图（回读就是从它读的）。
+    host_target: shot::Target,
+    /// 每格：group 0 与 `PassView`（两份都是**保留**的，每帧只写它们的内容）。
+    cells: Vec<Cell>,
+    /// 这一层**已经被画过**没有。
+    ///
+    /// ⚠ 它只为一件事：`loads_first` 非空的那几份文档里，**池子在画过一次之后就脏了**
+    /// （池子里的纹理带着上一帧的内容），所以"画第二帧"之前必须重开 —— 而第一帧不用
+    /// （刚建出来的池子就是干净的）。少了这一格，`run`（准备 + 画一帧）那条路会在
+    /// 第一帧白重开一次（多花一整份准备，而像素一个都不会变）。
+    used: bool,
+}
+
+impl Layer {
+    /// 这一层还配得上这次的"怎么看"吗（尺寸与每格的矩形都对得上）。
+    fn matches(&self, target: (u32, u32), placements: &[Placement]) -> bool {
+        self.target == target
+            && self.rects.len() == placements.len()
+            && self
+                .rects
+                .iter()
+                .zip(placements.iter())
+                .all(|(rect, placement)| *rect == placement.rect)
+    }
+}
+
+/// **一格**：一份 group 0（`view` 在里面）+ 一份 `PassView`（`view_proj` 在里面）。
+///
+/// ⚠ 两份都是保留的：换一台相机只写它们那两块 uniform（各 64 字节），
+/// 绑定组、布局、缓冲一个都不重建 —— 这就是"拖动不该付一次重建"的全部内容。
+struct Cell {
+    zero: group0::GroupZero,
+    stage: Stage,
+}
+
+impl Cell {
+    /// 换相机（含视口）：**只写 uniform 的内容**。返回 `view` 那一行的审计。
+    fn set_view(
+        &self,
+        queue: &wgpu::Queue,
+        camera: &crate::camera::Camera,
+        viewport: [f32; 4],
+    ) -> String {
+        let line = self.zero.set_view(queue, camera, viewport);
+        self.stage.set_view(queue, camera);
+        line
+    }
+}
+
+impl Session {
+    /// **准备**：文档 → 一切与"怎么看"无关的 GPU 句柄，外加**第一层**"尺寸那一层"。
+    ///
+    /// ⚠ 这一刀切在 `placements()` **之前**：这里只认文档、CAS 成员、`pcg_root`
+    /// （外加"这一帧多大、几格"那两格尺寸参数）—— **相机一个都不进来**。
+    /// 所以换相机时它整段都不重跑；换尺寸/换格数时它整段重跑（见 [`Session::draw`]）。
+    ///
+    /// ⚠ **这一段的缩进是搬过来时的原样**（比常规少一级）：它的躯体就是从前 `run` 那个
+    /// 函数体，一个字没改（只有"相机那几笔"搬去了 [`Session::draw`]）。重排缩进会让
+    /// 这份 diff 变成"整个函数都改了"，而 mover 与 editor 的差别在 review 时最值钱。
+    pub fn open(
+        gpu: &Gpu,
+        scene_path: &Path,
+        pcg_root: &Path,
+        views: Views,
+        width: u32,
+        height: u32,
+    ) -> Result<Session, String> {
     let root = pcg_root.to_path_buf();
     let spec = art::read_spec(scene_path)?;
     let scene = art::load_scene(scene_path, &root)?;
@@ -590,32 +784,34 @@ pub fn run(
     }
     let executed_plan = all_passes(&plan, &mut audit)?;
 
-    // ---- 相机与格子：产物自带的那 12 台（`--sheet`）或者一台探针相机 ----
-    let (placements, target) = placements(views, &spec, width, height)?;
-    audit.push(format!(
-        "怎么看：{:?}｜{} 台相机｜一格 {}×{}（aspect {}，位模式 {:08X}）⇒ 目标 {}×{}\
-         ｜无限 reverse-Z / Depth32Float / 清 0.0 / GreaterEqual",
-        views,
-        placements.len(),
-        width,
-        height,
-        width as f32 / height as f32,
-        (width as f32 / height as f32).to_bits(),
-        target.0,
-        target.1
-    ));
-    for placement in &placements {
+    // ---- ⚠ 保留态的**前提**：池子跨帧活着，而池子里的纹理带着上一帧的内容 ----
+    //
+    // 一次性那条路（每条请求新建执行器）给的是**全新的、按规范清零的**纹理。两者的差别
+    // 只在"有谁在没人写过的格子上 `load`"时露头 —— 那一档下保留态与一次性会给出不同的
+    // 像素，而**那种错不会有任何门响**。⇒ 判据从**文档**里推（pass 的次序 + 附件状态），
+    // 推出来有 ⇒ 这一份每一帧重开（代价回到从前，像素一定一样）。
+    // `view`（宿主自己的目标）不算在这条里：它在每一帧开头被显式清成透明黑，见 `draw_into`。
+    let loads_first: Vec<String> = loads_before_write(&executed_plan);
+    if !loads_first.is_empty() {
         audit.push(format!(
-            "  {}｜from_xyz({}, {}, {}).looking_at(ZERO, Y)｜viewport {}",
-            placement.note,
-            placement.camera.position.x,
-            placement.camera.position.y,
-            placement.camera.position.z,
-            match placement.uniform_viewport((width, height)) {
-                [x, y, w, h] => format!("({x}, {y}, {w}, {h})"),
-            }
+            "⚠ 这一份计划里 [{}] 的**第一笔写就是 `load`**（没有任何一条更早的 pass 写过它）：\
+             池子跨帧复用给的是**上一帧**的内容，而一次性那条路给的是清零的纹理 ⇒ \
+             这一份**不开保留**（每一帧重新准备）。这不是「宿主偷懒」：要保留它，就得给执行器\
+             一条「清空池子」的路（那是另一个单元的事）",
+            loads_first.join(" / ")
         ));
     }
+
+    // ---- 相机与格子：产物自带的那 12 台（`--sheet`）或者一台探针相机 ----
+    //
+    // ⚠ 这一段**只在准备时算一次**，而它的**审计行不在这一层**：那几行里写着相机的位置
+    //    （`from_xyz(...)`），每帧都变 ⇒ 它们由 [`Session::draw`] 现算（[`describe_views`]）。
+    //
+    // ⚠ 审计在这里**断成两截**：`audit_head` 是"怎么看"之前的那几行（文档/计划），
+    //    `audit_rest` 是之后的一切（灯 / 影图 / 深度图 / 几何 / 材质 / 帧材质 …）。
+    //    每帧重放的次序因此与加保留态之前**逐字相同**：头 + 现算的"怎么看" + 尾 + 每格那几行。
+    let audit_head = std::mem::take(&mut audit);
+    let (placements, target) = placements(views, &spec, width, height)?;
 
     // ---- 灯：文档那几盏 → 聚类缓冲的那几格（`group0::lights_of`，逐字复刻 oracle 的打包）----
     //
@@ -648,6 +844,7 @@ pub fn run(
     //    **仍然声明**了 group 0 的 binding 2 ⇒ 管线布局必须有这一格、必须绑得上。
     //    那一档绑一份 1×1×6 全 0 的兜底图，并把"绑的是兜底"**打印出来** ——
     //    没有投影的灯时没有任何一条路会去采它（`surface.wgsl` 那个 `shadow_maps` 位）。
+    let shadow_sampler = group0::point_shadow_sampler(&gpu.device);
     let (shadow_texture, shadow_view, shadow_note) = match plan.resource(SHADOW_TEXTURE_RESOURCE) {
         Some(resource) => {
             let (cube_width, cube_height) = resource.size.resolve(target.0, target.1);
@@ -712,7 +909,6 @@ pub fn run(
     // ⚠ 纹理要活到这一帧画完（`wgpu::BindGroup` 持的是视图、视图持的是纹理 ——
     //    引用计数保证它不会先死；这里留一个绑定只是让"谁活着"这件事看得见）。
     let _shadow_texture = shadow_texture;
-    let shadow_sampler = group0::point_shadow_sampler(&gpu.device);
 
     // ---- group 0 的契约：从**某一份物体 shader** 反射（五格超集的那份布局）----
     let contract = scene
@@ -1132,7 +1328,8 @@ pub fn run(
             .device
             .create_buffer_init(&BufferInitDescriptor {
                 label: Some(label),
-                usage: wgpu::BufferUsages::UNIFORM,
+                // ⚠ `COPY_DST` 是保留态要的（每帧写内容）：见 `Stage::view_buffer` 那段。
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                 contents: &view_bytes(view),
             });
         let bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -1150,7 +1347,7 @@ pub fn run(
             ],
         });
         Stage {
-            _view: buffer,
+            view_buffer: buffer,
             bind_group,
         }
     };
@@ -1198,38 +1395,11 @@ pub fn run(
         bindings.push(binding);
     }
 
-    // ---- 执行器要的那几张表 ----
-    let resolved_geometry: Vec<ResolvedGeometry<'_>> = geometries
-        .iter()
-        .enumerate()
-        .map(|(index, geometry)| ResolvedGeometry {
-            name: geometry.name.as_str(),
-            // ⚠ 程序化那一笔两栏都给 `None`：它**没有**顶点缓冲，顶点由顶点阶段按
-            //    `vertex_index` 现算。给一个空缓冲是另一回事 —— 执行器会拿它去建管线的
-            //    顶点布局，而那段顶点阶段不认那个布局。
-            vertices: geometry
-                .vertices
-                .as_ref()
-                .map(|buffer| (buffer, geometry.layout())),
-            indices: geometry
-                .indices
-                .as_ref()
-                .map(|buffer| (buffer, wgpu::IndexFormat::Uint32, geometry.index_count)),
-            vertex_count: geometry.vertex_count,
-            // ⚠ 实例下标 = **物体在 `objects[]` 里的次序**，而几何表就是照那个次序建的
-            //    （实例数组也是）⇒ 两者同源，"下标越界"在结构上不可能发生。
-            //    一格宽的区间 ⇒ `instance_index` 恒为 `index`：每个算式与拆之前逐位相同。
-            //
-            // ⚠ 程序化那一笔（天空盒）**不是物体**：它画一次（`instance_index` 恒 0），
-            //    而它的顶点阶段一个 `@group(1)` 都不读（顶点全由 `vertex_index` 现算）。
-            //    `0..1` 说的是这件事本身，不是一个"兜底默认值"。
-            instances: if index < scene.objects.len() {
-                index as u32..index as u32 + 1
-            } else {
-                0..1
-            },
-        })
-        .collect();
+    // ---- 执行器要的那几张表**不在这里** ----
+    //
+    // ⚠ `ResolvedGeometry`（几何名 → 顶点/索引缓冲 + 实例区间）是一份**借**出来的表：
+    //    它借的是 `Session.geometries`。留着它就要自引用（自引用的结构体在这里没有理由），
+    //    所以它每一帧在 [`Session::draw_into`] 里现造 —— 那是纯 CPU 的十几行，不碰 GPU。
 
     // ---- 材质名 → 哪张表（§135）：名字是**索引**，两张表都可能给出它 ----
     //
@@ -1302,121 +1472,400 @@ pub fn run(
         frame_materials.push((loaded, binding));
     }
 
-    // ---- 外部目标：宿主这一帧那张图（**整幅**：对照图就是 12 格拼出来的那一张）----
+    // ---- 外部目标（宿主这一帧那张图）+ **每格的组**：这就是"尺寸那一层" ----
+    //
+    // ⚠ 每格建**一次**（不是每帧）：`view` 与 `PassView` 这两块 uniform 的内容每帧要换，
+    //    而绑定组、布局、缓冲一个都不换 —— 换内容走 `Cell::set_view`（`queue.write_buffer`）。
+    //    "建了 14 份、用了 8 份"那个粒度毛病（§142.1）在这里同样不复发：格子数 = 相机数。
     let host_target = shot::Target::new(&gpu.device, target.0, target.1);
-    let mut sets: Vec<Vec<External<'_>>> = Vec::with_capacity(executed_plan.passes.len());
-    for (index, pass) in executed_plan.passes.iter().enumerate() {
-        let mut set: Vec<External<'_>> = Vec::new();
-        // ⚠ **`Role::Depth` 那条外部目标的路，这一档不再走**（§132）。
-        //
-        // 它没错，只是这一档不再需要：那条规则说的是"宿主给的外部目标顶掉同名声明资源"，
-        // 将来谁真需要"宿主提供一张**池子拥有**的视图"，它还在、还是对的。
-        // 这一档改成了 `Executor::seed` —— 因为深度那张图**必须只有一张**（拷贝要纹理、
-        // 绑定要同一张纹理的视图），而 seed 才保证得了"一张"。
-        // 两条路同时开着就是"同一个东西两套机制"，那是漂移的温床，所以这里**空着**。
-        let _ = (index, &pass.label);
-        if pass.writes.first().map(String::as_str) == Some(px_protocol::scene::VIEW_BUILTIN) {
-            set.push(External {
-                name: px_protocol::scene::VIEW_BUILTIN,
-                role: Role::Write,
-                view: &host_target.view,
-                format: shot::FORMAT,
-            });
-        }
-        sets.push(set);
-    }
-
-    // ---- 逐格执行：每一格一套 group 0 / `PassView` / 材质表，格子交给 `Frame::viewport` ----
-    //
-    // ⚠ 12 次执行共用**同一个执行器**（池子与管线缓存都是它的）：12 格因此共用同一批
-    //    中间纹理（`scene_color_a/b` 与两张深度）。那正是 oracle 的形状 —— Bevy 的 12 台相机
-    //    虽然各有 `ViewTarget`，但主纹理是按**目标**（`camera.target`）从纹理池里取的
-    //    （`bevy_render-0.19.1/src/view/mod.rs:1253-1284` 的 `MainTextureKey`：键里没有 viewport），
-    //    12 台相机同指一张 Image ⇒ **同一对 a/b 纹理**，各自 `set_viewport` 画自己那一格。
-    //
-    // ⚠ 每一格都把**整份计划**跑完（含 prepass / 影子 / copy / blit）：少跑一条就是
-    //    "有些格子的图没画全"，而那种错不会有任何门响。
-    //
-    // ⚠ 一格清一次 `scene_color_a` 是安全的：清屏发生在**上一格的 blit 已经记进编码器之后**
-    //    （命令按记录次序执行），而中间目标里的内容本来就只在"这一格的那一块"有意义。
-    let mut encoder = gpu
-        .device
-        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("px_render_wgpu 的一帧（一格一次）"),
-        });
+    let mut cells: Vec<Cell> = Vec::with_capacity(placements.len());
     for placement in &placements {
         let viewport = placement.uniform_viewport((width, height));
         let zero = build_zero(&placement.camera, &sampled_view, viewport)?;
-        audit.push(format!(
-            "—— {} 的 group 0（`view.viewport` = ({}, {}, {}, {})）——",
-            placement.note, viewport[0], viewport[1], viewport[2], viewport[3]
-        ));
-        audit.extend(zero.audit.iter().map(|line| format!("  {line}")));
         // 这一格的 `PassView`：`view_proj` 是"每一条 pass 一份"的 super，而它是每格一份的。
         let camera_stage = make_stage(
             &format!("组 1：PassView（相机，第 {} 格）", placement.index),
             &placement.camera,
         );
-        // ⚠ 那些守卫（"一个名字恰好一套组"那三条）判的是**文档说不说得通**，与格子无关：
-        //    第 0 格把话说进 `audit`，其余各格写进一份丢弃的 Vec —— 守卫照跑（坏了当场拒），
-        //    话只说一遍（每条实例一行 × 12 格会把审计淹掉）。
-        let mut quiet: Vec<String> = Vec::new();
-        let audit_sink: &mut Vec<String> = if placement.index == 0 {
-            &mut audit
-        } else {
-            &mut quiet
-        };
-        let cell = cell_materials(
-            &zero,
-            &camera_stage,
-            &scene,
-            &bindings,
-            &spec,
-            &executed_plan,
-            &faces,
-            &face_stages,
-            &stage_layout,
-            &material_layout,
-            &frame_materials,
-            audit_sink,
-        )?;
-        let frame = Frame {
-            // ⚠ **整幅**的尺寸：池子里那些 `size = "view"` 的资源按它建（对照图是 3840×1920），
-            //    每一格靠 `frame.viewport` 落到自己那一块上。
+        cells.push(Cell {
+            zero,
+            stage: camera_stage,
+        });
+    }
+    // ⚠ 实例数组由 `Session` 持有（它在 `Session` 里活到这一份保留态结束，
+    //    `wgpu::BindGroup` 也持着它的引用 —— 引用计数保证它不会先死）。
+    //    原来这里那一行 `let _instance_buffer = instance_buffer;` 是"让谁活着看得见"，
+    //    现在它活着这件事由字段本身说得清（而且必须在 `make_stage` 最后一次调用**之后**
+    //    才能 move —— 本单元实测过 E0505）。
+
+    Ok(Session {
+        spec,
+        scene,
+        executed_plan,
+        executor,
+        geometries,
+        bindings,
+        frame_materials,
+        faces,
+        face_stages,
+        stage_layout,
+        material_layout,
+        materials,
+        instance_buffer,
+        shadow_view,
+        shadow_sampler,
+        scene_path: scene_path.to_path_buf(),
+        pcg_root: pcg_root.to_path_buf(),
+        audit_head,
+        audit_rest: audit,
+        loads_first,
+        layer: Some(Layer {
+            target,
+            rects: placements.iter().map(|placement| placement.rect).collect(),
+            host_target,
+            cells,
+            used: false,
+        }),
+    })
+}
+
+    /// **画一帧**：只写 uniform 的内容、录命令、提交、回读。**不重建文档那一侧的任何东西**。
+    ///
+    /// ⚠ 三档的代价差两个数量级，所以"这一帧跑的是哪一档"必须一眼看得见：
+    ///
+    /// | 这一帧发生了什么 | 代价（实测，`orbit-bare`，960×640） |
+    /// |---|---|
+    /// | 换相机（拖动 / `--place`） | **两次 64 字节的 `write_buffer`** |
+    /// | 换尺寸 / 换格数 | 重开一份（= [`Session::open`]，含重读文档：~0.7 s） |
+    /// | 每帧都要做的那部分 | 录一帧命令 + 回读（十几毫秒：`px_pass::Plan::check()`、GPU 与回读都在里面） |
+    ///
+    /// ⚠ "换尺寸/换格数就重开"是**这一版的边界**，不是一个顺手的选择：`Layer` 里那些东西
+    /// （深度图 / 影图 / 宿主目标 / 每格的组）与新尺寸不一致时**不能复用**，而"只重建那一层"
+    /// 需要把 `open` 里从影图到 `cells` 那一段抽出来单独成一个函数（那是下一个单元的第一件事，
+    /// 见报告）。窗口改大小是低频动作，相机拖动才是每帧的 —— 这一版先把每帧那条路做对。
+    pub fn draw(
+        &mut self,
+        gpu: &Gpu,
+        views: Views,
+        width: u32,
+        height: u32,
+    ) -> Result<Rendered, String> {
+        // ---- 怎么看：相机与格子（纯 CPU；换相机就是在这一行之后生效的）----
+        let (placements, target) = placements(views, &self.spec, width, height)?;
+        // 换尺寸 / 换格数 ⇒ 重开一份（`Layer` 里那些东西与新尺寸不一致时不能复用）。
+        let mut rebuild = !self
+            .layer
+            .as_ref()
+            .is_some_and(|layer| layer.matches(target, &placements));
+        // ⚠ 还有一条**从文档推出来的**理由：池子跨帧复用对它不安全（`loads_first` 非空），
+        //    而这一层**已经被画过一次**（池子脏了）⇒ 也重开。见 `loads_before_write`。
+        if self
+            .layer
+            .as_ref()
+            .is_some_and(|layer| layer.used)
+            && !self.loads_first.is_empty()
+        {
+            rebuild = true;
+        }
+        if rebuild {
+            let (path, root) = (self.scene_path.clone(), self.pcg_root.clone());
+            *self = Session::open(gpu, &path, &root, views, width, height)?;
+        }
+        // 把这一层**移出来**：`self` 的其余字段要同时借（`executor` 要 `&mut`）。
+        let mut layer = self.layer.take().expect("上面刚保证过它在");
+        let outcome = self.draw_into(gpu, &mut layer, views, &placements, target, width, height);
+        self.layer = Some(layer);
+        outcome
+    }
+
+    /// [`Session::draw`] 的实体：`layer` 已经从 `self` 里移出来了，于是它的 `cells`
+    /// 与 `self` 的那几张表可以同时借。
+    #[allow(clippy::too_many_arguments)]
+    fn draw_into(
+        &mut self,
+        gpu: &Gpu,
+        layer: &mut Layer,
+        views: Views,
+        placements: &[Placement],
+        target: (u32, u32),
+        width: u32,
+        height: u32,
+    ) -> Result<Rendered, String> {
+        // ⚠ 拆字段（而不是一个 `&self`）：`executor.execute` 要 `&mut`，`cell_materials` 要 `&`
+        //    —— 同一结构体的不同字段可以同时借，走一次 `&self` 就不行（`draw` 里那条注释）。
+        let Session {
+            spec,
+            scene,
+            executed_plan,
+            bindings,
+            frame_materials,
+            faces,
+            face_stages,
+            stage_layout,
+            material_layout,
+            geometries,
+            audit_head,
+            audit_rest,
+            executor,
+            ..
+        } = self;
+        // ---- 审计：文档那几行原样重放，"怎么看"现算，次序与加保留态之前逐字相同 ----
+        let mut audit: Vec<String> = Vec::with_capacity(audit_head.len() + audit_rest.len() + 8);
+        audit.extend(audit_head.iter().cloned());
+        audit.extend(describe_views(views, placements, width, height, target));
+        audit.extend(audit_rest.iter().cloned());
+        // ---- 每格：**只写 uniform 的内容**（相机一动只值这两次 64 字节的写）----
+        for (cell, placement) in layer.cells.iter_mut().zip(placements.iter()) {
+            let viewport = placement.uniform_viewport((width, height));
+            audit.push(format!(
+                "—— {} 的 group 0（`view.viewport` = ({}, {}, {}, {})）——",
+                placement.note, viewport[0], viewport[1], viewport[2], viewport[3]
+            ));
+            audit.push(cell.set_view(&gpu.queue, &placement.camera, viewport));
+            audit.extend(cell.zero.audit.iter().map(|line| format!("  {line}")));
+        }
+        // ---- 外部目标：宿主这一帧那张图（**整幅**：对照图就是 12 格拼出来的那一张）----
+        let mut sets: Vec<Vec<External<'_>>> = Vec::with_capacity(executed_plan.passes.len());
+        for (index, pass) in executed_plan.passes.iter().enumerate() {
+            let mut set: Vec<External<'_>> = Vec::new();
+            // ⚠ **`Role::Depth` 那条外部目标的路，这一档不再走**（§132）。
+            //
+            // 它没错，只是这一档不再需要：那条规则说的是"宿主给的外部目标顶掉同名声明资源"，
+            // 将来谁真需要"宿主提供一张**池子拥有**的视图"，它还在、还是对的。
+            // 这一档改成了 `Executor::seed` —— 因为深度那张图**必须只有一张**（拷贝要纹理、
+            // 绑定要同一张纹理的视图），而 seed 才保证得了"一张"。
+            // 两条路同时开着就是"同一个东西两套机制"，那是漂移的温床，所以这里**空着**。
+            let _ = (index, &pass.label);
+            if pass.writes.first().map(String::as_str) == Some(px_protocol::scene::VIEW_BUILTIN) {
+                set.push(External {
+                    name: px_protocol::scene::VIEW_BUILTIN,
+                    role: Role::Write,
+                    view: &layer.host_target.view,
+                    format: shot::FORMAT,
+                });
+            }
+            sets.push(set);
+        }
+        // ---- 执行器要的那几张表 ----
+        let resolved_geometry: Vec<ResolvedGeometry<'_>> = geometries
+            .iter()
+            .enumerate()
+            .map(|(index, geometry)| ResolvedGeometry {
+                name: geometry.name.as_str(),
+                // ⚠ 程序化那一笔两栏都给 `None`：它**没有**顶点缓冲，顶点由顶点阶段按
+                //    `vertex_index` 现算。给一个空缓冲是另一回事 —— 执行器会拿它去建管线的
+                //    顶点布局，而那段顶点阶段不认那个布局。
+                vertices: geometry
+                    .vertices
+                    .as_ref()
+                    .map(|buffer| (buffer, geometry.layout())),
+                indices: geometry
+                    .indices
+                    .as_ref()
+                    .map(|buffer| (buffer, wgpu::IndexFormat::Uint32, geometry.index_count)),
+                vertex_count: geometry.vertex_count,
+                // ⚠ 实例下标 = **物体在 `objects[]` 里的次序**，而几何表就是照那个次序建的
+                //    （实例数组也是）⇒ 两者同源，"下标越界"在结构上不可能发生。
+                //    一格宽的区间 ⇒ `instance_index` 恒为 `index`：每个算式与拆之前逐位相同。
+                //
+                // ⚠ 程序化那一笔（天空盒）**不是物体**：它画一次（`instance_index` 恒 0），
+                //    而它的顶点阶段一个 `@group(1)` 都不读（顶点全由 `vertex_index` 现算）。
+                //    `0..1` 说的是这件事本身，不是一个"兜底默认值"。
+                instances: if index < scene.objects.len() {
+                    index as u32..index as u32 + 1
+                } else {
+                    0..1
+                },
+            })
+            .collect();
+
+        // ---- 逐格执行：每一格一套 group 0 / `PassView` / 材质表，格子交给 `Frame::viewport` ----
+        //
+        // ⚠ 12 次执行共用**同一个执行器**（池子与管线缓存都是它的）：12 格因此共用同一批
+        //    中间纹理（`scene_color_a/b` 与两张深度）。那正是 oracle 的形状 —— Bevy 的 12 台相机
+        //    虽然各有 `ViewTarget`，但主纹理是按**目标**（`camera.target`）从纹理池里取的
+        //    （`bevy_render-0.19.1/src/view/mod.rs:1253-1284` 的 `MainTextureKey`：键里没有 viewport），
+        //    12 台相机同指一张 Image ⇒ **同一对 a/b 纹理**，各自 `set_viewport` 画自己那一格。
+        //
+        // ⚠ 每一格都把**整份计划**跑完（含 prepass / 影子 / copy / blit）：少跑一条就是
+        //    "有些格子的图没画全"，而那种错不会有任何门响。
+        //
+        // ⚠ 一格清一次 `scene_color_a` 是安全的：清屏发生在**上一格的 blit 已经记进编码器之后**
+        //    （命令按记录次序执行），而中间目标里的内容本来就只在"这一格的那一块"有意义。
+        let mut encoder = gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("px_render_wgpu 的一帧（一格一次）"),
+            });
+        // ⚠ 宿主目标**每帧先清成透明黑**（= 新纹理按规范的内容）：保留态让它跨帧活着，
+        //    而帧图里 `blit` 那条 pass 的状态是 `color=load`（`art/frame/default.toml:169`）
+        //    —— "load 一张新图"读到的就是零。少了这一清，"上一帧的像素"会留在这一帧没人
+        //    写到的地方（对照图那种按格写的情形正是这样），而那种错不会有任何门响。
+        {
+            let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("px_render_wgpu 宿主目标清零（让复用的目标等于新目标）"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &layer.host_target.view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+        }
+        for (cell, placement) in layer.cells.iter().zip(placements.iter()) {
+            // ⚠ 那些守卫（"一个名字恰好一套组"那三条）判的是**文档说不说得通**，与格子无关：
+            //    第 0 格把话说进 `audit`，其余各格写进一份丢弃的 Vec —— 守卫照跑（坏了当场拒），
+            //    话只说一遍（每条实例一行 × 12 格会把审计淹掉）。
+            let mut quiet: Vec<String> = Vec::new();
+            let audit_sink: &mut Vec<String> = if placement.index == 0 {
+                &mut audit
+            } else {
+                &mut quiet
+            };
+            let table = cell_materials(
+                &cell.zero,
+                &cell.stage,
+                scene,
+                bindings,
+                spec,
+                executed_plan,
+                faces,
+                face_stages,
+                stage_layout,
+                material_layout,
+                frame_materials,
+                audit_sink,
+            )?;
+            let frame = Frame {
+                // ⚠ **整幅**的尺寸：池子里那些 `size = "view"` 的资源按它建（对照图是 3840×1920），
+                //    每一格靠 `frame.viewport` 落到自己那一块上。
+                width: target.0,
+                height: target.1,
+                viewport: placement.viewport(),
+                sets: &sets,
+                geometries: &resolved_geometry,
+                materials: &table,
+            };
+            let audit_text = executor.execute(&gpu.device, &mut encoder, executed_plan, &frame)?;
+            audit.push(format!("第 {} 格的执行器审计：\n{audit_text}", placement.index));
+        }
+        gpu.queue.submit(Some(encoder.finish()));
+        // 这一层从此"被画过"了：池子里的纹理带着这一帧的内容（见 `Layer::used`）。
+        layer.used = true;
+
+        let pixels = shot::read_back(&gpu.device, &gpu.queue, &layer.host_target)?;
+        Ok(Rendered {
+            pixels,
             width: target.0,
             height: target.1,
-            viewport: placement.viewport(),
-            sets: &sets,
-            geometries: &resolved_geometry,
-            materials: &cell,
-        };
-        let audit_text = executor.execute(&gpu.device, &mut encoder, &executed_plan, &frame)?;
-        audit.push(format!("第 {} 格的执行器审计：\n{audit_text}", placement.index));
+            audit,
+            executed: executed_plan
+                .passes
+                .iter()
+                .map(|pass| pass.label.clone())
+                .collect(),
+            // ⚠ §136 起这一栏是空的：文档里六条 pass 全部执行，**一条都不跳**。
+            //    留着它是为了那条纪律（"绿是因为跳过了它"）：真开始跳的时候，
+            //    理由必须跟着名字一起出来 —— 那时候这里要重新有内容。
+            skipped: Vec::new(),
+            declared_clouds: spec.expects.iter().any(|tag| tag == "clouds"),
+        })
     }
-    // ⚠ 实例数组要活到这一帧画完（`wgpu::BindGroup` 持的是它的引用 —— 引用计数保证它不会
-    //    先死）。这一行只是让"谁活着"这件事看得见（同上面那条 `_shadow_texture`），
-    //    而且它必须落在 `make_stage` 最后一次被调用**之后**：`make_stage` 那个闭包借的
-    //    就是这块缓冲，提前 move 会变成编译错误（本单元实测：E0505）。
-    let _instance_buffer = instance_buffer;
-    gpu.queue.submit(Some(encoder.finish()));
+}
 
-    let pixels = shot::read_back(&gpu.device, &gpu.queue, &host_target)?;
-    Ok(Rendered {
-        pixels,
-        width: target.0,
-        height: target.1,
-        audit,
-        executed: executed_plan
-            .passes
-            .iter()
-            .map(|pass| pass.label.clone())
-            .collect(),
-        // ⚠ §136 起这一栏是空的：文档里六条 pass 全部执行，**一条都不跳**。
-        //    留着它是为了那条纪律（"绿是因为跳过了它"）：真开始跳的时候，
-        //    理由必须跟着名字一起出来 —— 那时候这里要重新有内容。
-        skipped: Vec::new(),
-        declared_clouds: spec.expects.iter().any(|tag| tag == "clouds"),
-    })
+/// **这一份计划里哪些资源"第一笔写就是 `load`"**（从文档推，不猜）。
+///
+/// ⚠ 为什么这是个判据而不是"一条注释"：保留态让执行器的池子（以及 `seed` 进去的那几张
+/// 深度图/影图）**跨帧活着**，而它们带着**上一帧**的内容；一次性那条路每次新建执行器，
+/// 给的是**按规范清零**的纹理。两者的差别只在"有谁在没人写过的格子上 `load`"时露出来 ——
+/// 那一档下两条路会给出**不同的像素**，而画面上不会有任何门响。
+///
+/// ⚠ `view`（宿主这一帧的目标）**排除在外**：它是宿主自己的东西，`Session::draw` 在每一帧
+/// 开头把它清成透明黑（= 新纹理的内容），所以它在两条路上都读得到零。
+///
+/// 次序就是计划的次序（一条 pass 一条 pass 往下走），"写过"包括附件（颜色/深度）与
+/// `copy` 的落点 —— 拷贝是整张覆盖，与 `clear` 同档。
+fn loads_before_write(plan: &Plan) -> Vec<String> {
+    let mut written: Vec<String> = Vec::new();
+    let mut loaded: Vec<String> = Vec::new();
+    let note = |loaded: &mut Vec<String>, written: &mut Vec<String>, name: &str| {
+        if !written.iter().any(|seen| seen == name) && !loaded.iter().any(|seen| seen == name) {
+            loaded.push(name.to_string());
+        }
+        written.push(name.to_string());
+    };
+    for pass in &plan.passes {
+        match pass.kind {
+            // 拷贝：一次整张覆盖（与 `clear` 同档），没有附件状态可读。
+            PassKind::Copy => {
+                for name in &pass.writes {
+                    written.push(name.clone());
+                }
+            }
+            _ => {
+                if let Some(target) = pass.target() {
+                    if pass.render.color == Attachment::Load {
+                        note(&mut loaded, &mut written, target);
+                    } else {
+                        written.push(target.to_string());
+                    }
+                }
+                if let Some(target) = pass.depth_target.as_deref() {
+                    if pass.render.depth == Attachment::Load {
+                        note(&mut loaded, &mut written, target);
+                    } else {
+                        written.push(target.to_string());
+                    }
+                }
+            }
+        }
+    }
+    loaded.retain(|name| name != px_protocol::scene::VIEW_BUILTIN);
+    loaded
+}
+
+/// "怎么看"那几行审计：相机与格子**每帧现算**（它们里面写着相机的位置）。///
+/// ⚠ 它原来长在 `placements()` 的调用点上；搬到这里是因为那几行是**这一帧**的读数，
+/// 而保留态里"准备"只发生一次 —— 一份写着上一帧相机的审计比没有审计更坏。
+fn describe_views(
+    views: Views,
+    placements: &[Placement],
+    width: u32,
+    height: u32,
+    target: (u32, u32),
+) -> Vec<String> {
+    let mut audit = vec![format!(
+        "怎么看：{:?}｜{} 台相机｜一格 {}×{}（aspect {}，位模式 {:08X}）⇒ 目标 {}×{}\
+         ｜无限 reverse-Z / Depth32Float / 清 0.0 / GreaterEqual",
+        views,
+        placements.len(),
+        width,
+        height,
+        width as f32 / height as f32,
+        (width as f32 / height as f32).to_bits(),
+        target.0,
+        target.1
+    )];
+    for placement in placements {
+        audit.push(format!(
+            "  {}｜from_xyz({}, {}, {}).looking_at(ZERO, Y)｜viewport {}",
+            placement.note,
+            placement.camera.position.x,
+            placement.camera.position.y,
+            placement.camera.position.z,
+            match placement.uniform_viewport((width, height)) {
+                [x, y, w, h] => format!("({x}, {y}, {w}, {h})"),
+            }
+        ));
+    }
+    audit
 }
 
 /// 一格的材质表：名字 → 那几套组（`zero` 与 `camera_stage` 是**这一格**的那两份）。
@@ -2154,5 +2603,139 @@ mod tests {
         assert_eq!(geometry.vertex_count, PROCEDURAL_VERTICES);
         assert_eq!(PROCEDURAL_VERTICES, 3, "oracle 的 `render_pass.draw(0..3, 0..1)`");
         assert!(geometry.procedural(), "没有顶点缓冲**就是**程序化");
+    }
+
+    // -----------------------------------------------------------------------
+    // 保留态（§151）：**"能不能跨帧复用池子"这件事是从文档推出来的**
+    //
+    // ⚠ 这条守卫必须自己有判据：它判错时**没有任何门会响** —— 池子里的纹理带着上一帧的
+    //    内容，画出来只是"某几笔的底色不对"，而像素判据只在恰好用到那一档的文档上才会红。
+    // -----------------------------------------------------------------------
+
+    /// 一条 pass（只填这条判据看的那几栏）。
+    fn plan_pass(label: &str, kind: PassKind, writes: &[&str], render: &str) -> px_pass::PassPlan {
+        px_pass::PassPlan {
+            kind,
+            label: label.to_string(),
+            shader: String::new(),
+            entry: String::new(),
+            reads: Vec::new(),
+            writes: writes.iter().map(|name| name.to_string()).collect(),
+            params: Vec::new(),
+            slots: Vec::new(),
+            render: px_pass::RenderState::parse(render).expect("状态那几栏"),
+            draws: Vec::new(),
+            depth_target: None,
+            layer: None,
+            vertex_shader: String::new(),
+            vertex_entry: String::new(),
+        }
+    }
+
+    /// `clear` 先写、`load` 后写 ⇒ **能**复用（池子里那张在 `load` 之前已经被写满了）。
+    #[test]
+    fn a_load_after_a_write_does_not_block_reuse() {
+        let plan = Plan {
+            passes: vec![
+                plan_pass(
+                    "opaque",
+                    PassKind::Geometry,
+                    &["scene_color_a"],
+                    "color=clear(0,0,0,1)|depth=none|depth_write=true|compare=greater_equal|winding=ccw",
+                ),
+                plan_pass(
+                    "sky",
+                    PassKind::Geometry,
+                    &["scene_color_a"],
+                    "color=load|depth=none|depth_write=false|compare=greater_equal|winding=ccw",
+                ),
+            ],
+            ..Default::default()
+        };
+        assert!(loads_before_write(&plan).is_empty(), "有人先写过了 ⇒ 池子可以复用");
+    }
+
+    /// **第一笔写就是 `load`** ⇒ 不能复用（一次性那条路读到的是清零的新纹理）。
+    #[test]
+    fn a_load_before_any_write_blocks_reuse() {
+        let plan = Plan {
+            passes: vec![plan_pass(
+                "invert",
+                PassKind::Geometry,
+                &["scene_color_b"],
+                "color=load|depth=none|depth_write=true|compare=greater_equal|winding=ccw",
+            )],
+            ..Default::default()
+        };
+        assert_eq!(loads_before_write(&plan), vec!["scene_color_b".to_string()]);
+    }
+
+    /// ⚠ `view`（宿主这一帧的目标）**排除在外**：它由宿主每一帧先清成透明黑
+    /// （= 新纹理的内容），所以它在两条路上都读得到零。帧图里 `blit` 那条 pass 正是
+    /// `color=load` —— 少了这条排除，**六档场景一份都开不了保留**。
+    #[test]
+    fn the_host_target_is_never_the_reason_to_refuse_reuse() {
+        let plan = Plan {
+            passes: vec![plan_pass(
+                "blit",
+                PassKind::Fullscreen,
+                &[px_protocol::scene::VIEW_BUILTIN],
+                "color=load|depth=none|depth_write=true|compare=greater_equal|winding=ccw",
+            )],
+            ..Default::default()
+        };
+        assert!(loads_before_write(&plan).is_empty(), "宿主目标由宿主自己清");
+    }
+
+    /// 深度那一栏同样算：`copy` 是整张覆盖（与 `clear` 同档），它之后的 `load` 不算"没写过"。
+    #[test]
+    fn a_copy_counts_as_a_write_for_the_depth_resource() {
+        let mut copy = plan_pass(
+            "copy_depth",
+            PassKind::Copy,
+            &["scene_depth_sample"],
+            "color=none|depth=none|depth_write=true|compare=greater_equal|winding=ccw",
+        );
+        copy.reads = vec!["scene_depth".to_string()];
+        let mut after = plan_pass(
+            "clouds",
+            PassKind::Geometry,
+            &["scene_color_a"],
+            "color=load|depth=none|depth_write=false|compare=greater_equal|winding=ccw",
+        );
+        after.reads = vec!["scene_depth_sample".to_string()];
+        let good = Plan {
+            passes: vec![copy.clone()],
+            ..Default::default()
+        };
+        assert!(loads_before_write(&good).is_empty(), "拷贝是整张覆盖");
+
+        // 反过来：**没有任何一条写过**它，而有人要读它 —— 那一条不该被算进来
+        // （读它不改变池子的内容；`only_reader` 自己那一笔写的是 `clear`，所以整份是空的）。
+        let mut only_reader = plan_pass(
+            "clouds",
+            PassKind::Geometry,
+            &["scene_color_a"],
+            "color=clear(0,0,0,1)|depth=none|depth_write=false|compare=greater_equal|winding=ccw",
+        );
+        only_reader.reads = vec!["scene_depth_sample".to_string()];
+        let only_reader = Plan {
+            passes: vec![only_reader],
+            ..Default::default()
+        };
+        assert!(loads_before_write(&only_reader).is_empty(), "读它不改变池子的内容");
+
+        // 而拷贝**之后的 load** 也不该被算成"第一笔写"。
+        let mut loader = copy.clone();
+        loader.label = "shadow".to_string();
+        loader.render = px_pass::RenderState::parse(
+            "color=load|depth=none|depth_write=true|compare=greater_equal|winding=ccw",
+        )
+        .expect("状态");
+        let plan = Plan {
+            passes: vec![copy, loader],
+            ..Default::default()
+        };
+        assert!(loads_before_write(&plan).is_empty(), "拷贝在前 ⇒ 这一格有内容");
     }
 }
