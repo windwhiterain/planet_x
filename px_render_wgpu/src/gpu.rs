@@ -35,6 +35,15 @@ fn refuse(reason: String) -> ! {
     std::process::exit(2);
 }
 
+/// 建实例（**只有它**）。分开是为了预览窗口：`Surface` 属于**建它的那个实例**，
+/// 所以窗口那条路的次序必须是"实例 → surface → 适配器/设备"，而不是"设备 → surface"。
+pub fn instance() -> wgpu::Instance {
+    wgpu::Instance::new(wgpu::InstanceDescriptor {
+        backends: wgpu::Backends::VULKAN,
+        ..wgpu::InstanceDescriptor::new_without_display_handle()
+    })
+}
+
 /// 建实例 → 适配器 → 设备，并把就绪读数打出来。
 ///
 /// 打出来的顺序就是外部仪器打戳的顺序（`target/research/startup-probe.ps1` 那种：
@@ -42,17 +51,22 @@ fn refuse(reason: String) -> ! {
 /// 含 `后端` 的那一行 = "适配器 + 设备就绪"这个里程碑，与 §94 那张表同一个边界。
 /// ⚠ 边界换一格，读数就不能与历史比（§104 第 4 条同一条教训）。
 pub fn connect() -> Gpu {
-    let started = Instant::now();
+    connect_with(instance(), None)
+}
 
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-        backends: wgpu::Backends::VULKAN,
-        ..wgpu::InstanceDescriptor::new_without_display_handle()
-    });
+/// [`connect`] 的后半段，多一格：**要画到哪张 surface 上**。
+///
+/// ⚠ 只有预览窗口会传 `Some`，而那一格不是可选的：`compatible_surface` 缺省是 `None`，
+/// 于是选适配器时**不考虑**它能不能画到那张交换链上 —— 多 GPU 的机器上完全可能选到一张
+/// 画不出来的卡，症状是"窗口开了、里面全黑"，而那一刻的错误离病因已经很远。
+/// 离线那几条路传 `None`（它们的层次里根本没有交换链，§104 第 13 条）。
+pub fn connect_with(instance: wgpu::Instance, surface: Option<&wgpu::Surface<'_>>) -> Gpu {
+    let started = Instant::now();
 
     let adapter = match pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
         power_preference: wgpu::PowerPreference::HighPerformance,
         force_fallback_adapter: false,
-        compatible_surface: None,
+        compatible_surface: surface,
     })) {
         Ok(adapter) => adapter,
         Err(err) => refuse(format!("Vulkan 适配器拿不到：{err}")),

@@ -10,6 +10,10 @@ px_pass = { path = "../px_pass" }
 # 后端**锁死 Vulkan**（§104 第 9 条）。`default-features = false` 之后必须显式点名后端，
 # 否则拿到的实例一个后端都没有 —— 那不是"默认"，那是空。
 wgpu = { version = "29", default-features = false, features = ["vulkan", "wgsl"] }
+# 预览窗口（S7 前半）。**只开 `rwh_06`**：那是 wgpu 29 认的 raw-window-handle 版本，
+# 而 winit 的缺省特性里另外那几项（x11 / wayland*）在本机（Windows）一个都用不上 ——
+# 缺省特性是一份"没人写过"的选择，这里显式点名（§104 第 3 条）。
+winit = { version = "0.30", default-features = false, features = ["rwh_06"] }
 naga = { version = "29", features = ["wgsl-in"] }
 # PNG 必须走 image（§104 第 3 条）：哈希是被这个编码器定下来的，不是被我们。
 image = { version = "0.25", default-features = false, features = ["png"] }

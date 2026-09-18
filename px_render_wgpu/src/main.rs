@@ -32,6 +32,7 @@ mod shader;
 mod shot;
 mod stubs;
 mod vec;
+mod viewer;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -69,13 +70,26 @@ fn usage() -> String {
         "      给了 --shot 就再清一张纯色图、回读、落 PNG。",
         "  px_render_wgpu --shaders",
         "      把四份内容 shader 用**本宿主的桩表**组装出来并 naga 校验（不要 GPU）。",
+        "  px_render_wgpu --view [--scene 文档.pxart] [--cam YAW,PITCH,DIST] [--shot PNG]",
+        "                   [--width W] [--height H] [--novsync]",
+        "      **常驻预览窗口**（S7）：1 台轨道相机（左键拖 = 转、滚轮 = 缩放），",
+        "      相机一变、场景一换、窗口一改大小才重画一帧（本宿主是同步建管线，按需渲染）。",
+        "      --shot：**开窗之后的第一帧**顺手存一张 PNG（与 `--offline` 同一行代码）。",
+        "      --cam：窗口的起始方位；不给就是**不给 --cam 那一档**（探针机位，与 J1 那张图同一台）。",
+        "      --width/--height：窗口的初始尺寸（离线那条路是图的尺寸，同一个口径）。",
+        "  px_render_wgpu --show --scene 文档.pxart [--shot PNG]",
+        "      把一份场景**推给**在跑的窗口（写 target/viewer-scene.json）；它自己不渲染。",
+        "  px_render_wgpu --where ｜ px_render_wgpu --place YAW,PITCH,DIST",
+        "      问 / 摆**常驻窗口**的相机（一问一答，3 s 超时；不换场景、不重烘）。",
+        "      ⚠ (yaw,pitch,distance) 的含义与 `--cam` **同一套数**（同一个 `probe_camera`）：",
+        "        窗口在某个方位看到的，就是 `--offline --cam 同一个三元组` 画出来的那一张。",
         "  px_render_wgpu --help",
         "",
         "⚠ 这一版没有的（各自都会**当场拒**，而且拒词指路）：",
         "  --perf/--windows/--frames",
-        "                     性能那两路要的是**帧循环**（逐帧采样 / 丢窗 / 等 K 帧），",
-        "                     而帧循环是 viewer（S7）的交付物 —— 在那之前 gpu_ms/pair 没有可比对象",
-        "  --view/--show      预览窗口（S7）",
+        "                     性能那两路要的是**计时用的帧循环**（逐帧采样 / 丢窗 / 等 K 帧 +",
+        "                     逐段 GPU 时间戳），viewer 那个是按需渲染的交互循环，不是它",
+        "  shader 热重载      预览窗口里改一个 .wgsl 存盘、1 秒内画面变 —— S7 的后半",
     ]
     .join("\n")
 }
@@ -114,14 +128,18 @@ struct Options {
     port: u16,
     pcg_root: PathBuf,
     pcg_root_given: bool,
-    /// `--fps` / `--novsync`：**收下但不生效**（本宿主没有帧循环、也没有交换链）。
+    /// `--fps` / `--novsync`：**服务这条路上收下但不生效**（服务没有帧循环、也不碰交换链）。
     ///
     /// ⚠ 为什么是"收下 + 说明"而不是"不认识的参数"：这两个开关是
     /// `tools/harness.ps1::Start-RenderServer` 给**性能那两路**传的（`-Extra @('--fps')`），
     /// 而它等的就绪信号是日志里那行"渲染管线全部就绪"。当场拒 ⇒ 进程立刻退出，可 harness
     /// 的等待循环**看不见**"它死了"，要空等到超时才报一句"服务没在 180 s 内就绪" ——
     /// 那句话指向**错的原因**（§146.3 ③：拦住了不等于说对了）。
-    /// 收下之后，真正的拒词由**服务端**在收到性能请求时说出来（"要的是帧循环，那是 S7 的"）。
+    /// 收下之后，真正的拒词由**服务端**在收到性能请求时说出来（"要的是计时用的帧循环"）。
+    ///
+    /// ⚠ 预览窗口（`--view`）那条路上它们的含义不一样：`--novsync` **真的生效**
+    /// （交换链的 present mode，见 `viewer::Viewer::open`），`--fps` 仍然收下不用
+    /// （窗口是按需渲染的，没有逐帧的帧率可报）。
     fps: bool,
     novsync: bool,
     // ---- 请求 ----
@@ -146,6 +164,18 @@ struct Options {
     columns: u32,
     /// `--perf`：这一路请求要收帧（默认是 `--shots`）。
     perf: bool,
+    // ---- 预览窗口（S7 前半）----
+    /// `--view`：起那个**常驻**窗口（这条进程会一直占着事件循环，直到窗口关掉）。
+    view: bool,
+    /// `--show`：把一份场景**推给**在跑的窗口（自己不渲染）。
+    show: bool,
+    /// `--where`：问常驻窗口"相机现在在哪儿"（**只读**，不动画面、不换场景）。
+    ask_where: bool,
+    /// `--place yaw,pitch,distance`：把常驻窗口的相机摆到某个方位（复现某个视角用）。
+    ///
+    /// ⚠ 这三个数与 `--cam` 是**同一套数**（都进 `camera::probe_camera`），
+    /// 不是 Bevy 窗口那一套（那边的 pitch 正方向与它自己的 `--cam` 相反）。
+    place: Option<[f32; 3]>,
     /// 性能那一路要收的**干净**窗口数（老路）。
     windows: u32,
     /// 调用方**显式**给了 `--windows`（决定走老路还是新主路径）。
@@ -185,6 +215,10 @@ impl Default for Options {
             sheet: false,
             columns: 4,
             perf: false,
+            view: false,
+            show: false,
+            ask_where: false,
+            place: None,
             windows: 4,
             windows_given: false,
             drop_windows: 1,
@@ -196,14 +230,18 @@ impl Default for Options {
     }
 }
 
-fn parse_cam(text: &str) -> Result<[f32; 3], String> {
+/// `--cam` / `--place` 的取值：三个数。
+///
+/// ⚠ 拒词里带上**是哪一个开关**：`--place 1,2` 报"--cam 要三个数"会把人指向另一个开关，
+/// 而这两个开关住在**同一条命令行**上、含义也确实是同一套数（§146.3 ③）。
+fn parse_cam(flag: &str, text: &str) -> Result<[f32; 3], String> {
     let parts: Vec<f32> = text
         .split(',')
         .map(|part| part.trim().parse::<f32>())
         .collect::<Result<_, _>>()
-        .map_err(|_| "--cam 要 yaw,pitch,dist 三个数".to_string())?;
+        .map_err(|_| format!("{flag} 要 yaw,pitch,dist 三个数"))?;
     if parts.len() != 3 {
-        return Err("--cam 要 yaw,pitch,dist 三个数".to_string());
+        return Err(format!("{flag} 要 yaw,pitch,dist 三个数"));
     }
     Ok([parts[0], parts[1], parts[2]])
 }
@@ -246,7 +284,7 @@ impl Options {
                     }
                 }
                 "--cam" => {
-                    let cam = parse_cam(&next("--cam")?)?;
+                    let cam = parse_cam("--cam", &next("--cam")?)?;
                     match options.shots.last_mut() {
                         Some(shot) => shot.cam = Some(cam),
                         None => options.cam = Some(cam),
@@ -304,13 +342,11 @@ impl Options {
                             .map_err(|_| "--round 需要一个整数".to_string())?,
                     )
                 }
-                // ---- 这一版没有的路：**当场拒，且说对理由**（不是"不认识的参数"）----
-                "--view" | "--show" | "--where" | "--place" => {
-                    return Err(format!(
-                        "{arg} 不在这一版：预览窗口（常驻相机 / 输入 / 热重载 / 一问一答）是 S7 的交付物。\n{}",
-                        usage()
-                    ));
-                }
+                // ---- 预览窗口那三路（S7 前半）：起窗口 / 推场景 / 一问一答 ----
+                "--view" => options.view = true,
+                "--show" => options.show = true,
+                "--where" => options.ask_where = true,
+                "--place" => options.place = Some(parse_cam("--place", &next("--place")?)?),
                 "--help" | "-h" => {
                     println!("{}", usage());
                     std::process::exit(0);
@@ -326,7 +362,62 @@ impl Options {
         {
             return Err("--sheet 用的是产物自带的相机表，不要再给 --cam".to_string());
         }
+        options.check_viewer()?;
         Ok(options)
+    }
+
+    /// 预览窗口那几路的**表面冲突**：当场拒，而且拒词说的是"这条路不适用"，
+    /// 不是"不认识的参数"（§146.3 ③：拦住了不等于说对了）。
+    ///
+    /// ⚠ 每一条都在拒绝**静默忽略**：`--view --place` 这种写法如果收下，
+    /// 人以为"窗口起始就摆在那儿了"，而实际发生的是"那一句被丢了"（Bevy 那边正是如此：
+    /// 派发次序是 view → where/place，`place` 到不了窗口）。
+    fn check_viewer(&self) -> Result<(), String> {
+        let asked = [self.view, self.show, self.ask_where, self.place.is_some()]
+            .iter()
+            .filter(|flag| **flag)
+            .count();
+        if asked == 0 {
+            return Ok(());
+        }
+        if self.serve {
+            return Err(
+                "--serve（渲染服务）与 --view/--show/--where/--place（预览窗口）是**两条常驻路**：\
+                 一个进程只能当一个（各自的租约文件也不同：target/render-server.json 与 target/viewer.json）"
+                    .to_string(),
+            );
+        }
+        if self.offline {
+            return Err(
+                "--offline 是「本进程画一帧就退出」，与常驻窗口那几路（--view/--show/--where/--place）不相干"
+                    .to_string(),
+            );
+        }
+        if asked > 1 {
+            return Err(format!(
+                "--view / --show / --where / --place 一次只能走一条（这次给了 {asked} 条）：\
+                 起窗口、推场景、问相机、摆相机是四件事"
+            ));
+        }
+        if self.show {
+            if self.shots.is_empty() {
+                return Err("--show 需要一份场景产物：--scene <SCENE.pxart>".to_string());
+            }
+        } else if self.view {
+            if self.shots.len() > 1 {
+                return Err(
+                    "--view 只要**一份**起始场景（窗口是常驻的，其余场景用 --show 推）：\
+                     一次只能显示一份文档"
+                        .to_string(),
+                );
+            }
+        } else if self.shots.iter().any(|shot| shot.out.is_some()) || self.out.is_some() {
+            return Err(
+                "--where/--place 只跟常驻窗口的相机说话，不渲染任何东西：--out 在这儿没有意义"
+                    .to_string(),
+            );
+        }
+        Ok(())
     }
 
     /// 单张时的相机：`--scene A --cam …` 是「这一步的相机」，单张请求里它就是 `View.cam`。
@@ -609,12 +700,42 @@ fn main() {
         std::process::exit(run_diff(left, right));
     }
 
+    // ---- 预览窗口那三路（S7 前半）----
+    //
+    // ⚠ 位置在这里是有讲究的：它们在 `--serve` **之前**，因为窗口与服务是两条常驻路
+    //    （`check_viewer` 已经拒了同时给）；而在 `--device`/`--offline` 之前是因为
+    //    `--view --shot PNG` 里那个 `--shot` 属于**窗口的第一帧**，不是 S0 那张纯色图。
+    if options.view {
+        if let Err(message) = viewer::view(&options) {
+            eprintln!("{message}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if options.show {
+        // `check_viewer` 已经保证至少给了一份 `--scene`。
+        let scene = options.shots[0].scene.clone();
+        if let Err(message) = viewer::show(&scene, options.shot.clone()) {
+            eprintln!("{message}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if options.ask_where || options.place.is_some() {
+        if let Err(message) = viewer::camera_query(options.place) {
+            eprintln!("{message}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
     // 服务那一路：它自己建设备、写租约、等请求。
     if options.serve {
         // `--fps` / `--novsync` 收下但不生效：说一声，别让它变成一个谁也不看的旗标。
         if options.fps || options.novsync {
             println!(
-                "（--fps/--novsync 收下但不生效：本宿主按需渲染，没有帧循环、也不碰交换链 —— 那两个开关属于 S7）"
+                "（--fps/--novsync 在**服务**这条路上收下但不生效：服务按需渲染，没有帧循环、也不碰交换链。\
+                 窗口那条路（--view）上 --novsync 是真的（交换链的 present mode））"
             );
         }
         if let Err(message) = serve::serve(
@@ -629,8 +750,8 @@ fn main() {
         return;
     }
 
-    // ⚠ `--pcg-root` 只在**服务端**生效：解析成员的是服务进程，它有自己的 CAS 根。
-    //    客户端这一份只报一声，不能装作生效（照搬 bevy 宿主那句）。
+    // ⚠ `--pcg-root` 只在**渲染进程**（`--serve` / `--view`）生效：解析成员的是那个进程，
+    //    它有自己的 CAS 根。客户端这一份只报一声，不能装作生效（照搬 bevy 宿主那句）。
     if options.pcg_root_given {
         eprintln!(
             "⚠ --pcg-root 只在渲染进程（--serve）生效：这次请求的内容由服务进程按它自己的 CAS 根解析"
@@ -679,7 +800,7 @@ fn run_offline(options: &Options) -> i32 {
         return 64;
     }
     if options.perf || options.windows_given {
-        eprintln!("--perf/--windows 要的是**帧循环**（服务那条路的活），而离线这条路一次只画一帧");
+        eprintln!("--perf/--windows 要的是**计时用的帧循环**（服务那条路的活），而离线这条路一次只画一帧");
         return 64;
     }
     let [shot] = options.shots.as_slice() else {
