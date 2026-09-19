@@ -689,7 +689,16 @@ fn main() {
         .unwrap_or_else(|err| panic!("{err}"));
 
     println!("{}", compiled.document.audit());
-    println!("产物 scene -> {}（{}）", artifact.display(), px_ops::hex_short(&key));
+    // ⚠ 尾巴上那一格是**内容键**（`scene_key` 算出来的、也嵌在文件名里那个），**不是文件字节的
+    //    sha256** —— 两者是两个量。`art/anchor/hashes.txt` §三 那六格判的是**文件字节**，
+    //    而这一行印的是键：拿这一格去比登记值，六份会**全报 ✗ 而真值其实是对的**（这条踩过一次，
+    //    见 `hashes.txt:39-40`；S8-b 又踩了一次同族的一次）。要文件字节，就自己
+    //    `Get-FileHash <上面的路径> -Algorithm SHA256`。
+    println!(
+        "产物 scene -> {}（内容键 {}，不是文件字节的 sha256）",
+        artifact.display(),
+        px_ops::hex_short(&key)
+    );
 
     let entry = ManifestEntry {
         node: compiled.document.name.clone(),

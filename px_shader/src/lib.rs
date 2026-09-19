@@ -610,4 +610,61 @@ mod tests {
         assert!(duplicate.contains("两个真本"), "报错要说清是两个真本：{duplicate}");
         std::fs::remove_file(entry.join("noise-again.wgsl")).expect("清不掉夹具");
     }
+
+    /// 四份**内容入口**在裸 wgpu 宿主那张桩表下组装出来的文本与它的 include 闭包：**钉住的读数**。
+    ///
+    /// ⚠ 为什么这一条是判据而不是"打印一下"：S8-b 要判的是"**改 `#import` 的名字**有没有动到
+    /// 组装出来的字"。而组装器把 `#import` 那几行**整行丢掉**（它们不进产物，见
+    /// [`assemble::render_source`]）⇒「文本不变」与「闭包不变」是两件事，必须**分开量**：
+    ///
+    /// - 字节数 + FNV：组装文本（`#import` 展开后的那一份，就是喂给 `create_shader_module` 的）；
+    /// - 闭包指纹：**外部符号的名字在这里**（`Closure::fingerprint` 哈希的是 import 子句本身）
+    ///   ⇒ 它同时是 `px_ops::shader_key` 的输入之一（`键 = WGSL 字节 ‖ 闭包指纹`）。
+    ///
+    /// ⚠ 这正是 S8-b 那条死结的读数：改一个外部符号的**名字**，组装文本可以一个字节都不动，
+    /// 而闭包指纹**必然**变 ⇒ 产物键变 ⇒ `art/anchor/frozen/*.pxart` 里钉着的 shader 成员键变。
+    /// 谁要动这些名字，这一条会告诉他"动的是哪一半"。
+    ///
+    /// ⚠ `ring.wgsl` 是**负对照**：它一个 `planet_x::` 模块都不引、外部符号只有 `VertexOutput`
+    /// 一个（§154 记过：换桩表时它逐字节不变，就是因为它不引那几个差别符号）。
+    #[test]
+    fn the_four_entry_shaders_assemble_to_these_bytes_under_the_wgpu_host_table() {
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("px_shader 必须住在 workspace 下");
+        let modules = workspace_modules(workspace).expect("模块表");
+        // (入口, 组装文本字节数, 组装文本 FNV-1a, 闭包指纹)
+        let pinned = [
+            ("atmosphere.wgsl", 8311_usize, 0x6b67_21a2_55ce_f009_u64, 0x3388_1b68_faef_8589_u64),
+            ("clouds.wgsl", 52769, 0x7ff2_8567_aa71_6987, 0x7678_2061_a1bd_b006),
+            ("ring.wgsl", 1096, 0x59d8_22d8_f87c_d24c, 0x23d0_283f_680f_89d3),
+            ("surface.wgsl", 25915, 0xfecf_8fee_bd76_8982, 0xabed_b20f_868b_f99c),
+        ];
+        for (name, bytes, fnv, closure_fingerprint) in pinned {
+            let (source, _path) = workspace_source_of(workspace, name).expect("入口真本");
+            assert_eq!(
+                closure(&source, &modules).fingerprint(),
+                closure_fingerprint,
+                "{name} 的 include 闭包变了 —— 外部符号的名字也在指纹里，\
+                 而 `px_ops::shader_key` 拿它算产物键（改了它，冻在 art/anchor/frozen 的产物键就跟着变）"
+            );
+            let mut seen = Vec::new();
+            let assembled = assemble::render_source(
+                &source,
+                &modules,
+                crate::host_stubs::wgpu_host_stub,
+                &mut seen,
+            );
+            assert_eq!(
+                assembled.len(),
+                bytes,
+                "{name} 组装出来的字节数变了（喂给 create_shader_module 的就是这一份）"
+            );
+            let mut plain = Fnv(FNV_OFFSET);
+            for byte in assembled.as_bytes() {
+                plain.byte(*byte);
+            }
+            assert_eq!(plain.finish(), fnv, "{name} 组装出来的字节流变了");
+        }
+    }
 }

@@ -3712,3 +3712,97 @@ help: a package with a similar name exists: `px_shader`
 **指纹与产物键哈希的是"盘上那些字节"，而工作副本是 CRLF**（`core.autocrlf=true`，index 是 LF）
 ⇒ **换一台 checkout 约定不同的机器重烘，键会变、逃生门六份文件字节也会变。**
 ⇒ 今天全绿的前提是"**锚和我是在同一种行尾约定下量的**"。**进 S8-c。**
+
+---
+
+## §155 S8-b：`bevy_pbr::…` 那些名字**不改** —— 量过之后决定不做（裁决 a）
+
+> 这一档的产出**不是代码，是这条证据**：下次有人想"把死掉的名字改真"时，先读这一节再动手。
+> 起因：S8-a 删了 bevy 宿主，那些 `#import bevy_pbr::…` 于是指向一个**不存在的 crate**，
+> 而文本其实来自我们自己的桩表（`px_shader::host_stubs`）。本档原本的任务是"改成 `planet_x::…`"。
+
+### §155.1 为什么这条路走不通：两处**独立**的耦合
+
+| # | 耦合 | 出处 |
+|---|---|---|
+| ① | `Closure::fingerprint` 哈希的是 **`#import` 子句字符串本身**（`bevy_pbr::mesh_view_bindings::{view, lights}` 整串进哈希） | `px_shader/src/lib.rs`（`Closure::fingerprint`） |
+| ② | `shader_key = blake3("px_shader/v2" ‖ SHADER_VERSION ‖ **闭包指纹** ‖ 入口文本)` | `px_ops/src/lib.rs:555-562` |
+
+⇒ **改一个外部符号的名字 ⇒ 产物键必变**，而 `art/anchor/frozen/*.pxart` 里钉着那份 shader 的
+**成员键**（`"shader":{"graph":"shaders","node":"surface","key":"f679cdf8…"}`）⇒ 冻文档的
+**文件字节**跟着变 ⇒ **逃生门那条判据（`hashes.txt` §三）破**。
+⚠ 副本实测确证：只把 `ring.wgsl` 一条 import 改成 `planet_x::view::VertexOutput`，烘 shader
+**当场 panic**：`未知的 import：planet_x::view::VertexOutput`（`assemble.rs:197`）。
+
+### §155.2 实测：**组装文本「之前 → 完整改名之后」**（四份入口，副本上跑的）
+
+尺子：`px_shader` 里那条判据测试（`px_shader/src/lib.rs`，钉住四份入口的**组装字节数 + FNV + 闭包指纹**）
+
+| 入口 | 组装文本 之前 | 组装文本 之后 | 闭包指纹 之前 → 之后 |
+|---|---|---|---|
+| `atmosphere.wgsl` | 8311 B `6b6721a255cef009` | 8323 B `c260c9d7ad06bde9` | `33881b68faef8589` → `a9e9142bd625f349` |
+| `clouds.wgsl` | 52769 B `7ff28567aa716987` | 52781 B `a1aca6bfc9f079a3` | `76782061a1bdb006` → `2a1968cc5dfc5630` |
+| **`ring.wgsl`（负对照）** | 1096 B `59d822d8f87cd24c` | **1096 B `59d822d8f87cd24c`（逐字节同）** | `23d0283f680f89d3` → `ab0d94f0bf8ec473` |
+| `surface.wgsl` | 25915 B `fecf8feebd768982` | 25945 B `a00e6582979b3ee2` | `abedb20f868bf99c` → `60c72a59321e8fbc` |
+
+- `+12 B` 的来路：`bevy_pbr::`（10 字符）→ `planet_x::host::`（16 字符），**桩体文本一个字没改**。
+- **`ring.wgsl` 是负对照**：它只引 `VertexOutput`，而那条在**两张表里逐字相同** ⇒ 改名对它
+  **一个字节都不动**（与 §154 那次"换桩表它逐字节不变"是同一个理由）。
+- ⚠ 两个读数**必须分开看**：组装文本可以不动，而**闭包指纹四个全变**。
+
+### §155.3 ⚠⚠ 完整改名**不改一个像素** —— 所以"全绿"里没有一句话提到键已经全换了
+
+副本上把**桩表 + 五份 WGSL + 那份帧材质**（`art/frame/skybox.wgsl`）全改完，重烘后实测：
+
+| 判据 | 完整改名之后 | 登记值 |
+|---|---|---|
+| J1 `orbit-bare` | **`63184151909371A5`｜300012 B** | 同（逐字节） |
+| J2 sheet | **`A94F9F2D1437C06C`｜3159948 B** | 同（逐字节） |
+| J3 `none` / `invert` / `invert_vignette` / `scratch` | **四条图画哈希与字节数全部与登记值相同** | 同（逐字节） |
+
+而**同时**：基准场景产物的**文件字节** `BDA26463EF0B66D1` → `823030B10AC771E2`，
+四份 pass 文档的文件字节也全变（`541442FD2B4AD11A`→`4BC7299748C4F88B` 等）。
+
+⇒ **像素与符号名无关，而键与符号名强相关**。这就是本档要留下的那条读数：
+**(b) 那条路不是"改语义"，是"换靶子"** —— 而换靶子只能由用户/评审裁。
+（副本上还顺带撞出两处必然要跟着改的手抄：`px_render_wgpu::group0` 的 `PROBE` 与
+`material.rs` 的 `VERTEX_PROBE` —— 它们把 `#import bevy_pbr::…` 手抄在 Rust 里，
+是"夹具跟着改名走"而不是"判据能分辨改名有没有生效"。）
+
+### §155.4 裁决 a：**一个符号都不改**，理由是那些名字在**说真话**
+
+`bevy_pbr::` 不是"历史遗留的假名"，它是一条**出处指针**：这段文本**从哪儿抄来、照哪儿排的**。
+两处是**真实现**（`fetch_point_shadow` 逐句抄 Bevy 的 cube 影子路；`depth_ndc_to_view_z` 是
+`-perspective_camera_near()/ndc_depth` 的逐字一份），其余是对着 Bevy 的**组号/格位**排的声明
+（§104 第 1 条：绑定号会改像素）。而"每一处都指得出出处"是本仓的核心纪律。
+
+⇒ 改成 `planet_x::host::…` = **把出处指针换成所有权声明**，而所有权是假的（这段不是我们写的）
+⇒ 那不是"用真名换假名"，是**用假名换掉唯一指向出处的那一个**。
+
+**落地**（都在不进产物的那一侧）：
+
+1. `px_shader/src/host_stubs.rs` 表头写清三件：**为什么叫 `bevy_pbr::`**（出处指针）｜
+   **改名会换掉所有产物键与那六份冻文档**（带 §155.2 的表）｜**`art/shaders/*.wgsl` 与
+   `art/frame/*.wgsl` 连注释都不许顺手改**（注释进模块源码 ⇒ 进闭包 ⇒ 换键）。
+2. `px_shader/src/lib.rs` 加一条判据测试：四份入口的**组装字节数 + FNV + 闭包指纹**钉住
+   （`the_four_entry_shaders_assemble_to_these_bytes_under_the_wgpu_host_table`）——
+   下一个人动这些名字时，它会**说出动的是哪一半**。
+3. `--bin scene` / `--bin passes` 印的那一行标明：括号里那一格是**内容键**，
+   **不是文件字节的 sha256**（本条与 `hashes.txt:39-40` 登记的是同一个错法，S8-b 又独立踩中一次）。
+
+### §155.5 两条被否掉的近路（都留在这里，免得再想一遍）
+
+- **把桩文本搬进真库文件**（`planet_x::host::view` 等）再删桩：`expand` 里**桩表先于模块表**
+  ⇒ 不删桩就永远用不上真库（**判据全绿而改名没生效**）；删了桩则**组装文本当场就变**
+  （多加一条 import 子句的去重口径）⇒ 比纯改名更糟。**这条路两头都不通。**
+- **"闭包按规范名哈希"**（让指纹与 `#import` 写法无关）：要改 `px_shader` 的语义、
+  升 `CLOSURE_NAMESPACE` 与 `SHADER_VERSION` ⇒ **键还是全换**，等于白改 + 多一层间接。
+
+### §155.6 本档复测的回归集（工作副本，改动前后各一次）
+
+J1 六档与 `art/anchor/*.png` **逐字节相同**（`63184151909371A5`/`7BBB18CE3612D4F7`/
+`C03FFF3235264DD5`/`B5799E4F1649535C`/`FA20FAD37BC61EA2`/`32872F80AC867BE3`）｜
+J2 `A94F9F2D1437C06C` 3840×1920 3159948 B｜J3 四条与登记值逐字节同｜
+逃生门六份**文件字节**与登记值逐字相同（六格 ✓）。
+测试：逐 crate 与基线**逐格相同**，`px_shader` **20 → 21**（新加的那条判据），
+即 **308 → 309 passed / 0 failed**。

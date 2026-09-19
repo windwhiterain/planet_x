@@ -536,8 +536,10 @@ fn main() {
             .unwrap_or_else(|err| panic!("{err}"));
 
     println!("{}", spec.audit());
+    // ⚠ 括号里那一格是**内容键**，不是文件字节的 sha256 —— 与 `--bin scene` 同一条提醒：
+    //    `art/anchor/hashes.txt` 里"逃生门"那六格判的是**文件字节**，拿键去比会全报 ✗。
     println!(
-        "产物 passdoc -> {}（{}｜{} 字节）",
+        "产物 passdoc -> {}（内容键 {}｜{} 字节）",
         artifact.display(),
         px_ops::hex_short(&key),
         bytes
