@@ -27,3 +27,7 @@ px_volume_schema = { path = "@UP@px_volume_schema" }
 px_verify = { path = "@UP@px_verify" }
 px_volume_op = { path = "@UP@px_volume_op" }
 serde_json = { version = "1", features = ["float_roundtrip"] }
+
+# `build.rs` 里的源码指纹用它（与键里的哈希同一个算法）。
+[build-dependencies]
+blake3 = "1"

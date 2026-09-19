@@ -1,17 +1,32 @@
-//! §28.2 的门：算子的 `SOURCE_HASH` 必须覆盖它的**共享依赖**。
+//! §28.2 那条门的**后继**：算子的源码指纹必须由构建脚本自动算出来。
 //!
-//! 病根：`const SOURCE_HASH: u64 = fnv1a(include_str!("fbm.rs"))` 只哈希算子自己那个文件
-//! ⇒ 改 `field.rs` 的方向约定、`noise.rs` 的噪声时，§19.1 那条「源码变了但版本仍是 N」
-//! 的告警**一声不响**，而缓存照旧命中 —— 那份告警存在的唯一理由就是拦住这种陈旧命中。
+//! 病根原先是：`const SOURCE_HASH: u64 = fnv1a(include_str!("fbm.rs"))` 只哈希算子自己那个
+//! 文件 ⇒ 改 `field.rs` 的方向约定、`noise.rs` 的噪声时，陈旧命中**一声不响**。
 //!
-//! 算子拆成 `px_*_op`（dylib）之后这条更硬：共享依赖现在住在 `px_*_schema` 里，
-//! 它们不在 dll 的源码集合里，只有 `SOURCE_HASH` 点得到它们。
+//! 后来那条病根换了个形状：清单由**人手维护**（每个算子一段 `include_str![…]`）⇒
+//! 加一个共享文件忘了补进去，错误原样复发。
 //!
-//! ⚠ 立场变过一次：清单现在**每张图/每个算子各写一份**（`typed.rs` 里那一段），
-//! 由 `px_op!` 收进去生成 `const SOURCE_HASH`。于是门扫的是**那段清单**，而不是
-//! 某一行 `const`。语言管不住这件事（漏一份照样编译、照样跑），所以用门看住。
+//! 现在的口径：**清单不存在**。每个算子库的 `build.rs` `include!` 那份共享助手
+//! （`build/fingerprint.rs`），它遍历"这个 crate 编译进去的全部源码"——
+//! 自己 `src/` + `Cargo.toml` 里所有 path 依赖的 `src/` + 本文件。
+//!
+//! 所以这道门守两件事：
+//!
+//! 1. **每个算子库都有那个 `build.rs`**，而且它是 `include!` 共享助手而不是自己写一套；
+//! 2. **没有任何算子再手列源码清单** —— 一旦有人把 `include_str!` 那张表加回声明里，
+//!    这里就炸。（那正是"忘了补一份"这条病的载体。）
 
 use std::path::{Path, PathBuf};
+
+/// 装了算子的 crate：每个都该有指纹脚本。
+const OPERATOR_CRATES: &[&str] = &["px_field_op", "px_volume_op", "px_mesh_op"];
+
+/// 声明文件：**不许**再出现手列的源码清单。
+const DECLARATIONS: &[&str] = &[
+    "px_field_op/src/typed.rs",
+    "px_volume_op/src/typed.rs",
+    "px_mesh_op/src/typed.rs",
+];
 
 fn workspace() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -20,174 +35,51 @@ fn workspace() -> PathBuf {
         .to_path_buf()
 }
 
-/// 一条规则：哪一段代码里，必须点到哪些共享件。
-///
-/// `must` 是**子串**（含行内换行由 `\` 接起来的那些也照查），逐个必须命中。
-struct Rule {
-    file: &'static str,
-    /// 在这份文件里找哪一段（`after` 之后的第一个 `until`）。
-    after: &'static str,
-    until: &'static str,
-    /// 这一段里的"一段源码"是怎么写的：
-    ///
-    /// * `true` —— 直接写 `include_str!`，一个顶一份（网格/体积域）。
-    /// * `false` —— 写 `sources!(a, b, c)`，一个顶三份 ⇒ 要**数逗号**（场域；路径相对算子自己的文件）。
-    count_parts: bool,
-    must: Vec<&'static str>,
-}
+#[test]
+fn every_operator_crate_fingerprints_its_own_sources() {
+    let root = workspace();
+    let shared = root.join("build/fingerprint.rs");
+    assert!(
+        shared.is_file(),
+        "共享的指纹助手不在了：{}（三个算子库的 build.rs 都 include! 它）",
+        shared.display(),
+    );
 
-fn rules() -> Vec<Rule> {
-    let mut rules = Vec::new();
-    // 场域：每个算子一段 `sources!(...)`，路径相对 `px_field_op/src/`
-    let field = [
-        ("Constant", vec!["px_field_schema/src/field.rs", "px_field_schema/src/params.rs"]),
-        (
-            "Fbm",
-            vec![
-                "px_field_op/src/noise.rs",
-                "px_field_schema/src/field.rs",
-                "px_field_schema/src/noise.rs",
-                "px_field_schema/src/params.rs",
-            ],
-        ),
-        (
-            "Ridged",
-            vec![
-                "px_field_op/src/noise.rs",
-                "px_field_schema/src/field.rs",
-                "px_field_schema/src/noise.rs",
-                "px_field_schema/src/params.rs",
-            ],
-        ),
-        ("Remap", vec!["px_field_schema/src/field.rs", "px_field_schema/src/params.rs"]),
-        ("Gradient", vec!["px_field_schema/src/field.rs", "px_field_schema/src/params.rs"]),
-        ("Mix", vec!["px_field_schema/src/field.rs", "px_field_schema/src/params.rs"]),
-        (
-            "Warp",
-            vec![
-                "px_field_schema/src/field.rs",
-                "px_field_schema/src/params.rs",
-                "px_verify/src/noise.rs",
-            ],
-        ),
-    ];
-    for (name, must) in field {
-        let after: &'static str = Box::leak(format!("{name},").into_boxed_str());
-        rules.push(Rule {
-            file: "px_field_op/src/typed.rs",
-            after,
-            // 结束标记用块尾那两行（`field_op!` 本身会被子串命中，区间就空了）。
-            until: "\n}",
-            count_parts: false,
-            must,
-        });
+    for name in OPERATOR_CRATES {
+        let build = root.join(name).join("build.rs");
+        let text = std::fs::read_to_string(&build)
+            .unwrap_or_else(|err| panic!("读不了 {}：{err}", build.display()));
+        assert!(
+            text.contains("include!"),
+            "{name}/build.rs 没有 include! 共享助手 —— 自己写一套就等于又有了可漏的清单",
+        );
+        assert!(
+            text.contains("build/fingerprint.rs"),
+            "{name}/build.rs 没指向 `build/fingerprint.rs`",
+        );
+        assert!(
+            text.contains("px_fingerprint_for_crate"),
+            "{name}/build.rs 没有调指纹入口",
+        );
     }
-    // 网格域：每个算子一段 `px_op!`（`include_str!` 数组写在参数里）
-    rules.push(Rule {
-        file: "px_mesh_op/src/typed.rs",
-        after: "CubeSphere =",
-        until: "pub struct Proxy",
-        count_parts: true,
-        must: vec![
-            "px_mesh_schema/src/params.rs",
-            "px_mesh_schema/src/payload.rs",
-            "px_field_schema/src/field.rs",
-        ],
-    });
-    rules.push(Rule {
-        file: "px_mesh_op/src/typed.rs",
-        after: "Proxy =",
-        until: "|p, i, _g|",
-        count_parts: true,
-        must: vec![
-            "px_volume_schema/src/volume.rs",
-            "px_volume_schema/src/params.rs",
-            "px_volume_schema/src/payload.rs",
-            "px_mesh_schema/src/params.rs",
-            "px_mesh_schema/src/payload.rs",
-        ],
-    });
-    // 体积域
-    rules.push(Rule {
-        file: "px_volume_op/src/typed.rs",
-        after: "CloudCoarse =",
-        until: "|p, i, _g|",
-        count_parts: true,
-        must: vec![
-            "px_volume_schema/src/volume.rs",
-            "px_volume_schema/src/params.rs",
-            "px_volume_schema/src/payload.rs",
-            "px_field_schema/src/field.rs",
-            "px_verify/src/cloud_field.rs",
-            "px_verify/src/noise.rs",
-            "px_verify/src/dual.rs",
-            "px_verify/src/proxy.rs",
-        ],
-    });
-    rules
 }
 
 #[test]
-fn every_operator_source_hash_covers_its_shared_dependencies() {
+fn nobody_hand_lists_operator_sources_anymore() {
     let root = workspace();
-    let mut checked = 0_usize;
-
-    for rule in rules() {
-        let path = root.join(rule.file);
-        let label = rule.file.replace('\\', "/");
+    for relative in DECLARATIONS {
+        let path = root.join(relative);
         let text = std::fs::read_to_string(&path)
             .unwrap_or_else(|err| panic!("读不了 {}：{err}", path.display()));
-        let start = text
-            .find(rule.after)
-            .unwrap_or_else(|| panic!("{label} 里找不到算子 `{}`", rule.after));
-        let rest = &text[start..];
-        let end = rest
-            .find(rule.until)
-            .unwrap_or_else(|| panic!("{label} 里 `{}` 之后找不到结束标记", rule.after));
-        let section = &rest[..end];
-
-        // 形状：至少两段（自己 + 一个共享件）。漏成单文件版就在这里炸。
-        let parts = if rule.count_parts {
-            section.matches("include_str!(").count()
-        } else {
-            // `sources!(a, b, c)` 的参数个数 = 逗号数 + 1
-            let args = &section[section.find("sources!(").expect("刚查过")..];
-            let args = &args[..args.find(')').expect("sources! 没有收尾")];
-            args.matches(',').count() + 1
-        };
         assert!(
-            parts >= 2,
-            "{label} 的 `{}` 只哈希了 {parts} 份源码（§28.2）：{section}",
-            rule.after
+            !text.contains("include_str!"),
+            "{relative} 里又有手列的源码清单了 —— 那正是「忘了补一份 ⇒ 陈旧命中」这条病的载体。\
+             源码指纹由 build.rs 遍历源码树算，不用列。",
         );
-        for dep in &rule.must {
-            assert!(
-                section.contains(dep),
-                "{label} 的 `{}` 没点到共享依赖 {dep}：{section}",
-                rule.after
-            );
-        }
-        checked += 1;
+        // 身份也不该有手写的版本号：接口哈希从类型名推。
+        assert!(
+            !text.contains("VERSION"),
+            "{relative} 里又有手写的 `VERSION` 了 —— 接口形状哈希已经取代它。",
+        );
     }
-
-    assert!(checked > 0, "一个算子都没检查到");
-    println!("SOURCE_HASH 覆盖共享依赖：检查了 {checked} 个算子");
-}
-
-/// 多段哈希本身：长度前缀挡住「拼起来一样」的两种切法。
-#[test]
-fn the_multi_part_hash_does_not_confuse_a_split() {
-    use px_graph::fnv1a_sources;
-    assert_ne!(
-        fnv1a_sources(&["ab", "c"]),
-        fnv1a_sources(&["a", "bc"]),
-        "没有长度前缀的话这两种切法会撞"
-    );
-    assert_ne!(fnv1a_sources(&["a"]), fnv1a_sources(&["a", ""]));
-    assert_ne!(
-        fnv1a_sources(&["a", "b"]),
-        fnv1a_sources(&["b", "a"]),
-        "顺序由调用点写死：换了顺序 = 另一份列表"
-    );
-    assert_eq!(fnv1a_sources(&["a", "b"]), fnv1a_sources(&["a", "b"]));
 }

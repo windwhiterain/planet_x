@@ -35,12 +35,22 @@ include!("identity.rs");
 // 所以这里用 `#[export_name]` 把库名拼进去 —— 模板本身不带具体库名，生成器填 `@LIB@`。
 #[unsafe(export_name = concat!("@LIB@", "_op_table"))]
 pub extern "Rust" fn table() -> &'static OpTable {
-    static TABLE: OpTable = OpTable {
-        ops: &[DESCRIPTOR],
+    // ⚠ 描述符要运行期建（`interface()` 不是 const）。见 `px_cook::px_op_table!` 的同一段理由。
+    static TABLE: std::sync::OnceLock<OpTable> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| OpTable {
+        ops: Box::leak(
+            vec![OpDescriptor {
+                id: MONO_ID,
+                interface: interface(),
+                source_hash: SOURCE_HASH,
+                inputs: &["coverage"],
+                kind: OpKind::Volume,
+            }]
+            .into_boxed_slice(),
+        ),
         canonical_params: canonical as ParamsCanonical,
         call: call as OpCall,
-    };
-    &TABLE
+    })
 }
 
 extern "Rust" fn canonical(op_id: &str, toml_text: Option<&str>) -> Result<String, String> {

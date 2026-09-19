@@ -22,3 +22,7 @@ px_verify = { path = "../px_verify" }
 px_cook = { path = "../px_cook" }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
+
+[build-dependencies]
+#  里的源码指纹用它（与键里的哈希同一个算法）。
+blake3 = "1"

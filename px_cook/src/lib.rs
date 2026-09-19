@@ -152,7 +152,6 @@ impl Cooked<MeshData> {
 /// `#[derive(PxOp)]` 会把它生成出来；`clouds.rs` 里也能按需手写（见那个演示分支）。
 pub trait PxOp {
     const ID: &'static str;
-    const VERSION: u32;
     /// 描述符里的输入**名**（老路径的接口形状：`["coverage"]` 那种字节边界上的名字）。
     /// ⚠ 它只给 dylib 那一侧的描述符用；图侧的真实检查在 `Inputs` 上。
     const INPUTS: &'static [&'static str];
@@ -165,10 +164,27 @@ pub trait PxOp {
         crate::op_kind_eq(Self::KIND, <Self::Payload as payload::Build>::KIND),
         "声明的 OpKind 与输出域对不上（Field/Mesh 掺相机、Volume 不掺）",
     );
-    /// 算子源码（含共享依赖）的 FNV-1a —— 改实现必然重算那一格。
+    /// **源码指纹**（`build.rs` 算的十六进制）—— 改实现必然重算那一格。
     ///
-    /// ⚠ 它是 `const`（描述符是 `static`），且图侧（键里）与 dylib 侧（描述符）**同一个数**。
-    const SOURCE_HASH: u64;
+    /// ⚠ 由 `build.rs` 生成、`env!("PX_SOURCE_HASH")` 取用：**没有手维护的清单**。
+    ///   它算的是"这个 crate 编译进去的全部源码"（自己 `src/` + 所有 path 依赖的 `src/`）。
+    const SOURCE_HASH: &'static str;
+
+    /// **接口形状哈希** —— 取代手写的 `version`，见 [`interface_hash`]。
+    ///
+    /// 默认实现从三个类型名推（`Params` / `Inputs` / `Payload`）⇒ 改了接口自动变。
+    /// 想强制失效就在 `px_op!` 的接口那一栏写一个字面量（逃生门）。
+    fn interface() -> u64 {
+        // ⚠ **不缓存**：泛型函数里的 `static` 在这里**不按单态化分开**（实测：
+        //   `cached_interface::<A>` 与 `::<B>` 拿到同一个值），缓存反而制造 bug。
+        //   代价是每次 `cook` 多哈希三个类型名 —— 可以忽略。
+        // ⚠ 类型名在字段改名/增删时会变 —— 那正是我们要的信号。
+        crate::interface_hash(&[
+            ::core::any::type_name::<Self::Params>(),
+            ::core::any::type_name::<Self::Inputs>(),
+            ::core::any::type_name::<Self::Payload>(),
+        ])
+    }
 
     /// 超参数的类型：从 `art/<图>/<节点名>.toml` 解出来的那一份。
     type Params: Serialize + DeserializeOwned + Default + PxKeyed;
@@ -306,8 +322,8 @@ where
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"px_cook/v1");
     hasher.update(O::ID.as_bytes());
-    hasher.update(&O::VERSION.to_le_bytes());
-    hasher.update(&O::SOURCE_HASH.to_le_bytes());
+    hasher.update(&O::interface().to_le_bytes());
+    hasher.update(O::SOURCE_HASH.as_bytes());
     hasher.update(&cache.graph_version().to_le_bytes());
     let (width, height) = cache.canvas();
     hasher.update(&width.to_le_bytes());
@@ -332,7 +348,7 @@ where
             Report {
                 node,
                 op: O::ID,
-                op_version: O::VERSION,
+                interface: O::interface(),
                 key,
                 hit: true,
                 millis: 0,
@@ -353,7 +369,7 @@ where
         Report {
             node,
             op: O::ID,
-            op_version: O::VERSION,
+            interface: O::interface(),
             key,
             hit: false,
             millis,
@@ -368,19 +384,25 @@ where
 /// **收敛样板**：一个算子只需要写「身份」与「怎么算」，其余（身份常量、参数类型、
 /// 输出域、编解码、相机口径）全从这两行推。
 ///
-/// ⚠ 这是 `#[derive(PxOp)]` 的语义，先用宏落地 —— 两者生成的东西必须一致。
-///
 /// ```ignore
-/// px_op! { Fbm = params::FBM, params::fbm::Params, Field, |p, grid| crate::ops::fbm::eval(p, &[], grid) }
+/// px_op! { Fbm = params::FBM, params::fbm::Params, (), Field,
+///          OpKind::Field, &[],
+///          |p, _i, g| crate::ops::fbm::eval(p, &[], g) }
 /// ```
+///
+/// ⚠ **身份全是自动的**：
+///   * 源码指纹 = `build.rs` 算的（`env!("PX_SOURCE_HASH")`）—— 没有手维护的清单
+///   * 接口哈希 = 三个类型名（`Params` / `Inputs` / `Payload`）—— 没有手写的 version
+///
+/// 两者都在 `PxOp` 里，所以图侧（键）与 dylib 侧（描述符）**天然同一个值**。
 #[macro_export]
 macro_rules! px_op {
-    ($name:ident = $id:expr, $version:literal, $params:ty, $inputs:ty, $payload:ty,
-     $kind:expr, $arity:expr, $sources:expr,
-     |$p:ident, $i:ident, $g:ident| $body:expr) => {
+    ($name:ident = $id:expr, $params:ty, $inputs:ty, $payload:ty,
+     $kind:expr, $arity:expr,
+     |$p:ident, $i:ident, $g:ident| $body:expr
+     $(, interface = $interface:literal)?) => {
         impl $crate::PxOp for $name {
             const ID: &'static str = $id;
-            const VERSION: u32 = $version;
             const INPUTS: &'static [&'static str] = $arity;
             const KIND: $crate::px_graph_schema::OpKind = $kind;
 
@@ -388,9 +410,21 @@ macro_rules! px_op {
             type Inputs = $inputs;
             type Payload = $payload;
 
-            /// 常数上下文可用（描述符是 `static`）；图侧与 dylib 侧同一个数。
-            const SOURCE_HASH: u64 = $crate::source_hash_of(&$sources);
+            /// 这个 crate 编译进去**全部源码**的指纹 —— `build.rs` 算的，
+            /// 没有手维护的清单（见 `build/fingerprint.rs`）。
+            const SOURCE_HASH: &'static str = env!("PX_SOURCE_HASH");
 
+            // 逃生门：给了字面量就强制失效（改类型之外的理由）。
+            $(
+                fn interface() -> u64 {
+                    $crate::interface_hash(&[
+                        ::core::any::type_name::<Self::Params>(),
+                        ::core::any::type_name::<Self::Inputs>(),
+                        ::core::any::type_name::<Self::Payload>(),
+                        $interface,
+                    ])
+                }
+            )?
 
             fn params() -> $crate::params::Kind<$params> {
                 $crate::params::Kind(std::marker::PhantomData)
@@ -410,24 +444,15 @@ macro_rules! px_op {
                 $i: &$inputs,
                 $g: $crate::Grid,
             ) -> Result<$payload, String> {
+                // ⚠ 不用任何 downcast：`cook<O>` 收的就是 `O::Inputs`，
+                //    "图参数 struct 接错算子"是**编译错**。`$body` 先绑成值，
+                //    免得 `?`/`return` 的语义被这里的表达式位置改掉。
+                let $i = $i;
+                let _ = &$i;
                 Ok($body)
             }
         }
     };
-}
-
-/// `const` 上下文里的 `OpKind` 相等。
-pub const fn op_kind_eq(left: px_graph_schema::OpKind, right: px_graph_schema::OpKind) -> bool {
-    // `OpKind` 是 `Copy` 的简单枚举 ⇒ 比较判别式。⚠ 加变体时这里要跟着改。
-    // ⚠ 不能写成闭包：`const fn` 里闭包调用还没有 RFC。
-    const fn index(kind: px_graph_schema::OpKind) -> u8 {
-        match kind {
-            px_graph_schema::OpKind::Field => 0,
-            px_graph_schema::OpKind::Mesh => 1,
-            px_graph_schema::OpKind::Volume => 2,
-        }
-    }
-    index(left) == index(right)
 }
 
 /// `const` 上下文里的字符串相等（`str ==` 在那里用不了）。
@@ -446,19 +471,43 @@ pub const fn str_eq(left: &str, right: &str) -> bool {
     true
 }
 
-/// 算子源码清单的哈希（`SOURCE_HASH` 的算法）——**const fn**，因为描述符是 `static`。
-///
-/// ⚠ 图侧（键里）与 dylib 侧（描述符）都用它，同一个数。
-pub const fn source_hash_of(parts: &[&str]) -> u64 {
-    let mut hash = px_graph_schema::FNV_OFFSET;
-    let mut index = 0;
-    while index < parts.len() {
-        hash = px_graph_schema::identity::fnv1a_stage(hash, parts[index]);
-        index += 1;
+/// `const` 上下文里的 `OpKind` 相等。
+pub const fn op_kind_eq(left: px_graph_schema::OpKind, right: px_graph_schema::OpKind) -> bool {
+    // ⚠ 不能写成闭包：`const fn` 里闭包调用还没有 RFC。
+    const fn index(kind: px_graph_schema::OpKind) -> u8 {
+        match kind {
+            px_graph_schema::OpKind::Field => 0,
+            px_graph_schema::OpKind::Mesh => 1,
+            px_graph_schema::OpKind::Volume => 2,
+        }
     }
-    hash
+    index(left) == index(right)
 }
 
+/// **接口形状的哈希** —— 它取代了手写的 `version`。
+///
+/// 喂进来的是几个类型名（`Params` / `Inputs` / `Payload`）。于是：
+///
+/// * 改了参数 struct 的字段、改了输入 struct、改了输出域 ⇒ **自动变**（该重算）
+/// * 只改了算法体 ⇒ **不变**（那是 `SOURCE_HASH` 管的事）
+/// * **什么都不用记** —— 这正是 `version` 唯一的存在理由，而它是会忘的
+///
+/// ⚠ 参的是 `core::any::type_name` 的字符串，而它**不保证跨编译器稳定**。
+///   我们的键只要求"同一台机器上前后一致"，所以够用；想按别的理由强制失效，
+///   就给 `px_op!` 末尾加 `, interface = "n"`（逃生门）。
+pub fn interface_hash(parts: &[&str]) -> u64 {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"px_cook/interface/v1");
+    for part in parts {
+        hasher.update(&(part.len() as u64).to_le_bytes());
+        hasher.update(part.as_bytes());
+    }
+    let mut bytes = [0_u8; 8];
+    bytes.copy_from_slice(&hasher.finalize().as_bytes()[..8]);
+    u64::from_le_bytes(bytes)
+}
+
+/// `const` 上下文里的 `OpKind` 相等。
 /// **无上游**那一档的形状：它没有名字问题，留在契约里。
 impl PxInputs for () {
     fn collect(&self, _hasher: &mut blake3::Hasher) {}
@@ -597,23 +646,28 @@ macro_rules! px_op_table {
 
         #[unsafe(export_name = concat!($lib, "_table"))]
         pub extern "Rust" fn table() -> &'static $crate::px_graph_schema::OpTable {
-            static OPS: &[$crate::px_graph_schema::OpDescriptor] = &[
-                $($crate::px_graph_schema::OpDescriptor {
-                    id: <$op as $crate::PxOp>::ID,
-                    version: <$op as $crate::PxOp>::VERSION,
-                    source_hash: <$op as $crate::PxOp>::SOURCE_HASH,
-                    inputs: <$op as $crate::PxOp>::INPUTS,
-                    kind: <$op as $crate::PxOp>::KIND,
-                }),+
-            ];
-            static TABLE: $crate::px_graph_schema::OpTable =
+            // ⚠ 描述符表必须**运行期建一次**：`interface()` 是"哈希类型名"，
+            //   而 `type_name` 不是 const ⇒ `const`/`static` 里都调不了它。
+            //   建一次就泄漏那一小段（每个库一份）—— 换来的是"接口变了自动失效"。
+            static TABLE: std::sync::OnceLock<$crate::px_graph_schema::OpTable> =
+                std::sync::OnceLock::new();
+            TABLE.get_or_init(|| {
+                let ops: Vec<$crate::px_graph_schema::OpDescriptor> = vec![
+                    $($crate::px_graph_schema::OpDescriptor {
+                        id: <$op as $crate::PxOp>::ID,
+                        interface: <$op as $crate::PxOp>::interface(),
+                        source_hash: <$op as $crate::PxOp>::SOURCE_HASH,
+                        inputs: <$op as $crate::PxOp>::INPUTS,
+                        kind: <$op as $crate::PxOp>::KIND,
+                    }),+
+                ];
                 $crate::px_graph_schema::OpTable {
-                    ops: OPS,
+                    ops: Box::leak(ops.into_boxed_slice()),
                     canonical_params: canonical_params
                         as $crate::px_graph_schema::ParamsCanonical,
                     call: call as $crate::px_graph_schema::OpCall,
-                };
-            &TABLE
+                }
+            })
         }
     };
 }

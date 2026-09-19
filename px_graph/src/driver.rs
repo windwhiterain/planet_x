@@ -49,7 +49,8 @@ pub trait Cache {
 pub struct Report<'a> {
     pub node: &'a str,
     pub op: &'static str,
-    pub op_version: u32,
+    /// **接口形状哈希**（完整 64 位）—— 它取代了手写的 `version`。
+    pub interface: u64,
     pub key: Key,
     pub hit: bool,
     pub millis: u64,
@@ -137,7 +138,7 @@ impl Cache for Driver {
             let entry = ManifestEntry {
                 node: report.node.to_string(),
                 op: report.op.to_string(),
-                op_version: report.op_version,
+                op_version: interface_version(report.interface),
                 key: hex(&report.key),
                 hit: false,
                 millis: report.millis,
@@ -147,10 +148,10 @@ impl Cache for Driver {
                 mean: stats.mean,
             };
             println!(
-                "重算 {:<12} {:<16} v{}  {}  {:>5} ms  {:>9} B",
+                "重算 {:<12} {:<16} @{}  {}  {:>5} ms  {:>9} B",
                 report.node,
                 report.op,
-                report.op_version,
+                interface_tag(report.interface),
                 hex_short(&report.key),
                 report.millis,
                 bytes.len(),
@@ -162,10 +163,10 @@ impl Cache for Driver {
                 .push(entry);
         } else {
             println!(
-                "命中 {:<12} {:<16} v{}  {}  {:>5} ms  {:>9} B",
+                "命中 {:<12} {:<16} @{}  {}  {:>5} ms  {:>9} B",
                 report.node,
                 report.op,
-                report.op_version,
+                interface_tag(report.interface),
                 hex_short(&report.key),
                 report.millis,
                 bytes.len(),
@@ -191,15 +192,27 @@ fn bundling(
     bundle.to_bytes(node, cameras)
 }
 
+/// 接口哈希的低 32 位：清单里那个只用于显示/对账的 `op_version` 字段。
+///
+/// ⚠ 真正进键的是接口哈希的十六进制文本（64 位）；这里只是把它塞进老字段的形状里。
+fn interface_version(interface: u64) -> u32 {
+    (interface & 0xffff_ffff) as u32
+}
+
+/// 接口哈希的前 8 位十六进制：读数里那个 `@…` 就用它（比十进制好认）。
+fn interface_tag(interface: u64) -> String {
+    format!("{:016x}", interface)[..8].to_string()
+}
+
 /// 把算子的**源码哈希**折进键（§17.1 那条「键 = 内容」的补丁）。
 ///
 /// 与 `px_graph_schema::key_with_cameras` 同一条做法：在键的末尾再混一维，
 /// 老键的具体值只取决于这一维加不加。⚠ 加不加是**一次性的口径决定**，不是每键可选。
-fn key_with_source_hash(key: Key, source_hash: u64) -> Key {
+fn key_with_source_hash(key: Key, source_hash: &str) -> Key {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"px_source/v1");
     hasher.update(&key);
-    hasher.update(&source_hash.to_le_bytes());
+    hasher.update(source_hash.as_bytes());
     *hasher.finalize().as_bytes()
 }
 
@@ -319,7 +332,7 @@ impl Context {
             let ops: Vec<String> = loaded
                 .iter()
                 .flat_map(|library| library.descriptors())
-                .map(|op| format!("{}@v{}", op.id, op.version))
+                .map(|op| format!("{}@{}", op.id, interface_tag(op.interface)))
                 .collect();
             println!(
                 "算子库 {} 个：{}",
@@ -473,9 +486,12 @@ pub fn node(op_id: &str, name: &str, inputs: &[&Artifact]) -> Artifact {
         .unwrap_or_else(|err| panic!("读参数 {} 失败：{err}", params_path.display()));
 
     let input_keys: Vec<Key> = inputs.iter().map(|artifact| artifact.key).collect();
+    // ⚠ 接口哈希取代了手写的 `version`：它由算子那三个类型名推出来，
+    //   改了参数/输入/输出类型自动变，没有"忘了升版本"这回事。
+    let interface = format!("{:016x}", descriptor.interface);
     let key = node_key(
         op_id,
-        descriptor.version,
+        &interface,
         context.spec.version,
         (context.spec.width, context.spec.height),
         context.spec.projection,
@@ -553,14 +569,8 @@ pub fn node(op_id: &str, name: &str, inputs: &[&Artifact]) -> Artifact {
         let mut index = context.index.lock().expect("索引锁坏了");
         if hit {
             if let Some(meta) = index.get(&hex(&key)) {
-                if meta.op_version == descriptor.version
-                    && meta.source_hash != descriptor.source_hash
-                {
-                    eprintln!(
-                        "⚠ {name}（{op_id}）的源码变了但 VERSION 仍是 {}；若输出语义变了，请升版本并加 PX_PCG_FRESH=1 重烘",
-                        descriptor.version,
-                    );
-                }
+                // ⚠ 这里原本有一条"源码变了但 VERSION 没升"的告警。
+                //   现在源码指纹**直接进键** ⇒ 那种陈旧命中不可能发生，告警也随之删掉。
                 if meta.graph_version == context.spec.version
                     && meta.graph_source_hash != context.spec.source_hash
                 {
@@ -571,10 +581,9 @@ pub fn node(op_id: &str, name: &str, inputs: &[&Artifact]) -> Artifact {
                 }
                 if meta.dll != library.fingerprint() {
                     eprintln!(
-                        "⚠ {name}（{op_id}）这次是拿**另一份**算子库算的（dll {:016x} → {:016x}）而 VERSION 仍是 {}；若输出语义变了，请升版本并加 PX_PCG_FRESH=1 重烘",
+                        "⚠ {name}（{op_id}）这次是拿**另一份**算子库算的（dll {:016x} → {:016x}），但两者的源码指纹相同 ⇒ 内容一致，只是构建产物换了。若输出语义变了，请加 PX_PCG_FRESH=1 重烘",
                         meta.dll,
                         library.fingerprint(),
-                        descriptor.version,
                     );
                 }
             }
@@ -583,9 +592,9 @@ pub fn node(op_id: &str, name: &str, inputs: &[&Artifact]) -> Artifact {
                 hex(&key),
                 IndexEntry {
                     op_id: op_id.to_string(),
-                    op_version: descriptor.version,
+                    op_version: interface_version(descriptor.interface),
                     graph_version: context.spec.version,
-                    source_hash: descriptor.source_hash,
+                    source_hash: descriptor.source_hash.to_string(),
                     graph_source_hash: context.spec.source_hash,
                     node: name.to_string(),
                     millis,
@@ -601,11 +610,11 @@ pub fn node(op_id: &str, name: &str, inputs: &[&Artifact]) -> Artifact {
         Payload::Field(field) => {
             let stats = field.stats();
             println!(
-                "{} {:<12} {:<16} v{}  {}  {:>4} ms  {:>9} B  值域 {:.4}..{:.4} 均 {:.4}",
+                "{} {:<12} {:<16} @{}  {}  {:>4} ms  {:>9} B  值域 {:.4}..{:.4} 均 {:.4}",
                 if hit { "命中" } else { "重算" },
                 name,
                 op_id,
-                descriptor.version,
+                interface_tag(descriptor.interface),
                 short,
                 millis,
                 size,
@@ -616,7 +625,7 @@ pub fn node(op_id: &str, name: &str, inputs: &[&Artifact]) -> Artifact {
             ManifestEntry {
                 node: name.to_string(),
                 op: op_id.to_string(),
-                op_version: descriptor.version,
+                op_version: interface_version(descriptor.interface),
                 key: hex(&key),
                 hit,
                 millis,
@@ -628,11 +637,11 @@ pub fn node(op_id: &str, name: &str, inputs: &[&Artifact]) -> Artifact {
         }
         Payload::Mesh(mesh) => {
             println!(
-                "{} {:<12} {:<16} v{}  {}  {:>4} ms  {:>9} B  {} 顶点 / {} 三角形",
+                "{} {:<12} {:<16} @{}  {}  {:>4} ms  {:>9} B  {} 顶点 / {} 三角形",
                 if hit { "命中" } else { "重算" },
                 name,
                 op_id,
-                descriptor.version,
+                interface_tag(descriptor.interface),
                 short,
                 millis,
                 size,
@@ -642,7 +651,7 @@ pub fn node(op_id: &str, name: &str, inputs: &[&Artifact]) -> Artifact {
             ManifestEntry {
                 node: name.to_string(),
                 op: op_id.to_string(),
-                op_version: descriptor.version,
+                op_version: interface_version(descriptor.interface),
                 key: hex(&key),
                 hit,
                 millis,
@@ -655,11 +664,11 @@ pub fn node(op_id: &str, name: &str, inputs: &[&Artifact]) -> Artifact {
         Payload::Volume(volume) => {
             let stats = volume_stats(volume);
             println!(
-                "{} {:<12} {:<16} v{}  {}  {:>5} ms  {:>9} B  值域 {:.4}..{:.4} 均 {:.4}  {} 面 {}×{}×{} 层",
+                "{} {:<12} {:<16} @{}  {}  {:>5} ms  {:>9} B  值域 {:.4}..{:.4} 均 {:.4}  {} 面 {}×{}×{} 层",
                 if hit { "命中" } else { "重算" },
                 name,
                 op_id,
-                descriptor.version,
+                interface_tag(descriptor.interface),
                 short,
                 millis,
                 size,
@@ -674,7 +683,7 @@ pub fn node(op_id: &str, name: &str, inputs: &[&Artifact]) -> Artifact {
             ManifestEntry {
                 node: name.to_string(),
                 op: op_id.to_string(),
-                op_version: descriptor.version,
+                op_version: interface_version(descriptor.interface),
                 key: hex(&key),
                 hit,
                 millis,

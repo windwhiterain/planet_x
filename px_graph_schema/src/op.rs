@@ -16,9 +16,11 @@ pub enum OpKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OpDescriptor {
     pub id: &'static str,
-    pub version: u32,
-    /// 算子源码（含共享依赖，§28.2）的 FNV-1a。**不进键**，只在命中时对账（§19.1）。
-    pub source_hash: u64,
+    /// **接口形状哈希**（取代手写的 `version`）—— 改了参数/输入/输出类型就自动变。
+    pub interface: u64,
+    /// **源码指纹**：这个库编译进去全部源码的 blake3（`build.rs` 算的）。
+    /// **不进键**，只在命中时对账（§19.1）。
+    pub source_hash: &'static str,
     pub inputs: &'static [&'static str],
     pub kind: OpKind,
 }

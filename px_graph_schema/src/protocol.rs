@@ -29,9 +29,11 @@ pub struct Grid {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IndexEntry {
     pub op_id: String,
+    /// 接口哈希的低 32 位（只用于显示/对账；真正进键的是 64 位接口哈希的文本）。
     pub op_version: u32,
     pub graph_version: u32,
-    pub source_hash: u64,
+    /// 算子库的**源码指纹**（blake3 十六进制，`build.rs` 算的）。
+    pub source_hash: String,
     pub graph_source_hash: u64,
     pub node: String,
     pub millis: u64,

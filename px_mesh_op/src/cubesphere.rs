@@ -1,28 +1,11 @@
 use std::collections::HashMap;
 
 use px_field_schema::field::Field;
-use px_graph_schema::identity::fnv1a_sources;
-use px_graph_schema::{Grid, OpDescriptor, OpKind};
+use px_graph_schema::Grid;
 use px_mesh_schema::params;
 use px_protocol::art::{
     CUBE_FACES, CUBE_GUTTER, MeshData, cube_atlas_uv, cube_cell_size, cube_direction,
     cube_face_size,
-};
-
-pub const VERSION: u32 = 1;
-pub const SOURCE_HASH: u64 = fnv1a_sources(&[
-    include_str!("cubesphere.rs"),
-    include_str!("../../px_mesh_schema/src/params.rs"),
-    include_str!("../../px_mesh_schema/src/payload.rs"),
-    include_str!("../../px_field_schema/src/field.rs"),
-]);
-pub const INPUTS: &[&str] = &["height"];
-pub const DESCRIPTOR: OpDescriptor = OpDescriptor {
-    id: params::CUBESPHERE,
-    version: VERSION,
-    source_hash: SOURCE_HASH,
-    inputs: INPUTS,
-    kind: OpKind::Mesh,
 };
 
 fn normalize(vector: [f32; 3]) -> [f32; 3] {
@@ -238,5 +221,4 @@ pub fn eval(params: &params::cubesphere::Params, inputs: &[&Field], grid: Grid) 
             indices,
         }
 }
-
 

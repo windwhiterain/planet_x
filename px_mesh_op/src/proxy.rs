@@ -25,31 +25,9 @@ use isosurface::sampler::Sampler;
 use isosurface::source::ScalarSource;
 use isosurface::MarchingCubes;
 
-use px_graph_schema::identity::fnv1a_sources;
-use px_graph_schema::{OpDescriptor, OpKind};
 use px_mesh_schema::params;
 use px_protocol::art::MeshData;
 use px_volume_schema::{PATCHES, VolumeSampler};
-
-pub const VERSION: u32 = 1;
-// 共享依赖：体积与面参数的约定住在 `px_volume_schema/src/volume.rs`（§28.2）——
-// 只哈希这个文件的话，改那份约定不会有任何告警。
-pub const SOURCE_HASH: u64 = fnv1a_sources(&[
-    include_str!("proxy.rs"),
-    include_str!("../../px_volume_schema/src/volume.rs"),
-    include_str!("../../px_volume_schema/src/params.rs"),
-    include_str!("../../px_volume_schema/src/payload.rs"),
-    include_str!("../../px_mesh_schema/src/params.rs"),
-    include_str!("../../px_mesh_schema/src/payload.rs"),
-]);
-pub const INPUTS: &[&str] = &["volume"];
-pub const DESCRIPTOR: OpDescriptor = OpDescriptor {
-    id: params::PROXY,
-    version: VERSION,
-    source_hash: SOURCE_HASH,
-    inputs: INPUTS,
-    kind: OpKind::Mesh,
-};
 
 /// 把「本面参数」接到「参数空间」上：面号单独传，面内坐标就是 marching cubes 的域。
 struct Face<'a> {

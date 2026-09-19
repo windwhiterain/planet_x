@@ -5,7 +5,7 @@ use px_graph::{canonical_params, node_key, shader_key};
 fn key_of(params: &Params, graph_version: u32, inputs: &[[u8; 32]]) -> [u8; 32] {
     node_key(
         "field.fbm",
-        1,
+        "0123456789abcdef",
         graph_version,
         (384, 192),
         Projection::Equirect,
@@ -45,26 +45,42 @@ fn changing_a_value_changes_the_key() {
 }
 
 #[test]
-fn bumping_the_version_changes_the_key() {
+fn a_different_interface_changes_the_key() {
+    // ⚠ 这里原来是"升 `VERSION` 必须换键"。`version` 已经**删掉**了 ——
+    //   它由算子的**接口形状哈希**取代（`px_cook::interface_hash`，从参数/输入/输出
+    //   三个类型名推出来）。所以这条门守的变成"接口哈希进键"：
+    //   改了参数 struct、改了输入 struct、改了输出域 ⇒ 哈希变 ⇒ 键变，没人需要记得升版本。
     let params = Params::default();
-    let v1 = node_key("field.fbm", 1, 1, (384, 192), Projection::Equirect, &canonical_params(&params), &[]);
-    let v2 = node_key("field.fbm", 2, 1, (384, 192), Projection::Equirect, &canonical_params(&params), &[]);
-    assert_ne!(v1, v2, "算子版本必须进键");
+    let before = node_key(
+        "field.fbm",
+        "0123456789abcdef", 1, (384, 192), Projection::Equirect, &canonical_params(&params), &[]);
+    let after = node_key(
+        "field.fbm",
+        "fedcba9876543210", 1, (384, 192), Projection::Equirect, &canonical_params(&params), &[]);
+    assert_ne!(before, after, "接口形状哈希必须进键");
 }
 
 #[test]
 fn the_canvas_size_is_part_of_the_key() {
     let params = Params::default();
-    let small = node_key("field.fbm", 1, 1, (384, 192), Projection::Equirect, &canonical_params(&params), &[]);
-    let large = node_key("field.fbm", 1, 1, (768, 384), Projection::Equirect, &canonical_params(&params), &[]);
+    let small = node_key(
+        "field.fbm",
+        "0123456789abcdef", 1, (384, 192), Projection::Equirect, &canonical_params(&params), &[]);
+    let large = node_key(
+        "field.fbm",
+        "0123456789abcdef", 1, (768, 384), Projection::Equirect, &canonical_params(&params), &[]);
     assert_ne!(small, large, "画布尺寸必须进键，否则改分辨率会命中旧尺寸的产物");
 }
 
 #[test]
 fn bumping_the_graph_version_changes_the_key() {
     let params = Params::default();
-    let g1 = node_key("field.fbm", 1, 1, (384, 192), Projection::Equirect, &canonical_params(&params), &[]);
-    let g2 = node_key("field.fbm", 1, 2, (384, 192), Projection::Equirect, &canonical_params(&params), &[]);
+    let g1 = node_key(
+        "field.fbm",
+        "0123456789abcdef", 1, (384, 192), Projection::Equirect, &canonical_params(&params), &[]);
+    let g2 = node_key(
+        "field.fbm",
+        "0123456789abcdef", 2, (384, 192), Projection::Equirect, &canonical_params(&params), &[]);
     assert_ne!(g1, g2, "图版本必须进键");
 }
 

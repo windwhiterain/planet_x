@@ -1409,6 +1409,7 @@ dependencies = [
 name = "px_field_op"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "px_cook",
  "px_derive",
  "px_field_schema",
@@ -1484,6 +1485,7 @@ dependencies = [
 name = "px_mesh_op"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "isosurface",
  "px_cook",
  "px_derive",
@@ -1577,6 +1579,7 @@ dependencies = [
 name = "px_volume_op"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "px_cook",
  "px_derive",
  "px_field_schema",

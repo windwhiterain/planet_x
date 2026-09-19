@@ -20,15 +20,6 @@ pub type VolumeOut = Cooked<VolumeData>;
 /// 烘一份体积（立方球参数空间）。
 pub struct CloudCoarse;
 
-px_op! { CloudCoarse = params::CLOUD_COARSE, 1, params::Params, CloudCoarseInput, VolumeData,
+px_op! { CloudCoarse = params::CLOUD_COARSE, params::Params, CloudCoarseInput, VolumeData,
          OpKind::Volume, &["coverage"],
-         [include_str!("lib.rs"),
-          include_str!("../../px_volume_schema/src/volume.rs"),
-          include_str!("../../px_volume_schema/src/params.rs"),
-          include_str!("../../px_volume_schema/src/payload.rs"),
-          include_str!("../../px_field_schema/src/field.rs"),
-          include_str!("../../px_verify/src/cloud_field.rs"),
-          include_str!("../../px_verify/src/noise.rs"),
-          include_str!("../../px_verify/src/dual.rs"),
-          include_str!("../../px_verify/src/proxy.rs")],
          |p, i, _g| crate::eval_sampled(p, i.coverage.sample()) }

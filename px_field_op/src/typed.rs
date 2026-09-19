@@ -11,17 +11,6 @@ use px_field_schema::field::Field;
 use px_field_schema::params;
 use px_graph_schema::OpKind;
 
-/// 每个算子的身份清单：**它自己的实现文件 + 它依赖的共享件**。
-///
-/// ⚠ 它同时喂给图侧（`PxOp::SOURCE_HASH`）与 dylib 侧（描述符）——同一份，
-///   才不会出现"改了算子体却命中旧产物"。数组长度写死（多一条编译期就报）。
-macro_rules! sources {
-    ($own:literal $(, $shared:literal)*) => {
-        [include_str!(concat!("ops/", $own)),
-         $(include_str!(concat!("../../", $shared))),*]
-    };
-}
-
 // ── 图参数的形状：一个算子一个 ────────────────────────────────────────────────
 //
 // 两条 impl 是同一件事的两面：`collect` 把上游的**键**折进自己的键，
@@ -51,13 +40,12 @@ pub struct MixInput {
 macro_rules! field_op {
     (
         $(#[$meta:meta])*
-        $name:ident, $id:expr, $version:literal, $params:ty, $inputs:ty, $arity:expr,
-        $sources:expr, $expr:expr
+        $name:ident, $id:expr, $params:ty, $inputs:ty, $arity:expr, $expr:expr
     ) => {
         $(#[$meta])*
         pub struct $name;
 
-        px_op! { $name = $id, $version, $params, $inputs, Field, OpKind::Field, $arity, $sources,
+        px_op! { $name = $id, $params, $inputs, Field, OpKind::Field, $arity,
                  |p, i, g| $expr(p, i, g) }
     };
 }
@@ -66,31 +54,25 @@ macro_rules! field_op {
 
 field_op! {
     /// 常量场（无输入）。
-    Constant, params::CONSTANT, 1, params::constant::Params, (), &[],
-    sources!("constant.rs", "px_field_schema/src/field.rs", "px_field_schema/src/params.rs"),
+    Constant, params::CONSTANT, params::constant::Params, (), &[],
     |p: &params::constant::Params, _i: &(), g| crate::ops::constant::eval(p, &[], g)
 }
 
 field_op! {
     /// 分形布朗噪声（无输入）。
-    Fbm, params::FBM, 4, params::fbm::Params, (), &[],
-    sources!("fbm.rs", "px_field_op/src/noise.rs", "px_field_schema/src/field.rs",
-             "px_field_schema/src/noise.rs", "px_field_schema/src/params.rs"),
+    Fbm, params::FBM, params::fbm::Params, (), &[],
     |p: &params::fbm::Params, _i: &(), g| crate::ops::fbm::eval(p, &[], g)
 }
 
 field_op! {
     /// 脊状噪声（无输入）。
-    Ridged, params::RIDGED, 4, params::ridged::Params, (), &[],
-    sources!("ridged.rs", "px_field_op/src/noise.rs", "px_field_schema/src/field.rs",
-             "px_field_schema/src/noise.rs", "px_field_schema/src/params.rs"),
+    Ridged, params::RIDGED, params::ridged::Params, (), &[],
     |p: &params::ridged::Params, _i: &(), g| crate::ops::ridged::eval(p, &[], g)
 }
 
 field_op! {
     /// 值域重映射（一张场）。
-    Remap, params::REMAP, 1, params::remap::Params, FieldInput, &["field"],
-    sources!("remap.rs", "px_field_schema/src/field.rs", "px_field_schema/src/params.rs"),
+    Remap, params::REMAP, params::remap::Params, FieldInput, &["field"],
     |p: &params::remap::Params, i: &FieldInput, g| {
         crate::ops::remap::eval(p, &[i.field.sample()], g)
     }
@@ -98,8 +80,7 @@ field_op! {
 
 field_op! {
     /// 切向梯度的一个分量（一张场）。
-    Gradient, params::GRADIENT, 1, params::gradient::Params, FieldInput, &["field"],
-    sources!("gradient.rs", "px_field_schema/src/field.rs", "px_field_schema/src/params.rs"),
+    Gradient, params::GRADIENT, params::gradient::Params, FieldInput, &["field"],
     |p: &params::gradient::Params, i: &FieldInput, g| {
         crate::ops::gradient::eval(p, &[i.field.sample()], g)
     }
@@ -107,8 +88,7 @@ field_op! {
 
 field_op! {
     /// 三张场按第三张当权重混合。
-    Mix, params::MIX, 1, params::mix::Params, MixInput, &["a", "b", "mask"],
-    sources!("mix.rs", "px_field_schema/src/field.rs", "px_field_schema/src/params.rs"),
+    Mix, params::MIX, params::mix::Params, MixInput, &["a", "b", "mask"],
     |p: &params::mix::Params, i: &MixInput, g| {
         crate::ops::mix::eval(p, &[i.a.sample(), i.b.sample(), i.mask.sample()], g)
     }
@@ -116,9 +96,7 @@ field_op! {
 
 field_op! {
     /// 域扭曲（两张场：待扭曲的场 + 偏移场）。
-    Warp, params::WARP, 3, params::warp::Params, FieldPairInput, &["field", "offset"],
-    sources!("warp.rs", "px_field_schema/src/field.rs", "px_field_schema/src/params.rs",
-             "px_verify/src/noise.rs"),
+    Warp, params::WARP, params::warp::Params, FieldPairInput, &["field", "offset"],
     |p: &params::warp::Params, i: &FieldPairInput, g| {
         crate::ops::warp::eval(p, &[i.field.sample(), i.offset.sample()], g)
     }

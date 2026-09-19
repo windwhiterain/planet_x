@@ -145,17 +145,18 @@ px_op! { Mix = params::MIX, 1, params::mix::Params, MixInput, Field,
          |p, i, g| crate::ops::mix::eval(p, &[i.a.sample(), i.b.sample(), i.c.sample()], g) }
 ```
 
-参数顺序：`名字 = id, 版本, 超参数类型, 输入形状, 输出域, OpKind, 输入名, 源码清单, |超参数, 输入, 画布| 怎么算`。
+参数顺序：`名字 = id, 超参数类型, 输入形状, 输出域, OpKind, 输入名, |超参数, 输入, 画布| 怎么算`。
+
+⚠ **没有「版本」这一栏，也没有「源码清单」那一栏** —— 身份两半都是自动的，见 §3.3c。
 
 | 字段 | 是什么 |
 |---|---|
-| `id` / `版本` | 键认得出的那一半。⚠ **版本只在接口变了时才升**；改实现不用动（源码哈希自己会变） |
+| `id` | 键认得出的那一半（图侧按它找节点） |
 | `超参数类型` | 从 `art/<图>/<节点>.toml` 解出来的那个 struct |
 | `输入形状` | 这个算子**自己定义**的输入 struct（`()` = 不吃上游）—— 见 §3.3b |
 | `输出域` | `Field` / `VolumeData` / `MeshData` —— 相机口径与编解码都从它推 |
 | `OpKind` | 描述符里的档；**必须与输出域一致**（`Field`↔`Field`、`VolumeData`↔`Volume`…）。⚠ 不一致是**编译错**（`px_op!` 里的 `const` 断言） |
 | `输入名` | 老路径描述符里的输入名（`["coverage"]` 那种）。图侧真正的检查在 `输入形状` 上 |
-| `源码清单` | **它自己的实现文件 + 它依赖的共享件**。漏一份 ⇒ 改了它却命中旧产物 |
 
 ### 3.3b 图参数的形状：**算子自己定义**，两条 impl 由宏生成
 
@@ -183,13 +184,37 @@ pub struct MixInput {
 `Cooked::from_bytes`，但**同样是机械生成的**。
 
 ⚠⚠ **字段顺序 = 上游顺序**。这是"按位置解字节"的代价（手写版也是，只是 `let [a, b, mask] = inputs`
-摆在眼前）。**改字段顺序等于换接口** —— 升降 `VERSION`。
+摆在眼前）。**改字段顺序等于换接口** —— 接口哈希会自动变，所以「记不记得升版本」不是问题。
 
 **为什么不是 `px_cook` 给一组通用的 `Unary1/2/3`**（那一版我做过，删了）：字段名会变成
 `a`/`b`/`c` —— **没有语义**，而且形状就"谁都不属于"了。**为什么也不加泛型**：那只为"多个
 算子共用同一个形状"，而仓里吃三张场的算子只有一个 —— 换不来什么，却要多一个类型参数到处传。
 
 **"接错就是编译错"一条不丢**：`O::Inputs` 是具体类型，少一个字段、给错域都编不过。
+
+### 3.3c 身份：两半都自动（你什么都不用记）
+
+```text
+源码指纹 = build.rs 遍历「这个 crate 编译进去的全部源码」（自己 src/ + 所有 path 依赖的 src/ + 本文件）
+接口哈希 = interface_hash([type_name::<Params>, type_name::<Inputs>, type_name::<Payload>])
+```
+
+| 你改了什么 | 源码指纹 | 接口哈希 | 结果 |
+|---|---|---|---|
+| 算法体一行 | 变 | 不变 | 重算（键变） |
+| 参数 struct 加/删/改字段 | 变 | **变** | 重算 |
+| 输入 struct 改 | 变 | **变** | 重算 |
+| 输出域改 | 变 | **变** | 重算 |
+| 只改了图脚本 | 不变 | 不变 | 全命中 |
+
+**两半都不需要人维护**：不用列清单（`build.rs` 自己遍历），不用升版本（接口变了哈希自己变）。
+`build.rs` 只 include 那份共享助手（`build/fingerprint.rs`），三个算子库共用一份。
+
+⚠ **逃生门**：真要按类型之外的理由强制失效，给 `px_op!` 末尾加
+`, interface = "n"` —— 它混进接口哈希。
+
+⚠ 接口哈希参的是 `core::any::type_name`，**不保证跨编译器稳定**。我们的键只要求
+「同一台机器上前后一致」，所以够用；跨机器共享缓存的场景要另想办法。
 
 ### 3.4 输出域与相机
 
@@ -256,7 +281,7 @@ cargo test  -p px_graphs                # 两条门（见 §5）
 px_graphs/src/bin/<图>/mono/
   fields.rs            ⭐ stage 1：图自己的场函数（唯一编辑面）
   fields.mono          ⭐ 声明：lib / id / version / ingredient
-  template.Cargo.toml / template.lib.rs / template.identity.rs   stage 2 模板
+  template.Cargo.toml / template.lib.rs / template.identity.rs / template.build.rs   stage 2 模板
 ```
 
 ```bash
@@ -294,8 +319,9 @@ cargo run -q -p px_graphs --bin mono-gen -- px_graphs/src/bin/<图>/mono/fields.
    （老口径没动），但跑完会写一份 `<图>/params.json`：**每个节点实际生效的参数值 + 字段名**，
    外加一句"N 个节点走默认值：<名字>"。想补参数文件，照着那份 JSON 抄字段名即可。
 
-4. **身份清单漏一份** ⇒ 改了共享依赖而身份没变 ⇒ 缓存静默给旧产物。
-   `px_graph/tests/source_hash.rs` 那道门扫每个算子那段清单（至少两段 + 点到共享依赖）。
+4. **身份两半都是自动的**，所以「漏一份清单」「忘了升版本」这两类错**没有载体**了：
+   源码指纹由 `build.rs` 遍历源码树算，接口哈希由三个类型名推。
+   `px_graph/tests/source_hash.rs` 那道门现在守的是「**没有人再把清单加回来**」。
 
 5. **`OpKind` 必须与 `Payload` 一致**（相机掺不掺、解码走哪条都从它推）——
    `px_op!` 里那条 `const` 断言会在算子库编译时炸，不是运行期的怪事。

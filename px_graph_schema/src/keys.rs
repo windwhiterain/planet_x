@@ -26,7 +26,7 @@ fn sorted(value: Value) -> Value {
 
 pub fn node_key(
     op_id: &str,
-    op_version: u32,
+    op_interface: &str,
     graph_version: u32,
     canvas: (u32, u32),
     projection: Domain,
@@ -36,7 +36,7 @@ pub fn node_key(
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"px_pcg/v1");
     hasher.update(op_id.as_bytes());
-    hasher.update(&op_version.to_le_bytes());
+    hasher.update(op_interface.as_bytes());
     hasher.update(&graph_version.to_le_bytes());
     hasher.update(&canvas.0.to_le_bytes());
     hasher.update(&canvas.1.to_le_bytes());

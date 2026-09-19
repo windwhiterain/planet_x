@@ -8,7 +8,7 @@
 //! |---|---|
 //! | 命令行 | stage 1 的 `.rs`（里面是那个要单态化的场函数） |
 //! | 同目录、同主名的 `.mono` | 声明（`key = value` 文本）：`lib` / `id` / `version` / `ingredient` |
-//! | 同目录的 `template.*` | stage 2 的三份模板（`template.Cargo.toml` / `template.lib.rs` / `template.identity.rs`） |
+//! | 同目录的 `template.*` | stage 2 的四份模板（`template.Cargo.toml` / `template.lib.rs` / `template.identity.rs` / `template.build.rs`） |
 //! | 计算的 | 生成物落 `target/mono/<库名>/{crate,build}`，装入 `target/debug/<库名>_op.dll` |
 //!
 //! 四件事，每一步都必要：
@@ -149,11 +149,12 @@ fn main() {
         read_declaration("", &format!("（{} 不存在）", sidecar.display()), &stage1)
     };
 
-    // ── 模板：同目录的 `template.*`（三份，缺一不可）──────────────────────────
+    // ── 模板：同目录的 `template.*`（四份，缺一不可）──────────────────────────
     let templates: Vec<(PathBuf, PathBuf)> = [
         ("template.Cargo.toml", "Cargo.toml"),
         ("template.lib.rs", "src/lib.rs"),
         ("template.identity.rs", "src/identity.rs"),
+        ("template.build.rs", "build.rs"),
     ]
     .iter()
     .map(|(from, to)| {
@@ -229,8 +230,10 @@ fn main() {
     );
     let identity = read(&crate_dir.join("src/identity.rs"))
         .replace("@MONO_ID@", &format!("\"{}\"", declared.id))
-        .replace("@VERSION@", &declared.version.to_string())
-        .replace("@SOURCE_HASH@", &hash.to_string());
+        // ⚠ 身份两半都不用在这里填了：
+        //   * 接口哈希由 `template.identity.rs` 的 `interface()` 从类型名推
+        //   * 源码指纹由**生成物的 `build.rs`** 算（算的是它编进去的全部源码）
+        ;
     std::fs::write(crate_dir.join("src/identity.rs"), identity).expect("写不了 identity.rs");
     // 库名进**两处**：manifest 的 `name`、`lib.rs` 的导出符号名（驱动按 `<库名>_op_table` 找）。
     let manifest = read(&crate_dir.join("Cargo.toml"))
@@ -239,6 +242,25 @@ fn main() {
     std::fs::write(crate_dir.join("Cargo.toml"), manifest).expect("写不了 Cargo.toml");
     let wiring = read(&crate_dir.join("src/lib.rs")).replace("@LIB@", &declared.lib);
     std::fs::write(crate_dir.join("src/lib.rs"), wiring).expect("写不了 lib.rs");
+    // `build.rs` 的源码指纹：`include!` 工作区里那份助手（**编译期已知的路径**，
+    // 不是运行期 cwd —— 这样它与"从哪儿跑生成器"无关），契约清单由声明给。
+    let fingerprint = crate_dir
+        .join(&up)
+        .join("build/fingerprint.rs")
+        .to_string_lossy()
+        .replace('\\', "/");
+    let ingredients: String = declared
+        .ingredients
+        .iter()
+        .map(|relative| format!("        \"{up}{relative}\",\n"))
+        .collect();
+    // ⚠ 模板是 CRLF ⇒ 占位符那行要连回车一起换，否则会剩下 @INGREDIENTS@ 编不过。
+    let build = read(&crate_dir.join("build.rs"))
+        .replace("@FINGERPRINT@", &fingerprint)
+        .replace("@INGREDIENTS@\r\n", &ingredients)
+        .replace("@INGREDIENTS@\n", &ingredients);
+    assert!(!build.contains('@'), "build.rs 里还有没填的占位符");
+    std::fs::write(crate_dir.join("build.rs"), build).expect("写不了 build.rs");
 
     // ── 3) 编 ─────────────────────────────────────────────────────────────────
     let status = Command::new("cargo")
