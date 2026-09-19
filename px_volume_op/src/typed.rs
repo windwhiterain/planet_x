@@ -3,32 +3,15 @@
 //! ⚠ **图参数的形状是算子接口的一部分**（`CloudCoarseInput { coverage }`）——
 //! 图侧写错字段、少给上游都是编译错。
 
-use px_cook::{Cooked, Grid, PxInputs, px_op};
+use px_cook::{Cooked, px_op};
 use px_field_schema::field::Field;
 use px_graph_schema::OpKind;
 use px_volume_schema::{VolumeData, params};
 
 /// 烘一份体积要吃的东西：**一张覆盖度场**。
-#[derive(Clone)]
+#[derive(Clone, px_derive::PxInputs)]
 pub struct CloudCoarseInput {
     pub coverage: Cooked<Field>,
-}
-
-impl PxInputs for CloudCoarseInput {
-    fn collect(&self, hasher: &mut px_cook::blake3::Hasher) {
-        hasher.update(&self.coverage.key);
-    }
-}
-
-impl px_cook::FromPayloads for CloudCoarseInput {
-    fn from_payloads(inputs: &[&[u8]], grid: Grid) -> Result<Self, String> {
-        let [coverage] = inputs else {
-            return Err(format!("吃 1 张覆盖度场，却收到 {} 个上游", inputs.len()));
-        };
-        Ok(Self {
-            coverage: Cooked::from_bytes(coverage, grid)?,
-        })
-    }
 }
 
 /// 产物形状：`cook::<CloudCoarse>` 返回的就是它。

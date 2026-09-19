@@ -10,6 +10,8 @@ edition = "2024"
 crate-type = ["dylib", "rlib"]
 
 [dependencies]
+# 图参数 struct 的 `PxInputs` 由它生成（字段名进键、按位置解字节）。
+px_derive = { path = "../px_derive" }
 px_protocol = { path = "../px_protocol" }
 px_graph_schema = { path = "../px_graph_schema" }
 px_field_schema = { path = "../px_field_schema" }

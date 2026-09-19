@@ -157,40 +157,33 @@ px_op! { Mix = params::MIX, 1, params::mix::Params, MixInput, Field,
 | `输入名` | 老路径描述符里的输入名（`["coverage"]` 那种）。图侧真正的检查在 `输入形状` 上 |
 | `源码清单` | **它自己的实现文件 + 它依赖的共享件**。漏一份 ⇒ 改了它却命中旧产物 |
 
-### 3.3b 图参数的形状：**算子自己定义**
+### 3.3b 图参数的形状：**算子自己定义**，两条 impl 由宏生成
 
 形状是这个算子**接口的一部分**，所以住 `typed.rs`，字段名就是它吃的东西的名字：
 
 ```rust
-/// 三张场（两张待混 + 一张权重）。**注意字段名有语义。**
-#[derive(Clone)]
+/// 三张场（两张待混 + 一张权重）。**字段名有语义。**
+#[derive(Clone, px_derive::PxInputs)]
 pub struct MixInput {
     pub a: Cooked<Field>,
     pub b: Cooked<Field>,
     pub mask: Cooked<Field>,
 }
-
-/// 键：把上游的键折进来。
-impl PxInputs for MixInput {
-    fn collect(&self, hasher: &mut px_cook::blake3::Hasher) {
-        hasher.update(&self.a.key);
-        hasher.update(&self.b.key);
-        hasher.update(&self.mask.key);
-    }
-}
-
-/// 字节：dylib 那一侧重算时要能把上游解回来。
-impl px_cook::FromPayloads for MixInput {
-    fn from_payloads(inputs: &[&[u8]], grid: Grid) -> Result<Self, String> {
-        let [a, b, mask] = inputs else {
-            return Err(format!("吃 3 张场，却收到 {} 个上游", inputs.len()));
-        };
-        Ok(Self { a: Cooked::from_bytes(a, grid)?,
-                  b: Cooked::from_bytes(b, grid)?,
-                  mask: Cooked::from_bytes(mask, grid)? })
-    }
-}
 ```
+
+`#[derive(PxInputs)]` 生成**两条 impl**，与超参数那边"键用宏、编解码用 serde"是同一套口径：
+
+| | 超参数（`#[derive(PxParams)]`） | 图参数（`#[derive(PxInputs)]`） |
+|---|---|---|
+| 键 | 宏：字段名 + `HashField`（按类型写字节） | 宏：字段名 + `Cooked::key`（上游的键） |
+| 编解码 | serde：`toml` → 结构 → 规范 JSON | 宏：`Cooked::from_bytes`（按**字段顺序**解上游字节） |
+
+**为什么不给图参数用 serde 编解码**：超参数是**文本**（`art/<图>/<节点>.toml`），而图参数是内存里
+的 `Cooked<T>` —— 它没有文本形式，dylib 那一侧拿到的只是字节 + 它自己那把键。所以编解码走
+`Cooked::from_bytes`，但**同样是机械生成的**。
+
+⚠⚠ **字段顺序 = 上游顺序**。这是"按位置解字节"的代价（手写版也是，只是 `let [a, b, mask] = inputs`
+摆在眼前）。**改字段顺序等于换接口** —— 升降 `VERSION`。
 
 **为什么不是 `px_cook` 给一组通用的 `Unary1/2/3`**（那一版我做过，删了）：字段名会变成
 `a`/`b`/`c` —— **没有语义**，而且形状就"谁都不属于"了。**为什么也不加泛型**：那只为"多个

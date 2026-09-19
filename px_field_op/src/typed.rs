@@ -6,7 +6,7 @@
 //!
 //! ⚠ 这里**一行实现都没有** —— `render` 转发到本 crate 里那个既有的 `eval`。
 
-use px_cook::{Cooked, Grid, PxInputs, px_op};
+use px_cook::{Cooked, px_op};
 use px_field_schema::field::Field;
 use px_field_schema::params;
 use px_graph_schema::OpKind;
@@ -28,81 +28,24 @@ macro_rules! sources {
 // `from_payloads` 把上游的**字节**解成这个 struct。
 
 /// 一张场（`Remap` / `Gradient` 吃它）。
-#[derive(Clone)]
+#[derive(Clone, px_derive::PxInputs)]
 pub struct FieldInput {
     pub field: Cooked<Field>,
 }
 
-impl PxInputs for FieldInput {
-    fn collect(&self, hasher: &mut px_cook::blake3::Hasher) {
-        hasher.update(&self.field.key);
-    }
-}
-
-impl px_cook::FromPayloads for FieldInput {
-    fn from_payloads(inputs: &[&[u8]], grid: Grid) -> Result<Self, String> {
-        let [field] = inputs else {
-            return Err(format!("吃 1 张场，却收到 {} 个上游", inputs.len()));
-        };
-        Ok(Self {
-            field: Cooked::from_bytes(field, grid)?,
-        })
-    }
-}
-
 /// 两张场（`Warp` 吃它）。
-#[derive(Clone)]
+#[derive(Clone, px_derive::PxInputs)]
 pub struct FieldPairInput {
     pub field: Cooked<Field>,
     pub offset: Cooked<Field>,
 }
 
-impl PxInputs for FieldPairInput {
-    fn collect(&self, hasher: &mut px_cook::blake3::Hasher) {
-        hasher.update(&self.field.key);
-        hasher.update(&self.offset.key);
-    }
-}
-
-impl px_cook::FromPayloads for FieldPairInput {
-    fn from_payloads(inputs: &[&[u8]], grid: Grid) -> Result<Self, String> {
-        let [field, offset] = inputs else {
-            return Err(format!("吃 2 张场，却收到 {} 个上游", inputs.len()));
-        };
-        Ok(Self {
-            field: Cooked::from_bytes(field, grid)?,
-            offset: Cooked::from_bytes(offset, grid)?,
-        })
-    }
-}
-
 /// 三张场（`Mix` 吃它：两张待混 + 一张权重）。
-#[derive(Clone)]
+#[derive(Clone, px_derive::PxInputs)]
 pub struct MixInput {
     pub a: Cooked<Field>,
     pub b: Cooked<Field>,
     pub mask: Cooked<Field>,
-}
-
-impl PxInputs for MixInput {
-    fn collect(&self, hasher: &mut px_cook::blake3::Hasher) {
-        hasher.update(&self.a.key);
-        hasher.update(&self.b.key);
-        hasher.update(&self.mask.key);
-    }
-}
-
-impl px_cook::FromPayloads for MixInput {
-    fn from_payloads(inputs: &[&[u8]], grid: Grid) -> Result<Self, String> {
-        let [a, b, mask] = inputs else {
-            return Err(format!("吃 3 张场，却收到 {} 个上游", inputs.len()));
-        };
-        Ok(Self {
-            a: Cooked::from_bytes(a, grid)?,
-            b: Cooked::from_bytes(b, grid)?,
-            mask: Cooked::from_bytes(mask, grid)?,
-        })
-    }
 }
 
 macro_rules! field_op {

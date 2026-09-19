@@ -3,56 +3,22 @@
 //! ⚠ **图参数的形状是算子接口的一部分**（`CubeSphereInput { height }` /
 //! `ProxyInput { volume }`）—— 图侧写错字段、少给上游都是编译错。
 
-use px_cook::{Cooked, Grid, PxInputs, px_op};
+use px_cook::{Cooked, px_op};
 use px_field_schema::field::Field;
 use px_graph_schema::OpKind;
 use px_mesh_schema::{MeshData, params};
 use px_volume_schema::VolumeData;
 
 /// 立方球网格要吃的东西：**一张高度场**。
-#[derive(Clone)]
+#[derive(Clone, px_derive::PxInputs)]
 pub struct CubeSphereInput {
     pub height: Cooked<Field>,
 }
 
-impl PxInputs for CubeSphereInput {
-    fn collect(&self, hasher: &mut px_cook::blake3::Hasher) {
-        hasher.update(&self.height.key);
-    }
-}
-
-impl px_cook::FromPayloads for CubeSphereInput {
-    fn from_payloads(inputs: &[&[u8]], grid: Grid) -> Result<Self, String> {
-        let [height] = inputs else {
-            return Err(format!("吃 1 张高度场，却收到 {} 个上游", inputs.len()));
-        };
-        Ok(Self {
-            height: Cooked::from_bytes(height, grid)?,
-        })
-    }
-}
-
 /// 等值面要吃的东西：**一份体积**。
-#[derive(Clone)]
+#[derive(Clone, px_derive::PxInputs)]
 pub struct ProxyInput {
     pub volume: Cooked<VolumeData>,
-}
-
-impl PxInputs for ProxyInput {
-    fn collect(&self, hasher: &mut px_cook::blake3::Hasher) {
-        hasher.update(&self.volume.key);
-    }
-}
-
-impl px_cook::FromPayloads for ProxyInput {
-    fn from_payloads(inputs: &[&[u8]], grid: Grid) -> Result<Self, String> {
-        let [volume] = inputs else {
-            return Err(format!("吃 1 份体积，却收到 {} 个上游", inputs.len()));
-        };
-        Ok(Self {
-            volume: Cooked::from_bytes(volume, grid)?,
-        })
-    }
 }
 
 /// 立方球网格：一张场当位移。

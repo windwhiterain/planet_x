@@ -1410,6 +1410,7 @@ name = "px_field_op"
 version = "0.1.0"
 dependencies = [
  "px_cook",
+ "px_derive",
  "px_field_schema",
  "px_graph_schema",
  "px_protocol",
@@ -1485,6 +1486,7 @@ version = "0.1.0"
 dependencies = [
  "isosurface",
  "px_cook",
+ "px_derive",
  "px_field_schema",
  "px_graph_schema",
  "px_mesh_schema",
@@ -1576,6 +1578,7 @@ name = "px_volume_op"
 version = "0.1.0"
 dependencies = [
  "px_cook",
+ "px_derive",
  "px_field_schema",
  "px_graph_schema",
  "px_protocol",
