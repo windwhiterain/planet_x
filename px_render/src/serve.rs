@@ -27,10 +27,10 @@ use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use px_host_protocol::client as client;
-use px_host_protocol::frame::{self, Frame};
-use px_host_protocol::render::{Job, Lease, Report, Request, Response, Scene, ShotReport};
-use px_handshake::ProtocolId;
+use px_protocol::client as client;
+use px_protocol::frame::{self, Frame};
+use px_protocol::render::{Job, Lease, Report, Request, Response, Scene, ShotReport};
+use px_protocol::ProtocolId;
 
 use crate::digest;
 use crate::gpu::Gpu;
@@ -445,7 +445,7 @@ fn views_of(request: &Request, cam: Option<[f32; 3]>) -> render::Views {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use px_host_protocol::render::{Shot, View};
+    use px_protocol::render::{Shot, View};
 
     fn request(scene: Scene, out: &str) -> Request {
         Request {

@@ -17,14 +17,18 @@
 //! 1. **产物是低层帧图**：一份 [`SceneSpec`]（物体 + 灯 + 环境 + 相机 + `resources` /
 //!    `passes` / `frame_materials` / `material_instances`）。`px_pass` 只按 `kind` 与状态
 //!    分派，它一个标签都不认识（§124）。
-//! 2. **pipeline 是 stage 的列表，每个 stage 声明它要的 material 参数格式**
-//!    （[`StageFormat`]）：图程序里手写 `impl StageFormat<Stage> for 你的材质`。
-//!    编译时逐项对账 —— 少参数 / 类型不符在**烘图时**就红，而不是装载时（§81.4 的那条）。
-//! 3. **一个物体可以注册多个 stage 的材质**（[`Registration`]）；寻常那一路由
-//!    [`Registration::single`] 包成"一份材质" —— 用起来与寻常引擎一样。
-//!    ⚠ 这份多档状态**只在内存里**：产物仍然是「一个物体一份材质」（见 [`Registration::resolve`]）。
-//! 4. **参数类型手写在图脚本里**（`MATERIAL_FORMATS` 那种），**不是**从 WGSL 反推的
-//!    格式就是第二份契约。反射仍然是"名字 ↔ 字节"的真源（[`contract`]），两者各管一半。
+//! 2. **pipeline 是一串 stage，每个 stage 只要求 material 里那些 *per pass* 参数的类型**
+//!    （[`StageParams`]）：图程序里手写 `impl StageParams<Stage, 内容> for Stage`（不进
+//!    WGSL 反推）。编译时逐项对账 —— 缺格 / 塞不进在**烘图时**就红，而不是装载时（§81.4）。
+//! 3. **一个物体可以注册多个 stage 的材质**；寻常那一路由 [`Registration::single`] 包成
+//!    "一份材质" —— 用起来与寻常引擎一样。⚠ 这份多档状态**只在内存里**：产物仍然是
+//!    「一个物体一份材质」（登记在加物体那一刻 `freeze` 成那一份）。
+//! 4. **stage 与内容都是类型**（[`Stage`] / [`Content`]），这一层没有类型擦除：漏写某一档的
+//!    参数表、或给某份内容登记它不参与的档，都是**编译错误**。反射仍然是"名字 ↔ 字节"的
+//!    真源（[`contract`]），两者各管一半。
+//!
+//! ⚠ 装配场景请用**通用**的 [`SceneBuilder`]：它不认识行星 / 云 / 大气，也不认识 `art/`
+//! 下的路径 —— 那些语义住在 [`recipe`]（TOML 配方的适配器）与图程序里。
 
 pub mod baked;
 pub mod builder;

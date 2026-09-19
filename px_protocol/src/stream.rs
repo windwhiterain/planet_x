@@ -13,7 +13,7 @@ pub const STREAM_VERSION: u32 = 1;
 /// （`Art` / `Blob`）、场景文档（`Scene`）以及拒词。
 ///
 /// ⚠ 原来这里还有三路：`World`（经济世界视图）、`Request` / `Response`（渲染作业）。
-/// 它们各自搬去了 `game`（`sim`）与 `px_host_protocol`（`render` / `frame`）—— 搬的理由不是整洁：
+/// 它们各自搬去了 `game`（`sim`）—— 搬的理由不是整洁：
 /// 那两边的 crate **本来就依赖 `px_protocol`**，这三路再留在这里就是循环依赖，编都编不过。
 /// 信封留在本 crate 是因为它确实两边都认：px_ops 写产物、px_scene / px_pass / px_verify 读产物。
 #[derive(Debug, Clone, PartialEq)]

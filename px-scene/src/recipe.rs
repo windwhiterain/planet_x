@@ -41,18 +41,6 @@ pub struct SceneFile {
     /// 用哪张**帧图**（`art/frame/<名>.toml`，§128）。不写 = `default`。
     #[serde(default)]
     pub frame: Option<String>,
-    /// **逐 stage 的材质格式对账**要不要在这份场景上做。
-    ///
-    /// ⚠ 缺省 `false`，而这是一个**必须说清的取舍**：格式表（[`crate::stage::Formats::content`]）
-    /// 目前**晚于内容** —— 行星的 surface 材质在 shader 里还带着云影那几个格（`inner` /
-    /// `outer` / `coverage` / `shadow` / `height` / `gain`），而表面那一档的格式**故意**不列它们
-    /// （它们是云那一侧的量）。⇒ 今天给**既有配方**打开它，`orbit-soft` 那一族会当场红。
-    ///
-    /// 所以：**新内容请写 `formats = true`**（那时格式与材质一起设计，对账是有意义的）；
-    /// 老配方保持 `false`，它们的产物**逐字节不动**（`art/anchor/hashes.txt` §三 那六格）。
-    /// 等 surface 的云影参数腾出那个结构体之后，这一栏就该删掉 —— 那时它是恒真的。
-    #[serde(default)]
-    pub formats: bool,
     pub parts: Vec<PartFile>,
 }
 
@@ -372,7 +360,7 @@ pub fn compile(
             TextureRef::new(5, coverage.clone(), Sampler::clamped()),
         );
     }
-    if file.formats { check_stage(&file.name, "planet", &surface)?; }
+    check_stage(&file.name, "planet", &surface)?;
     objects.push(Object {
         id: "planet".to_string(),
         geometry: Geometry::mesh(planet.member("mesh")?),
@@ -419,9 +407,7 @@ pub fn compile(
         let material = Material::new(atmosphere_shader).with_params(params);
         let mut material = material;
         material.alpha = AlphaMode::Add;
-        if file.formats {
-            check_stage(&file.name, "atmosphere", &material)?;
-        }
+        check_stage(&file.name, "atmosphere", &material)?;
         objects.push(Object {
             id: "atmosphere".to_string(),
             geometry: Geometry::primitive(
@@ -470,9 +456,7 @@ pub fn compile(
                 Sampler::clamped(),
             ),
         );
-        if file.formats {
-            check_stage(&file.name, "clouds", &material)?;
-        }
+        check_stage(&file.name, "clouds", &material)?;
         // 几何：有代理 mesh 就用它（空区域在光栅阶段就被剔除），没有就是一个细分球壳。
         let geometry = match clouds.optional_member("proxy")? {
             Some(proxy) => Geometry::mesh(proxy),
@@ -514,9 +498,7 @@ pub fn compile(
         material.alpha = AlphaMode::Blend;
         material.cull = CullMode::None;
         material = material.with_texture("color", TextureRef::new(1, band, Sampler::clamped()));
-        if file.formats {
-            check_stage(&file.name, "rings", &material)?;
-        }
+        check_stage(&file.name, "rings", &material)?;
         objects.push(Object {
             id: "rings".to_string(),
             geometry: Geometry::mesh(mesh),
@@ -619,7 +601,10 @@ pub fn compile(
 ///
 /// ⚠ 这一支是**唯一**的运行期入口：配方是数据，`kind` / `shader` 是字符串 ⇒ 走到这里
 /// "哪份内容"已经不在类型里。表与判据**仍然是类型级那两份**（`StageParams` 的实现 +
-/// `stage::check`），这里只做分派（[`stage::runtime`]）。
+/// [`stage::check`]），这里只做分派（[`stage::runtime`]）。
+///
+/// ⚠ **无条件跑**：每份材质做完就查，没有开关、没有"先放过以后再说"的档。
+/// 认不出的内容（自写 shader）这一档没有表可查 ⇒ 不算错，但那是**没有表**，不是"跳过检查"。
 ///
 /// 判据用的是**产物那一档**（`stage_of_alpha`）—— 与 `frame::draws_of` 的 `opaque` /
 /// `transparent` 两个 `select` 同一套谓词：两处各写一遍就是"同一件事两个答案"。

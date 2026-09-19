@@ -4,7 +4,8 @@
 //! 是宿主自己的事（谁能渲、渲完回什么话）。留着的代价不是洁癖 —— 它是**循环依赖**：
 //! `px_render` 本来就依赖 `px_protocol`，作业形状再留在那边就编不过。
 //!
-//! ⚠ 这里住的是**形状**，跨进程的信封与握手仍然在 `px_protocol`（`stream` / `wire`）。
+//! ⚠ 这里住的是**形状**；跨进程的信封与握手身份是同一 crate 里的
+//! `frame` 与 `ProtocolId` / `SCHEMA_VERSION` / `wire`。
 
 use serde::{Deserialize, Serialize};
 
@@ -309,7 +310,7 @@ pub struct Lease {
 }
 
 impl Lease {
-    pub fn matches(&self, id: &px_handshake::ProtocolId) -> bool {
+    pub fn matches(&self, id: &crate::ProtocolId) -> bool {
         self.protocol_hash == id.protocol_hash && self.git_rev == id.git_rev
     }
 }

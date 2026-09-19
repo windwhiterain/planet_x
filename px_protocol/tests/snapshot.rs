@@ -5,7 +5,7 @@ use game::sim::{DepartmentView, GoodView, Totals, WorldView};
 use px_protocol::art::{ArtBundle, AssetKind, AssetManifest, Camera};
 use px_protocol::wire::{Blob, BlobHeader, DType};
 use px_protocol::{Handshake, ProtocolId, SCHEMA_VERSION};
-use px_host_protocol::render::{self as render, Lease, Request, Response, Scene};
+use px_protocol::render::{self as render, Lease, Request, Response, Scene};
 
 /// 资产种类必须**逐个列出**（穷尽匹配）：加一种资产而不动这份快照就编不过 ——
 /// 快照一变 `protocol_hash` 就变，跨进程握手会因此拒绝旧对端，这正是要人看一眼的地方。
@@ -429,14 +429,14 @@ fn canonical() -> String {
             // ⚠ 这一串是**冻结记录**，不许跟着 `stream::Frame` 缩表（它今天只剩 5 种）：
             // 它进 `protocol_hash()`，改一个字就是换指纹，旧对端在握手处当场被拒。
             // 八种标签今天分散在三处：`protocol` / `art` / `scene` / `blob` / `refused` 还在
-            // `stream::Frame`，`request` / `response` 在 `px_host_protocol::frame`，`world`
+            // `stream::Frame`，`request` / `response` 在 `px_protocol::frame`，`world`
             // 那一支随 `game::sim` 搬走（它本来就没有生产者、也没有消费者）。
             "stream::Frame.kinds": [
                 "protocol", "world", "art", "scene", "blob", "request", "response", "refused"
             ],
             "stream::MAGIC": String::from_utf8_lossy(&px_protocol::stream::MAGIC),
             "stream::STREAM_VERSION": px_protocol::stream::STREAM_VERSION,
-            "client::LEASE_PATH": px_host_protocol::client::LEASE_PATH,
+            "client::LEASE_PATH": px_protocol::client::LEASE_PATH,
         }
     });
 
@@ -447,11 +447,7 @@ fn canonical() -> String {
 
 #[test]
 fn protocol_snapshot_is_current() {
-    // ⚠ 快照住在**叶子 crate `px_handshake`** 里（它是握手身份的一部分：宿主侧构造
-    // `ProtocolId` 也要它），而这条判据留在 `px_protocol`（它要按这一侧的真类型算形状）。
-    // ⇒ 路径按 `px_handshake` 那一份找，找不到就**红**（不是跳过）。
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../px_handshake/snapshots/protocol.snapshot.json");
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("snapshots/protocol.snapshot.json");
     let current = canonical();
     if std::env::var("PX_UPDATE_SNAPSHOT").as_deref() == Ok("1") {
         std::fs::write(&path, &current).expect("写快照失败");

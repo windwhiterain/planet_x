@@ -45,7 +45,7 @@ mod viewer;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use px_host_protocol::render::{Job, Request, Scene, Shot, View};
+use px_protocol::render::{Job, Request, Scene, Shot, View};
 
 fn usage() -> String {
     [

@@ -11,8 +11,8 @@ use std::io::{self, Read, Write};
 
 use serde::{Deserialize, Serialize};
 
-use px_handshake::ProtocolId;
-use px_handshake::{wire, WireError};
+use crate::ProtocolId;
+use crate::wire::{self, WireError};
 
 use crate::render::{Request, Response};
 
@@ -175,7 +175,7 @@ mod tests {
     #[test]
     fn the_handshake_frame_round_trips() {
         let frame = Frame::Protocol(ProtocolId {
-            schema_version: px_handshake::SCHEMA_VERSION,
+            schema_version: crate::SCHEMA_VERSION,
             protocol_hash: 0xfeed_face_dead_beef,
             git_rev: "abc123".to_string(),
         });

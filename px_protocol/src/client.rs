@@ -8,7 +8,7 @@ use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use px_handshake::ProtocolId;
+use crate::ProtocolId;
 
 use crate::frame::{self, Frame};
 use crate::render::{ClientError, Lease, Request, Response};
@@ -156,6 +156,6 @@ fn io(err: std::io::Error) -> ClientError {
     ClientError::Io(err.to_string())
 }
 
-fn wire(err: px_handshake::WireError) -> ClientError {
+fn wire(err: crate::WireError) -> ClientError {
     ClientError::Wire(err.to_string())
 }

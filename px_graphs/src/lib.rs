@@ -8,9 +8,3 @@
 //! · `art/<图名>/<节点>.toml` 那些参数所对应的图程序。
 pub mod cloud_proxy;
 
-/// ⚠ 兼容别名：`px_graphs::params` 原来的两个函数搬进了 `px_scene::contract`。
-///
-/// 留着它是因为**两条烘图路**（`--bin scene` 与 `--bin passes`）与它们的历史注释都按
-/// 这个名字说话；真正的实现只有一份（`px_scene::contract`），这里只是转出去 ——
-/// 抄第二份就是第二个会漂开的真相。
-pub use px_scene::contract as params;

@@ -26,7 +26,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use px_protocol::scene::{
-    AlphaMode, CullMode, Environment, Geometry, Light, Material, Member, Object, Sampler, SceneSpec,
+    AlphaMode, CullMode, Environment, Geometry, Light, Material, Member, Object, SceneSpec,
     TextureRef, Transform, Value,
 };
 
@@ -105,15 +105,6 @@ impl SceneBuilder {
 
     pub fn add_light(mut self, light: Light) -> Self {
         self.lights.push(light);
-        self
-    }
-
-    /// 用**作者自己的** per-pass 表（`(stage, 材质) → 要哪几格`）代替内容那张。
-    /// 关掉逐 stage 的 per-pass 对账。
-    ///
-    /// ⚠ 这是一个**取舍开关**，不是常规用法：格式表可能晚于内容（既有 surface 的 shader 里
-    /// 还带着云影那几个格，而 `opaque` 那一档故意不列它们）。新内容请**别关**。
-    pub fn without_stage_checks(self) -> Self {
         self
     }
 
@@ -377,23 +368,6 @@ impl MaterialBuilder {
         material.depth_bias = self.depth_bias;
         Ok(material)
     }
-}
-
-/// 一份材质的取值**不经校验**的旁路（给烘图侧自己算出来的那些量用）。
-///
-/// ⚠ 它**故意**不校验：调用方是编译器，值是从契约里算出来的。作者写的那些请走
-/// [`MaterialBuilder`] —— 那条路才有"名字打错当场红"。
-pub fn with_params(shader: Member, params: BTreeMap<String, Value>) -> Material {
-    Material::new(shader).with_params(params)
-}
-
-/// 采样器两种常用档的转发（省得每个调用点都去 import 协议那一层）。
-pub fn repeat() -> Sampler {
-    Sampler::repeat()
-}
-
-pub fn clamped() -> Sampler {
-    Sampler::clamped()
 }
 
 #[cfg(test)]

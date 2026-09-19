@@ -244,12 +244,51 @@ contents! {
 }
 
 /// 一个 `Value` 落在哪一档。与 [`ParamKind`] 一一对应（文本在参数块里非法 ⇒ `None`）。
+///
+/// ⚠ 只用于报错信息；**判据不许只看它**（见 [`satisfies`]）。
 pub fn kind_of(value: &Value) -> Option<ParamKind> {
     match value {
         Value::Num(_) => Some(ParamKind::F32),
         Value::Quad(_) => Some(ParamKind::Vec4),
         Value::Triple(_) => Some(ParamKind::Vec3),
         Value::Text(_) => None,
+    }
+}
+
+/// 这个值**塞得进**这一档要的那个格吗？
+///
+/// ⚠ 判据是"**打得进去吗**"，不是"值在 Rust 里是不是那个类型"：参数块的打包（
+/// `MaterialLayout::pack`，唯一那份真源）**允许把整数写成 `Value::Num`** 再 `as u32`
+/// —— `steps` / `seed` / `ablate` / `bound` / `gradient` 这几个 `u32` 格在既有配方里
+/// 就是按数给的，落盘的字节也一直是对的。只看 [`kind_of`] 会把它们判成"类型不符"，
+/// 那是**假红**：判据与真源各说一套，最坏的结局是把好端端的内容逼着改。
+///
+/// ⇒ 整数那一档：`Value::Num` 只要**没有小数部分**且落在范围内就算满足；小数则点名拒。
+pub fn satisfies(value: &Value, want: ParamKind) -> Result<(), String> {
+    match (value, want) {
+        (Value::Quad(_), ParamKind::Vec4) | (Value::Triple(_), ParamKind::Vec3) => Ok(()),
+        (Value::Num(_), ParamKind::F32) => Ok(()),
+        (Value::Num(number), ParamKind::U32 | ParamKind::I32) => {
+            if number.fract() != 0.0 {
+                return Err(format!(
+                    "给的是 {number}（有小数部分），这一档要的是{}",
+                    if want == ParamKind::U32 { "u32" } else { "i32" }
+                ));
+            }
+            let range = match want {
+                ParamKind::U32 => (0.0, u32::MAX as f64),
+                _ => (i32::MIN as f64, i32::MAX as f64),
+            };
+            if !(range.0..=range.1).contains(number) {
+                return Err(format!("给的是 {number}，超出这一档的取值范围"));
+            }
+            Ok(())
+        }
+        (value, want) => Err(format!(
+            "这一档要 {}，给的是 {}",
+            want.name(),
+            kind_of(value).map(ParamKind::name).unwrap_or("文本"),
+        )),
     }
 }
 
@@ -272,14 +311,8 @@ fn check_given<S: Stage, M: Content>(
         match params.get(field.name) {
             None => missing.push(format!("{}（{}）", field.name, field.kind.name())),
             Some(value) => {
-                let got = kind_of(value);
-                if got != Some(field.kind) {
-                    wrong.push(format!(
-                        "{}：这一档要 {}，材质给的是 {}",
-                        field.name,
-                        field.kind.name(),
-                        got.map(ParamKind::name).unwrap_or("文本"),
-                    ));
+                if let Err(why) = satisfies(value, field.kind) {
+                    wrong.push(format!("{}：{why}", field.name));
                 }
             }
         }
@@ -679,6 +712,71 @@ mod tests {
         )]))
         .check_all()
         .expect("一个格");
+    }
+
+    /// **整数那一档收 `Value::Num`（整数值）** —— 参数块的打包本来就这么收
+    /// （`MaterialLayout::pack` 对 `u32` 的判据是 `number.fract() != 0.0`）。
+    ///
+    /// ⚠ 这条是**踩过之后补的**：判据原先只看 `kind_of`，于是把 `steps` / `seed` /
+    /// `ablate` / `bound` / `gradient` 那五个 `u32` 格判成"类型不符"，而既有配方一直是
+    /// 按数给它们的、落盘字节也一直是对的 ⇒ 那是**假红**。云的参数表里这五个格就是夹具。
+    #[test]
+    fn an_integral_number_satisfies_an_integer_slot() {
+        let mut clouds = params(&[
+            ("orientation", Value::Quad([0.0, 0.0, 0.0, 1.0])),
+            ("tint", Value::Quad([1.0, 1.0, 1.0, 1.0])),
+        ]);
+        for name in [
+            "inner", "outer", "density", "coverage", "base", "top", "detail_scale",
+            "detail_strength", "erode", "phase", "shadow", "bump", "slope_scale", "taper",
+            "coverage_gain", "surface_level", "wind", "wind_skin",
+        ] {
+            clouds.insert(name.to_string(), Value::Num(1.0));
+        }
+        for name in ["steps", "seed", "ablate", "bound", "gradient"] {
+            clouds.insert(name.to_string(), Value::Num(64.0));
+        }
+        Registration::<Transparent, Clouds>::single(clouds)
+            .check_all()
+            .expect("整数格按数给也算满足");
+    }
+
+    /// 但**带小数**的给整数格要拒，而且报错要点名那个值。
+    #[test]
+    fn a_fractional_number_is_refused_for_an_integer_slot() {
+        let mut clouds = params(&[
+            ("orientation", Value::Quad([0.0, 0.0, 0.0, 1.0])),
+            ("tint", Value::Quad([1.0, 1.0, 1.0, 1.0])),
+        ]);
+        for name in [
+            "inner", "outer", "density", "coverage", "base", "top", "detail_scale",
+            "detail_strength", "erode", "phase", "shadow", "bump", "slope_scale", "taper",
+            "coverage_gain", "surface_level", "wind", "wind_skin",
+        ] {
+            clouds.insert(name.to_string(), Value::Num(1.0));
+        }
+        for name in ["steps", "seed", "ablate", "bound", "gradient"] {
+            clouds.insert(name.to_string(), Value::Num(64.0));
+        }
+        clouds.insert("steps".to_string(), Value::Num(1.5));
+        let err = Registration::<Transparent, Clouds>::single(clouds)
+            .check_all()
+            .expect_err("1.5 塞不进 u32");
+        assert!(err.contains("steps"), "{err}");
+        assert!(err.contains("小数"), "{err}");
+    }
+
+    /// 判据本身就是"塞得进吗"：四数给 vec3、三数给 vec4 都拒；数与向量的分岔也拒。
+    #[test]
+    fn satisfies_judges_packability_not_the_rust_type() {
+        assert!(satisfies(&Value::Quad([0.0; 4]), ParamKind::Vec4).is_ok());
+        assert!(satisfies(&Value::Triple([0.0; 3]), ParamKind::Vec3).is_ok());
+        assert!(satisfies(&Value::Num(2.0), ParamKind::U32).is_ok());
+        assert!(satisfies(&Value::Num(-1.0), ParamKind::U32).is_err(), "u32 不收负数");
+        assert!(satisfies(&Value::Triple([0.0; 3]), ParamKind::Vec4).is_err());
+        assert!(satisfies(&Value::Quad([0.0; 4]), ParamKind::Vec3).is_err());
+        assert!(satisfies(&Value::Text("x".to_string()), ParamKind::F32).is_err());
+        assert!(satisfies(&Value::Num(1.0), ParamKind::Vec4).is_err());
     }
 
     /// `freeze` 按这一档解算（分档优先、其次 `single`）。

@@ -10,8 +10,8 @@ edition = "2024"
 #   `px_render` 一律指 **Bevy 那支**，取法 `git show f121ee3^:px_render/…`）。
 #   改名不带一个字节的产物移动（判据见 §157）。删 Bevy 那支**不减少**任何判据 ——
 #   六张判据图 + 六份冻产物仍然逐字节可比（回归集复测过）。
-members = ["game", "px_protocol", "px_handshake", "px_host_protocol", "px_shader", "px_pass", "px_render", "px_ops", "px_mc", "px_graphs", "px-scene", "px_verify", "px_probe"]
-default-members = ["game", "px_protocol", "px_handshake", "px_host_protocol", "px_shader", "px_pass", "px_ops", "px_mc", "px_graphs", "px-scene", "px_verify"]
+members = ["game", "px_protocol", "px_shader", "px_pass", "px_render", "px_ops", "px_mc", "px_graphs", "px-scene", "px_verify", "px_probe"]
+default-members = ["game", "px_protocol", "px_shader", "px_pass", "px_ops", "px_mc", "px_graphs", "px-scene", "px_verify"]
 
 [dependencies]
 
