@@ -6,7 +6,7 @@
 //!   `field.fbm` 在别的图里叫别的名字，算子不该知道；
 //! * 键里多了算子的源码哈希 ⇒ 改算子体必然重算，不靠人记得升版本。
 
-use px_cook::{Cooked, cook};
+use px_cook::cook;
 use px_field_op::typed as field;
 use px_field_schema::field::cube_map_extent;
 use px_graph::{GraphSpec, begin, finish, params_text};

@@ -21,7 +21,7 @@ pub use driver::{
     write_graph_manifest, write_shader, SHADER_VERSION,
 };
 pub use px_graph_schema::{
-    GraphSpec, Grid, IndexEntry, Key, ManifestEntry, canonical_params, fnv1a, fnv1a_sources, hex,
+    GraphSpec, Grid, Key, ManifestEntry, canonical_params, fnv1a, fnv1a_sources, hex,
     hex_short, node_key, payload_fingerprint,
 };
 pub use px_field_schema::field::{Field, Projection, Stats};

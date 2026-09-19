@@ -9,7 +9,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
 use px_graph_schema::{
-    GraphSpec, Grid, IndexEntry, Key, ManifestEntry, OpDescriptor, OpKind, OpLibrary, PayloadBundle,
+    GraphSpec, Grid, Key, ManifestEntry, OpDescriptor, OpKind, OpLibrary, PayloadBundle,
     fnv1a, hex, hex_short, key_with_cameras, node_key,
 };
 use px_protocol::art::{Camera, Domain};
@@ -192,6 +192,17 @@ fn bundling(
     bundle.to_bytes(node, cameras)
 }
 
+/// 画布折进键（只对**场**那一档：场的分辨率就是画布）。
+fn key_with_canvas(key: Key, grid: Grid) -> Key {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"px_canvas/v1");
+    hasher.update(&key);
+    hasher.update(&grid.width.to_le_bytes());
+    hasher.update(&grid.height.to_le_bytes());
+    hasher.update(grid.projection.name().as_bytes());
+    *hasher.finalize().as_bytes()
+}
+
 /// 接口哈希的低 32 位：清单里那个只用于显示/对账的 `op_version` 字段。
 ///
 /// ⚠ 真正进键的是接口哈希的十六进制文本（64 位）；这里只是把它塞进老字段的形状里。
@@ -313,7 +324,6 @@ struct Context {
     /// 算子库**按需装载**：只写 shader / 只写场景的图（`--bin shaders` / `--bin scene`）
     /// 一个算子都不需要，不该因为找不到 dylib 就起不来。
     libraries: OnceLock<Vec<OpLibrary>>,
-    index: Mutex<BTreeMap<String, IndexEntry>>,
     manifest: Mutex<Vec<ManifestEntry>>,
     /// 每个节点实际读到的参数（诊断：缺文件是静默用默认值的，设计师看不到自己少写了什么）。
     params_used: Mutex<BTreeMap<String, ParamsUsed>>,
@@ -431,8 +441,7 @@ pub fn begin(spec: GraphSpec) {
         .map(|value| value != "0")
         .unwrap_or(false);
     let libraries = OnceLock::new();
-    let index = load_index(&cache_root);
-    let cached = index.len();
+    let cached = cache_root.join(&spec.name).join("manifest.json").is_file() as usize;
 
     let _ = CONTEXT.set(Context {
         grid: Grid {
@@ -444,7 +453,6 @@ pub fn begin(spec: GraphSpec) {
         cache_root: cache_root.clone(),
         fresh,
         libraries,
-        index: Mutex::new(index),
         manifest: Mutex::new(Vec::new()),
         params_used: Mutex::new(BTreeMap::new()),
         spec,
@@ -496,15 +504,14 @@ pub fn node(op_id: &str, name: &str, inputs: &[&Artifact]) -> Artifact {
     // ⚠ 接口哈希取代了手写的 `version`：它由算子那三个类型名推出来，
     //   改了参数/输入/输出类型自动变，没有"忘了升版本"这回事。
     let interface = format!("{:016x}", descriptor.interface);
-    let key = node_key(
-        op_id,
-        &interface,
-        context.spec.version,
-        (context.spec.width, context.spec.height),
-        context.spec.projection,
-        &params_json,
-        &input_keys,
-    );
+    // ⚠ 老路径的每个节点都掺画布（它不知道域）。类型化那一支按域决定 ——
+    //   两条路的键从此**不必一致**，因为老路径只剩演示分支在用。
+    let key = node_key(op_id, &interface, &params_json, &input_keys);
+    let key = if descriptor.kind == OpKind::Field {
+        key_with_canvas(key, context.grid)
+    } else {
+        key
+    };
     // ⚠ 体积那一档**不掺相机**：相机是「怎么看」，而体积没人看（渲染器只读 mesh）。
     let key = if descriptor.kind == OpKind::Volume {
         key
@@ -571,48 +578,6 @@ pub fn node(op_id: &str, name: &str, inputs: &[&Artifact]) -> Artifact {
 
     let payload = decode_payload(&bytes, descriptor.kind, context.spec.projection, name);
     let millis = started.elapsed().as_millis() as u64;
-
-    {
-        let mut index = context.index.lock().expect("索引锁坏了");
-        if hit {
-            if let Some(meta) = index.get(&hex(&key)) {
-                // ⚠ 这里原本有一条"源码变了但 VERSION 没升"的告警。
-                //   现在源码指纹**直接进键** ⇒ 那种陈旧命中不可能发生，告警也随之删掉。
-                if meta.graph_version == context.spec.version
-                    && meta.graph_source_hash != context.spec.source_hash
-                {
-                    eprintln!(
-                        "⚠ 图 {} 的源码变了但 GRAPH_VERSION 仍是 {}；若拓扑或写死的常量变了，请升版本并加 PX_PCG_FRESH=1 重烘",
-                        context.spec.name, context.spec.version,
-                    );
-                }
-                if meta.dll != library.fingerprint() {
-                    eprintln!(
-                        "⚠ {name}（{op_id}）这次是拿**另一份**算子库算的（dll {:016x} → {:016x}），但两者的源码指纹相同 ⇒ 内容一致，只是构建产物换了。若输出语义变了，请加 PX_PCG_FRESH=1 重烘",
-                        meta.dll,
-                        library.fingerprint(),
-                    );
-                }
-            }
-        } else {
-            index.insert(
-                hex(&key),
-                IndexEntry {
-                    op_id: op_id.to_string(),
-                    op_version: interface_version(descriptor.interface),
-                    graph_version: context.spec.version,
-                    source_hash: descriptor.source_hash.to_string(),
-                    graph_source_hash: context.spec.source_hash,
-                    node: name.to_string(),
-                    millis,
-                    bytes: size,
-                    dll: library.fingerprint(),
-                },
-            );
-            save_index(&context.cache_root, &index);
-        }
-    }
-
     let entry = match &payload {
         Payload::Field(field) => {
             let stats = field.stats();
@@ -919,26 +884,6 @@ pub fn write_graph_manifest(graph: &str, entries: &[ManifestEntry]) -> Result<Pa
     Ok(path)
 }
 
-fn load_index(cache_root: &Path) -> BTreeMap<String, IndexEntry> {
-    std::fs::read_to_string(cache_root.join("index.json"))
-        .ok()
-        .and_then(|text| serde_json::from_str(&text).ok())
-        .unwrap_or_default()
-}
-
-fn save_index(cache_root: &Path, index: &BTreeMap<String, IndexEntry>) {
-    if let Some(parent) = cache_root.parent() {
-        std::fs::create_dir_all(parent).ok();
-    }
-    match serde_json::to_string_pretty(index) {
-        Ok(text) => {
-            if let Err(err) = std::fs::write(cache_root.join("index.json"), text) {
-                eprintln!("写缓存索引失败：{err}");
-            }
-        }
-        Err(err) => eprintln!("缓存索引无法序列化：{err}"),
-    }
-}
 
 pub const SHADER_VERSION: u32 = 1;
 

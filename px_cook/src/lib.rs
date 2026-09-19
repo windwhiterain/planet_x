@@ -216,6 +216,13 @@ pub mod payload {
     /// 有个类型参数，这样 `PxOp::payload()` 能指名自己的域。
     pub struct Kind<P>(pub std::marker::PhantomData<P>);
 
+    impl<P: Build> Kind<P> {
+        /// 键里要不要掺画布 —— 见 `Build::RESOLUTION_IS_CANVAS`。
+        pub fn resolution_is_canvas(&self) -> bool {
+            P::RESOLUTION_IS_CANVAS
+        }
+    }
+
     pub trait Build: Sized {
         /// 产物档 —— 相机口径与解码路径都从它推。
         ///
@@ -223,6 +230,12 @@ pub mod payload {
         /// 所以"写错域"是编译错而不是运行期的怪事。
         const KIND: px_graph_schema::OpKind;
         const WITH_CAMERAS: bool;
+        /// **这个域的产物尺寸是不是就是画布？**
+        ///
+        /// * `true`（场）：分辨率 = 画布 ⇒ 画布必须进键，否则"改了画布却命中旧分辨率"。
+        /// * `false`（体积/网格）：自己的分辨率由参数给 ⇒ 画布与产物无关，
+        ///   掺进去只会让"改画布"连带重烘它们。
+        const RESOLUTION_IS_CANVAS: bool;
         fn encode(payload: &Self) -> Result<Vec<u8>, String>;
         /// 上游字节 → 类型化的值。场载荷不含投影，所以要 `projection` 补回去。
         fn decode(bytes: &[u8], projection: Domain, node: &str) -> Result<Self, String>;
@@ -231,6 +244,7 @@ pub mod payload {
     impl Build for Field {
         const KIND: px_graph_schema::OpKind = px_graph_schema::OpKind::Field;
         const WITH_CAMERAS: bool = true;
+        const RESOLUTION_IS_CANVAS: bool = true;
         fn encode(payload: &Self) -> Result<Vec<u8>, String> {
             px_field_schema::payload::encode(payload).placeholder()
         }
@@ -243,6 +257,7 @@ pub mod payload {
     impl Build for VolumeData {
         const KIND: px_graph_schema::OpKind = px_graph_schema::OpKind::Volume;
         const WITH_CAMERAS: bool = false;
+        const RESOLUTION_IS_CANVAS: bool = false;
         fn encode(payload: &Self) -> Result<Vec<u8>, String> {
             px_volume_schema::payload::encode(payload).placeholder()
         }
@@ -255,6 +270,7 @@ pub mod payload {
     impl Build for MeshData {
         const KIND: px_graph_schema::OpKind = px_graph_schema::OpKind::Mesh;
         const WITH_CAMERAS: bool = true;
+        const RESOLUTION_IS_CANVAS: bool = false;
         fn encode(payload: &Self) -> Result<Vec<u8>, String> {
             px_mesh_schema::payload::encode(payload).placeholder()
         }
@@ -327,10 +343,14 @@ where
     hasher.update(O::ID.as_bytes());
     hasher.update(&O::interface().to_le_bytes());
     hasher.update(O::SOURCE_HASH.as_bytes());
-    hasher.update(&cache.graph_version().to_le_bytes());
-    hasher.update(&grid.width.to_le_bytes());
-    hasher.update(&grid.height.to_le_bytes());
-    hasher.update(grid.projection.name().as_bytes());
+    // ⚠ **画布按域决定要不要进键**：场的分辨率就是画布，体积/网格不是。
+    //   一刀切（都掺）会让"改画布"连带重烘体积；一刀切（都不掺）会让场出现
+    //   "同一个键、不同分辨率"。
+    if O::payload().resolution_is_canvas() {
+        hasher.update(&grid.width.to_le_bytes());
+        hasher.update(&grid.height.to_le_bytes());
+        hasher.update(grid.projection.name().as_bytes());
+    }
     hasher.update(params_json.as_bytes());
     inputs.collect(&mut hasher);
     let base = *hasher.finalize().as_bytes();
@@ -671,4 +691,43 @@ macro_rules! px_op_table {
             })
         }
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::payload::Build;
+
+    /// **哪些域的产物尺寸就是画布** —— 这条决定键里要不要掺画布。
+    ///
+    /// 病根：一刀切都会错。
+    /// * 都掺 ⇒ 改画布连带重烘体积/网格（它们的尺寸由参数给，与画布无关）。
+    /// * 都不掺 ⇒ 场出现「同一个键、不同分辨率」。
+    #[test]
+    fn only_the_field_domain_bakes_the_canvas_into_its_size() {
+        assert!(
+            <px_field_schema::field::Field as Build>::RESOLUTION_IS_CANVAS,
+            "场的分辨率就是画布 ⇒ 画布必须进键"
+        );
+        assert!(
+            !<px_volume_schema::VolumeData as Build>::RESOLUTION_IS_CANVAS,
+            "体积的分辨率由参数（res/layers）给 ⇒ 画布与它无关"
+        );
+        assert!(
+            !<px_mesh_schema::MeshData as Build>::RESOLUTION_IS_CANVAS,
+            "网格的尺寸由参数给 ⇒ 画布与它无关"
+        );
+        // 顺带把"域与载荷一致"那条口径也读一遍（`px_op!` 里已经断言过，这里是第二只眼睛）。
+        assert_eq!(
+            <px_field_schema::field::Field as Build>::KIND,
+            px_graph_schema::OpKind::Field
+        );
+        assert_eq!(
+            <px_volume_schema::VolumeData as Build>::KIND,
+            px_graph_schema::OpKind::Volume
+        );
+        assert_eq!(
+            <px_mesh_schema::MeshData as Build>::KIND,
+            px_graph_schema::OpKind::Mesh
+        );
+    }
 }

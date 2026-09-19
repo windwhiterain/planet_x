@@ -7,7 +7,12 @@ use px_protocol::art::{Camera, Domain};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GraphSpec {
     pub name: String,
+    /// **图的身份**，不是键的一部分。
+    ///
+    /// ⚠ 它曾经进节点键 —— 那是错的：改图脚本里别处一行代码，不该让某个节点的产物作废。
+    ///   它现在的用途是"这张图的这一版"这个说法本身（清单里记着它）。
     pub version: u32,
+    /// 图脚本源码的哈希。用途同上：图的身份，**不进键**。
     pub source_hash: u64,
     pub width: u32,
     pub height: u32,
@@ -26,26 +31,6 @@ pub struct Grid {
     pub projection: Domain,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct IndexEntry {
-    pub op_id: String,
-    /// 接口哈希的低 32 位（只用于显示/对账；真正进键的是 64 位接口哈希的文本）。
-    pub op_version: u32,
-    pub graph_version: u32,
-    /// 算子库的**源码指纹**（blake3 十六进制，`build.rs` 算的）。
-    pub source_hash: String,
-    pub graph_source_hash: u64,
-    pub node: String,
-    pub millis: u64,
-    pub bytes: u64,
-    /// 这个节点是哪个 dll 算出来的（dll 文件字节的 blake3 前 8 字节）。
-    ///
-    /// ⚠ **它不进键**（用户裁决）：dll 是一个字节序列，整包进键就是 §19 当年否掉的
-    /// 「一动全废」（改任一算子 ⇒ 所有图的全部节点换键）。它进这里干两件事：
-    /// 「这个键是哪个二进制算的」可查，以及换 dll 而版本没升时能当场喊（§19.1 同一套）。
-    #[serde(default)]
-    pub dll: u64,
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ManifestEntry {

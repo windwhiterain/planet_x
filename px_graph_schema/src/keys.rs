@@ -3,7 +3,7 @@
 use serde::Serialize;
 use serde_json::Value;
 
-use px_protocol::art::{Camera, Domain};
+use px_protocol::art::Camera;
 use px_protocol::wire::Blob;
 
 use crate::identity::fnv1a;
@@ -24,23 +24,35 @@ fn sorted(value: Value) -> Value {
     }
 }
 
+/// **一个节点的键 = 产出这个节点的那些东西。**
+///
+/// ```text
+/// op_id + 接口哈希 + 规范参数 + 上游的键
+/// ```
+///
+/// ⚠ 这里**没有**两样从前有、现在删掉的东西，理由同一个 —— 它们不是"这个节点是什么"：
+///
+/// * **`graph_version`**：改图脚本里别处一行代码，不该让这个节点的产物作废。
+///   它是**图的属性**，进键等于把"节点身份"与"这张图今天长什么样"绑在一起。
+/// * **画布尺寸**：它对**场**是真的（场的分辨率就是画布），但对体积/网格无关
+///   —— 所以它由**域自己**声明要不要（`Payload::RESOLUTION_IS_CANVAS`），
+///   不在这里一刀切。见 `px_cook::cook`。
+///
+/// ⇒ 同样的算子、同样的参数、同样的上游（+ 该域的画布）⇒ **同一个产物**，
+///   不管图脚本长什么样。
+///
+/// ⚠ 投影不在这里：它只影响**编码/解码的字节布局**，那种差异该由 `Payload` 的
+///   `decode`/`encode` 承担，而不是靠往节点键里掺一个"当时用什么投影编的"。
 pub fn node_key(
     op_id: &str,
     op_interface: &str,
-    graph_version: u32,
-    canvas: (u32, u32),
-    projection: Domain,
     params_json: &str,
     input_keys: &[Key],
 ) -> Key {
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"px_pcg/v1");
+    hasher.update(b"px_pcg/v2");
     hasher.update(op_id.as_bytes());
     hasher.update(op_interface.as_bytes());
-    hasher.update(&graph_version.to_le_bytes());
-    hasher.update(&canvas.0.to_le_bytes());
-    hasher.update(&canvas.1.to_le_bytes());
-    hasher.update(projection.name().as_bytes());
     hasher.update(params_json.as_bytes());
     for key in input_keys {
         hasher.update(key);

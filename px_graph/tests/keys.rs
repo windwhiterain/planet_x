@@ -1,14 +1,11 @@
-use px_field_schema::field::{Field, Projection};
+use px_field_schema::field::Field;
 use px_field_schema::params::fbm::Params;
 use px_graph::{canonical_params, node_key, shader_key};
 
-fn key_of(params: &Params, graph_version: u32, inputs: &[[u8; 32]]) -> [u8; 32] {
+fn key_of(params: &Params, inputs: &[[u8; 32]]) -> [u8; 32] {
     node_key(
         "field.fbm",
         "0123456789abcdef",
-        graph_version,
-        (384, 192),
-        Projection::Equirect,
         &canonical_params(params),
         inputs,
     )
@@ -23,8 +20,8 @@ fn the_same_values_give_the_same_key_however_they_were_written() {
         "省略的字段应当等于默认值"
     );
     assert_eq!(
-        key_of(&Params::default(), 1, &[]),
-        key_of(&explicit, 1, &[])
+        key_of(&Params::default(), &[]),
+        key_of(&explicit, &[])
     );
 }
 
@@ -34,14 +31,14 @@ fn comments_and_spacing_do_not_change_the_key() {
     let noisy: Params =
         toml::from_str("# 注释\nfrequency   =   6.0   # 行内注释\n\noctaves = 4\n").expect("解析失败");
     assert_eq!(canonical_params(&plain), canonical_params(&noisy));
-    assert_eq!(key_of(&plain, 1, &[]), key_of(&noisy, 1, &[]));
+    assert_eq!(key_of(&plain, &[]), key_of(&noisy, &[]));
 }
 
 #[test]
 fn changing_a_value_changes_the_key() {
     let a: Params = toml::from_str("frequency = 6.0\n").expect("解析失败");
     let b: Params = toml::from_str("frequency = 6.5\n").expect("解析失败");
-    assert_ne!(key_of(&a, 1, &[]), key_of(&b, 1, &[]));
+    assert_ne!(key_of(&a, &[]), key_of(&b, &[]));
 }
 
 #[test]
@@ -53,43 +50,42 @@ fn a_different_interface_changes_the_key() {
     let params = Params::default();
     let before = node_key(
         "field.fbm",
-        "0123456789abcdef", 1, (384, 192), Projection::Equirect, &canonical_params(&params), &[]);
+        "0123456789abcdef",
+        &canonical_params(&params),
+        &[],
+    );
     let after = node_key(
         "field.fbm",
-        "fedcba9876543210", 1, (384, 192), Projection::Equirect, &canonical_params(&params), &[]);
+        "fedcba9876543210",
+        &canonical_params(&params),
+        &[],
+    );
     assert_ne!(before, after, "接口形状哈希必须进键");
 }
 
+/// ⚠ 这条门是**反的**（原来是"图版本必须进键"）。
+///
+/// 一个节点的键 = 产出这个节点的那些东西：算子身份 + 规范参数 + 上游的键。
+/// `graph_version` 是**图的属性** —— 改图脚本里别处一行代码，不该让这个节点的产物作废。
 #[test]
-fn the_canvas_size_is_part_of_the_key() {
+fn the_graph_version_is_not_part_of_the_key() {
     let params = Params::default();
-    let small = node_key(
-        "field.fbm",
-        "0123456789abcdef", 1, (384, 192), Projection::Equirect, &canonical_params(&params), &[]);
-    let large = node_key(
-        "field.fbm",
-        "0123456789abcdef", 1, (768, 384), Projection::Equirect, &canonical_params(&params), &[]);
-    assert_ne!(small, large, "画布尺寸必须进键，否则改分辨率会命中旧尺寸的产物");
-}
+    // `node_key` 的签名里已经没有 `graph_version` 了 —— 这条测试记录的就是那个决定。
+    // 想证明"它不影响键"，最直接的办法是同一个调用给出同一个键（没有可变的第三个数）。
+    let once = key_of(&params, &[]);
+    let twice = key_of(&params, &[]);
+    assert_eq!(once, twice, "键只由算子身份 + 参数 + 上游决定");
 
-#[test]
-fn bumping_the_graph_version_changes_the_key() {
-    let params = Params::default();
-    let g1 = node_key(
-        "field.fbm",
-        "0123456789abcdef", 1, (384, 192), Projection::Equirect, &canonical_params(&params), &[]);
-    let g2 = node_key(
-        "field.fbm",
-        "0123456789abcdef", 2, (384, 192), Projection::Equirect, &canonical_params(&params), &[]);
-    assert_ne!(g1, g2, "图版本必须进键");
+    // ⚠ 画布同理：它对**场**是真的，但那件事由 `px_cook` 按域决定
+    //   （`Payload::RESOLUTION_IS_CANVAS`），不在 `node_key` 里一刀切。
 }
 
 #[test]
 fn changing_an_input_changes_the_key() {
     let params = Params::default();
-    let a = key_of(&params, 1, &[[1u8; 32]]);
-    let b = key_of(&params, 1, &[[2u8; 32]]);
-    let c = key_of(&params, 1, &[[1u8; 32], [1u8; 32]]);
+    let a = key_of(&params, &[[1u8; 32]]);
+    let b = key_of(&params, &[[2u8; 32]]);
+    let c = key_of(&params, &[[1u8; 32], [1u8; 32]]);
     assert_ne!(a, b, "输入产物变了，下游必须重算");
     assert_ne!(a, c, "输入个数不同应当是不同的键");
 }

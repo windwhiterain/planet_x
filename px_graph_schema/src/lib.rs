@@ -38,4 +38,4 @@ pub use keys::{
 pub use load::OpLibrary;
 pub use op::{OpCall, OpDescriptor, OpKind, OpTable, ParamsCanonical};
 pub use payload::PayloadBundle;
-pub use protocol::{GraphSpec, Grid, IndexEntry, ManifestEntry};
+pub use protocol::{GraphSpec, Grid, ManifestEntry};
