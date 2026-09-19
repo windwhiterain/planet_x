@@ -70,7 +70,7 @@ fn main() -> Result<(), Fault> {
         //    它的 `bake<ClosedForm<…>>` 是在那个 dylib **内部**单态化出来的。
         //    ⚠ 描述符声明了 `inputs = ["coverage"]`（老路径的接口形状），所以这一格必须给；
         //      但**闭式那一档不看它** —— 覆盖度是 dylib 里现算的。
-        let closed = px_graph::node("volume.cloud.coarse.closed", "coarse_closed", &[&source_artifact]);
+        let closed = px_graph::node(px_graphs::mono::MONO_ID, "coarse_closed", &[&source_artifact]);
 
         // 在**同一批方向**上把两条路的覆盖度并排量出来（这才是可比的东西：
         // 比烘出来的体积没有信息量 —— `shape` 在覆盖度低于阈值时两边都归零）。
@@ -95,7 +95,7 @@ fn main() -> Result<(), Fault> {
         );
         println!(
             "  生成的实例：{}（键 {}）{} 面 × {}² × {} 层 = {} 个采样，值域 {:.4}..{:.4}",
-            "volume.cloud.coarse.closed",
+            px_graphs::mono::MONO_ID,
             px_graph::hex_short(&closed.key),
             PATCHES,
             volume.res,

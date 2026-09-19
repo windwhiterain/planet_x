@@ -1,0 +1,23 @@
+# ⚠ 这一份是**生成的**（`cargo run -p px_graphs --bin mono-gen` 复制到 `target/mono/crate/`）。
+# 它落在 `target/` 下、又按内容换路径，所以不能当主 workspace 的成员 ——
+# 空 `[workspace]` 表就是为了说这句话。（代价：它自己一份 `Cargo.lock`。）
+[workspace]
+
+[package]
+name = "px_mono"
+version = "0.1.0"
+edition = "2024"
+
+# `cdylib`：导出面只有 `px_mono_op_table` 那一个符号（入口名由库名派生，
+# 见 `px_graph_schema::op::table_symbol`）。不必为一堆上游元数据买单。
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+px_cook = { path = "../../../px_cook" }
+px_graph_schema = { path = "../../../px_graph_schema" }
+px_field_schema = { path = "../../../px_field_schema" }
+px_volume_schema = { path = "../../../px_volume_schema" }
+px_verify = { path = "../../../px_verify" }
+px_volume_op = { path = "../../../px_volume_op" }
+serde_json = { version = "1", features = ["float_roundtrip"] }

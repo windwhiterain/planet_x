@@ -199,29 +199,38 @@ pub fn eval_closed<F: FieldFn>(params, &F) -> VolumeData // = bake::<F>
 
 ## §166 生成单态化实例 + 动态链接（这一级终于做了）
 
-**要的是「自动生成单态化 → 编成 dylib → 动态装载」，不是把实例静态烘进图程序。** 落成的形状：
+**要的是「自动生成单态化 → 编成 dylib → 动态装载」，不是把实例静态烘进图程序。**
+⚠ 而且**两个 stage 都必须住在 graph scripts 底下**（用户裁定：不是在 `tools/` 那种通用位置）。
+
+### §166.1 布局（`px_graphs/` 底下）
 
 ```text
-tools/mono-template/          模板（人手写、进 git）
-  src/fields.rs               ⭐ 编辑面：那个闭式场函数
-  src/lib.rs                  接线：描述符 / canonical / call（生成物就是它的复制）
-  Cargo.toml                  cdylib；空 `[workspace]`（它落在 target/ 下，不能当成员）
-tools/mono-gen.ps1            生成器：算 mono_key → 落到 target/mono/crate → cargo build → 装入 target/debug
+px_graphs/
+  mono/fields.rs              ⭐ stage 1：要单态化的那一半（**编辑面**，图自己的场函数）
+  mono/template/              stage 2 的三份模板（人手写、进 git）
+    Cargo.toml                cdylib + 空 [workspace]
+    lib.rs                    接线：描述符 / canonical / call
+    identity.rs               身份占位（生成时具体化）
+  src/mono.rs                 身份：MONO_ID / VERSION / INGREDIENTS（配料清单）
+  src/bin/mono-gen.rs         生成器：算身份 → 复制到 target/mono/crate → cargo build → 装入
 ```
 
-* **`bake<ClosedForm<…>>` 的实例是在那个 dylib 内部单态化出来的** —— 这是这一级存在的全部理由
-  （泛型的实例化要求"定义"与"类型参数"在同一个编译单元里，而图程序是 `bin`）。
-* 图脚本只写 `node("volume.cloud.coarse.closed", "coarse_closed", &[&source])` ——
-  **一个字符串 id**，`clouds.exe` 里没有那个算子的任何代码。
+用法：`cargo run -q -p px_graphs --bin mono-gen`。
 
-### §166.1 读数（改一行场函数）
+**`bake<ClosedForm<…>>` 的实例是在那个 dylib 内部单态化出来的** —— 这是这一级存在的全部理由
+（泛型的实例化要求"定义"与"类型参数"在同一个编译单元里，而图程序是 `bin`）。
+图脚本只写 `node(px_graphs::mono::MONO_ID, "coarse_closed", &[&source])` ——
+**`clouds.exe` 里没有那个算子的任何代码**。
+
+### §166.2 读数（改一行场函数）
 
 | | 读数 |
 |---|---|
-| 改一行 `fields.rs` → 生成 + 编 dylib | **1.56 s** |
+| 改一行 `mono/fields.rs` → 生成 + 编 dylib | **1.75 s** |
 | 同期 `clouds.exe` 的 sha256 | **不变**（图程序一个字节都没重编） |
-| 下一次跑（`--closed-cover`） | 键 `526e1961` → `2bf8ab4e` ⇒ **必然重算**，不可能陈旧命中 |
+| 下一次跑（`--closed-cover`） | 键必变（`2bf8ab4e` → `316df462`）⇒ **必然重算**，不可能陈旧命中 |
 | 生成物大小 | **2.89 MB**（对比 `px_volume_op.dll` 的 13.8 MB） |
+| 全套测试 | **180 通过 / 0 失败** |
 
 ### §166.2 ⚠ 身份与陈旧命中：**算子的源码哈希必须进键**
 
@@ -267,8 +276,9 @@ tools/mono-gen.ps1            生成器：算 mono_key → 落到 target/mono/cr
 
 1. **另外三张图没迁**（`planet` / `desert` / `scene` 仍是老 `node()` 路径）。纯机械活。
 2. **生成的实例只接进 `--closed-cover` 这个演示分支**，没进任何一张图的正路。
-3. **生成器是手写的 PowerShell + 手写模板**：`mono_key` 的配料清单是手维护的
-   （`tools/mono-gen.ps1` 顶部那 12 条）。要真当工具用，该由 `fields.rs` 的声明驱动。
+3. **生成器的配料清单仍是手维护的**（`px_graphs/src/mono.rs` 的 `INGREDIENTS` 那 15 条，
+   写成定长数组就是为了多一条编译期就报）。这一条比"手写脚本"好，但还没到
+   「由 `fields.rs` 的声明自动推出来」。
 4. **§166.4 那条 dylib 依赖**（上游 DLL 递归）没解决。
 5. **`source_hash.rs` 那道门没覆盖新的 `typed.rs`** 与模板里的 `SOURCE_HASH`。
 6. **`node()` 与 `cook_*` 的键坐标系不同**（前者现已含 source_hash，后者含 source_hash 但

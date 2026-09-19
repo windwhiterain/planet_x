@@ -1,9 +1,0 @@
-[package]
-name = "px_loadprobe"
-version = "0.1.0"
-edition = "2024"
-
-[dependencies]
-px_graph_schema = { path = "../../px_graph_schema" }
-
-[workspace]
