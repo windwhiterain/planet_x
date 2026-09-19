@@ -13,9 +13,25 @@ const PROTOCOL_WHITELIST: [&str; 2] = ["serde", "serde_json"];
 //   ② 红（负对照）：把这条边临时改成 `("px_render", "px_pass")`（宿主真有的依赖）⇒ 断言当场响，
 //      报的是 `px_render 在 [dependencies] 里依赖了 px_pass` ⇒ **证明那个包名确实进了扫描**
 //      （没有主体的边是不会响的）。负对照跑完即恢复，读数记在 `15-render-wgpu.md` §157。
-// ⚠ 剩下的空档照旧：第二条边 `px_web` 今天**也没有主体**（那个包还不存在）—— 本表是
-// "现在 + 将来"两种边混装，所以**不许**加"每条边都必须有主体"的断言（那会把 `px_web` 判红）。
-const FORBIDDEN_EDGES: [(&str, &str); 2] = [("px_render", "px_sim"), ("px_web", "px_sim")];
+// ⚠ 剩下的空档：第二条边 `px_web` 今天**也没有主体**（那个包还不存在）—— 本表是
+// "现在 + 将来"两种边混装。
+//
+// ⚠ **§157 之后取代上面那句"不许加'每条边都必须有主体'的断言"**（本条由评审裁，原句留着是记录）：
+// 那句的本意是"别把 `px_web` 判红"，但它连**真正该响的那一格**也一起放过了 ——
+// `px_render` 丢掉主体时静默了整整一档，而那正是这条表存在的理由。
+// ⇒ 正确的分法不是"要不要主体"，是**"这条边今天该不该有主体"**：
+// `Present` = 该有 ⇒ 扫不到就红；`Reserved` = 还没有这个包 ⇒ 扫不到正常，但写在表里就是明账。
+enum Subject {
+    /// 这个包**今天就在** workspace 里 ⇒ **必须扫得到**，扫不到说明它被改名/删掉了，当场红。
+    Present,
+    /// 这个包**还不存在**（"将来"那一档）⇒ 扫不到是正常的 —— 但它是明账，不是遗忘。
+    Reserved,
+}
+
+const FORBIDDEN_EDGES: [(&str, &str, Subject); 2] = [
+    ("px_render", "px_sim", Subject::Present),
+    ("px_web", "px_sim", Subject::Reserved),
+];
 
 fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -81,12 +97,14 @@ fn consumers_never_depend_on_sim() {
     }
 
     let mut checked = 0usize;
+    let mut scanned: BTreeSet<String> = BTreeSet::new();
     for path in &manifests {
         let doc = manifest(path);
         let name = package_name(&doc, "?");
+        scanned.insert(name.clone());
         for section in ["dependencies", "dev-dependencies", "build-dependencies"] {
             let deps = dep_names(&doc, section);
-            for (from, to) in FORBIDDEN_EDGES {
+            for (from, to, _) in FORBIDDEN_EDGES {
                 assert!(
                     !(name == from && deps.contains(to)),
                     "{name} 在 [{section}] 里依赖了 {to}：渲染器与 sim 只能通过 px_protocol 通信"
@@ -94,6 +112,20 @@ fn consumers_never_depend_on_sim() {
             }
         }
         checked += 1;
+    }
+
+    // ⚠ 替我们盯着"一条边悄悄丢了主体"：`Present` 却扫不到 ⇒ 当场红。
+    // §156 的教训：`px_render` 被删之后，那条边**留在表里、永远扫不到东西、也永远不会响**
+    // ⇒ "渲染宿主不许拖 sim"静默地没人守了。一条**没有主体的门**看起来与一条**守得住的门**
+    // 长得一模一样，唯一的区别就是这里多问一句。
+    for (from, _, subject) in FORBIDDEN_EDGES {
+        assert!(
+            !matches!(subject, Subject::Present) || scanned.contains(from),
+            "禁止边 ({from}, …) 声明了 Subject::Present，但 workspace 里扫不到包 `{from}` \
+             —— 它被改名或删掉了？这条边现在**没有主体**，也就是没有人在守。\
+             真删了就把它改成 Subject::Reserved（明账）或换掉主体（§157 的先例）。\
+             扫到的包：{scanned:?}"
+        );
     }
 
     assert!(
