@@ -4374,28 +4374,67 @@ px_protocol ─> px_ops ─> px_scene ─> px_graphs（图程序）─> pcg
   ⚠ 交叉核对过一次：`art/anchor/frozen/*.pxart` 那六份在 git 里的文件字节就是这六个值。
 - **22 份配方**逐个比对：内容键 / 文件 sha256 / 字节数全同（`22 相同 / 0 不同`）。
   ⚠ 类型系统重做**之后**又重跑了一遍，仍全同 ⇒ 那一轮是**产物中性**的。
-- `px_scene` 38 个单测 + `px_host_protocol` 7 个 + 各 crate 全绿；
+- `px_scene` 41 个单测 + 各 crate 全绿（`cargo test --workspace` **0 failed**）；
   `cargo check --workspace --all-targets` exit 0。
 
 ### 边界收窄（用户口径：`px_protocol` 只管 `px-scene` ⇄ `px-pass`）
 
-- `sim` → `game::sim`；`render` / `client` / 作业信封 → 新的 **`px_host_protocol`**
-  （纯数据：serde / serde_json / `px_protocol`，**不带 GPU 栈**）；`px_render` 回到 bin-only。
+- `sim` → `game::sim`（零改动）。作业请求 / 回读报告 / 租约 / 四种帧与信封
+  （`render` / `client` / `frame`）**留在 `px_protocol`**，见下。
 - ⚠ **快照一个字节没动**（`protocol_hash()` 是它的哈希，而它闸着跨进程握手）。
-- ⚠ `px_protocol`(dev) → `px_host_protocol` → `px_protocol` 是一条 **cargo 允许的 dev 环**
-  （dev 依赖不进产物）。要完全无环只能把 `ProtocolId` / `wire` 再下沉一个 crate —— 没做。
 - `tests/crate_graph.rs` 原来只查 `[dependencies]`、**看不见 dev 边** ⇒ 加宽成
   "dev 依赖里不许有 `px_render`"（负对照实测会红）。
 
-### 一处要认的取舍
+#### ⚠⚠ 这一轮最大的一条教训：**不要用"测试要什么"去切 crate**
 
-`SceneFile.formats`（缺省 `false`）：per-pass 表**晚于内容** —— `surface.wgsl` 的结构体里
-还住着云影那几个格（`inner`/`outer`/`coverage`/`shadow`/`height`/`gain`），而 `opaque`
-那一档**故意**不列它们 ⇒ 给既有配方打开会把 `orbit-soft` 一族当场判红。
-**新内容请写 `formats = true`**；等 `surface` 腾出那几个格之后这一栏就该删掉（那时恒真）。
+过程是这样的（留在这里是因为它很容易再犯）：
+
+1. `px_protocol` 的快照测试要按**真类型**构造那些形状（抄一份假夹具进测试等于把
+   "形状变了 ⇒ 指纹变 ⇒ 握手拒旧对端"这条门拆掉）⇒ 它需要 `render` / `client`。
+2. 那些形状住在 `px_render` 里，而 `px_protocol`(dev) → `px_render` 会把 **wgpu / naga / winit**
+   整栈编进协议测试 ⇒ **为了绕开它**，把它们拆去一个新 crate `px_host_protocol`。
+3. 那个新 crate 又要 `ProtocolId` / `wire`，而它们当时在 `px_protocol` ⇒ 成了一条 dev 环
+   ⇒ **又拆一个** `px_handshake` 来装握手身份与线格式。
+
+三个 crate 各自都"讲得通"，合起来是**让一条测试的依赖边决定了整套生产结构**。
+用户当场问：**"why there is still px_host_protocol?"** ⇒ 两个旁支 crate 全删，
+`render` / `client` / `frame` / `wire` / 握手身份 / `snapshots/` / `build.rs`
+**全部回家到 `px_protocol`**。
+
+- 依赖图现在**无环、无旁支**：`px_protocol` 只依赖 serde / serde_json；
+  `px_render`（宿主的唯一合法位置）挂的是那一份纯数据 ⇒ **没有 GPU 代价**。
+- 想换的那个好处**照样拿到了**：`px_protocol` 的测试构建里没有 wgpu / naga / winit
+  （`cargo tree -e normal,dev` 一行没有）。
+- ⚠ 判据：**形状按归属放**。测试要好写的边，那是**结果**，不是切 crate 的理由。
+
+#### 抓到的另一个真缺陷：**"找不到文件"被读成了"绿"**
+
+快照搬走之后 `protocol_snapshot_is_current` 仍在按旧路径找文件 ⇒ `expect("缺少协议快照")` 当场红，
+⚠ **但第一次汇总里它显示为"绿"** —— 我用 `Select-String 'FAILED'` 过滤那次汇总，
+把 `test result: FAILED` 那一行连同上下文一起滤掉了。
+⇒ **汇总测试结果不许用"过滤失败关键字"的读法**（滤掉的正是要找的）。改成按 `test result:`
+全量分组、`ok`/`FAILED`/`ignored` 逐条计数。路径已回原位，且找不到就红。
+
+### per-pass 对账现在**无条件跑**（曾经的 `formats` 开关已删）
+
+一度加过 `SceneFile.formats`（缺省 `false`）来把对账挡在既有配方外面，理由是"格式表晚于内容"。
+**那个理由经不起实测**：打开之后 `orbit-soft` 那一族确实红了，但红的是**判据自己**——
+
+`steps` / `seed` / `ablate` / `bound` / `gradient` 这几个格在 WGSL 里是 `u32`，而参数块的打包
+（`MaterialLayout::pack`，唯一那份真源）**本来就允许把整数写成数再 `as u32`**：它的判据是
+`number.fract() != 0.0`，然后 `as u32`。既有配方一直是这么给的，**落盘字节一直是对的**
+（这也是六份冻产物首轮就复现的原因）。旧判据却只看 `Value` 的 Rust 形状（`Num` ⇒ `F32`）
+⇒ 把好端端的内容判成"类型不符"，那是**假红**。
+
+⇒ 判据改成 [`stage::satisfies`](`px-scene/src/stage.rs`)：**以"打得进这个格吗"为准**，
+与打包那份真源同一套判据（整数格收整数值、带小数则点名拒，并查范围）。
+`formats` 开关随之删除，对账**无条件**跑 —— 判据与真源各说一套，最坏的结局是把内容逼着改。
+⚠ 别再把"判据太严"读成"内容不合规"：先看真源怎么打包。
 
 ### 还没做
 
 - `scene` 的**帧图配方**（`art/frame/*.toml` → `FrameFile`）仍是数据：多条 pipeline =
   多份帧图配方，这一点没变；但"另一条 pipeline 的 stage 类型"目前**只有 `default` 那一套**，
   换个 pipeline 要真跑起来还得写它自己的档位类型（机制在，第二个实例还没出现）。
+- `px_protocol` 的 `render` / `client` / `frame` 是**留**在这里的形状（见上），
+  宿主的唯一合法位置仍是 `px_render`；若哪天快照不再需要真类型，它们该顺着归属搬去 `px_render`。
