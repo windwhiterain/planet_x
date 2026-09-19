@@ -469,6 +469,9 @@ dependencies = [
 [[package]]
 name = "game"
 version = "0.1.0"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "getrandom"
@@ -1389,6 +1392,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "px_host_protocol"
+version = "0.1.0"
+dependencies = [
+ "px_protocol",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "px_mc"
 version = "0.1.0"
 dependencies = [
@@ -1433,6 +1445,8 @@ dependencies = [
 name = "px_protocol"
 version = "0.1.0"
 dependencies = [
+ "game",
+ "px_host_protocol",
  "serde",
  "serde_json",
  "toml",
@@ -1447,6 +1461,7 @@ dependencies = [
  "image",
  "naga",
  "pollster",
+ "px_host_protocol",
  "px_pass",
  "px_protocol",
  "px_shader",

@@ -27,9 +27,9 @@ use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use px_protocol::client;
-use px_protocol::render::{Job, Lease, Report, Request, Response, Scene, ShotReport};
-use px_protocol::stream::{self, Frame};
+use px_host_protocol::client as client;
+use px_host_protocol::frame::{self, Frame};
+use px_host_protocol::render::{Job, Lease, Report, Request, Response, Scene, ShotReport};
 use px_protocol::ProtocolId;
 
 use crate::digest;
@@ -145,7 +145,7 @@ fn serve_connection(server: &mut Server, mut stream: TcpStream) {
     let _ = stream.set_nodelay(true);
 
     let local = ProtocolId::local();
-    match stream::read_frame(&mut stream) {
+    match frame::read_frame(&mut stream) {
         Ok(Some(Frame::Protocol(remote))) => {
             if remote.schema_version != local.schema_version
                 || remote.protocol_hash != local.protocol_hash
@@ -159,26 +159,26 @@ fn serve_connection(server: &mut Server, mut stream: TcpStream) {
                     local.protocol_hash,
                     local.git_rev,
                 );
-                let _ = stream::write_frame(&mut stream, &Frame::Refused(reason.clone()));
+                let _ = frame::write_frame(&mut stream, &Frame::Refused(reason.clone()));
                 eprintln!("拒绝连接：{reason}");
                 return;
             }
         }
         other => {
             let reason = format!("握手指望 Protocol 帧，收到 {other:?}");
-            let _ = stream::write_frame(&mut stream, &Frame::Refused(reason));
+            let _ = frame::write_frame(&mut stream, &Frame::Refused(reason));
             return;
         }
     }
-    if stream::write_frame(&mut stream, &Frame::Protocol(local)).is_err() {
+    if frame::write_frame(&mut stream, &Frame::Protocol(local)).is_err() {
         return;
     }
 
-    let request = match stream::read_frame(&mut stream) {
+    let request = match frame::read_frame(&mut stream) {
         Ok(Some(Frame::Request(request))) => request,
         Ok(other) => {
             let reason = format!("指望 Request 帧，收到 {other:?}");
-            let _ = stream::write_frame(&mut stream, &Frame::Refused(reason));
+            let _ = frame::write_frame(&mut stream, &Frame::Refused(reason));
             return;
         }
         Err(err) => {
@@ -195,7 +195,7 @@ fn serve_connection(server: &mut Server, mut stream: TcpStream) {
             Frame::Refused(reason)
         }
     };
-    let _ = stream::write_frame(&mut stream, &frame);
+    let _ = frame::write_frame(&mut stream, &frame);
 }
 
 /// 请求里的一步：渲哪一份文档、存哪儿、从哪个角度看。
@@ -445,7 +445,7 @@ fn views_of(request: &Request, cam: Option<[f32; 3]>) -> render::Views {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use px_protocol::render::{Shot, View};
+    use px_host_protocol::render::{Shot, View};
 
     fn request(scene: Scene, out: &str) -> Request {
         Request {

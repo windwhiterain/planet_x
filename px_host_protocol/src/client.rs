@@ -1,10 +1,17 @@
+//! 渲染服务的客户端那一半（读租约 → 连端口 → 握手 → 发请求），原 `px_protocol::client`。
+//!
+//! ⚠ 与 `render` 同一条理由：租约里写着 `ProtocolId`，而作业请求是宿主自己的形状 ——
+//! 它留在 `px_protocol` 就是宿主 ⇄ 协议的循环依赖。**跨进程的握手本身没有搬**：
+//! `ProtocolId` / `Frame::Protocol` / 信封长度前缀仍然来自 `px_protocol`。
+
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use crate::ProtocolId;
+use px_protocol::ProtocolId;
+
+use crate::frame::{self, Frame};
 use crate::render::{ClientError, Lease, Request, Response};
-use crate::stream::{self, Frame};
 
 pub const LEASE_PATH: &str = "target/render-server.json";
 const CONNECT_TIMEOUT: Duration = Duration::from_millis(400);
@@ -30,8 +37,8 @@ pub fn write_lease(path: &Path, lease: &Lease) -> Result<(), ClientError> {
 
 fn handshake(stream: &mut TcpStream) -> Result<(), ClientError> {
     let local = ProtocolId::local();
-    stream::write_frame(stream, &Frame::Protocol(local.clone())).map_err(wire)?;
-    match stream::read_frame(stream).map_err(wire)? {
+    frame::write_frame(stream, &Frame::Protocol(local.clone())).map_err(wire)?;
+    match frame::read_frame(stream).map_err(wire)? {
         Some(Frame::Protocol(remote)) => {
             if remote.schema_version != local.schema_version
                 || remote.protocol_hash != local.protocol_hash
@@ -135,8 +142,8 @@ pub fn request_with(request: Request, autostart: bool) -> Result<Response, Clien
     } else {
         connect()?
     };
-    stream::write_frame(&mut stream, &Frame::Request(request)).map_err(wire)?;
-    match stream::read_frame(&mut stream).map_err(wire)? {
+    frame::write_frame(&mut stream, &Frame::Request(request)).map_err(wire)?;
+    match frame::read_frame(&mut stream).map_err(wire)? {
         Some(Frame::Response(response)) => Ok(response),
         Some(Frame::Refused(reason)) => Err(ClientError::Refused(reason)),
         other => Err(ClientError::Wire(format!(
@@ -149,6 +156,6 @@ fn io(err: std::io::Error) -> ClientError {
     ClientError::Io(err.to_string())
 }
 
-fn wire(err: crate::wire::WireError) -> ClientError {
+fn wire(err: px_protocol::wire::WireError) -> ClientError {
     ClientError::Wire(err.to_string())
 }

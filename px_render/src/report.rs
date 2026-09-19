@@ -1,4 +1,4 @@
-//! 回读到的字节 → 报告（`px_protocol::render::ShotReport`）里那几个读数。
+//! 回读到的字节 → 报告（`px_host_protocol::render::ShotReport`）里那几个读数。
 //!
 //! **为什么这一栏要住在宿主里**：读数必须从**回读出来的那些字节**算，不能从磁盘上的 PNG 算
 //! —— PNG 是压缩后的东西，而判据看的是原始像素（`px_render/src/main.rs::collect_shot_stat`
@@ -10,7 +10,7 @@
 //! `has_cloud`/`verdict` 那一段（:2514-2539）。那几个常数住在**另一个 crate 的 bin** 里，
 //! 拿不过来（`px_render` 是个二进制，不对外导出），所以这里是**搬一份**而不是"另定一套"：
 //! 口径换一格，`tools/frame-probe.ps1` 打出来的 `has_cloud`/`verdict` 就与历史不可比。
-//! ⚠ `px_protocol::render::ShotReport` 的文档注释里写的是"`diff_vs_ref_grid ≥ 0.5% × 总像素`"
+//! ⚠ `px_host_protocol::render::ShotReport` 的文档注释里写的是"`diff_vs_ref_grid ≥ 0.5% × 总像素`"
 //! —— **那句话与代码不一致**（代码是 `1% × 参考图的总光通量`）。这里跟**代码**走：
 //! 判据要复现的是"Bevy 宿主实际干了什么"，不是"注释里怎么写的"。
 

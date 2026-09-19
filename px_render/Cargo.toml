@@ -7,6 +7,12 @@ edition = "2024"
 px_protocol = { path = "../px_protocol" }
 px_shader = { path = "../px_shader" }
 px_pass = { path = "../px_pass" }
+# ⚠ 宿主协议面（作业形状 / 四种帧与信封 / 租约 + 客户端那半）住在只依赖 serde / serde_json /
+# `px_protocol` 的这个 crate 里（闭包里**没有 GPU 栈**）。
+# 它曾经住在本 crate 的三份 `mod`（`render_proto` / `client_proto` / `render_frame`），而那份摆法
+# 逼着 `px_protocol` 的快照测试把 wgpu / naga / winit 一起编进来（dev 边 `px_protocol` → `px_render`），
+# 依赖方向也整个反过来。搬完这里**一个字节的形状都没改**（`protocol_hash()` 不动）。
+px_host_protocol = { path = "../px_host_protocol" }
 # 后端**锁死 Vulkan**（§104 第 9 条）。`default-features = false` 之后必须显式点名后端，
 # 否则拿到的实例一个后端都没有 —— 那不是"默认"，那是空。
 wgpu = { version = "29", default-features = false, features = ["vulkan", "wgsl"] }

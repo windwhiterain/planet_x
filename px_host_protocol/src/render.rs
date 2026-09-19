@@ -1,3 +1,11 @@
+//! 渲染作业的形状（`Request` / `Report` / `Lease`…），原 `px_protocol::render`。
+//!
+//! ⚠ 它**不属于**那张跨进程边界：`px_protocol` 只认 px-scene ⇄ px-pass 的交换，而作业请求
+//! 是宿主自己的事（谁能渲、渲完回什么话）。留着的代价不是洁癖 —— 它是**循环依赖**：
+//! `px_render` 本来就依赖 `px_protocol`，作业形状再留在那边就编不过。
+//!
+//! ⚠ 这里住的是**形状**，跨进程的信封与握手仍然在 `px_protocol`（`stream` / `wire`）。
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -301,7 +309,7 @@ pub struct Lease {
 }
 
 impl Lease {
-    pub fn matches(&self, id: &crate::ProtocolId) -> bool {
+    pub fn matches(&self, id: &px_protocol::ProtocolId) -> bool {
         self.protocol_hash == id.protocol_hash && self.git_rev == id.git_rev
     }
 }

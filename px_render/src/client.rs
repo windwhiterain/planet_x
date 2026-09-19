@@ -1,14 +1,14 @@
 //! 客户端那一半：把一条 `Request` 交给在跑的服务，把回话打给使用者。
 //!
-//! **连接/握手/超时全部走 `px_protocol::client`**（§102：协议不许在这里另抄一份）。
+//! **连接/握手/超时全部走 `px_host_protocol::client`**（§102：协议不许在这里另抄一份）。
 //! 这里只做两件事：把回话打成给人看的一行行，以及把错误翻成退出码。
 //!
 //! 逐字照搬 Bevy 宿主（`px_render/src/main.rs::request_once` :1078-1137）—— 包括那句
 //! "没有在跑的渲染服务"后面跟的用法提示：仪器（`tools/harness.ps1::Invoke-Client`）
 //! 判的是**退出码**，而人判的是这两行字。
 
-use px_protocol::client;
-use px_protocol::render::Request;
+use px_host_protocol::client as client;
+use px_host_protocol::render::Request;
 
 /// 发一条请求。返回进程退出码（0 成功）。
 pub fn request(request: Request, autostart: bool) -> i32 {
@@ -41,7 +41,7 @@ pub fn request(request: Request, autostart: bool) -> i32 {
             }
             0
         }
-        Err(px_protocol::ClientError::NoServer) => {
+        Err(px_host_protocol::render::ClientError::NoServer) => {
             eprintln!("没有在跑的渲染服务。先起一个：");
             eprintln!("    px_render --serve");
             eprintln!("租约文件：{}", client::lease_path().display());
