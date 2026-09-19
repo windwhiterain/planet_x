@@ -7,6 +7,10 @@
 //!
 //! 为什么住在这个叶子 crate：烘图侧（`px_graphs` / `px_ops`）也要在**烘图时**反射一次
 //! （schema descriptor 进产物、配方参数在烘图时就校验），而 `px_render` 拖着 bevy 进不去。
+//!
+//! ⚠ **S8-c 标注：那条理由的历史形态已经没了**（§154 把 `px_render` 连 bevy 一起删了）。
+//! 今天这条约束仍然成立、而且更简单：**烘图侧要轻**（§100 的用户口径）⇒ 反射不能住进拖 wgpu
+//! 的宿主 crate。运行期那一侧今天用这份反射的是 `px_render_wgpu`。
 //! `px_protocol` 那边则被依赖门钉死只有 serde（`px_protocol/tests/crate_graph.rs`），
 //! naga 同样进不去 ⇒ 反射只能住这里，契约的**类型**（[`MaterialLayout`] 等）住 `px_protocol::material`。
 

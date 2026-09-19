@@ -2,6 +2,18 @@
 
 云覆盖度立方图（`Domain::CubeMap`，六面沿行堆叠）+ 云壳内的体积 raymarch，以及云密度场的正确梯度组装。
 
+> ⚠ **S8-c 标注（2026-09-19）：本篇的 `bevy_*` file:line 引用是承重的，不许删。**
+> 它们解释的是"**为什么这个数是这个数**"：`bevy_pbr/src/render/mesh.rs`（`cull_mode: Some(Face::Back)`，
+> 实测那一处是 `:3631`）把剔除写死成背面 ⇒ 云代理**必须按有向体积翻缠绕**（§51.11 那条 13.6%
+> 像素的账）；`bevy_render` 把 `RenderPipelineDescriptor.cache` 写死 `None`（`render_device.rs:188/195`）
+> ⇒ 应用侧**开不了管线缓存**（§51.19 / §51.20 那两条）；`bevy_pbr::clustered_forward` / `globals`
+> 是 shader 里那几个 import 的出处（§60.3）。删掉它，推导链就断了。
+> ⚠ 可查性（本单元实核）：那些引用指向 **cargo registry**，`bevy_pbr-0.19.1` / `bevy_render-0.19.1` /
+> `bevy_core_pipeline-0.19.1` **今天都还在盘上**（`~/.cargo/registry/src/index.crates.io-*/`）。
+> ⚠ 过时的是**命令行**：本篇里 `px_render --serve` / `--planet` / `--cam` / `--where` / `--place`
+> 那些（§39.1、末尾那一段）指的是**已删的 Bevy 宿主**（`f121ee3`，`15-render-wgpu.md` §154）——
+> 今天等价的是 `px_render_wgpu --offline --scene … --out …`（§106 / §147.5）。读数一字未删。
+
 ## §39 云覆盖度图 + 体积云（阶段 1–2）
 
 **形状**：云直接用一张 cubemap，高度上的分布和细节用 shader 提供 ✓。理由：64³ 体积铺满 `[-1.1,1.1]³` 时体素边长 0.0344，而云带只有 0.05 厚 ⇒ **竖着只有 1.45 个体素** ✗，PCG 表达不了云顶/云底。

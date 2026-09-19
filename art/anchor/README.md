@@ -45,6 +45,11 @@ cargo run -q -p px_graphs --bin scene orbit-bare --no-frame-graph
 # 拿到的 .pxart 的 sha256 前 16 应当 == 2795F948E6987E11
 ```
 
+⚠ **还有一格前提：盘上那些字节的行尾约定。** 产品键哈希的是**盘上的源码文本**（闭包指纹，
+`hashes.txt` §六），所以"换一份 checkout 约定不同的副本"能**一个像素都不动而换掉所有键**
+（`hashes.txt` §三 那六格当场破）。⚠ 本副本里两种行尾**并存**（LF 在 index、盘上有的 CRLF
+有的 LF）⇒ 别一句"这份是 CRLF"带过，量法与逐文件读数在 `hashes.txt` §六。
+
 ⚠ **老形状是 oracle 的母语，不是交付的形状。**
 它今天只有"取 oracle 读数"和"逃生门判据"两个正当用途；
 产品形状是**帧图**（`passes` 由帧图配方生成）。

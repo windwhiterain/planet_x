@@ -382,6 +382,10 @@ pub fn draws_of(objects: &[Object], select: &str) -> Vec<DrawSpec> {
         // **实测**（仪器 `target/rings/anchor-*.ps1`：拿 `target/debug/px_render.exe` 这个**锚宿主**
         // 喂**改过的冻结 legacy 文档**，比对哈希）：
         //
+        // ⚠ S8-c 标注：那台仪器与那支锚宿主**都已经不在了**（§154；`art/anchor/hashes.txt` §五）
+        // ⇒ 这张表**取不回来了**，它是**记录**。而它定出的次序规则仍然有效，并且由六档逐字节回归
+        // （J1 六张与 `art/anchor/*.png`）替它背书 —— 记录留下，提问的能力没了。
+        //
         // | 扰动 | oracle 的结果 | 说明 |
         // |---|---|---|
         // | `orbit-rings` 基线（objects[] = planet, atmosphere, rings，两笔都 bias 0） | 画的是 [rings, atmosphere] | 平局 ⇒ **反序** |

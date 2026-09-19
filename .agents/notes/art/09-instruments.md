@@ -3,6 +3,20 @@
 改完一个功能之后，怎么证明它真的对了：热重载要不要重启、窗口 review 回路、
 单帧时间怎么量、探针在哪跑。**渲染器本身怎么跑**在 `08-renderer.md`。
 
+> ⚠ **S8-c 标注（2026-09-19）：这一篇里的 `bevy_*` file:line 引用是承重的，不许删。**
+> §55（间接绘制的 2 笔/帧从哪来）、§57（"管线全部就绪"那句话的出处与调度位置）、
+> §58（直读信号的实测清单：管线状态、GPU 时间戳 Bevy 有没有请求/暴露）这些**唯一的证据**
+> 就是那些行号：`bevy_render-0.19.1/src/batching/gpu_preprocessing.rs:1360-1379`、
+> `bevy_pbr-0.19.1/src/render/mesh.rs`、`bevy_pbr-0.19.1/src/cluster/gpu.rs:1071`、
+> `bevy_render/src/render_resource/pipeline_cache.rs:221/46-55/226`。删掉它，这些结论就只剩断言。
+> ⚠ 可查性（本单元实核）：**今天仍可直接打开** —— `bevy_pbr` / `bevy_render` /
+> `bevy_core_pipeline` 的 0.19.1 源码都在 cargo registry 里
+> （`~/.cargo/registry/src/index.crates.io-*/`）。⚠ 与 `px_render/…` 那一类引用**不同**：
+> 后者只能走 git 历史（`git show f121ee3^:px_render/…`）。
+> ⚠ 过时的是**命令行**：本文里的 `px_render --serve/--view/--show/--fps/--novsync` 指的是
+> **已删的 Bevy 宿主**（`f121ee3`，`15-render-wgpu.md` §154）⇒ 今天对应 `px_render_wgpu …`，
+> 而 `--fps` / `--novsync` 在新宿主里**收下但不生效**（§147.5 记了为什么）。**读数一字未删。**
+
 ---
 
 ## §37 / §42 shader 热重载

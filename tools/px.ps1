@@ -18,6 +18,9 @@
   .\tools\px.ps1 -Target planet -Level opt       # 烘星球图（PCG）
   .\tools\px.ps1 -Target test                    # 快速测试链（默认 members，不碰 bevy）
   .\tools\px.ps1 -Target test-all                # 全量（含 px_render / px_probe，慢）
+                                                 # ⚠ S8-c 标注：`px_render` 已删（§154）⇒ 今天
+                                                 # 就是 `cargo test --workspace`（九个 crate）。
+                                                 # 原文留着：它是这条命令当时的形状。
 #>
 param(
     [ValidateSet(

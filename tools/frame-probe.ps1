@@ -51,6 +51,10 @@
   **读不了帧图形状的文档**（`PassSchema` 那些栏是它之后才加的：`missing field 'shader'`）。
   要给锚取数就走 `--bin scene <档> --no-frame-graph` 烘**老形状**产物 + 本探针 `-Bake:$false`
   （老形状可以当"提问的靶子"，不能当"交付的形状"）。
+  ⚠⚠ **S8-c 标注：上面这条"要给锚取数"的路已经断了**（§154；`art/anchor/hashes.txt` §五）——
+  那支 exe 不在了、也不可重建（冻结的构建产物），所以**没有"给锚取数"这回事了**。
+  它读不了帧图形状这件事**仍然成立**（那是记录），老形状今天只剩**逃生门判据**这一个正当用途
+  （`art/anchor/README.md`）。上面那两行原文留着：它是"当时为什么这么设计相位"的出处。
 
 .EXAMPLE
   .\tools\frame-probe.ps1 -Scenes orbit-proxy

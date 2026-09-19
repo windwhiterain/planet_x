@@ -2,6 +2,10 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 const PROTOCOL_WHITELIST: [&str; 2] = ["serde", "serde_json"];
+// ⚠ S8-c 标注：`px_render` 已在 §154 删掉 ⇒ 第一条禁止边**今天没有主体**（扫不到那个包名）。
+// 它守的是"**渲染宿主不许拖 sim**"，而宿主今天是 `px_render_wgpu` —— 那个名字**不在这张表里**
+// ⇒ 这一格目前**没人在守**。留着原文是因为它是契约的记录；换名字/加回宿主时，
+// 请把这条边改成新名字（本单元只标注、不改门：动门的覆盖面要评审裁）。
 const FORBIDDEN_EDGES: [(&str, &str); 2] = [("px_render", "px_sim"), ("px_web", "px_sim")];
 
 fn root() -> PathBuf {

@@ -10,12 +10,19 @@
 //! 程序，把闭包指纹算进产物键）、运行期（`px_render::shaders` 的模块表与 `reflect` 的库指纹）、
 //! 以及门与探针。各写一份的实现迟早对不上，而"对不上"正是要消灭的那个故障。
 //!
+//! ⚠ **S8-c 标注：运行期那半边的落点换了名字**（§154 删了 `px_render`）——
+//! 今天运行期是 `px_render_wgpu::shader` 的模块表 + `px_shader::reflect` 的库指纹。
+//! "三个用户"这条**分法**没变（烘图侧 / 运行期 / 门与探针），改的只是"运行期"是谁。
+//!
 //! ⚠ 外部符号（`bevy_pbr::…`）**只记名字**：它们的实现由 Bevy / naga_oil 的版本决定，
 //! 那是 `px_ops::SHADER_VERSION` 手动那一档（§19.1）。这条边界要写进报告，不能装作它不存在。
 //!
 //! 依赖方向：**叶子 crate** —— 除了 `px_protocol`（只有类型，没有实现）不依赖本仓任何 crate，
 //! 也不依赖 bevy / wgpu。`px_ops` / `px_graphs`（烘图侧）与 `px_render`（运行期）都能用它：
 //! 烘图侧要在这里算键、组装、反射，运行期要在同一份规则下装载与对账。
+//!
+//! ⚠ **S8-c 标注：运行期那个 crate 现在是 `px_render_wgpu`**（§154 删了 `px_render`）。
+//! 依赖方向的**约束**（叶子、不拖 bevy / wgpu）反而更强了 —— 今天它也**不拖 wgpu**。
 
 pub mod assemble;
 pub mod host_stubs;
@@ -268,6 +275,7 @@ impl Closure {
 }
 
 /// 整张模块表的指纹（不区分可达性）：给只想知道"库变没变"的缓存用（`px_render::reflect`）。
+/// ⚠ S8-c 标注：那个落点今天叫 `px_render_wgpu`（§154 删了 `px_render`）；不用它的调用方另说。
 pub fn modules_fingerprint(modules: &ModuleTable) -> u64 {
     let mut hasher = Fnv::new(MODULES_NAMESPACE);
     for (name, source) in modules {

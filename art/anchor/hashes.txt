@@ -2,6 +2,8 @@
 #
 # ⚠ 这份表是"记录"，不是"证据"。每一条都要能**重跑出来**才算数（§131.2）。
 # ⚠ 量法必须连"拿哪份产物量的"一起写 —— 这一条在本工程被咬过四次。
+# ⚠ 还有一格量法：**盘上那些字节的行尾约定**（§六）。产品键哈希的是盘上的源码文本，
+#   所以"换一份 checkout 会不会变"是这份表的前提，不是细节。
 
 ## 一、J1 判据图（整份 PNG 的 sha256 前 16）
 
@@ -60,3 +62,65 @@ grade_half       = 平场：min = max = 188（1 种颜色，614400/614400）  �
 anchor exe             = D7ED54FDB8323EDD…  (被钉住的那一支；冻结的构建产物，重建不是同一个字节序列)
 # 它的读数都在上面；但"向 oracle 提问"那个能力随之消失（§143 靠它测出透明相位的次序规则）。
 # 要用就得重建一支，而重建的那支**必须先把这六张判据图重出一遍、逐字节对上**，才够格当 oracle。
+
+## 六、⚠ 盘上字节的**行尾约定**：这一格能不动一个像素而换掉所有键（S8-c 立，见 §156）
+
+# 为什么它属于这份表：闭包指纹哈希的是**模块源码字符串**（`px_shader/src/lib.rs` 的
+# `Closure::fingerprint`），而源码是**从盘上读的** ⇒ 盘上那批字节是**每一个产物键的输入**，
+# 也就是 §三 那六份冻产物"文件字节"的上游。换一份 checkout 约定不同的副本，可能：
+#   像素一个不动（§155.3 已证），而 §三 六格当场全红。
+
+# 量法（三步，S8-c 2026-09-19 在本工作副本上实跑；三条都不需要动 art/ 下一个字节）：
+#   ① 粗看：git ls-files --eol art/shaders art/frame
+#        i/lf + w/crlf ⇒ index 里是 LF、盘上是 CRLF（两种 checkout 会给不同字节）
+#        i/lf + w/lf   ⇒ 盘上是 LF（但**本机重新 checkout 可能给它 CRLF**，见 ③）
+#   ② 核字节：git ls-files -s <文件> → blob sha；git cat-file -s <blob> → blob 字节数；
+#        stat -c%s <文件> → 盘上字节数。两者之差恰等于行数 ⇒ 一边 CRLF 一边 LF。
+#   ③ 决定性的那一步：git checkout-index --prefix=target/<某处>/ -- <文件>
+#        ⇒ 写出"**本机重新 checkout 会给的那份字节**"，与盘上直接比。
+#        加 `git -c core.autocrlf=false checkout-index …` ⇒ 写出"**无转换的机器会给的那份**"。
+
+# ⚠ core.autocrlf=true（来源：file:C:/SoftWare/git/Git/etc/gitconfig，**机器级**不是仓库级）。
+
+# 实测（本副本，2026-09-19）：差 0 = 盘与 index 是同一批字节
+#   art/shaders/surface.wgsl      盘 9780 ／ index 9603  差 177 ⇒ **盘 CRLF**
+#   art/shaders/clouds.wgsl       盘 35364 ／ index 34587 差 777 ⇒ 盘 CRLF
+#   art/shaders/atmosphere.wgsl   盘 2175 ／ index 2122  差 53  ⇒ 盘 CRLF
+#   art/shaders/ring.wgsl         盘 1035 ／ index 1014  差 21  ⇒ 盘 CRLF
+#   art/shaders/lib/{common,light,noise}.wgsl  差 59 ／ 85 ／ 164 ⇒ 盘 CRLF
+#   art/shaders/{blit,px_grade,px_vignette}.wgsl 差 0 ⇒ 盘 **LF**
+#   art/frame/{skybox,vertex_mesh,vertex_sky}.wgsl 差 0 ⇒ 盘 **LF**
+#   art/frame/default.toml 差 194、art/scene/orbit-bare.toml 差 26 ⇒ 盘 CRLF
+#   art/scene/orbit-bare-nolight.toml / orbit-bare-shadow.toml 差 0 ⇒ 盘 LF
+# ⇒ **不是"这份副本全是 CRLF"**。同一棵树下两种行尾并存 ⇒ 只能一份一份量。
+
+# ③ 的读数（本机 checkout ／ 无转换 checkout ／ 现在盘上）：
+#   art/shaders/surface.wgsl    9780 ／ 9603 ／ 9780     本机=盘（吻合）
+#   art/shaders/blit.wgsl       1581 ／ 1554 ／ 1554     ⚠ **本机重 checkout 会把它变成 CRLF**（1554 → 1581）
+#   art/frame/skybox.wgsl       7136 ／ 7030 ／ 7030     ⚠ 同上（7030 → 7136）
+#   art/frame/default.toml     10583 ／ 10389 ／ 10583   本机=盘
+#   art/scene/orbit-bare.toml    867 ／ 841 ／ 867       本机=盘
+# ⇒ **两个方向都会咬人**：
+#   换到无转换的机器（Linux / CI）：内容入口与库（surface/clouds/atmosphere/ring/lib/*）
+#     从 CRLF 变 LF ⇒ 闭包指纹变 ⇒ 产物键变 ⇒ §三 那六格的文件字节跟着变（**破的是逃生门**）。
+#   在本机重 checkout：今天在盘上是 LF 的那几份**都会变大**（逐份实测，见 ③ 与下面这行）——
+#     blit 1554→1581、px_grade 1002→1023、px_vignette 1095→1117、
+#     frame/{skybox 7030→7136、vertex_mesh 6769→6883、vertex_sky 2006→2043}
+#     ⇒ 帧材质的内容键变 ⇒ 带帧图的 pass 文档字节变（**J3 的图不变、文档字节变**）。
+# ⚠ 后一条 `git status` **看不见**：CRLF 与 LF 两份 clean 之后是同一个 blob
+#   ⇒ "git 说我干净"与"字节没变"是两件事（§122 那条"验的是哪个产物"的同一族）。
+
+# ⚠ 这一格**只量了字节数**。"键会变"是 §155.1 机制的直接推论（指纹哈希的是源码字符串，
+#   输入不同 ⇒ 键重算），本单元**没有**在另一份约定的副本上重烘一遍去实测它 ——
+#   那要动 art/ 下的字节，是明令禁止的（§155.4）。所以这里是**已量的前提 + 标明来源的推论**。
+
+# ⚠ 报警器：`px_shader` 那条判据测试（四份入口的**组装字节数 + FNV + 闭包指纹**，
+#   `the_four_entry_shaders_assemble_to_these_bytes_under_the_wgpu_host_table`）读的就是盘上这份文本
+#   ⇒ 换约定之后它会**先红**，而且说的是"字节数变了"。别把它当噪声改掉。
+
+# 今天"全绿"的前提，逐条说清（两条都是量出来的，不是假设）：
+#   1) **六份冻产物**：本单元在本副本上重烘，文件字节与 §三 逐字节相同
+#      ⇒ 内容入口的字节约定**自冻结以来没有漂过**（键相同才会字节相同）。
+#   2) **六张判据图**：图不比文本字节 —— 行尾不改像素（§155.3 把"像素与文本无关"量过一遍）。
+#   ⇒ 前提是"**产物那一半**可证同约定"；**不是**"锚和我在同一种约定下量的"这种无法检验的话。
+#   ⚠ 锚 exe 已丢失（§五），"向 oracle 提问"的能力不可恢复 —— 所以这条前提只能这样立。
