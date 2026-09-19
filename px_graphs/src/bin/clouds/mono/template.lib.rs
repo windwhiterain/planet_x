@@ -10,6 +10,13 @@
 // 里生成，而图程序是 `bin` ⇒ 实例只可能落在**图侧自建的 dylib** 里。
 // 这就是「生成 + 动态链接」那一级的全部理由。
 
+// ⚠⚠ 为什么这里**还要手写** `PxOp` 与那三段 `extern "Rust"`（而算子库那边只要三行宏）：
+//   因为 `render(&self, params, inputs, grid)` **拿不到那个场函数** ——
+//   它是"图上现写的"（`ClosedForm { f: |cloud, dir| fields::closed_cover(...) }`），
+//   既不是参数、也不是上游输入，而是**这一份实例自己的类型**。
+//   要让宏收得下它，`PxOp` 的签名就得变成 `render<F: FieldFn>` 之类 ——
+//   为一个特例把通用契约改成泛型的，不划算。**所以这一档是有意破例的，别去"统一"它。**
+
 use px_cook::field_fn::{ClosedForm, CoverCloud};
 use px_graph_schema::{
     Grid, OpCall, OpDescriptor, OpKind, OpTable, ParamsCanonical, PayloadBundle,
