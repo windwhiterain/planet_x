@@ -15,6 +15,7 @@ pub mod driver;
 pub mod generate;
 
 pub use driver::{
+    read_cached,
     Artifact, Cache, Driver, Payload, Report, artifact_path_of, begin, cache_root, driver, finish,
     graph_manifest, manifest_key_of, node, params_text, scene_key, shader_key, workspace_root,
     write_graph_manifest, write_shader, SHADER_VERSION,

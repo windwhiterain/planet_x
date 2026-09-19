@@ -197,36 +197,95 @@ pub fn eval_closed<F: FieldFn>(params, &F) -> VolumeData // = bake::<F>
 
 ---
 
-## §165 未做 / 下一步（按价值排）
+## §166 生成单态化实例 + 动态链接（这一级终于做了）
 
-1. **另外三张图没迁**（`planet` / `desert` / `scene` 仍是老 `node()` 路径）。
-   两条路**并存**且互不干扰（老驱动一位未动），所以这不是缺陷；但"契约"只有在图脚本
-   真的用它的时候才有类型检查的收益。迁移是纯机械活。
-2. **闭式那一支只到"演示 + 判据"，没有进任何一张图的正路**：`--closed-cover` 是个
-   单独的分支（`clouds.rs` 里 early return）。要让它成为正路，得改 `art/clouds/*.toml`
-   的语义或加一个算子 id（`volume.cloud.coarse.closed` 之类）——
-   那又回到「同一个算子、两个身份」的问题（§162.2 的键那一维就是为它准备的）。
-3. **`source_hash.rs` 那道门没覆盖新的 `typed.rs`**：`typed.rs` 里的
-   `Identity.source_hash` 是手写清单，门看不见它。该把三份 `typed.rs`
-   按同一条形状加进门（每个算子至少两段、点到共享依赖）。
-4. **`node()` 与 `cook_*` 的键坐标系不同**：前者 `node_key`（无源码哈希），
-   后者 `cook_key`（含源码哈希）。两条路的**同名节点会得到不同的键** ⇒
-   迁移过程中同一张图**不能混用**（混用会让上半截命中、下半截重算，白烧一遍）。⚠ 已知、未堵。
-5. **`px_graphs` 的 `[dev-dependencies]` 与 `[dependencies]` 现在都点了三个算子库** ——
-   前者只为把 dylib 编出来（老路径/测试用），后者为 rlib（类型用）。语义重复，但**不能合并**
-   （合并会让 `cargo test` 不再编 dylib）。已在 Cargo.toml 的注释里写死。
+**要的是「自动生成单态化 → 编成 dylib → 动态装载」，不是把实例静态烘进图程序。** 落成的形状：
+
+```text
+tools/mono-template/          模板（人手写、进 git）
+  src/fields.rs               ⭐ 编辑面：那个闭式场函数
+  src/lib.rs                  接线：描述符 / canonical / call（生成物就是它的复制）
+  Cargo.toml                  cdylib；空 `[workspace]`（它落在 target/ 下，不能当成员）
+tools/mono-gen.ps1            生成器：算 mono_key → 落到 target/mono/crate → cargo build → 装入 target/debug
+```
+
+* **`bake<ClosedForm<…>>` 的实例是在那个 dylib 内部单态化出来的** —— 这是这一级存在的全部理由
+  （泛型的实例化要求"定义"与"类型参数"在同一个编译单元里，而图程序是 `bin`）。
+* 图脚本只写 `node("volume.cloud.coarse.closed", "coarse_closed", &[&source])` ——
+  **一个字符串 id**，`clouds.exe` 里没有那个算子的任何代码。
+
+### §166.1 读数（改一行场函数）
+
+| | 读数 |
+|---|---|
+| 改一行 `fields.rs` → 生成 + 编 dylib | **1.56 s** |
+| 同期 `clouds.exe` 的 sha256 | **不变**（图程序一个字节都没重编） |
+| 下一次跑（`--closed-cover`） | 键 `526e1961` → `2bf8ab4e` ⇒ **必然重算**，不可能陈旧命中 |
+| 生成物大小 | **2.89 MB**（对比 `px_volume_op.dll` 的 13.8 MB） |
+
+### §166.2 ⚠ 身份与陈旧命中：**算子的源码哈希必须进键**
+
+做这一级时暴露了一个**真问题**，值得单独记：
+
+> mono 实例的身份住在 `SOURCE_HASH` 里，而**键不含 source_hash** ⇒ 改了场函数之后
+> **命中旧产物**，只有一行 stderr 告警（`⚠ 源码变了但 VERSION 仍是 1`）。
+> 这正是 §159.4 那条对账机制在守的那件事，而它**只告警、不拦**。
+
+修法（`px_graph/src/driver.rs`）：在相机之后**把 `descriptor.source_hash` 折进键**
+（新函数 `key_with_source_hash`，做法与 `key_with_cameras` 同一个位置、同一种混法）。
+
+⚠ **代价要说清：老产物的键会因此全部失效（第一次重烘一遍）** ——
+这是故意的：换掉的正是"源码变了而版本没升"那一档的陈旧命中。之后老键稳定。
+**这一条是改口径，需要用户确认**（类型化那一支 `px_cook::cook_key` 从一开始就是这么做的）。
+
+### §166.3 ⚠ 构建卫生：这一级最难的地方（三条都踩过）
+
+| 做法 | 结果 |
+|---|---|
+| 生成的 crate **共用主 workspace 的 `target/`** | ❌ **回归**：它的依赖图不同（自己一份 `Cargo.lock`、自己的特征统一）⇒ cargo 把 `px_volume_op.dll` 等**再编一份**进同一个 `target/debug/deps/` 覆盖主 workspace 那份 ⇒ `LoadLibraryExW failed`（实测复现） |
+| **target 也按 mono_key 分** | ❌ 每次改一行场函数都在**新目录**里从零编依赖（**20.8 s/次**），比不带这一级还差 |
+| **构建目录固定 + 源码目录固定** | ✅ **1.56 s**（依赖编一次、之后复用）。代价：`target/mono/crate` 这个位置**不代表身份**，身份由内容（`SOURCE_HASH`）带 —— 想同时要"内容寻址的源码路径"与"复用的依赖"，得自己管依赖产物的存放（**未做**） |
+
+### §166.4 未决：生成的 dylib 仍要**一整套上游 DLL**
+
+`px_volume_op` 等算子是 `crate-type = ["dylib", "rlib"]`。生成物**静态链**它们（用的是 rlib），
+但那份 rlib 里的 `dylib`-ABI 依赖会**递归要求上游一整套 `.dll`**
+（实测：mono 构建目录里的 `px_volume_op.dll` 自己就 `LoadLibraryExW failed`，
+它缺 `px_field_schema.dll` 等）。
+
+现在的状态是**能跑**的：生成的实例落进 `target/debug/`，上游 DLL 由主 workspace 提供
+（因此 `mono-gen` 与主 workspace 的构建必须**不同时**污染同一个 `target/`；
+混过之后要 `cargo clean` 才能恢复 —— 踩过一次）。
+
+**正确的修法**（未做）：让生成的 crate **一个 Rust 上游 DLL 都不需要** ——
+上游那几份要么改成静态（纯 rlib），要么生成物只链 `cdylib` 那一份。
+判据可以是 `dumpbin /dependents target/debug/px_mono_clouds_op.dll` 只列出系统库。
 
 ---
 
-## §166 与 `16-graph-split.md` 的关系
+## §167 未做 / 下一步（按价值排）
+
+1. **另外三张图没迁**（`planet` / `desert` / `scene` 仍是老 `node()` 路径）。纯机械活。
+2. **生成的实例只接进 `--closed-cover` 这个演示分支**，没进任何一张图的正路。
+3. **生成器是手写的 PowerShell + 手写模板**：`mono_key` 的配料清单是手维护的
+   （`tools/mono-gen.ps1` 顶部那 12 条）。要真当工具用，该由 `fields.rs` 的声明驱动。
+4. **§166.4 那条 dylib 依赖**（上游 DLL 递归）没解决。
+5. **`source_hash.rs` 那道门没覆盖新的 `typed.rs`** 与模板里的 `SOURCE_HASH`。
+6. **`node()` 与 `cook_*` 的键坐标系不同**（前者现已含 source_hash，后者含 source_hash 但
+   混法不同）⇒ 两条路的同名节点键不同。已知、未堵。
+
+---
+
+## §168 与 `16-graph-split.md` 的关系
 
 | §159 的口径 | 这一轮之后 |
 |---|---|
 | 图脚本依赖 `xxx_schema` | **仍成立**，但它现在**也**依赖 `px_cook`（类型化契约） |
 | 图脚本不许静态依赖任何 `*_op` | **改口径**：允许（那是类型检查的手段）；替代门见 §162 |
-| `xxx_op` 是动态链接 | **仍成立**：实现那一半照旧是 dylib，入口名派生不变 |
+| `xxx_op` 是动态链接 | **仍成立**，而且**生成的实例也走这条路**（§166） |
 | 算子之间只走 schema 的序列化数据 | **仍成立**：跨边界仍是 `PayloadBundle`；**载荷仍逐字节相同**（§163.1 / §164.1） |
-| 需要单态化的算子由图自建的 `xxx_op` 并着用 | **样本有了**：`bake<F: FieldFn>` + 图侧的 `SampleField` / `ClosedForm`（§164） |
+| 需要单态化的算子由图自建的 `xxx_op` 并着用 | ✅ **样本有了，而且是生成 + 动态链接那一支**（§166） |
+| 键 = 内容 | **加强**：算子的源码哈希现在也进键（§166.2，⚠ 老键全失效一次） |
 
-⇒ 一句话：**这一轮把"算子 id 字符串 + 字节"这层擦除去掉了；泛型方法落在 `bake<F>` 上，
-实例由图脚本生成。产物逐字节不变的判据（14/14）说明它不是重写而是换壳。**
+⇒ 一句话：**这一级把「生成的单态化实例」变成了一个可装载的 dylib ——
+改一行场函数 1.56 s、图程序 sha 不变、键必变。最难的地方不是单态化，是构建卫生（§166.3）。**

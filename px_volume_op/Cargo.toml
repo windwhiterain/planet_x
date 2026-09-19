@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2024"
 
 [lib]
+# ⚠ `rlib` 这一项是给**生成的单态化实例**用的：它静态链本 crate 的那一份，
+# 于是生成的 dylib **一个 Rust 上游 DLL 都不需要**（只带系统库）。
+# 老路径（驱动装载的那一份）用的仍然是 `dylib`，两不干扰。
 crate-type = ["dylib", "rlib"]
 
 [dependencies]

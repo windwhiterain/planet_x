@@ -1,1 +1,5 @@
 /target
+
+# 诊断用探针（`tools/loadprobe`）自己的构建产物；以及生成的单态化实例
+/tools/loadprobe/target/
+/target/mono/

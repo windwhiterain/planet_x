@@ -42,36 +42,40 @@ fn main() -> Result<(), Fault> {
     });
     let cache = px_graph::driver();
 
-    // ⚠ 这一支是**演示 + 判据**：它不接上游的 `mixed`，覆盖度现算。
+    // ⚠ 这一支是**演示 + 判据**：它走的是「生成的单态化实例 + 动态装载」那一级。
     // 用法：`cargo run -p px_graphs --bin clouds -- --closed-cover`
+    //
+    // 关键：`"volume.cloud.coarse.closed"` 这个算子**不在图程序里**，也不在 `px_volume_op` 里 ——
+    // 它在 `target/debug/px_mono_clouds_op.dll`（由 `tools/mono-gen.ps1` 生成 + 编），
+    // 由 `load_directory` 扫出来接上。所以图程序**一个字节都不用重编**。
     if std::env::args().any(|arg| arg == "--closed-cover") {
-        use px_cook::field_fn::{ClosedForm, FieldFn, SampleField};
+        use px_cook::field_fn::{FieldFn, SampleField};
         use px_volume_schema::params as volume_params;
 
         let params = volume_params::parse(params_text("coarse").as_deref())?;
-        // ① 老路的那一份覆盖度：先用一个上游算子烘出整张场，再在 3D 里按方向回采
+        // ① 老路：先用一个上游算子烘出整张覆盖度场，再在 3D 里按方向回采
         let source = cook_field::<field::Fbm>(&cache, "clusters", (), canvas)?;
         let sampled = SampleField { field: source.field() };
+        // 两条路混用时的桥：类型化的 `Cooked` → 老路径的 `Artifact`（键同一个，不重算）
+        let source_artifact = px_cook::Cooked {
+            key: source.key,
+            value: source.value.clone(),
+            hit: source.hit,
+            millis: source.millis,
+            bytes: source.bytes,
+        }
+        .into_artifact()?;
 
-        // ② 闭式路：**同一个算子、同一份 bake 体**，场函数是图上现写的闭包 ——
-        //    覆盖度一次栅格化都没有，算子按方向直接问它要值。
-        let closed_fn = ClosedForm {
-            f: |cloud: &px_cook::field_fn::CoverCloud, direction: [f32; 3]| {
-                let local = cloud.to_local(direction);
-                let longitude = local[2].atan2(local[0]);
-                let latitude = local[1].clamp(-1.0, 1.0).asin();
-                let wave = (longitude * 7.0).sin() * (latitude * 4.9).cos();
-                let ripple = ((longitude + latitude) * 21.7 + 3.0).sin();
-                cloud.cover_from_mask((0.5 + 0.32 * wave + 0.18 * ripple).clamp(0.0, 1.0))
-            },
-        };
+        // ② 生成的单态化实例：**动态装载**进来的那一份。
+        //    它的 `bake<ClosedForm<…>>` 是在那个 dylib **内部**单态化出来的。
+        //    ⚠ 描述符声明了 `inputs = ["coverage"]`（老路径的接口形状），所以这一格必须给；
+        //      但**闭式那一档不看它** —— 覆盖度是 dylib 里现算的。
+        let closed = px_graph::node("volume.cloud.coarse.closed", "coarse_closed", &[&source_artifact]);
 
         // 在**同一批方向**上把两条路的覆盖度并排量出来（这才是可比的东西：
         // 比烘出来的体积没有信息量 —— `shape` 在覆盖度低于阈值时两边都归零）。
         let cloud = px_verify::proxy::from_volume(&params);
-        let mut worst_pairs = Vec::new();
         let mut open_range = (f32::INFINITY, f32::NEG_INFINITY);
-        let mut closed_range = (f32::INFINITY, f32::NEG_INFINITY);
         let steps = 2000_u32;
         for index in 0..steps {
             // 一条**确定性**的扫描线（不带随机数，跨进程一致）
@@ -82,30 +86,28 @@ fn main() -> Result<(), Fault> {
                 (t * std::f32::consts::TAU).sin(),
             ]);
             let opened = sampled.cover(&cloud, direction);
-            let closed = closed_fn.cover(&cloud, direction);
             open_range = (open_range.0.min(opened), open_range.1.max(opened));
-            closed_range = (closed_range.0.min(closed), closed_range.1.max(closed));
-            worst_pairs.push((direction, opened, closed));
         }
-        worst_pairs.sort_by(|one, two| {
-            (one.1 - one.2).abs().partial_cmp(&(two.1 - two.2).abs()).unwrap()
-        });
-        let worst = worst_pairs.last().expect("至少一条方向");
+        let volume = closed.volume();
         println!(
-            "覆盖度对账（{steps} 条方向）：老路（回采混合场）{:.4}..{:.4}｜闭式路（图上现算）{:.4}..{:.4}",
-            open_range.0, open_range.1, closed_range.0, closed_range.1,
+            "覆盖度对账（{steps} 条方向）：老路（回采混合场）{:.4}..{:.4}",
+            open_range.0, open_range.1,
         );
         println!(
-            "  两路最大差 {:+.4}（在方向 {:?}：老 {:.4} / 闭式 {:.4}）—— 两条路问的是**不同的场函数**，\
-             这个差就是「换了一个覆盖度」的代价，不是误差",
-            (worst.1 - worst.2).abs(),
-            worst.0.map(|value| (value * 1000.0).round() / 1000.0),
-            worst.1,
-            worst.2,
+            "  生成的实例：{}（键 {}）{} 面 × {}² × {} 层 = {} 个采样，值域 {:.4}..{:.4}",
+            "volume.cloud.coarse.closed",
+            px_graph::hex_short(&closed.key),
+            PATCHES,
+            volume.res,
+            volume.layers,
+            volume.samples(),
+            volume.data.iter().cloned().fold(f32::INFINITY, f32::min),
+            volume.data.iter().cloned().fold(f32::NEG_INFINITY, f32::max),
         );
         println!(
-            "  ⇒ 同一个算子、同一份 `bake<F>` 体；闭式路省掉了整张覆盖度场（{source}）",
-            source = format_args!("{} 个采样", source.value.data.len()),
+            "  ⇒ 同一个 `bake<F>` 泛型体：老路把覆盖度烘成 {} 个采样的场再回采；\
+             闭式路在 dylib 内部现算，**一次栅格化都没有**",
+            source.value.data.len(),
         );
         finish();
         return Ok(());

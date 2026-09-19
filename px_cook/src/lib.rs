@@ -98,10 +98,51 @@ pub struct Cooked<P> {
     pub bytes: usize,
 }
 
+/// 各领域载荷 → 老路径那个枚举（`node()` 收 `&Artifact`，混用两条路时要过一下）。
+pub trait PayloadKind {
+    fn into_payload(self) -> px_graph::Payload;
+}
+
+impl PayloadKind for Field {
+    fn into_payload(self) -> px_graph::Payload {
+        px_graph::Payload::Field(self)
+    }
+}
+
+impl PayloadKind for VolumeData {
+    fn into_payload(self) -> px_graph::Payload {
+        px_graph::Payload::Volume(self)
+    }
+}
+
+impl PayloadKind for MeshData {
+    fn into_payload(self) -> px_graph::Payload {
+        px_graph::Payload::Mesh(self)
+    }
+}
+
 impl<P> Deref for Cooked<P> {
     type Target = P;
     fn deref(&self) -> &P {
         &self.value
+    }
+}
+
+impl<P: PayloadKind> Cooked<P> {
+    /// 换成老路径的 `Artifact`：**字节从缓存里取回来**（不重新序列化）。
+    ///
+    /// ⚠ 它存在的唯一理由是两条路要混用：`node(op_id, name, &[&上游])` 收的是 `&Artifact`，
+    /// 而类型化那一支给的是 `Cooked<T>`。**键同一个**（`Cooked.key` 就是写进 CAS 的那把），
+    /// 所以这一步不会重算、也不会写出第二份产物。
+    pub fn into_artifact(self) -> Result<px_graph::Artifact, String> {
+        let bytes = self.cached_bytes()?;
+        let payload = self.value.into_payload();
+        Ok(px_graph::Artifact { key: self.key, payload, bytes })
+    }
+
+    /// 缓存里那份字节（不重新序列化）。
+    pub fn cached_bytes(&self) -> Result<Vec<u8>, String> {
+        px_graph::read_cached(self.key)
     }
 }
 

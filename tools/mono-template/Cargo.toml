@@ -1,0 +1,28 @@
+# ⚠ 空 `[workspace]` 表：这一份落在 `target/` 下、又按 mono_key 换路径，
+# 不能当主 workspace 的成员（否则 cargo 会要求把它写进 members/exclude）。
+# 代价：它自己解析一次依赖（与主 workspace 各有一份 Cargo.lock）。
+[workspace]
+
+[package]
+name = "px_mono_clouds"
+version = "0.1.0"
+edition = "2024"
+
+# ⚠ 这是**生成的** crate（`tools/mono-gen.ps1` 生成 + 编）。它属于图脚本那一侧，
+# 但**不在 workspace members 里**：它按 `<mono_key>` 落在 `target/mono/` 下的内容寻址路径上，
+# 于是同一个场函数被两张图声明时**共用同一份 dylib**（跨图、跨 worktree 都算）。
+#
+# 它编出 `cdylib`：入口只有一个 `px_mono_clouds_table`（由库名派生，见 px_graph_schema::op）。
+# ⚠ 用 cdylib 而不是 dylib：导出面就只有那一个符号，不必为一堆上游元数据买单。
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# 泛型体的两侧：契约（`bake` 的 trait）与领域数据类型。**没有 px_graphs**（那会是环）。
+px_cook = { path = "../../../px_cook" }
+px_graph_schema = { path = "../../../px_graph_schema" }
+px_field_schema = { path = "../../../px_field_schema" }
+px_volume_schema = { path = "../../../px_volume_schema" }
+px_verify = { path = "../../../px_verify" }
+px_volume_op = { path = "../../../px_volume_op" }
+serde_json = { version = "1", features = ["float_roundtrip"] }

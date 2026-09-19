@@ -1,0 +1,24 @@
+# 云硬表面的外接代理：粗场网格（立方球参数空间）。
+#
+# 粗场 = `shape_of(cover, altitude, 1.0)`：细节场在 shader 里是乘上去的，而
+# `billows ∈ [0,1]` ⇒ `final ≤ coarse`，所以粗场的等值面**结构上**就包住最终等值面，
+# 不需要任何经验外扩。
+#
+# `scale` 就是归一化用的梯度上界 L：存进体积的是 `(粗场 - τ) / L`（量法与实测见报告）。
+# 形状那一档必须与 `art/scene/orbit-*.toml` 里 clouds 那一档一致，否则代理包的是别的云。
+
+res = 65          # 每面 65 × 65 条射线（64 格）
+layers = 65       # 径向 65 层
+inner = 1.01
+outer = 1.06
+tau = 0.20        # 就是 shader 的 surface_level
+scale = 240.0     # L：只许大不许小（量法与实测见报告）
+reach = 1         # 保守化：节点取切向邻域最大值，最多外扩一格
+
+coverage = 0.35
+base = 0.06
+top = 0.62
+taper = 0.45
+coverage_gain = 2.6
+erode = 0.0
+orientation = [0.0, 0.0, 0.0, 1.0]

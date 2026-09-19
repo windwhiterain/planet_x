@@ -170,6 +170,28 @@ fn bundling(
     bundle.to_bytes(node, cameras)
 }
 
+/// 把算子的**源码哈希**折进键（§17.1 那条「键 = 内容」的补丁）。
+///
+/// 与 `px_graph_schema::key_with_cameras` 同一条做法：在键的末尾再混一维，
+/// 老键的具体值只取决于这一维加不加。⚠ 加不加是**一次性的口径决定**，不是每键可选。
+fn key_with_source_hash(key: Key, source_hash: u64) -> Key {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"px_source/v1");
+    hasher.update(&key);
+    hasher.update(&source_hash.to_le_bytes());
+    *hasher.finalize().as_bytes()
+}
+
+/// 从 CAS 里读回一份产物的字节（按键）。
+///
+/// ⚠ 这是「键 → 字节」的**唯一**出口：类型化那一支（`px_cook`）要靠它把
+/// `Cooked<T>` 换成老路径的 `Artifact`，而两条路混用时不重新序列化、不写第二份产物。
+pub fn read_cached(key: Key) -> Result<Vec<u8>, String> {
+    let context = context();
+    let path = artifact_path(&context.cache_root, &key);
+    std::fs::read(&path).map_err(|err| format!("读不了产物 {}：{err}", path.display()))
+}
+
 /// 取缓存机制的句柄（`begin` 之后才有效）。
 pub fn driver() -> Driver {
     Driver
@@ -344,12 +366,14 @@ fn load_ops() -> Vec<OpLibrary> {
     panic!(
         "一个算子库（px_*_op 动态库）都没找到。\n\
          找过：{}\n\
+         ⚠ 每个目录的读数（空 = 没有匹配 `px_*_op` 的文件；Err = 有文件但装载失败）：\n  {}\n\
          先 `cargo build -p px_field_op -p px_volume_op -p px_mesh_op`（改完算子之后要重跑这一条），\n\
          或者用 PX_GRAPH_OP_DIR 指到它们所在的目录。",
         dirs.iter()
             .map(|dir| dir.display().to_string())
             .collect::<Vec<_>>()
             .join("、"),
+        notes.join("\n  "),
     );
 }
 
@@ -432,6 +456,16 @@ pub fn node(op_id: &str, name: &str, inputs: &[&Artifact]) -> Artifact {
     } else {
         key_with_cameras(key, &context.spec.cameras)
     };
+    // ⚠ **算子的源码哈希也进键**（在相机之后，与 `key_with_cameras` 同一个位置）。
+    //
+    // 理由：算子的语义可能随源码变而 `VERSION` 没升，而描述符表里那份 `SOURCE_HASH`
+    // 是编译期带过来的 —— 只拿它对账、不进键，就会出现「同一个键、不同内容」：
+    // 改了算子实现之后**命中旧产物**，只有一行 stderr 告警。
+    // 类型化那一支（`px_cook::cook_key`）从一开始就是这么做的；这里补上，
+    // 让两条路的**新鲜度**一致。
+    // ⚠ 老产物的键会因此**全部失效**（第一次重烘一遍），这是**故意的**：
+    // 换掉的正是「源码变了而版本没升」那一档的陈旧命中。之后老键稳定。
+    let key = key_with_source_hash(key, descriptor.source_hash);
     let path = artifact_path(&context.cache_root, &key);
     let short = hex_short(&key);
     let started = Instant::now();
