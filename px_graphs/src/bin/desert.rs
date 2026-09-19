@@ -1,10 +1,16 @@
-use px_field_schema::params;
-use px_graph::{GraphSpec, begin, finish, node};
-use px_mesh_schema::params as mesh_params;
+//! 沙漠：**普通 Rust** —— 同 `planet.rs`，每一步走 `px_cook` 那个缓存辅助函数。
+//!
+//! ⚠ 这里原来是老写法（字符串 id + `&[&Artifact]`）。见 `planet.rs` 顶上那条注释。
+
+use px_cook::cook;
+use px_field_op::typed as field;
+use px_graph::{GraphSpec, begin, finish};
+use px_mesh_op::typed as mesh;
 use px_protocol::art::Domain;
 
+type Fault = Box<dyn std::error::Error>;
 
-fn main() {
+fn main() -> Result<(), Fault> {
     begin(GraphSpec {
         name: "desert".to_string(),
         width: 780,
@@ -12,21 +18,53 @@ fn main() {
         projection: Domain::Cube,
         cameras: px_graph::cameras::review(),
     });
+    let cache = px_graph::driver();
 
-    let plateaus = node(params::FBM, "plateaus", &[]);
-    let canyons = node(params::RIDGED, "canyons", &[]);
-    let flow = node(params::FBM, "flow", &[]);
-    let carved = node(params::WARP, "carved", &[&canyons, &flow]);
-    let blend = node(params::CONSTANT, "blend", &[]);
-    let terrain = node(params::MIX, "terrain", &[&plateaus, &carved, &blend]);
-    let height = node(params::REMAP, "height", &[&terrain]);
+    let plateaus = cook::<field::Fbm>(&cache, "plateaus", ())?;
+    let canyons = cook::<field::Ridged>(&cache, "canyons", ())?;
+    let flow = cook::<field::Fbm>(&cache, "flow", ())?;
+    let carved = cook::<field::Warp>(
+        &cache,
+        "carved",
+        field::FieldPairInput {
+            field: canyons,
+            offset: flow,
+        },
+    )?;
+    let blend = cook::<field::Constant>(&cache, "blend", ())?;
+    let terrain = cook::<field::Mix>(
+        &cache,
+        "terrain",
+        field::MixInput {
+            a: plateaus,
+            b: carved,
+            mask: blend,
+        },
+    )?;
+    let height = cook::<field::Remap>(
+        &cache,
+        "height",
+        field::FieldInput {
+            field: terrain.clone(),
+        },
+    )?;
 
-    let surface = node(mesh_params::CUBESPHERE, "surface", &[&height]);
+    let surface = cook::<mesh::CubeSphere>(
+        &cache,
+        "surface",
+        mesh::CubeSphereInput {
+            height: height.clone(),
+        },
+    )?;
 
-    let stats = height.field().stats();
+    let stats = height.value().stats();
     println!(
         "输出 height：{}×{}，值域 {:.4}..{:.4}，均值 {:.4}",
-        height.field().width, height.field().height, stats.min, stats.max, stats.mean,
+        height.value().width,
+        height.value().height,
+        stats.min,
+        stats.max,
+        stats.mean,
     );
 
     println!(
@@ -35,7 +73,6 @@ fn main() {
         surface.mesh().triangles()
     );
 
-    // ⚠ S8-a：同 `planet.rs` —— bevy 宿主删了，提示改成新宿主**真跑得起来**的那条命令。
     println!(
         "看这一份内容：先 `cargo run -q -p px_graphs --bin scene <档>` 出场景文档（配方在 art/scene/），\
          再 `cargo run -q -p px_render -- --offline --scene <产物> --out x.png --width 960 --height 640`"
@@ -47,4 +84,5 @@ fn main() {
     );
 
     finish();
+    Ok(())
 }
