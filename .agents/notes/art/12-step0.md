@@ -21,6 +21,10 @@
 >    要走 `px_render_wgpu`，而它**只吃 `.pxart` 场景文档**（`.pxstream` 那条路随宿主没了）。
 > 3. §79.4 W4 那条 `px_render/src/reflect.rs:499-527` 的引用：源码在 git 历史里
 >    （`git show f121ee3^:px_render/src/reflect.rs`），不在工作树。
+>
+> ⚠ **§157（2026-09-19）：第 2 条里那个 `px_render_wgpu` 今天叫 `px_render`**（wgpu 宿主改名，
+> `15-render-wgpu.md` §157）⇒ 复跑这一篇走 `px_render`，而它**只吃 `.pxart`**。
+> ⚠ 第 2、3 条里指**已删的 Bevy 宿主**的那个 `px_render` 按旧义读（第 3 条带路径，取法不变）。
 
 ---
 

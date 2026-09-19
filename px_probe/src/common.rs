@@ -1,6 +1,7 @@
 //! 探针的公共地基：一个进程一个 wgpu 设备、一个 shader 组装入口。
 //!
-//! `connect()` 原来住在 `px_render/tests/common/mod.rs`，被 15 个 `#[test]` 各调一次
+//! `connect()` 原来住在 `px_render/tests/common/mod.rs`（**已删的 Bevy 宿主**，§154；§157 起
+//! 同一个名字归 wgpu 宿主 ⇒ 带路径的这种引用一律读作旧义），被 15 个 `#[test]` 各调一次
 //! （文档 §44.4 实测每次拿 adapter 4.24 s）。现在探针是一个进程跑完全部 check，
 //! 设备只建一次，而且后端固定 DX12。
 
@@ -9,14 +10,15 @@ use std::path::Path;
 /// 组装一份入口 shader：**裸 wgpu 宿主那张桩表 + 本仓的路径约定**。
 ///
 /// ⚠ S8-a 之前这里是 `pub use px_render::shaders::assemble;`（Bevy 宿主 + `bevy_stub`）。
-/// 那条路随 `px_render` 一起没了，而"探针编到设备上的文本"必须与**真正会渲染它的那个宿主**
+/// 那条路随 **Bevy 宿主**（§154 删掉的那支 `px_render`；§157 起这个名字归 wgpu 宿主，
+/// 所以这句里的 `px_render` 按旧义读）一起没了，而"探针编到设备上的文本"必须与**真正会渲染它的那个宿主**
 /// 是同一份 —— 否则探针量的是一份谁也不会执行的文本（§144 那条规矩：夹具/桩不能替被测物挡枪。
 /// 实测差别不是"风格问题"：`bevy_stub` 给的是 `fetch_point_shadow { return 1.0 }` 与
 /// 少一个 near 的 `depth_ndc_to_view_z`，而 `clouds.wgsl` 两样都 import）。
 ///
 /// ⚠ **探针依赖的是 `px_shader`，不是宿主 crate**（派活那句"指向新宿主"在 crate 布局上
-/// 落不下去：`px_render_wgpu` **只有 bin target**、没有 `src/lib.rs`）。"用的是宿主那张表"
-/// 这件事因此由**文本同源**保证 —— 宿主那侧 `px_render_wgpu::stubs` 也只是 `pub use`
+/// 落不下去：`px_render` **只有 bin target**、没有 `src/lib.rs`）。"用的是宿主那张表"
+/// 这件事因此由**文本同源**保证 —— 宿主那侧 `px_render::stubs` 也只是 `pub use`
 /// `px_shader::host_stubs` 的同一份。这一句必须写清，否则下一个人会以为探针挂在宿主 crate 上。
 ///
 /// 三块拼出来，三块都住在共享叶子 crate 里：
@@ -39,7 +41,7 @@ pub fn assemble(name: &str) -> String {
 /// 工作区根：`px_probe` 的上一级。
 ///
 /// ⚠ 取法**不猜当前目录**：探针是 `cargo run -p px_probe` 起的（那时 cwd 是包目录），
-/// 而它要读的是工作区里的 `art/shaders`。与 `px_render_wgpu::shader::workspace()` 同源
+/// 而它要读的是工作区里的 `art/shaders`。与 `px_render::shader::workspace()` 同源
 /// （`CARGO_MANIFEST_DIR` 的上一级）。
 pub fn workspace_root() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR"))

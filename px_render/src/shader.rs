@@ -22,12 +22,13 @@ pub fn roots() -> Vec<PathBuf> {
     px_shader::workspace_roots(workspace())
 }
 
-/// 工作区根：`px_render_wgpu` 的上一级。与 `px_render::shaders` 的取法同源（`CARGO_MANIFEST_DIR`），
+/// 工作区根：本 crate（§157 起叫 `px_render`，改名前是 `px_render_wgpu`）的上一级。
+/// 与 `px_render::shaders`（**已删的 Bevy 宿主**的模块，§154）的取法同源（`CARGO_MANIFEST_DIR`），
 /// 不猜当前目录 —— 服务是**别的进程**按绝对路径调起来的，当前目录不归我们管。
 pub fn workspace() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
-        .expect("px_render_wgpu 必须住在 workspace 下")
+        .expect("px_render 必须住在 workspace 下")
 }
 
 pub fn modules() -> ModuleTable {

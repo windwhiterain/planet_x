@@ -9,7 +9,7 @@ edition = "2024"
 # ⚠ **不依赖任何宿主 crate**（S8-a 之前它只为了 `px_render::shaders::assemble` 而依赖 bevy 宿主）。
 # 现在它要的两样都在共享叶子 crate `px_shader` 里：路径约定（`workspace_roots` /
 # `workspace_source_of`）与**裸 wgpu 宿主那张桩表**（`host_stubs::wgpu_host_stub`，
-# 宿主那侧 `px_render_wgpu::stubs` 只是 `pub use` 同一份 ⇒ "探针编的文本"与"宿主编的文本"
+# 宿主那侧 `px_render::stubs` 只是 `pub use` 同一份 ⇒ "探针编的文本"与"宿主编的文本"
 # 由**文本同源**保证，不是由 crate 依赖保证）。宿主 crate 也依赖不到：它只有 bin target。
 px_shader = { path = "../px_shader" }
 px_verify = { path = "../px_verify" }

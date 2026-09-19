@@ -41,7 +41,7 @@ fn main() {
     // ⚠ S8-a：同 `planet.rs` —— bevy 宿主删了，提示改成新宿主**真跑得起来**的那条命令。
     println!(
         "看这一份内容：先 `cargo run -q -p px_graphs --bin scene <档>` 出场景文档（配方在 art/scene/），\
-         再 `cargo run -q -p px_render_wgpu -- --offline --scene <产物> --out x.png --width 960 --height 640`"
+         再 `cargo run -q -p px_render -- --offline --scene <产物> --out x.png --width 960 --height 640`"
     );
     println!(
         "  这一趟烘的成员（要在 art/scene/ 里自己接上）：height {}｜surface {}",

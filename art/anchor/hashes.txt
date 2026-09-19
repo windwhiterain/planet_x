@@ -4,12 +4,15 @@
 # ⚠ 量法必须连"拿哪份产物量的"一起写 —— 这一条在本工程被咬过四次。
 # ⚠ 还有一格量法：**盘上那些字节的行尾约定**（§六）。产品键哈希的是盘上的源码文本，
 #   所以"换一份 checkout 会不会变"是这份表的前提，不是细节。
+# ⚠ §157（2026-09-19）：下面各条量法里的包名从 `px_render_wgpu` 改成 **`px_render`**
+#   （宿主 crate 改名，`15-render-wgpu.md` §157）。⚠ 那是一次纯改名：本表**一个读数都没动** ——
+#   六份冻产物的文件字节与六张判据图的 sha256 改名前后逐格相同（§157 有前后两遍的读数）。
 
 ## 一、J1 判据图（整份 PNG 的 sha256 前 16）
 
 # 量法：
 #   cargo run -q -p px_graphs --bin scene <档>
-#   cargo run -q -p px_render_wgpu -- --offline --scene <产物> --out x.png --width 960 --height 640
+#   cargo run -q -p px_render -- --offline --scene <产物> --out x.png --width 960 --height 640
 #   (Get-FileHash x.png -Algorithm SHA256).Hash.Substring(0,16)
 #
 # ⚠ 两半都不能省：产物必须是**刚烘的**，图的字节数要一起核（字节数是"图没被换过"的第二道锁）。
@@ -62,6 +65,20 @@ grade_half       = 平场：min = max = 188（1 种颜色，614400/614400）  �
 anchor exe             = D7ED54FDB8323EDD…  (被钉住的那一支；冻结的构建产物，重建不是同一个字节序列)
 # 它的读数都在上面；但"向 oracle 提问"那个能力随之消失（§143 靠它测出透明相位的次序规则）。
 # 要用就得重建一支，而重建的那支**必须先把这六张判据图重出一遍、逐字节对上**，才够格当 oracle。
+
+# ⚠ §157 就地更正（2026-09-19，三条并存的事实；`README.md` 有全文）：
+#   ① 上面那一格**仍然成立**：被钉住的那支 `D7ED54FDB8323EDD…` 已丢失且不可重建。
+#   ② ⚠ 但"能力随之消失"这句**在写下时不成立**：2026-09-19 实测 `target/debug/px_render.exe`
+#      （`EB8F85452C8B2E291B6714BA04325AF784565F7F335E4BC3265E472F68CE38C7`，164,638,720 B）
+#      是一支**还能跑的 Bevy 宿主**，六份冻产物出图与 §一 那六张**逐字节全中**（0/6 失败；
+#      仪器 `target/pre-rename/bevy-six.ps1`）⇒ 按上面那句自己立的门槛，**它够格**。
+#   ③ 而**裁决是不留**（用户：「该做的功能都做完了，留着 oracle 干嘛」）—— 靶子在 git、
+#      源码在 `f121ee3^` ⇒ 留 164 MB 是给一个不存在的消费者留。改名 `px_render_wgpu → px_render`
+#      覆盖了那个路径（覆盖是对的：`harness.ps1` 的 `$HarnessExe` 就指它）⇒ **§157 起 ② 那句成立**。
+#      ⚠ 那份副本 `target/pre-rename/px_render-bevy-EB8F8545.exe`（sha256 与原件逐字节同）
+#      **是未登记的临时副本，不是资产** —— 别依赖它。
+#   拿回来的路：源码完整在 `f121ee3^`（`px_render/` 21 个文件，含 `Cargo.toml` 与 `tests/`），
+#   bevy 一族的锁在那一笔的 `Cargo.lock` 里 ⇒ 命令与注意事项见 `15-render-wgpu.md` §157.5。
 
 ## 六、⚠ 盘上字节的**行尾约定**：这一格能不动一个像素而换掉所有键（S8-c 立，见 §156）
 

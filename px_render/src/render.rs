@@ -2069,7 +2069,7 @@ impl Session {
         let mut encoder = gpu
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("px_render_wgpu 的一帧（一格一次）"),
+                label: Some("px_render 的一帧（一格一次）"),
             });
         // 帧级那一对 span 的**起点**：清屏**之前**（清屏也是这一帧的 GPU 活）。
         if let Some(stamps) = stamps {
@@ -2081,7 +2081,7 @@ impl Session {
         //    写到的地方（对照图那种按格写的情形正是这样），而那种错不会有任何门响。
         {
             let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("px_render_wgpu 宿主目标清零（让复用的目标等于新目标）"),
+                label: Some("px_render 宿主目标清零（让复用的目标等于新目标）"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &layer.host_target.view,
                     depth_slice: None,

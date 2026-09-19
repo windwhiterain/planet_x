@@ -1,4 +1,11 @@
-//! px_render_wgpu：**不依赖 bevy** 的渲染宿主（`art/15-render-wgpu.md`）。
+//! px_render：**不依赖 bevy** 的渲染宿主（`art/15-render-wgpu.md`）。
+//!
+//! ⚠ **本 crate 在 §157（2026-09-19）之前叫 `px_render_wgpu`**，那之后它接管了 `px_render`
+//! 这个名字（旧的 `px_render` 是 Bevy 宿主，§154 已删）。⇒ 本 crate 源码里凡是
+//! **`px_render::…` / `px_render/src/…:行` 形态的引用**，都是**已删的 Bevy 宿主**的出处指针
+//! （取法 `git show f121ee3^:…`；§156.2 立的规矩：这类指针**不许删**），**不是**本 crate ——
+//! 只有 `px_render::shader` / `::stubs` / `::art` 这种**本 crate 真有的模块**才指本 crate。
+//! ⚠ 而 `art/shaders/**` 里的 `#import bevy_pbr::…` 是另一类出处指针（§155.4），那类**在产物里**。
 //!
 //! 几条路，一条比一条走得远：
 //!
@@ -43,14 +50,14 @@ use px_protocol::render::{Job, Request, Scene, Shot, View};
 fn usage() -> String {
     [
         "用法：",
-        "  px_render_wgpu --serve [--port N] [--pcg-root DIR] [--width W] [--height H]",
+        "  px_render --serve [--port N] [--pcg-root DIR] [--width W] [--height H]",
         "      常驻渲染服务：写租约（target/render-server.json）、按请求出图。",
         "      ⚠ 尺寸以**请求里的**为准（--width/--height 只收不用）。",
-        "  px_render_wgpu --scene A.pxart --out a.png [--scene B.pxart --out b.png]",
+        "  px_render --scene A.pxart --out a.png [--scene B.pxart --out b.png]",
         "            [--cam YAW,PITCH,DIST] [--report r.json] [--width W] [--height H] [--autostart]",
         "      客户端：把一条请求交给在跑的服务。给了多个 --scene 就是**批量**（一个请求出一串图）。",
         "      --report 让服务端把结构化报告落到那个路径（同一份也回给调用方）。",
-        "  px_render_wgpu --scene 文档.pxart --out PNG [--width W] [--height H] [--offline] [--stats]",
+        "  px_render --scene 文档.pxart --out PNG [--width W] [--height H] [--offline] [--stats]",
         "      **离线**出图（要显式写 --offline）：不开服务、不走协议，直接用本进程的设备画一帧。",
         "      ⚠ 为什么它不是缺省：`--scene --out` 在 bevy 宿主那里的语义是**请求**（交给服务），",
         "        而 `tools/` 那套仪器（frame-probe / harness）就是这么调本 exe 的。",
@@ -65,35 +72,35 @@ fn usage() -> String {
         "        后者与 Bevy 的 `elapsed_gpu` 同一套），另有帧级一条与匹配子集之和。",
         "        ⚠ 两个数都必须显式写（不给缺省）；⚠ 与 --sheet 互斥（槽按单张排）。",
         "        ⚠ 这个数**不叫** `gpu_ms`：那个名字在 Bevy 那边是七段之和（见 src/spans.rs）。",
-        "  px_render_wgpu --scene 文档.pxart --out sheet.png --sheet [--columns N] [--offline]",
+        "  px_render --scene 文档.pxart --out sheet.png --sheet [--columns N] [--offline]",
         "      **对照图**（J2）：12 格 × 960×640 拼成一张 3840×1920 —— 相机表来自产物",
         "      （`.pxart` 的 `cameras`），格子的排布是渲染器的事（缺省 4 列）。",
         "      ⚠ 与 --cam 互斥：相机表与 --cam 是两处会漂开的真相。",
-        "  px_render_wgpu --diff A.png B.png",
+        "  px_render --diff A.png B.png",
         "      两张 PNG 逐像素比（不要 GPU）：差异像素数 / 最大与平均通道差 / 差异区域 /",
         "      剪影内的像素是不是逐位相同。",
         "      ⚠ **按位置读，不按角色读**：背景色与剪影**只按第一个参数（左图）**定，",
         "        约定是『左 = 本宿主那张 / 右 = oracle』。传反了整篇读数就反着读 ——",
         "        本工具不认识角色，所以报告开头会把两条路径连同左右一起打出来。",
-        "  px_render_wgpu --device [--shot PNG] [--width W] [--height H]",
+        "  px_render --device [--shot PNG] [--width W] [--height H]",
         "      建实例/适配器/设备（Vulkan 锁死），报「到设备就绪」的读数；",
         "      给了 --shot 就再清一张纯色图、回读、落 PNG。",
-        "  px_render_wgpu --shaders",
+        "  px_render --shaders",
         "      把四份内容 shader 用**本宿主的桩表**组装出来并 naga 校验（不要 GPU）。",
-        "  px_render_wgpu --view [--scene 文档.pxart] [--cam YAW,PITCH,DIST] [--shot PNG]",
+        "  px_render --view [--scene 文档.pxart] [--cam YAW,PITCH,DIST] [--shot PNG]",
         "                   [--width W] [--height H] [--novsync]",
         "      **常驻预览窗口**（S7）：1 台轨道相机（左键拖 = 转、滚轮 = 缩放），",
         "      相机一变、场景一换、窗口一改大小才重画一帧（本宿主是同步建管线，按需渲染）。",
         "      --shot：**开窗之后的第一帧**顺手存一张 PNG（与 `--offline` 同一行代码）。",
         "      --cam：窗口的起始方位；不给就是**不给 --cam 那一档**（探针机位，与 J1 那张图同一台）。",
         "      --width/--height：窗口的初始尺寸（离线那条路是图的尺寸，同一个口径）。",
-        "  px_render_wgpu --show --scene 文档.pxart [--shot PNG]",
+        "  px_render --show --scene 文档.pxart [--shot PNG]",
         "      把一份场景**推给**在跑的窗口（写 target/viewer-scene.json）；它自己不渲染。",
-        "  px_render_wgpu --where ｜ px_render_wgpu --place YAW,PITCH,DIST",
+        "  px_render --where ｜ px_render --place YAW,PITCH,DIST",
         "      问 / 摆**常驻窗口**的相机（一问一答，3 s 超时；不换场景、不重烘）。",
         "      ⚠ (yaw,pitch,distance) 的含义与 `--cam` **同一套数**（同一个 `probe_camera`）：",
         "        窗口在某个方位看到的，就是 `--offline --cam 同一个三元组` 画出来的那一张。",
-        "  px_render_wgpu --help",
+        "  px_render --help",
         "",
         "⚠ 这一版没有的（各自都会**当场拒**，而且拒词指路）：",
         "  --perf/--windows/--frames",
@@ -233,7 +240,7 @@ impl Default for Options {
             serve: false,
             port: 0,
             // ⚠ 缺省 CAS 根**不是** `PathBuf::from("target/pcg")`：那是**当前目录**，
-            // 而 cargo 的当前目录是包目录（`px_render_wgpu/`）。`art::default_pcg_root()`
+            // 而 cargo 的当前目录是包目录（`px_render/`）。`art::default_pcg_root()`
             // 从可执行文件的位置反推工作区。这里只在"服务端"生效。
             pcg_root: art::default_pcg_root(),
             pcg_root_given: false,

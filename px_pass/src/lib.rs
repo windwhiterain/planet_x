@@ -1371,7 +1371,7 @@ pub struct ResolvedGeometry<'a> {
     ///
     /// ⚠ 为什么它有资格出现在这里：**执行器原来把这一格写死成 `0..1`**，而那正是
     /// "一个没人写过的数"（§104 第 3 条的缺省病）。per-instance 的参数一旦变成
-    /// "一份数组 + 一个下标"（`px_render_wgpu` 的 `MeshInstance` 数组就是它），
+    /// "一份数组 + 一个下标"（`px_render` 的 `MeshInstance` 数组就是它），
     /// 下标就成了**每笔 draw 必须说的那件事** —— 不说就等于每笔都读第 0 格。
     ///
     /// ⚠ **长度等于 1 是常态**（今天每一笔画一个对象）：`k..k+1` 的 `instance_index` 恒为
@@ -2432,6 +2432,9 @@ impl Executor {
     ///
     /// ⚠ S8-c 标注：调用方里那个 `px_render` **已删**（§154）⇒ 今天只剩"本宿主的每一条渲染路"
     /// 这一类调用方。**这条禁令不变**：加仪器不许改这个签名。
+    /// ⚠ **§157（2026-09-19）：`px_render` 这个名字换过手**（wgpu 宿主从 `px_render_wgpu` 改名）
+    /// ⇒ 上面那句里的 `px_render` 是**已删的 Bevy 宿主**，而"本宿主"今天**也叫这个名字**。
+    /// 本段要读成：调用方从"两支宿主"收敛成"一支"，而那一支现在叫 `px_render`。
     pub fn execute(
         &mut self,
         device: &Device,
@@ -3906,7 +3909,7 @@ fn vs_main(@location(0) position: vec3<f32>) -> Out {
     /// - 不要仪器的那一档（`execute`）**审计里写着 0 条**，而且它连查询集都不用建。
     ///
     /// ⚠ 它只钉"这台仪器在这台机器上拿到了一个**说得通的**数"，钉不到"这个数与 Bevy 的
-    /// 是同一个量" —— 那是 `px_render_wgpu` 那一侧的对照表与映射表的事（J4 的报告）。
+    /// 是同一个量" —— 那是 `px_render` 那一侧的对照表与映射表的事（J4 的报告）。
     #[test]
     fn the_timestamps_measure_the_pass_and_the_reading_is_not_all_zero() {
         use wgpu::Features;
@@ -4685,7 +4688,7 @@ fn fs_main() -> @location(0) vec4<f32> {
             panic!(
                 "后端断言失败：这台机器上拿不到 Vulkan 适配器（{err}）。\
                  几何判据必须真跑 —— 它要一个能用的 Vulkan 驱动；\
-                 这一档**不静默跳过**（同 `px_render_wgpu::gpu::connect`）"
+                 这一档**不静默跳过**（同 `px_render::gpu::connect`）"
             )
         });
         let info = adapter.get_info();
@@ -4799,7 +4802,7 @@ fn fs_main(@location(0) tint: vec4<f32>) -> @location(0) vec4<f32> {
 "#;
 
     /// 组 1 的布局：binding 0 = `PassView`（uniform，super）、binding 1 = 实例数组
-    /// （storage，instance）—— 与 `px_render_wgpu` 那一份**同形**（照抄它的两个地址空间）。
+    /// （storage，instance）—— 与 `px_render` 那一份**同形**（照抄它的两个地址空间）。
     fn two_class_layout(device: &Device) -> BindGroupLayout {
         device.create_bind_group_layout(&BindGroupLayoutDescriptor {
             label: Some("px_pass 判据：组 1（PassView + 实例数组）"),

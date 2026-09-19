@@ -36,15 +36,27 @@
      `px_render` 这个 crate 连同 `assets/` 一起删掉了（shader 库搬去 `art/shaders/lib/`），
      所以**任何指向它的默认值都是死指针**，这里三处（`$Exe` / `$HarnessExe` / 单一实例闸的
      进程名前缀）一并对齐。就绪信号**不用改**：新宿主打的是同一行
-     「渲染管线全部就绪…」（`px_render_wgpu/src/serve.rs:101`，§147 逐字搬过来的）。
+     「渲染管线全部就绪…」（`px_render/src/serve.rs:101`，§147 逐字搬过来的）。
+     ⚠⚠ **§157（2026-09-19）取代：wgpu 宿主改名叫 `px_render`** ⇒ 那三处默认值**又回到
+     `px_render.exe`**，而这次它是**本宿主**（不是 bevy 锚）。⚠ 名字有两个所指，按日期切：
+     本段开头那句里的 `px_render`（"从 `px_render.exe`（bevy 锚宿主）"）是**旧义**；
+     下面 `px_render/src/serve.rs:101` 与 `px_render --spans` 是**新义**（= 本宿主）。
+     ⚠ 顺带一条与单例闸有关的：那个路径上原本躺着一支**还能跑的 Bevy 宿主**（§157 实测），
+     改名之后它是本宿主的 exe —— 正是这条对齐要的结果（否则闸会驱动到一支 bevy exe）。
 
   ⚠ **随锚退休的两条路（不要在这里再补）**：`frame-probe.ps1` 的 **Perf** 与 **Stable**
      两路要的是「计时用的帧循环」（逐帧采样 / 丢窗 / 等 K 帧 + 每条 pass 的编码器级
      GPU 时间戳），而新宿主**按需渲染**（一条请求画一帧就回话）⇒ 服务端**当场拒**，
-     拒词自己写着理由（`px_render_wgpu/src/serve.rs`）。**能读出可比计时数的那支宿主
+     拒词自己写着理由（`px_render/src/serve.rs`）。**能读出可比计时数的那支宿主
      已经不在了**（锚 exe 不可重建，见 `art/anchor/README.md`）⇒ 这两路**不再修**，
+     ⚠ **§157 修正（2026-09-19）：上面那句话在写下时（S8-c）不成立** —— 实测
+     `target/debug/px_render.exe` 是一支**还能跑的 Bevy 宿主**（六份冻产物出图与
+     `art/anchor/*.png` **逐字节全中**，仪器 `target/pre-rename/bevy-six.ps1`）。
+     而**裁决是不留**，改名又覆盖那个路径 ⇒ **从 §157 那一笔起这句话成立**。
+     被钉住的那支锚（`D7ED54FDB8323EDD…`）确实找不回来 —— 这两件事不矛盾，全文见
+     `art/anchor/README.md` 与 §157。要拿回这条路：源码在 `f121ee3^`，命令见 §157。
      它们的量法留在 git 历史与 `.agents/notes/art/15-render-wgpu.md` §147/§153 里。
-     本宿主**有的**那件计时仪器是 `px_render_wgpu --spans 预热,测量`（§153 的 J4 仪器，
+     本宿主**有的**那件计时仪器是 `px_render --spans 预热,测量`（§153 的 J4 仪器，
      量的是**逐条 pass** 的编码器级时间戳），它不是 `--perf` 的替代品 —— 名字与口径都不同。
 #>
 
@@ -57,16 +69,16 @@ function Get-HarnessChildEnv {
     return @{ WGPU_BACKEND = $HarnessBackend }
 }
 
-if (-not $Exe) { $Exe = 'target\debug\px_render_wgpu.exe' }
+if (-not $Exe) { $Exe = 'target\debug\px_render.exe' }
 
 $HarnessCacheRoot = 'target\pcg'
 $HarnessLease = 'target\render-server.json'
 # 「这一套仪器驱动的那支 exe」。⚠ 今天**没有调用方**（原来是给"改前那支"留的位），
 # 但它是"这批读数是在哪支 exe 上取的"这句话的落点，所以照样对齐到新宿主，不许留死指针。
-$HarnessExe = 'target\debug\px_render_wgpu.exe'
+$HarnessExe = 'target\debug\px_render.exe'
 # 硬失败模式。⚠ 逐条说清哪几个还活着：
 #   Refused              活着 —— 新宿主对能力之外的请求回的就是 `Frame::Refused`（`serve.rs`）
-#   后端断言失败          活着 —— `px_render_wgpu/src/gpu.rs:14` 的 `BACKEND_ASSERT`
+#   后端断言失败          活着 —— `px_render/src/gpu.rs:14` 的 `BACKEND_ASSERT`
 #   管线编译失败          退休 —— bevy 宿主排队建管线那一路的词，新宿主是同步建的（§104 第 5 条）
 #   failed to process shader / 设备实例已经暂停 / 0x887A0005
 #                        退休 —— bevy 的资产与 DXGI 设备丢失那两句；新宿主锁死 Vulkan，

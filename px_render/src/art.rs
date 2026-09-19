@@ -287,9 +287,10 @@ impl LoadedScene {
 
 /// CAS 根的缺省值：`<工作区>/target/pcg`。
 ///
-/// ⚠ **按 `CARGO_MANIFEST_DIR` 取，不按当前目录取**（`px_render` 那边是
-/// `PathBuf::from("target/pcg")`）。差别不是风格：`cargo test` 的当前目录是**包目录**
-/// （`px_render_wgpu/`），照当前目录解会去 `px_render_wgpu/target/pcg` 找一个不存在的 CAS；
+/// ⚠ **按 `CARGO_MANIFEST_DIR` 取，不按当前目录取**（`px_render` **那边**是
+/// `PathBuf::from("target/pcg")` —— ⚠ 那个 `px_render` 是**已删的 Bevy 宿主**（§154），
+/// 而本 crate 从 §157 起也叫 `px_render`：这一句说的是"当年那支凭相对路径解"的教训，不是本 crate）。差别不是风格：`cargo test` 的当前目录是**包目录**
+/// （`px_render/`），照当前目录解会去 `px_render/target/pcg` 找一个不存在的 CAS；
 /// 而服务是别的进程按绝对路径调起来的，当前目录也不归我们管。
 ///
 /// 真跑起来仍然应该由命令行 `--pcg-root` 说了算，这个函数只是它的缺省值。
@@ -689,7 +690,7 @@ fn load_geometry(geometry: &Geometry, id: &str, pcg_root: &Path) -> Result<Loade
 
 /// 内建图元 → 网格。**参数全部来自文档**，一个数都不写死。
 ///
-/// ⚠ 现在只认 `icosphere`：`px_render_wgpu/src/icosphere.rs` 只移植了细分球。
+/// ⚠ 现在只认 `icosphere`：`px_render/src/icosphere.rs` 只移植了细分球。
 /// Bevy 宿主还有 `uv_sphere`（`Sphere::uv`）—— 那一支**故意不装**：
 /// 移植件没有、拿一个"看起来差不多"的球去顶，就是让两条宿主在同一个场景上出两张不同的图，
 /// 而报错信息比一张对不上的图便宜得多。要用它的那一天，先把移植件补上（`target/oracle/`

@@ -14,6 +14,9 @@ px_render 长什么样：离屏还是常驻、实体分几类、那张图是怎�
 > Bevy 宿主**（`f121ee3`，`15-render-wgpu.md` §154）⇒ 今天用 `px_render_wgpu --offline --scene …`；
 > ② `px_render/src/{shaders,passes}.rs` 那几条落点同理，源码在 git 历史里（`git show f121ee3^:…`）。
 > **读数与结论一字未删。**
+> ⚠ **§157（2026-09-19）：①里那条等价命令今天写作 `px_render --offline --scene …`**
+> （wgpu 宿主改名叫 `px_render`）；而①②里的 `px_render` **照旧指已删的 Bevy 宿主** ——
+> 同一段两个名字各指一支，按日期切（`15-render-wgpu.md` §157）。
 
 ---
 

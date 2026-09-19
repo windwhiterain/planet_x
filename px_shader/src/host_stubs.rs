@@ -1,4 +1,4 @@
-//! **裸 wgpu 宿主（`px_render_wgpu`）那张桩表** —— 它就是那个宿主的 group 0 契约。
+//! **裸 wgpu 宿主（`px_render`）那张桩表** —— 它就是那个宿主的 group 0 契约。
 //!
 //! 与 Bevy 宿主的关系（§103.1）：
 //!
@@ -13,13 +13,13 @@
 //!
 //! | 谁 | 为什么够不到宿主 |
 //! |---|---|
-//! | 烘图侧（`px_graphs::frame`，反射帧材质） | `px_render_wgpu` 拖着整棵 wgpu 树（§100：烘图侧要快） |
+//! | 烘图侧（`px_graphs::frame`，反射帧材质） | `px_render` 拖着整棵 wgpu 树（§100：烘图侧要快） |
 //! | `px_probe`（把云 shader 编到自己的设备上） | 同上；而且宿主**只有 bin target**，根本没有可依赖的 lib |
-//! | 宿主自己（`px_render_wgpu::stubs`） | 够得到 —— 它只是 `pub use` 这一份，并留着**钉住**它的判据 |
+//! | 宿主自己（`px_render::stubs`） | 够得到 —— 它只是 `pub use` 这一份，并留着**钉住**它的判据 |
 //!
 //! ⚠ 桩表的**内容**是宿主的判据来源：谁多认一个已经退休的符号（比如平行光的
 //! `fetch_directional_shadow`），离线门就该报「找不到这个符号」，而不是运行期才发现画面不对。
-//! 宿主那一侧的钉法（哪三格与 Bevy 不同、各自为什么）住在 `px_render_wgpu::stubs` 的测试里 ——
+//! 宿主那一侧的钉法（哪三格与 Bevy 不同、各自为什么）住在 `px_render::stubs` 的测试里 ——
 //! **文本搬了家，判据没跟着搬**：它钉的是"宿主认下来的那张表"，而那仍然是宿主的事。
 //!
 //! ## ⚠⚠ 为什么这些符号**还叫 `bevy_pbr::…`** —— 那是**出处指针**，不是"还没改的名字"（S8-b 裁决 a）
@@ -90,8 +90,8 @@ use crate::assemble::{HOST_VIEW_STUB, bevy_stub};
 /// ⚠ 它**自带两格的声明**（binding 2 的 cube array 与 binding 3 的比较采样器）：
 /// 内容 shader 只 import 这个符号，而 Bevy 那边这两格是 `mesh_view_bindings` 那份
 /// import 顺带带进来的。本宿主没有 naga_oil，所以"顺带"这件事必须写出来 ——
-/// 而绑定号仍然只有一处（`px_render_wgpu::group0::POINT_SHADOW_TEXTURES_BINDING` /
-/// `px_render_wgpu::group0::POINT_SHADOW_SAMPLER_BINDING`），由宿主 `group0` 那条反射判据钉住。
+/// 而绑定号仍然只有一处（`px_render::group0::POINT_SHADOW_TEXTURES_BINDING` /
+/// `px_render::group0::POINT_SHADOW_SAMPLER_BINDING`），由宿主 `group0` 那条反射判据钉住。
 ///
 /// ⚠ 用到的两个符号（`clustered_lights` 与 `light_id` 的下标语义）来自**别的 import**：
 /// `surface.wgsl` 引了 `clustered_lights`，所以这里直接用；谁哪天写一支只引

@@ -245,7 +245,7 @@ pub fn show(scene: &Path, shot: Option<PathBuf>) -> Result<(), String> {
     println!("已推给常驻窗口：{scene}（键 {key:016x}）");
     match lease_age() {
         Some(age) if age < LEASE_FRESH => println!("窗口在线（心跳 {:.1} s 前）", age.as_secs_f32()),
-        _ => println!("⚠ 没检测到在跑的窗口；先执行 `px_render_wgpu --view --scene …` 开一个，它会一直留着"),
+        _ => println!("⚠ 没检测到在跑的窗口；先执行 `px_render --view --scene …` 开一个，它会一直留着"),
     }
     if request.shot {
         println!(
@@ -267,7 +267,7 @@ pub fn camera_query(place: Option<[f32; 3]>) -> Result<(), String> {
     let place = place.map(|place| orbit_of("--place", place)).transpose()?;
     let previous = read_request().ok_or_else(|| {
         format!(
-            "读不到 {VIEW_REQUEST}：先 `px_render_wgpu --view --scene <SCENE.pxart>` 开一个窗口，\
+            "读不到 {VIEW_REQUEST}：先 `px_render --view --scene <SCENE.pxart>` 开一个窗口，\
              或 `--show --scene <SCENE.pxart>` 推一份"
         )
     })?;
@@ -317,7 +317,7 @@ pub fn camera_query(place: Option<[f32; 3]>) -> Result<(), String> {
         std::thread::sleep(Duration::from_millis(20));
     }
     Err(format!(
-        "窗口没回话（{} s）：确认 `px_render_wgpu --view` 在跑（租约 {}）",
+        "窗口没回话（{} s）：确认 `px_render --view` 在跑（租约 {}）",
         REPLY_TIMEOUT.as_secs(),
         VIEW_LEASE
     ))
@@ -442,8 +442,8 @@ pub fn view(options: &crate::Options) -> Result<(), String> {
     //    那是实话（"窗口没起来"与"窗口起来了但没回话"是两件事），不是缺陷。
 
     println!("操作：左键拖动 = 转视角、滚轮 = 缩放；s = 存一张图（落到 --shot 那条路径）；q / Esc = 退出");
-    println!("  推一份新场景进来：px_render_wgpu --show --scene <SCENE.pxart> [--shot PNG]");
-    println!("  问/摆相机：px_render_wgpu --where ｜ px_render_wgpu --place yaw,pitch,distance");
+    println!("  推一份新场景进来：px_render --show --scene <SCENE.pxart> [--shot PNG]");
+    println!("  问/摆相机：px_render --where ｜ px_render --place yaw,pitch,distance");
     println!("  截图落点：{}（--shot 不给路径时）", VIEW_SHOT);
     if options.fps {
         println!(
@@ -545,12 +545,12 @@ impl Present {
         //    理由：它的输出**永远只到交换链**，不进任何判据（连 `--shot` 都不经过它）。
         //    判据那条路上一个字节都不许走"另一个编译档"，也不该让这一份去共享那个档位。
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("px_render_wgpu 呈现"),
+            label: Some("px_render 呈现"),
             source: wgpu::ShaderSource::Wgsl(PRESENT_WGSL.into()),
         });
 
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("px_render_wgpu 呈现"),
+            label: Some("px_render 呈现"),
             entries: &[
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
@@ -571,12 +571,12 @@ impl Present {
             ],
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("px_render_wgpu 呈现"),
+            label: Some("px_render 呈现"),
             bind_group_layouts: &[Some(&layout)],
             immediate_size: 0,
         });
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("px_render_wgpu 呈现"),
+            label: Some("px_render 呈现"),
             layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &module,
@@ -610,7 +610,7 @@ impl Present {
             // 1:1 的取样：放大缩小时宁可看到方块，也不要一个"看起来更顺眼"的重采样 ——
             // 那是屏幕上**另外**画了一遍，而这一格的全部意义是"原样"。
             sampler: device.create_sampler(&wgpu::SamplerDescriptor {
-                label: Some("px_render_wgpu 呈现"),
+                label: Some("px_render 呈现"),
                 address_mode_u: wgpu::AddressMode::ClampToEdge,
                 address_mode_v: wgpu::AddressMode::ClampToEdge,
                 address_mode_w: wgpu::AddressMode::ClampToEdge,
@@ -635,7 +635,7 @@ impl Present {
     fn upload(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, width: u32, height: u32, rgba: &[u8]) {
         if self.texture.is_none() || self.size != (width, height) {
             let texture = device.create_texture(&wgpu::TextureDescriptor {
-                label: Some("px_render_wgpu 呈现源"),
+                label: Some("px_render 呈现源"),
                 size: wgpu::Extent3d {
                     width,
                     height,
@@ -650,12 +650,12 @@ impl Present {
                 view_formats: &[shot::FORMAT.remove_srgb_suffix()],
             });
             let view = texture.create_view(&wgpu::TextureViewDescriptor {
-                label: Some("px_render_wgpu 呈现源（非 sRGB）"),
+                label: Some("px_render 呈现源（非 sRGB）"),
                 format: Some(shot::FORMAT.remove_srgb_suffix()),
                 ..Default::default()
             });
             self.bind = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("px_render_wgpu 呈现源"),
+                label: Some("px_render 呈现源"),
                 layout: &self.layout,
                 entries: &[
                     wgpu::BindGroupEntry {
@@ -696,7 +696,7 @@ impl Present {
     /// 一个全屏三角，把那张纹理盖到交换链上。
     fn draw(&self, encoder: &mut wgpu::CommandEncoder, target: &wgpu::TextureView) {
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("px_render_wgpu 呈现"),
+            label: Some("px_render 呈现"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: target,
                 depth_slice: None,
@@ -1023,7 +1023,7 @@ impl Viewer {
 
     fn title(&self) -> String {
         format!(
-            "px_render_wgpu 预览 — {}｜键 {:016x}｜{}",
+            "px_render 预览 — {}｜键 {:016x}｜{}",
             self.scene,
             self.key,
             describe_orbit(self.orbit)
@@ -1522,12 +1522,12 @@ impl Viewer {
             }
         };
         let view = frame.texture.create_view(&wgpu::TextureViewDescriptor {
-            label: Some("px_render_wgpu 呈现（非 sRGB）"),
+            label: Some("px_render 呈现（非 sRGB）"),
             format: Some(config.format.remove_srgb_suffix()),
             ..Default::default()
         });
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("px_render_wgpu 呈现"),
+            label: Some("px_render 呈现"),
         });
         if let Some(present) = self.present.as_ref() {
             present.draw(&mut encoder, &view);

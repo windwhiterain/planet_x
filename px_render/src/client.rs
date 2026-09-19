@@ -43,7 +43,7 @@ pub fn request(request: Request, autostart: bool) -> i32 {
         }
         Err(px_protocol::ClientError::NoServer) => {
             eprintln!("没有在跑的渲染服务。先起一个：");
-            eprintln!("    px_render_wgpu --serve");
+            eprintln!("    px_render --serve");
             eprintln!("租约文件：{}", client::lease_path().display());
             // ⚠ 这一句是给"其实想在本进程里出图"的人看的：少了它，拒词只说清了一半，
             //    而"没有服务"与"我不想走服务"是两件事（`--offline` 那条路一条命令就够）。

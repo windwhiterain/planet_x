@@ -23,7 +23,7 @@ pub struct Target {
 impl Target {
     pub fn new(device: &wgpu::Device, width: u32, height: u32) -> Target {
         let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("px_render_wgpu target"),
+            label: Some("px_render target"),
             size: wgpu::Extent3d {
                 width,
                 height,
@@ -60,11 +60,11 @@ pub fn clear(
     color: wgpu::Color,
 ) {
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some("px_render_wgpu clear"),
+        label: Some("px_render clear"),
     });
     {
         let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("px_render_wgpu clear"),
+            label: Some("px_render clear"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: &target.view,
                 depth_slice: None,
@@ -94,14 +94,14 @@ pub fn read_back(
     let padded = unpadded.div_ceil(align) * align;
 
     let staging = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("px_render_wgpu readback"),
+        label: Some("px_render readback"),
         size: u64::from(padded) * u64::from(target.height),
         usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
 
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some("px_render_wgpu readback"),
+        label: Some("px_render readback"),
     });
     encoder.copy_texture_to_buffer(
         wgpu::TexelCopyTextureInfo {

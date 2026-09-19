@@ -15,14 +15,19 @@
 
   ⚠⚠ **S8-a：Perf 与 Stable 两路退休了，别在这里把它们补回来。**
      它们要的是**计时用的帧循环**（逐帧采样 / 丢窗 / 等 K 帧 + 每条 pass 的编码器级
-     GPU 时间戳），而今天唯一在的宿主（`px_render_wgpu`，本脚本的 `$Exe` 已换成它）
+     GPU 时间戳），而今天唯一在的宿主（`px_render`，本脚本的 `$Exe` 已换成它）
      **按需渲染**：一条请求画一帧就回话，给不出逐帧序列、也没有那七段 span
      ⇒ 服务端收到这类请求**当场拒**，而那句拒词**指不到真正的原因**。
      真正的原因是：**能给出可比 `gpu_ms` / `pair` 的那支宿主（bevy 锚 exe）已经不在了、
      且不可重建**（冻结的构建产物，重建出来的不是同一个字节序列 —— `art/anchor/README.md`）。
+     ⚠ **§157 修正（2026-09-19）**：上面这句在写下时（S8-c）**不成立** —— 实测
+     `target/debug/px_render.exe` 是一支**还能跑的 Bevy 宿主**（六份冻产物出图与
+     `art/anchor/*.png` 逐字节全中，仪器 `target/pre-rename/bevy-six.ps1`）；**裁决是不留**，
+     改名又覆盖那个路径 ⇒ **从 §157 起这句成立**。全文与"拿回来的路"见 `art/anchor/README.md`
+     与 `15-render-wgpu.md` §157。
      ⇒ 这两路由 `Stop-RetiredPhase` **当场拒并说清**（不是等 180 s 超时、也不是等服务端
      回一句"这一路不在这一版"）。量法与全部读数留在 git 历史与 `15-render-wgpu.md` §147/§153。
-     本宿主**有的**计时仪器是 `px_render_wgpu --spans 预热,测量`（§153 的 J4 仪器，量**逐条
+     本宿主**有的**计时仪器是 `px_render --spans 预热,测量`（§153 的 J4 仪器，量**逐条
      pass** 的编码器级时间戳）—— ⚠ 它**不是** `--perf` 的替代品，名字与口径都不同。
 
   `-Sweep` 才是大扫（5 档 × `-Rounds` 轮）—— ⚠ 它只服务那两条退休的路，今天一起失效。
@@ -53,6 +58,9 @@
   （老形状可以当"提问的靶子"，不能当"交付的形状"）。
   ⚠⚠ **S8-c 标注：上面这条"要给锚取数"的路已经断了**（§154；`art/anchor/hashes.txt` §五）——
   那支 exe 不在了、也不可重建（冻结的构建产物），所以**没有"给锚取数"这回事了**。
+  ⚠ **§157 修正（2026-09-19）**："断了"这句在写下时**不成立** —— 当时 `target/debug/px_render.exe`
+  是一支**还能跑的 Bevy 宿主**（六份冻产物出图与 `art/anchor/*.png` 逐字节全中）。
+  **裁决是不留**，改名又覆盖那个路径 ⇒ **从 §157 起成立**；要拿回来见 §157 的命令。
   它读不了帧图形状这件事**仍然成立**（那是记录），老形状今天只剩**逃生门判据**这一个正当用途
   （`art/anchor/README.md`）。上面那两行原文留着：它是"当时为什么这么设计相位"的出处。
 
@@ -83,7 +91,7 @@ param(
     [int]$DropWindows = 1,
     [bool]$Bake = $true,
     [switch]$AllowMixedShaders,
-    [string]$Exe = 'target\debug\px_render_wgpu.exe',
+    [string]$Exe = 'target\debug\px_render.exe',
     [string]$Tag = 'fp'
 )
 
@@ -243,20 +251,20 @@ function Write-ShaderTable {
 # 为什么是"当场拒并说清"而不是"删掉这几段代码"：**这条工具的量法本身是判据的一部分**
 # （§51.18 / §57 / §147.4 的配对差、漂移、第一窗口污染那几栏），删掉它等于把"我们量过什么"
 # 从脚本里抹掉。留着的代价只有一个：**它不能再跑** —— 而这一点必须由这里的一句话说出来，
-# 不许留给服务端去说：服务端只会说"这一路不在这一版"（`px_render_wgpu/src/serve.rs`），
+# 不许留给服务端去说：服务端只会说"这一路不在这一版"（`px_render/src/serve.rs`），
 # 那句话**指不到真正的原因**（能给出可比 `gpu_ms` / `pair` 的那支宿主已经不在了）。
 function Stop-RetiredPhase {
     param([string]$Phase, [string]$What)
     throw @"
 -Phase $Phase 已**随锚退休**（S8-a）：这条请求这里不会发出去。
   它要的是 $What 那套**计时用的帧循环**（逐帧采样 / 丢窗 / 等"重建后已渲染 K 帧"
-  + 每条 pass 的编码器级 GPU 时间戳），而今天唯一在的宿主（px_render_wgpu）是
+  + 每条 pass 的编码器级 GPU 时间戳），而今天唯一在的宿主（px_render）是
   **按需渲染**的：一条请求画一帧就回话，没有逐帧序列、也没有那七段 span。
   ⚠ 而能给出可比 `gpu_ms` / `pair` 的那支宿主（bevy 锚 exe）**已经不在了，且不可重建**
     —— 它是冻结的构建产物，重建出来的不是同一个字节序列（art/anchor/README.md）。
   ⇒ 这两路**退休，不再修**。它们的量法与全部读数留在 git 历史与
      .agents/notes/art/15-render-wgpu.md §147 / §153 里。
-  本宿主**有的**那件计时仪器是 `px_render_wgpu --spans 预热,测量`（§153 的 J4 仪器）：
+  本宿主**有的**那件计时仪器是 `px_render --spans 预热,测量`（§153 的 J4 仪器）：
     它量的是**逐条 pass** 的编码器级时间戳 —— ⚠ 它**不是** `--perf` 的替代品，
     名字与口径都不同（那个数不叫 gpu_ms）。
   还在的两条路：`-Phase shot`（判据图 + has_cloud）与 `-Phase ab`（A/B 正对照）。

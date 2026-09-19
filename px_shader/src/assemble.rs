@@ -2,6 +2,8 @@
 //!
 //! 为什么住在叶子 crate：**烘图侧也要组装**（烘 shader 产物时要反射出 schema descriptor，
 //! 见 `px_ops::write_shader`），而 `px_render` 拖着 bevy 进不去。
+//! ⚠ 这一句里的 `px_render` 是**已删的 Bevy 宿主**（§154）；§157 起同一个名字归 wgpu 宿主，
+//! 而那条理由对**今天那支**同样成立（它拖整棵 wgpu 树）。
 //!
 //! ⚠ 它比运行期宽松：这里把 `#import` 的整个模块递归展开，而 Bevy（naga_oil）只内联
 //! `#import` 里点名的符号 —— 所以「离线门能过」给不了「运行期能过」的保证（§46.4）。
@@ -30,13 +32,16 @@ pub type Stubs = fn(&str) -> Option<&'static str>;
 ///
 /// ⚠ **S8-c 标注：上面的"Bevy 宿主（`px_render`）"已经不在了**（§154 删了那个 crate）。
 /// 这张表今天**还有真实用户**，所以留着 —— 烘图侧（`px_ops` 的 shader 路、`px_graphs::frame`
-/// 烘帧材质）与 `px_render_wgpu::stubs` 那条"影子那一格必须由本表显式提供"的对照判据都在用它。
+/// 烘帧材质）与 `px_render::stubs` 那条"影子那一格必须由本表显式提供"的对照判据都在用它。
 /// ⇒ 读这一行时把"两个用户"读成"**烘图侧 + 唯一那支宿主的对照判据**"。
+/// ⚠ **§157（2026-09-19）：`px_render` 这个名字换过手** —— 上面"Bevy 宿主（`px_render`）"里
+/// 那个名字指**已删的 Bevy 宿主**，而同一段里的 `px_render::stubs` 指**现在的 wgpu 宿主**
+/// （它改名前叫 `px_render_wgpu`）。两个所指靠日期切：§100–§156 的旧义 / §157 起的新义。
 /// ⚠ 名字里的 `bevy_pbr::` **按 §155 保留**：那是**出处指针**，不是过时的名字（改名会换掉所有产物键）。
 ///
 /// ⚠ 运行期归 naga_oil 按 Bevy 自己的 `bevy_pbr` 兑现；这张表只服务"离线把文本拼出来"
 /// 这一件事（`px_shader::reflect` 与烘图侧）。
-/// 裸 wgpu 宿主（`px_render_wgpu`）**不传这张**，它传自己那份 —— 文本住在
+/// 裸 wgpu 宿主（`px_render`）**不传这张**，它传自己那份 —— 文本住在
 /// [`crate::host_stubs`]（S8-a 从宿主 crate 搬过来，理由见那个模块的头），
 /// 含真的 cube 影子实现。
 pub fn bevy_stub(symbol: &str) -> Option<&'static str> {
@@ -155,12 +160,12 @@ pub fn bevy_stub(symbol: &str) -> Option<&'static str> {
 /// 与 [`bevy_stub`] 的关系：那张表是"离线把 `bevy_pbr::*` 拼出来"的**近似**（Bevy 真正的 `View`
 /// 有七十多个字段，那张表里只有五格）。这一份不是近似，它是**契约**：宿主侧那个
 /// `#[repr(C)]` 的 `ViewUniform` 必须与它逐字对应，而两份的对账在宿主的 `cargo test` 里
-/// （`px_render_wgpu::group0` 的布局判据，偏移/大小/成员名逐格比）。
+/// （`px_render::group0` 的布局判据，偏移/大小/成员名逐格比）。
 ///
 /// ⚠ 为什么文本住在**共享的叶子 crate**、而不是宿主自己的桩表里：帧材质
 /// （`art/frame/skybox.wgsl`）是**宿主自有**的 WGSL，而它必须在**烘图时**被反射
 /// （参数块的三档校验在烘图时就做，见 `px_graphs::frame`）；烘图侧够不到宿主 crate ——
-/// `px_render_wgpu` 拖着整棵 wgpu 树（§100：烘图侧要快）。所以这一格文本只有**一处**：
+/// `px_render` 拖着整棵 wgpu 树（§100：烘图侧要快）。所以这一格文本只有**一处**：
 /// 宿主的桩表返回它，烘图侧的桩表（`bevy_stub` + 这一格覆盖）也返回它。
 /// 抄成两份就是 §66.1 那颗「同一条契约、两个数字」的雷：漂开的那天，烘图侧校验过的参数
 /// 与宿主反射出来的布局不是同一份东西，而画面上只表现为"某几个像素不一样"。
@@ -168,7 +173,7 @@ pub fn bevy_stub(symbol: &str) -> Option<&'static str> {
 /// ⚠ 最后两格（`view_from_clip` / `world_from_view`）是**追加在末尾**的，为的是天空盒
 /// 片元阶段重建视线方向（Bevy 的 `skybox.wgsl` 走的就是这两条逆矩阵，不是插值下来的
 /// 裁剪坐标）：追加 ⇒ 前面五格的偏移一个都不动，已经烘好的内容 shader 按名字读，读到的是
-/// 同一格。⚠ 两条逆矩阵都由宿主用**逐位移植的通用逆**（`px_render_wgpu::mat4::inverse`）算，
+/// 同一格。⚠ 两条逆矩阵都由宿主用**逐位移植的通用逆**（`px_render::mat4::inverse`）算，
 /// **不许**在 shader 里求逆、也不许换成解析逆（§110.1.1 实测：解析逆差 1–2 ulp）。
 pub const HOST_VIEW_STUB: &str = "struct ViewStub {\n\
                                    \x20   world_position: vec3<f32>,\n\

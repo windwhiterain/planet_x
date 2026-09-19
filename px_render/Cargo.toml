@@ -1,5 +1,5 @@
 [package]
-name = "px_render_wgpu"
+name = "px_render"
 version = "0.1.0"
 edition = "2024"
 

@@ -1,5 +1,17 @@
 # px_render_wgpu：把宿主从 Bevy 换成裸 wgpu（**开工序**）
 
+> ## ⚠⚠ 名字在 §157 换过手（2026-09-19）—— 读本篇之前先读这一行
+>
+> - **本篇 §100–§156 里每一处 `px_render`**（含那些 `px_render::…` / `px_render/src/…:行` 的落点）
+>   一律指**已删的 Bevy 宿主**（`f121ee3` 删除；源码取法 `git show f121ee3^:px_render/…`）。
+> - **从 §157 那一笔起**，`px_render` 指**现在唯一那支宿主**（裸 wgpu）—— 它在此之前叫
+>   `px_render_wgpu`，也就是本篇通篇在说的那个 crate。
+> - ⇒ **一个名字、两个所指，用日期切开。** 读旧节按旧义读；读代码与 §157 起按新义读。
+>   ⚠ 这一条必须写在这里：一个名字两个所指，是那种**会悄悄改掉一份决策记录**的东西。
+>
+> ⚠ 本单元（§157）对 §100–§156 的处理是**只加不删**：老句子与老读数**一个字节都没改**
+> （除了几处"现在是/今天叫"的**现在时**改成"当时叫"—— 逐条列在 §157.7），改名那一笔的判据在 §157。
+
 > **这一篇是工单，不是调研。** 调研与全部实测读数在 `art/14-bevy-exit.md` §91–§99。
 > 给新 session 的读法：**先读 §100（边界）、§101（判据）、§104（坑）**，再照 §105 一档一档做。
 > **每一档都有自己的判据；没拿到判据不许进下一档。**
@@ -3238,6 +3250,12 @@ frame-probe .\tools\frame-probe.ps1 -Phase shot -Scenes <六档> -Exe target\deb
 > ⚠ 用户那条口径要**改读一个字**：提问的靶子还在（`art/anchor/frozen/` 六份），
 > 而**能提问的人没了**（`art/anchor/hashes.txt` §五）⇒ 老形状今天只剩**逃生门判据**这一个
 > 正当用途（`art/anchor/README.md` 末两行写的就是这条边界）。
+>
+> ⚠⚠ **§157 就地更正（2026-09-19）：上面"能提问的人没了"在写下时不成立。** 实测
+> `target/debug/px_render.exe` 是一支**还能跑的 Bevy 宿主**，六份冻产物出图与 `art/anchor/*.png`
+> **逐字节全中**（仪器 `target/pre-rename/bevy-six.ps1`）⇒ 按 `art/anchor/README.md` 自己立的门槛
+> **它够格**。**裁决是不留**（靶子在 git、源码在 `f121ee3^`），改名又覆盖那个路径 ⇒
+> **从 §157 起这句话成立**，但理由是"我们选择不留"，不是"它丢了"。全文见 §157.5。
 
 **② ⚠ `tools/frame-probe.ps1` 的 stable 相位把产物解析放在重烘之前**（已修）。
 后果不是报错而是**静默量错东西**：我第一次跑它，量的是清单里**上一份**老形状产物
@@ -4102,3 +4120,201 @@ J4 的计时、`tools/frame-probe.ps1` 的 `-Phase shot`。它们不在本单元
 | `px_protocol/tests/crate_graph.rs` | 106 → 110 | +4 |
 | `tools/frame-probe.ps1` | 849 → 853 | +4 |
 | `tools/px.ps1` | 74 → 77 | +3 |
+
+---
+
+## §157 名字换手：`px_render_wgpu` → `px_render`（本单元；提交见下一笔）
+
+> **裁决（用户）**：旧 `px_render`（Bevy 宿主）已经删了 ⇒ wgpu 宿主**接管这个名字** ——
+> 仓里只剩一支宿主，名字该归它。
+> ⚠ 这是一次"只动名字"的改动，但它有一个**测量形状的风险**：产物键由闭包指纹算，而闭包哈希的是
+> **盘上那些字节** ⇒ 先在盘上量、再动手。本节全部读数由**同一把尺子跑两遍**得到。
+> 仪器：`target/rename/{regress,tests,do-rename,viewer-gate}.ps1`（不入 git，与 `j3/`、`s8c/` 同规矩），
+> 读数落 `target/rename/{before,after}/`。
+> ⚠ 边界（逐条量过）：**`art/shaders/` 与 `art/frame/` 一个字节都没动**；六张锚图与六份冻产物
+> 一个字节都没动（`git status --porcelain -- art/shaders art/frame art/anchor/frozen` 与
+> `art/anchor/*.png` 全为空）。
+
+### §157.1 判据（逐字；前后各一遍，逐格相同）
+
+```
+前（宿主包 px_render_wgpu）／后（宿主包 px_render）——
+J1 六档（与 art/anchor/*.png **逐字节**，`fc /b` 真比过；字节数一并核）
+  orbit-bare             63184151909371A5   300012 B  ✓
+  orbit-bare-nolight     7BBB18CE3612D4F7   215193 B  ✓
+  orbit-bare-shadow      C03FFF3235264DD5   298289 B  ✓
+  orbit-rings            B5799E4F1649535C   508562 B  ✓
+  orbit-soft             FA20FAD37BC61EA2   358066 B  ✓
+  orbit-proxy-fine-bound 32872F80AC867BE3   405380 B  ✓
+J2 --sheet（4×3）        A94F9F2D1437C06C   3159948 B  3840x1920 ✓
+J3 四条                  none 63184151909371A5｜invert 733408200119C203｜
+                         invert_vignette 745BE24FE1467192｜scratch 2D61519C6544E3C1 ✓
+逃生门六份（**文件字节**，不是文件名里那个 CAS 键）
+  2795F948E6987E11｜F60B19B0AE7E229F｜1A27679882A10D6B｜CB363DA74A90F63E｜
+  2C6C8592AD45214B｜ACB824E9EC0BA893 ✓（且与 art/anchor/frozen/*.pxart 逐字节相同）
+失败 0（六档 + J2 + 四条 + 六份 = **17 格**；两遍都是 0）
+测试  前：**309 passed / 0 failed**（49 个套件）｜后：**309 passed / 0 failed**
+      逐 crate（后）：px_pass 34｜**px_render 77**（原 px_render_wgpu 77）｜px_shader 21｜
+      px_protocol 40｜px_graphs 22｜px_probe 3｜px_ops 25｜px_verify 3｜planet_x 84
+改名后 crate 能跑  cargo run -q -p px_render -- --offline --scene <现烘产物> --out x.png
+                    --width 960 --height 640 --pcg-root target\pcg  → exit 0，sha16 63184151909371A5
+窗口（detached）   target\debug\px_render.exe --view --scene <产物> → 进程名 **px_render**、
+                    租约 target/viewer.json、日志「后端：Vulkan…设备就绪」；收工后残留 0
+单例闸             tools/harness.ps1 的 `Name -like 'px_render*'`：窗口在跑时**响**
+                    （"本机还有 1 个 px_render 在跑"）；起来**之前**与收工**之后**都不响
+```
+
+⚠ 两遍用的是**同一份脚本**（`regress.ps1`），只换 `-HostPkg`；脚本里显式 `Set-Location` **且**
+`[Environment]::CurrentDirectory = 根` —— "进程 cwd"与"PowerShell 的 location"是两件事，
+本仓已经为这条付过代价（有一支单元因此写到另一份 checkout 里）。
+
+### §157.2 改名**不需要动 `art/` 一个字节**：推导 + 实测
+
+推导（读代码，不是猜）：
+- `Closure::fingerprint`（`px_shader/src/lib.rs`）= 可达模块的 **（模块名, 源码）** + 外部符号的
+  **`#import` 子句**，长度前缀、按名字排序；
+- `shader_key`（`px_ops/src/lib.rs:555`）= `blake3("px_shader/v2" ‖ SHADER_VERSION ‖ 闭包指纹 ‖ 入口文本)`；
+- `scene_key` = `blake3("px_scene/v1" ‖ SCENE_SCHEMA ‖ spec JSON ‖ 成员键)`。
+
+⇒ **crate 的名字不是这三条里任何一条的输入**，输入全是**从盘上读来的字节** ⇒ 改 crate 名不动键，
+除非有人顺手改了那些字节。
+
+实测（比推导硬）：改名前后各现烘一遍，**27 份产物逐字节比**（`fc /b`）——
+六张 J1 PNG、`--sheet`、四份 J3 文档 + 四张图、六份老形状冻产物、六份新形状场景文档：
+**27/27 逐字节相同，不同 0**。
+
+### §157.3 ⚠ 旧名字确实出现在 `art/` 下**六份**文件里 —— 其中**四份在产物里**，一个字节都不许动
+
+| 文件 | 行 | 在产物里？ | 里面写的是 |
+|---|---|---|---|
+| `art/frame/skybox.wgsl` | 27、42 | **在**（帧材质 ⇒ 闭包指纹） | `px_render_wgpu::group0::exposure`、`::material::sampler_of` |
+| `art/frame/vertex_mesh.wgsl` | 4、21 | **在**（帧材质） | `px_render_wgpu/src/material.rs` 的 `VERTEX_PROBE`、`src/mat4.rs` |
+| `art/frame/default.toml` | 184 | **在**（帧图配方，烘 pass 文档时读） | `px_render_wgpu::material::FRAGMENT_ENTRY` |
+| `art/passes/grade_half.toml` | 6 | **在**（pass 配方） | `px_render_wgpu --stats` |
+| `art/anchor/README.md` | 40 | 不在任何产物里（§156 已核） | 量法命令行 ⇒ **已改成 `-p px_render`** |
+| `art/anchor/hashes.txt` | 12 | 不在任何产物里 | 同上，**已改** |
+
+⇒ **结论：不停手，但也不许"顺手改对"**：
+① 它们**不是**改名必须改的东西（§157.2），所以 brief 那条"旧名字出现在 art/ 下就停"的条件不成立；
+② 但前四份**在产物里** ⇒ 改它们就是换靶子（§155.4）⇒ **一个字节都没动**；
+③ 于是这次改名**故意**留下四处指向**旧 crate 名**的注释（`px_render_wgpu::…`）——它们是死指针，
+   登记在此；要动它们得先裁"换靶子"。
+
+⚠ 还有一处**反方向**的：`art/shaders/ring.wgsl:5` 与 `art/shaders/clouds.wgsl:67` 里的
+`px_render::reflect` —— 名字换手之后它**读起来像本 crate**，而本 crate **没有 `reflect` 模块**
+（反射住在 `px_shader::reflect`）⇒ 那两处**永远按旧义读**（= 已删的 Bevy 宿主）。它们在产物里、
+**不许改**；这条读法写进了 `art/anchor/README.md` 顶上。
+
+### §157.4 `("px_render","px_sim")` 这条禁止边**重新有主体** —— 怎么验的
+
+§156.5 记的那笔明账：那条边的 `from` 当时**扫不到任何包** ⇒ "渲染宿主不许拖 sim"**没人在守**。
+改名之后 `package.name == "px_render"` 就是本仓唯一那支宿主 ⇒ 边又有主体。**验法（不是"名字看着对"）**：
+
+```
+① 绿：cargo test -p px_protocol --test crate_graph
+   test protocol_is_a_workspace_member ... ok
+   test protocol_runtime_dependencies_are_whitelisted ... ok
+   test consumers_never_depend_on_sim ... ok          → 3 passed / 0 failed（exit 0）
+② 红（负对照）：把那一条临时改成 ("px_render", "px_pass")（宿主**真有的**依赖）⇒ 当场响：
+   thread 'consumers_never_depend_on_sim' panicked at px_protocol\tests\crate_graph.rs:90:17:
+   px_render 在 [dependencies] 里依赖了 px_pass：渲染器与 sim 只能通过 px_protocol 通信
+   test result: FAILED. 0 passed; 1 failed; …          → exit 101
+③ 负对照跑完**原样恢复**：常量那一行在 `git diff` 里是**上下文行**（不是改动行）⇒ 与 HEAD 逐字节相同。
+```
+
+⇒ **一条没有主体的边永远不会响**；② 响了，就证明 **`px_render` 那个包名确实进了扫描集**。
+⚠ `FORBIDDEN_EDGES` 第二格 `px_web` 今天**仍然没有主体**（那个包还不存在）—— 本表是"现在 + 将来"
+两种边混装 ⇒ **不许**加"每条边都必须有主体"的断言（那会把 `px_web` 判红）。这一格**留给评审**
+（§156.5 的口径不变：动门的覆盖面要评审裁）。
+
+### §157.5 oracle：三条并存的事实 + 拿回来的路
+
+**起因**：改名会让 cargo 写出 `target\debug\px_render.exe` —— 而那个路径上躺着**一支还能跑的
+Bevy 宿主**（§154 之前最后一支），于是它会被覆盖。**动手前先量了它**：
+
+| # | 事实 | 证据 |
+|---|---|---|
+| ① **老话仍成立** | `target/oracle/px_render-bevy.exe`（`D7ED54FDB8323EDD…`）**已丢失、不可重建** | `hashes.txt` §五；本单元把本 worktree `target/` 下 ≥20 MB 的 exe 逐个 sha256 过一遍，**没有**那一支（只有 `EB8F8545…` 的三份副本） |
+| ② **新事实（推翻"能力没了"）** | `target/debug/px_render.exe`（sha256 `EB8F85452C8B2E291B6714BA04325AF784565F7F335E4BC3265E472F68CE38C7`，164,638,720 B，mtime 10:51）**是一支还能跑的 Bevy 宿主**；拿 `art/anchor/frozen/*.pxart` 出图，**六张与 `art/anchor/*.png` 逐字节全中**（失败 0/6，字节数也逐格相同） | 仪器 `target/pre-rename/bevy-six.ps1`（`--serve` + 六次客户端请求）；⇒ 按 `art/anchor/README.md` **自己立的门槛**（"重建的那支必须先出这六张图、逐字节对上，才够格当 oracle"）**它够格** |
+| ③ **决定：不留** | 用户裁决「该做的功能都做完了，留着 oracle 干嘛」；靶子在 git、源码在 `f121ee3^` ⇒ 留 164 MB 是给一个**不存在的消费者**留（同族：§142 / §135 / §141 的"需要到了才建"） | 副本 `target/pre-rename/px_render-bevy-EB8F8545.exe`（sha256 与原件逐字节相同，已核两遍）**是未登记的临时副本、不是资产**；改名覆盖那个路径**是对的**（`harness.ps1` 的 `$HarnessExe` 就指那个名字，否则闸会驱动到一支 bevy exe） |
+
+⚠ ⇒ **正确的说法不是"它没了"（假），而是"我们选择不留，拿回来的路在这儿"。** 这句话已经就地写进
+`art/anchor/README.md`（"锚 exe 找不回来了"那段下面）与 `hashes.txt` §五，**老读数一字未删**；
+`tools/{harness,frame-probe}.ps1` 与 `px_graphs/src/frame.rs` 里复述过那句的地方也各加了一条 §157 更正。
+
+#### 拿回 oracle 的路（**只读核过**；本单元**没有真编** —— 编 Bevy 会把机器按住几分钟）
+
+只读核到的四件事实：
+
+1. **源码完整**：`git ls-tree -r f121ee3^ -- px_render` = **21 个文件** —— `Cargo.toml`、
+   `src/{art_cache,digest,lib,main,material,mesh,passes,reflect,scene,shaders,slots}.rs`、
+   `tests/{cloud_field,primitive_oracle,shaders,spike_reflect,view_oracle}.rs` + `tests/common/mod.rs`、
+   `assets/shaders/{common,light,noise}.wgsl`。
+   ⚠ 注意 shader **库**在那一笔还住在 `px_render/assets/shaders/`（§154 才搬到 `art/shaders/lib/`）——
+   少了 `px_render/assets/` 就重建不出同样的闭包，而它**在 git 里** ✓。
+2. **依赖锁在 git 里**：`git show f121ee3^:Cargo.lock` 里有 bevy 一族（`bevy` / `bevy_pbr` /
+   `bevy_core_pipeline` / `bevy_light` / `naga_oil` …）与 `wgpu`；`px_render/Cargo.toml` 那一格要的是
+   `bevy 0.19`（`file_watcher`）+ `naga 29`。而**本机 cargo registry 里 0.19.1 那一族还在**
+   （§156.2 实核过；本单元又核了一次 `bevy-0.19.1` / `bevy_pbr-0.19.1` 都在盘上）⇒ 不必联网。
+3. **冷编代价是记过的**：§100 的读数 —— 全新 target **366.4 s**、产物 **156.6 MB**。
+4. **"编出来"不等于"够格"**：按 `art/anchor/README.md` 的门槛，重出的那支**必须**再出六张、
+   与 `art/anchor/*.png` 逐字节对上，才够格当 oracle。
+
+命令（**全部在另一份 worktree 里**；别在这一份里 checkout 老树 —— 那会把 `art/` 连同工作树换成旧字节）：
+
+```powershell
+# ① 另开一份检出（detached，指向"删除前那一笔"）
+git -C C:\resource\planet_x\.worktrees\pass-table worktree add ..\oracle-rebuild f121ee3^
+# ② 在那一份里编 Bevy 宿主（⚠ 别与本机任何 px_render* 同时跑：单例闸按名字前缀认）
+cargo build -p px_render                         # cwd = .worktrees\oracle-rebuild
+# ③ 现烘六份**老形状**产物（CAS 按那一份自己的 target/pcg 解）
+cargo run -q -p px_graphs --bin shaders; cargo run -q -p px_graphs --bin planet; cargo run -q -p px_graphs --bin clouds
+cargo run -q -p px_graphs --bin scene orbit-bare --no-frame-graph        # 其余五档同理
+# ④ 起来（那支宿主的老规矩：`--scene` 是**客户端**请求，得先有服务）
+target\debug\px_render.exe --serve --width 960 --height 640 --pcg-root target\pcg
+target\debug\px_render.exe --scene <③的产物> --out x.png --width 960 --height 640
+# ⑤ 判据：六张与 art/anchor/*.png 逐字节（`fc /b`，或 sha256 前 16 + 字节数）
+```
+
+⚠ 两条必须一起说的前提（`hashes.txt` §六）：**(a)** 判据是**六张图**，而"像素与文本字节无关"
+（§155.3 已证）⇒ **行尾约定不同不会毁掉这条判据**；**(b)** 但若想**直接喂本仓的
+`art/anchor/frozen/*.pxart`**（而不是在那一份里现烘），那份副本的 CAS 必须按**同一种行尾约定**
+烘出同样的成员键（键相同才可能命中）。⚠ 本单元只核到"**路在**"，**没有**真走一遍。
+
+### §157.6 落点与机械证据
+
+- **改名**：`git mv px_render_wgpu px_render`（`git status` 记 `R`/`RM` **23 条** = 22 份 `.rs` +
+  `Cargo.toml`）＋ workspace `members` 与 `px_render/Cargo.toml` 的 `package.name`；`Cargo.lock` 随名字改
+  （`name = "px_render"`；它在这份 lock 里没有别的引用点）。
+- **名字替换 104 处 / 30 份文件**：名单**派生**自 `git grep -I -l px_render_wgpu`（再减掉明令不许动的
+  `art/frame/**`、`art/passes/grade_half.toml`、`.agents/**`），用**字节级**替换
+  （Latin-1 双射 + 长度自检）。为什么不用文本 cmdlet：本副本**同一棵树下两种行尾并存**（§六），
+  文本 cmdlet 会顺手改行尾 —— 实测**九份样本**（含 LF 与 CRLF 各半）的行尾计数与改动前**逐格相同**。
+- **`git diff --numstat`：41 份、+278 / −111 行**；删除行 111 行里 **93 行是纯机械改名**（同一行原地
+  换名字），**18 行是手工改写的原文**（逐条列在 §157.7）。
+- **不许动的两处（复核过）**：`git status --porcelain -- art/shaders art/frame` **为空**；
+  `art/anchor/frozen` 与 `art/anchor/*.png` **为空**。`art/` 下**只有** `anchor/README.md` 与
+  `anchor/hashes.txt` 被动过 —— 两份都不在任何产物里（§156 已核）。
+- **改名后的 crate 名**：`Cargo.lock` 里 `name = "px_render"`；`cargo check --workspace --all-targets`
+  **exit 0**（17.67 s，警告是既有的 dead-code 那几条）。
+
+### §157.7 改写了哪 18 行原文（"读数一字不删"的边界，逐条）
+
+本单元对 §100–§156 与源码注释的处置是**只加不删**，唯一的例外是**现在时**：S8-c/S8-a 那些
+"今天叫 / 现在是 `px_render_wgpu`"的句子，名字换手之后**会变成假话**（而且 `px_render` 同时指两支）
+⇒ 只把**时态与所指**改准，**读数与结论一个字没动**：
+
+| 文件 | 改写了什么 |
+|---|---|
+| `Cargo.toml` | 2 行：`(bevy 宿主)` 的所指 + 加 §157 说明（这个名字今天指本宿主） |
+| `px_shader/src/lib.rs` | 3 行："今天运行期是 `px_render_wgpu`" → "**当时**叫 `px_render_wgpu`"；`px_render::reflect` 那处标明它**永远**指 Bevy 宿主（本 crate 没有 `reflect`） |
+| `px_shader/src/reflect.rs` | 1 行：同上（时态） |
+| `px_probe/src/common.rs` | 2 行：`px_render/tests/…` 与"随 `px_render` 一起没了"两处标明**旧义** |
+| `px_protocol/tests/crate_graph.rs` | 4 行：§156 那段"没人在守／请把这条边改成新名字" → 换成 §157 的**验证记录**（绿 + 红负对照） |
+| `px_render/src/{art,digest,mesh,shader}.rs` | 5 行：四处"从 `px_render::…` 搬来"标明是**已删的 Bevy 宿主**（`mesh` / `digest` 与本 crate **同名**，最容易读反） |
+| `.agents/notes/art-framework.md` | 1 行：索引那一格补 §157 |
+
+其余的名字替换都是**逐字换名**（`px_render_wgpu` → `px_render`），不动句式、不动读数。
+⚠ 各处**新增**的 §157 标注（`art/anchor/README.md`、`hashes.txt`、`tools/{harness,frame-probe,px}.ps1`、
+`px_graphs/src/frame.rs`、以及 `06-clouds` / `08-renderer` / `09-instruments` / `12-step0` /
+`13-passtable` / 本篇顶上那条横幅与 §147.3 的脚注）都是**加行**，没有替换任何原文。

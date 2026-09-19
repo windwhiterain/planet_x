@@ -492,7 +492,7 @@ impl Recorder {
             ));
         }
         let query_set = device.create_query_set(&wgpu::QuerySetDescriptor {
-            label: Some("px_render_wgpu 逐条 pass 的时间戳（一帧那几格）"),
+            label: Some("px_render 逐条 pass 的时间戳（一帧那几格）"),
             ty: wgpu::QueryType::Timestamp,
             count: stride,
         });
@@ -508,13 +508,13 @@ impl Recorder {
         //    这与 Bevy 的诊断记录器同一个形状（`diagnostic/internal.rs:420`：
         //    resolve 那块是 `COPY_SRC`，落盘那块才是 `COPY_DST | MAP_READ`）。
         let resolve = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("px_render_wgpu 时间戳 resolve"),
+            label: Some("px_render 时间戳 resolve"),
             size: bytes,
             usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
         let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("px_render_wgpu 时间戳回读"),
+            label: Some("px_render 时间戳回读"),
             size: bytes,
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
@@ -567,7 +567,7 @@ impl Recorder {
         // 整块搬一次、映射一次：每帧的值在**它自己那条编码器里**就已经 resolve 好了
         // （`FrameStamps::resolve_now`），这里只是一次搬运。
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("px_render_wgpu 时间戳回读"),
+            label: Some("px_render 时间戳回读"),
         });
         encoder.copy_buffer_to_buffer(&self.resolve, 0, &self.buffer, 0, Some(self.bytes));
         queue.submit(Some(encoder.finish()));

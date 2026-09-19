@@ -9,10 +9,14 @@
 //! 这里把**一份**解析规则交出来，三个用户共用：烘图侧（`px_graphs` 的 `shaders` / `scene` 图
 //! 程序，把闭包指纹算进产物键）、运行期（`px_render::shaders` 的模块表与 `reflect` 的库指纹）、
 //! 以及门与探针。各写一份的实现迟早对不上，而"对不上"正是要消灭的那个故障。
+//! ⚠ 上面那个 `px_render::shaders` 是**已删的 Bevy 宿主**的落点（§154；`git show f121ee3^:…`）。
 //!
 //! ⚠ **S8-c 标注：运行期那半边的落点换了名字**（§154 删了 `px_render`）——
-//! 今天运行期是 `px_render_wgpu::shader` 的模块表 + `px_shader::reflect` 的库指纹。
+//! 那时（S8-c）运行期是 `px_render_wgpu::shader` 的模块表 + `px_shader::reflect` 的库指纹。
 //! "三个用户"这条**分法**没变（烘图侧 / 运行期 / 门与探针），改的只是"运行期"是谁。
+//! ⚠ **§157 取代（2026-09-19）：那个 crate 又改名叫 `px_render`** ⇒ 运行期今天是
+//! `px_render::shader` 的模块表 + `px_shader::reflect` 的库指纹。⚠ 同一个名字在 §154–§156
+//! 里指**已删的 Bevy 宿主**，从 §157 那一笔起指**现在的唯一宿主**（裸 wgpu）—— 读旧句按旧义读。
 //!
 //! ⚠ 外部符号（`bevy_pbr::…`）**只记名字**：它们的实现由 Bevy / naga_oil 的版本决定，
 //! 那是 `px_ops::SHADER_VERSION` 手动那一档（§19.1）。这条边界要写进报告，不能装作它不存在。
@@ -20,9 +24,12 @@
 //! 依赖方向：**叶子 crate** —— 除了 `px_protocol`（只有类型，没有实现）不依赖本仓任何 crate，
 //! 也不依赖 bevy / wgpu。`px_ops` / `px_graphs`（烘图侧）与 `px_render`（运行期）都能用它：
 //! 烘图侧要在这里算键、组装、反射，运行期要在同一份规则下装载与对账。
+//! ⚠ 这一句里的"`px_render`（运行期）"在 §157 之前指 Bevy 宿主、之后指 wgpu 宿主 —— 名字换过手，
+//! 而"运行期"这个**角色**没换过（§157）。
 //!
-//! ⚠ **S8-c 标注：运行期那个 crate 现在是 `px_render_wgpu`**（§154 删了 `px_render`）。
+//! ⚠ **S8-c 标注：运行期那个 crate 当时叫 `px_render_wgpu`**（§154 删了 Bevy 宿主 `px_render`）。
 //! 依赖方向的**约束**（叶子、不拖 bevy / wgpu）反而更强了 —— 今天它也**不拖 wgpu**。
+//! ⚠ **§157（2026-09-19）：它改名叫 `px_render` 了** ⇒ 这一句今天读作"运行期 = `px_render`"。
 
 pub mod assemble;
 pub mod host_stubs;
@@ -53,7 +60,7 @@ const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 
 /// **本仓的约定**：库在 `<workspace>/art/shaders/lib`，入口在 `<workspace>/art/shaders`。
 /// 两个根是**同一个契约的两半**，所以只有这一个函数说了算 —— 烘图侧（`px_graphs`）
-/// 与宿主（`px_render_wgpu`）都从它拿根；谁也不再自己拼一次路径。
+/// 与宿主（`px_render`）都从它拿根；谁也不再自己拼一次路径。
 ///
 /// ⚠ 为什么库**搬到 `art/shaders/lib/`**（S8-a）：它原来住 `px_render/assets/shaders`
 /// —— 那是 **bevy 宿主那个 crate 的资产目录**，而库的内容与"谁来渲染"无关：烘图侧要它、
@@ -170,7 +177,7 @@ pub fn module_sources(roots: &[PathBuf]) -> Result<ModuleTable, String> {
 /// **入口** shader 的真本：在 [`workspace_roots`] 那两个根下按**文件名**找。
 ///
 /// 为什么这条规则要住在共享 crate 里：找入口这一件事原先在 `px_render::shaders::shader_source_of`
-/// 与 `px_render_wgpu::shader::try_source_of` **各写了一遍**，而 `px_probe` 要是再写第三遍，
+/// 与 `px_render::shader::try_source_of` **各写了一遍**，而 `px_probe` 要是再写第三遍，
 /// 「游标那样一份内容 shader 到底是盘上哪个文件」就会有三个答案。规则只有一条：
 /// **按文件名找，找到 0 个或 ≥2 个都算失败** —— 重名不许先到先得，那会让两边各测一份。
 ///
@@ -275,7 +282,10 @@ impl Closure {
 }
 
 /// 整张模块表的指纹（不区分可达性）：给只想知道"库变没变"的缓存用（`px_render::reflect`）。
-/// ⚠ S8-c 标注：那个落点今天叫 `px_render_wgpu`（§154 删了 `px_render`）；不用它的调用方另说。
+/// ⚠ 那个落点是**已删的 Bevy 宿主**的模块（§154；`git show f121ee3^:px_render/src/reflect.rs`）。
+/// ⚠ S8-c 标注：S8-c 时那个落点叫 `px_render_wgpu`（§154 删了 Bevy 宿主 `px_render`）；
+/// §157（2026-09-19）起那个 crate 又叫 `px_render` —— 但**它没有 `reflect` 模块**（反射在
+/// `px_shader::reflect`），所以这一句里的 `px_render::reflect` **永远**指 Bevy 那支。
 pub fn modules_fingerprint(modules: &ModuleTable) -> u64 {
     let mut hasher = Fnv::new(MODULES_NAMESPACE);
     for (name, source) in modules {

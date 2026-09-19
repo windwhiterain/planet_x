@@ -4,10 +4,13 @@ version = "0.1.0"
 edition = "2024"
 
 [workspace]
-# ⚠ `px_render`（bevy 宿主）已在 S8-a 删除：判据的靶子在 `art/anchor/`，
-#   今天唯一在的宿主是 `px_render_wgpu`（裸 wgpu）。删它**不减少**任何判据 ——
+# ⚠ `px_render`（**Bevy 宿主**）已在 S8-a 删除（`f121ee3`）：判据的靶子在 `art/anchor/`。
+#   ⚠ §157（2026-09-19）：wgpu 宿主从 `px_render_wgpu` **改名叫 `px_render`** ⇒ 上面那个名字
+#   今天指它；而 S8-a 删掉的那一支**也叫这个名字**（本篇 §100–§156 及各处旧注释里的
+#   `px_render` 一律指 **Bevy 那支**，取法 `git show f121ee3^:px_render/…`）。
+#   改名不带一个字节的产物移动（判据见 §157）。删 Bevy 那支**不减少**任何判据 ——
 #   六张判据图 + 六份冻产物仍然逐字节可比（回归集复测过）。
-members = ["game", "px_protocol", "px_shader", "px_pass", "px_render_wgpu", "px_ops", "px_mc", "px_graphs", "px_verify", "px_probe"]
+members = ["game", "px_protocol", "px_shader", "px_pass", "px_render", "px_ops", "px_mc", "px_graphs", "px_verify", "px_probe"]
 default-members = ["game", "px_protocol", "px_shader", "px_pass", "px_ops", "px_mc", "px_graphs", "px_verify"]
 
 [dependencies]

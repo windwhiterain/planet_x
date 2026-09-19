@@ -13,6 +13,9 @@
 > ⚠ 过时的是**命令行**：本篇里 `px_render --serve` / `--planet` / `--cam` / `--where` / `--place`
 > 那些（§39.1、末尾那一段）指的是**已删的 Bevy 宿主**（`f121ee3`，`15-render-wgpu.md` §154）——
 > 今天等价的是 `px_render_wgpu --offline --scene … --out …`（§106 / §147.5）。读数一字未删。
+> ⚠ **§157（2026-09-19）：那个等价命令今天写作 `px_render --offline --scene … --out …`**
+> （wgpu 宿主改名叫 `px_render`）。⚠ 本段里"已删的 Bevy 宿主"那个 `px_render` 按旧义读 ——
+> 同一段两个名字各指一支，按日期切（`15-render-wgpu.md` §157）。
 
 ## §39 云覆盖度图 + 体积云（阶段 1–2）
 

@@ -82,7 +82,7 @@ pub fn connect_with(instance: wgpu::Instance, surface: Option<&wgpu::Surface<'_>
 
     let available = adapter.features();
     let (device, queue) = match pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-        label: Some("px_render_wgpu"),
+        label: Some("px_render"),
         required_features: available & wanted(),
         required_limits: wgpu::Limits::default(),
         experimental_features: wgpu::ExperimentalFeatures::disabled(),

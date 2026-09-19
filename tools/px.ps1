@@ -21,6 +21,9 @@
                                                  # ⚠ S8-c 标注：`px_render` 已删（§154）⇒ 今天
                                                  # 就是 `cargo test --workspace`（九个 crate）。
                                                  # 原文留着：它是这条命令当时的形状。
+                                                 # ⚠ §157（2026-09-19）：wgpu 宿主改名叫 `px_render`
+                                                 # ⇒ 上面"含 px_render / px_probe"**字面又成立**，
+                                                 # 只是对象换了（旧义 = 已删的 Bevy 宿主）。
 #>
 param(
     [ValidateSet(
