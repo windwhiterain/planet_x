@@ -27,6 +27,7 @@
 //!    格式就是第二份契约。反射仍然是"名字 ↔ 字节"的真源（[`contract`]），两者各管一半。
 
 pub mod baked;
+pub mod builder;
 pub mod contract;
 pub mod frame;
 pub mod math;
@@ -36,13 +37,13 @@ pub mod stage;
 pub mod vocab;
 
 pub use baked::Baked;
+pub use builder::{SceneBuilder, MaterialBuilder};
 pub use contract::{merge_named, schema_of, shader_parts_of};
 pub use frame::{FrameFile, Sources, DEFAULT_FRAME};
 pub use recipe::{compile, load, material_params, recipe_path, SceneFile};
 pub use stage::{
-    AtmosphereTransparent, CloudsTransparent, Fullscreen, Given, Opaque, PointShadow, Prepass,
-    Registration, RingTransparent, Sky, SkyboxSky, Stage, StageMaterial, StageParams,
-    StageParamsTable, SurfaceOpaque, Transparent,
+    Atmosphere, CheckStages, Clouds, Content, Given, Opaque, PointShadow, Prepass, Registration,
+    Ring, Sky, Skybox, Stage, StageParams, Surface, Transparent,
 };
 pub use vocab::{
     CLOUD_BASE, CLOUD_SHADOW_GAIN, CLOUD_SHADOW_HEIGHT, CLOUD_TOP, SKYBOX_BRIGHTNESS,

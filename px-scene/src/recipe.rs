@@ -19,7 +19,6 @@ use px_protocol::scene::{
 use crate::baked::Baked;
 use crate::contract::{merge_named, schema_of};
 use crate::members::{member_of, path_of};
-use crate::stage::Registration;
 use crate::vocab::{
     self, ATMOSPHERE_KEYS, CLOUD_BASE, CLOUD_SHADOW_GAIN, CLOUD_SHADOW_HEIGHT, CLOUD_TOP,
     CLOUDS_KEYS, CloudShape, PLANET_KEYS, RING_BAND, RING_SEGMENTS, SKYBOX_BRIGHTNESS,
@@ -316,7 +315,6 @@ pub fn compile(
 
     // ---- 物体 ----
     let mut objects: Vec<Object> = Vec::new();
-    let mut registrations: Vec<Registration> = Vec::new();
 
     // 行星本体：走自写的 surface 材质。云影那几个参数与云材质同一口径。
     let surface_shader = planet.shader_member()?;
@@ -374,7 +372,7 @@ pub fn compile(
             TextureRef::new(5, coverage.clone(), Sampler::clamped()),
         );
     }
-    registrations.push(Registration::single(&surface));
+    if file.formats { check_stage(&file.name, "planet", &surface)?; }
     objects.push(Object {
         id: "planet".to_string(),
         geometry: Geometry::mesh(planet.member("mesh")?),
@@ -421,7 +419,9 @@ pub fn compile(
         let material = Material::new(atmosphere_shader).with_params(params);
         let mut material = material;
         material.alpha = AlphaMode::Add;
-        registrations.push(Registration::single(&material));
+        if file.formats {
+            check_stage(&file.name, "atmosphere", &material)?;
+        }
         objects.push(Object {
             id: "atmosphere".to_string(),
             geometry: Geometry::primitive(
@@ -470,7 +470,9 @@ pub fn compile(
                 Sampler::clamped(),
             ),
         );
-        registrations.push(Registration::single(&material));
+        if file.formats {
+            check_stage(&file.name, "clouds", &material)?;
+        }
         // 几何：有代理 mesh 就用它（空区域在光栅阶段就被剔除），没有就是一个细分球壳。
         let geometry = match clouds.optional_member("proxy")? {
             Some(proxy) => Geometry::mesh(proxy),
@@ -512,7 +514,9 @@ pub fn compile(
         material.alpha = AlphaMode::Blend;
         material.cull = CullMode::None;
         material = material.with_texture("color", TextureRef::new(1, band, Sampler::clamped()));
-        registrations.push(Registration::single(&material));
+        if file.formats {
+            check_stage(&file.name, "rings", &material)?;
+        }
         objects.push(Object {
             id: "rings".to_string(),
             geometry: Geometry::mesh(mesh),
@@ -520,15 +524,6 @@ pub fn compile(
             transform: Transform::rotated(world),
             cast_shadow: true,
         });
-    }
-
-    // ---- stage 的登记与**格式对账**（`px-scene` 的高层语义那一半）----
-    //
-    // 一个物体可以注册多个 stage 的材质；寻常那一路是 `Registration::single`（一份材质，
-    // 几档 pass 共用）。这里对每一档问一遍"它要的格式满足了吗" —— 不满足就**烘图时**红。
-    // ⚠ 只有 `formats = true` 的配方走这一道（见 `SceneFile::formats` 里那段取舍）。
-    if file.formats {
-        check_registrations(&file.name, &objects, &registrations)?;
     }
 
     // ---- 灯：那盏太阳（点光源，§60）----
@@ -620,34 +615,22 @@ pub fn compile(
     })
 }
 
-/// **逐 stage 的格式对账**：每个物体登记的那些 stage 材质，必须满足那一档的格式。
+/// **逐 stage 的 per-pass 对账**（运行期那一条路，配方适配器专用）。
 ///
-/// ⚠ 今天是**声明式**的：内容那一侧按 `kind` 给出每一档要的格式（[`stage::content_formats`]）。
-/// "哪一档画哪些物体"由帧图的 `select` 决定（`opaque` / `transparent` / `shadow_casters` /
-/// `skybox`），而这里用的判据与 [`crate::frame::draws_of`] **同一套谓词** —— 两处各写一遍
-/// 就是"同一件事两个答案"，漂开的那天变成"自己烘的自己不认"。
-fn check_registrations(
-    scene: &str,
-    objects: &[Object],
-    registrations: &[Registration],
-) -> Result<(), String> {
-    let table = stage::StageParamsTable::content();
-    for (object, registration) in objects.iter().zip(registrations) {
-        for stage_name in stage::stages_of(&object.material, object.cast_shadow) {
-            // 登记的那份材质说"这一档用哪份内容" ⇒ per-pass 表按 **(stage, 那份材质)** 查。
-            let Some(material) = registration.material_for(stage_name) else {
-                continue;
-            };
-            let Some(given) = table.of(stage_name, &material.of) else {
-                continue;
-            };
-            if let Some(params) = registration.params_for(stage_name) {
-                stage::check(stage_name, &material.of, given, params)
-                    .map_err(|err| format!("场景 '{scene}' 的物体 '{}'：{err}", object.id))?;
-            }
-        }
-    }
-    Ok(())
+/// ⚠ 这一支是**唯一**的运行期入口：配方是数据，`kind` / `shader` 是字符串 ⇒ 走到这里
+/// "哪份内容"已经不在类型里。表与判据**仍然是类型级那两份**（`StageParams` 的实现 +
+/// `stage::check`），这里只做分派（[`stage::runtime`]）。
+///
+/// 判据用的是**产物那一档**（`stage_of_alpha`）—— 与 `frame::draws_of` 的 `opaque` /
+/// `transparent` 两个 `select` 同一套谓词：两处各写一遍就是"同一件事两个答案"。
+fn check_stage(scene: &str, id: &str, material: &Material) -> Result<(), String> {
+    let Some(content) = stage::runtime::RuntimeContent::parse(&material.shader.node) else {
+        // 认不出的内容（自写 shader 之类）：这一档没有表可查，不是错误。
+        return Ok(());
+    };
+    let stage_name = stage::runtime::stage_of_alpha(material.alpha);
+    stage::runtime::check(stage_name, content, &material.params)
+        .map_err(|err| format!("场景 '{scene}' 的物体 '{id}'：{err}"))
 }
 
 /// 配方参数表 + 编译器算出来的那些 → 材质参数表，并在**烘图时**按契约校验一遍。
@@ -733,4 +716,110 @@ pub const RING_SHADER_NODE: &str = "ring";
 /// 一个占位，让 `member_of` 在本模块里也有一条直路（`shaders` 图）。
 pub fn shader_member(node: &str) -> Result<px_protocol::scene::Member, String> {
     member_of("shaders", node)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::stage::runtime::{RuntimeContent, RuntimeStage};
+    use crate::stage::{Opaque, Surface};
+    use px_protocol::scene::{AlphaMode, Member, Value};
+
+    fn member(node: &str) -> Member {
+        Member::new("shaders", node, &"0".repeat(64))
+    }
+
+    fn material(node: &str, pairs: &[(&str, Value)]) -> Material {
+        let mut material = Material::new(member(node));
+        material.params = pairs
+            .iter()
+            .map(|(name, value)| (name.to_string(), value.clone()))
+            .collect();
+        material
+    }
+
+    fn full_surface() -> Material {
+        material(
+            "surface",
+            &[
+                ("orientation", Value::Quad([0.0, 0.0, 0.0, 1.0])),
+                ("emissive", Value::Quad([0.0, 0.0, 0.0, 0.0])),
+                ("inner", Value::Num(1.01)),
+                ("outer", Value::Num(1.06)),
+                ("coverage", Value::Num(0.35)),
+                ("shadow", Value::Num(0.0)),
+                ("height", Value::Num(0.5)),
+                ("gain", Value::Num(2.0)),
+                // ⚠ 多出来的格**不算错**：一份材质往往同时被几档 pass 用。
+                ("这一格是别的档要的", Value::Num(1.0)),
+            ],
+        )
+    }
+
+    /// **对账真的会红**：surface 那一档要 8 格，只给 2 格 ⇒ 当场点名缺的是哪几个。
+    ///
+    /// ⚠ 这是**行为的**判据（不是"这个函数存在"）：它走的是配方编译时那条路
+    /// （[`check_stage`] → `stage::runtime::check` → 类型级那份 `StageParams` 表）。
+    #[test]
+    fn the_stage_param_check_refuses_a_material_missing_per_pass_fields() {
+        let thin = material(
+            "surface",
+            &[
+                ("orientation", Value::Quad([0.0, 0.0, 0.0, 1.0])),
+                ("emissive", Value::Quad([0.0, 0.0, 0.0, 0.0])),
+            ],
+        );
+        let err = check_stage("夹具", "planet", &thin).expect_err("缺六格");
+        for want in ["inner", "outer", "coverage", "shadow", "height", "gain"] {
+            assert!(err.contains(want), "报错要点名 '{want}'：{err}");
+        }
+        assert!(err.contains("夹具") && err.contains("planet"), "{err}");
+        assert!(err.contains("surface"), "要点名是哪份内容：{err}");
+    }
+
+    /// 给全了就不红（同一条路的**正对照** —— 少了它，上面那条可能只是"永远红"）。
+    #[test]
+    fn the_stage_param_check_accepts_a_complete_material() {
+        check_stage("夹具", "planet", &full_surface()).expect("给全了就不该红");
+    }
+
+    /// **认不出的内容不查**（自写 shader 之类）：这一档没有表可查，不是错误。
+    #[test]
+    fn an_unknown_content_is_not_an_error() {
+        check_stage("夹具", "custom", &material("custom", &[])).expect("没有表就不查");
+        assert!(RuntimeContent::parse("custom").is_none());
+    }
+
+    /// 透明的物体走**透明**那一档：同样一份大气材质，在不透明那一档下没有表 ⇒ 不查；
+    /// 在透明那一档下按大气那五格查。
+    #[test]
+    fn the_stage_comes_from_the_alpha_mode() {
+        let mut atmosphere = material("atmosphere", &[("density", Value::Num(0.3))]);
+        atmosphere.alpha = AlphaMode::Add;
+        assert_eq!(
+            crate::stage::runtime::stage_of_alpha(atmosphere.alpha).name(),
+            RuntimeStage::Transparent.name()
+        );
+        let err = check_stage("夹具", "atmosphere", &atmosphere).expect_err("少四格");
+        assert!(err.contains("softness"), "{err}");
+    }
+
+    /// 分派表与类型级那张表**说的是同一件事**：`opaque` + surface 这一对在两边都存在。
+    #[test]
+    fn the_runtime_dispatch_agrees_with_the_typed_table() {
+        let typed = <Opaque as crate::stage::StageParams<Opaque, Surface>>::GIVEN;
+        let via_runtime = crate::stage::runtime::check(
+            RuntimeStage::Opaque,
+            RuntimeContent::Surface,
+            &BTreeMap::new(),
+        )
+        .expect_err("空参数必然缺格");
+        for field in typed {
+            assert!(
+                via_runtime.contains(field.name),
+                "运行期那条分派漏了 '{}'：{via_runtime}",
+                field.name
+            );
+        }
+    }
 }
