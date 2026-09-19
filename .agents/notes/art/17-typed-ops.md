@@ -276,24 +276,44 @@ stage 1 的场函数。生成物落在 `target/debug/px_mono_clouds_op.dll`
 表现是 `LoadLibraryExW failed`，而 `cargo build` **判它 fresh、不会重编** ——
 所以看上去"什么都没改却坏了"。恢复办法是 `cargo clean -p <那三个算子 crate>` 重编。
 
-⚠ 更阴的一点：**装载器的诊断探针（单独一个 crate）能把 4 个库全装好，
-而图程序却失败** —— 因为探针自己的进程里没有那些半成品的依赖冲突。
-所以"探针说没事"不能当"图程序没事"的证据。
+⚠ 更阴的一点：**装载器的诊断探针（单独一个 crate）能把 4 个库全装好，而图程序却失败** ——
+两个进程的模块搜索路径不同（探针从自己的构建目录起、图程序从 `target/debug` 起），
+于是同一个半成品在两边表现不同。所以"探针说没事"**不能**当"图程序没事"的证据。
 
-### §166.5 未决：生成的 dylib 仍要**一整套上游 DLL**
+⚠⚠ 而这条错**最可能的来源**是"把另一个构建图的同名 DLL 拷进 `target/debug/`" ——
+我自己在早期版本的生成器里干过这件事（见 §166.5 的更正）。教训：
+**从 `target/mono/` 里往 `target/debug/` 拷任何 `px_*.dll` 都是错的，一份都不行。**
 
-`px_volume_op` 等算子是 `crate-type = ["dylib", "rlib"]`。生成物**静态链**它们（用的是 rlib），
-但那份 rlib 里的 `dylib`-ABI 依赖会**递归要求上游一整套 `.dll`**
-（实测：mono 构建目录里的 `px_volume_op.dll` 自己就 `LoadLibraryExW failed`，
-它缺 `px_field_schema.dll` 等）。
+### §166.5 ⚠ 更正：生成的 dylib **是自足的**（我先前那条结论是错的）
 
-现在的状态是**能跑**的：生成的实例落进 `target/debug/`，上游 DLL 由主 workspace 提供
-（因此 `mono-gen` 与主 workspace 的构建必须**不同时**污染同一个 `target/`；
-混过之后要 `cargo clean` 才能恢复 —— 踩过一次）。
+先前这里写着"`dylib` 这个 crate-type 的 ABI 是递归的 ⇒ 生成物要一整套上游 DLL"。
+**那个结论错了**，测出来的事实是：
 
-**正确的修法**（未做）：让生成的 crate **一个 Rust 上游 DLL 都不需要** ——
-上游那几份要么改成静态（纯 rlib），要么生成物只链 `cdylib` 那一份。
-判据可以是 `dumpbin /dependents target/debug/px_mono_clouds_op.dll` 只列出系统库。
+```text
+px_mono_clouds_op.dll：9 个导入，全是系统库（kernel32 / ntdll / …）
+                       px_ 前缀的导入：**0 个**
+```
+
+cargo 对 **path 依赖**选的是 `rlib` ⇒ 上游被**静态链**进这一份 cdylib。
+上游 crate 虽然写了 `crate-type = ["dylib", "rlib"]`，那只是"**被直接依赖时**也可能要 dylib"，
+而生成物这边拿到的是 rlib。于是这一份实例**自足、不需要任何兄弟 DLL**。
+
+**那 `LoadLibraryExW failed` 是怎么来的**：是我早期版本的生成器**把 mono 构建目录里的
+同名 DLL 拷进 `target/debug/`**（`px_field_op.dll` 等）—— 那份属于**另一个构建图**
+（`target/mono/<库名>/build/`，自己一份 `Cargo.lock`、自己的特征统一），
+覆盖掉主 workspace 的正确产物 ⇒ 后者再也装不上。**是我自己造的，不是 ABI 约束。**
+（mono 构建目录里确实躺着一份 `px_volume_op.dll` —— 那是 cargo 为那个 package 的
+`dylib` crate-type 顺手产的，**没人链接它**。）
+
+⇒ 现在的规矩（**已落到生成器里**）：只deposit**那一份 cdylib**，一个兄弟都不拷；
+并且每次生成都**读一遍 PE 导入表**，任何 `px_` 导入就当场炸
+（`mono-gen.rs` 的 `assert_self_contained`）——
+因为这一条是**脆的**（哪天有上游改成纯 `dylib` crate-type 就变），而它坏了只在运行期冒出来。
+
+⚠ 剩下那条**仍然成立**的约束：`mono-gen` 与主 workspace 的构建必须**各用各的 `target/`**。
+两份构建图各有各的依赖解析，产物**不能互换**；谁把它们写进同一个目录，谁就制造
+"`cargo build` 判它 fresh、不重编"的半成品。混过之后要
+`cargo clean -p <那几个算子 crate>` 才恢复。
 
 ---
 

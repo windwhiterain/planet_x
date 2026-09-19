@@ -257,9 +257,13 @@ cargo run -q -p px_graphs --bin mono-gen -- px_graphs/src/bin/<图>/mono/fields.
 6. **载荷里别放节点名**：节点名与相机是**驱动**写盘时补的（`Driver::store` 的 `bundling`）。
    算子只回 `bundle.placeholder()`。
 
-7. **生成物与主 workspace 不能同时污染同一个 `target/`**：混过之后算子 DLL 会变成半成品，
-   而 `cargo build` **判它 fresh 不重编** ⇒ 莫名 `LoadLibraryExW failed`；只能
-   `cargo clean -p <那几个算子 crate>`。**未根治**（笔记 §166.5）。
+7. **生成物与主 workspace 各用各的 `target/`**：两份构建图各有各的依赖解析（各一份
+   `Cargo.lock`），产物**不能互换**。混过之后算子 DLL 会变成半成品，而 `cargo build`
+   **判它 fresh 不重编** ⇒ 莫名 `LoadLibraryExW failed`；只能
+   `cargo clean -p <那几个算子 crate>`。
 
-8. **`dylib` 这个 crate-type 的 ABI 是递归的**：生成的实例运行时还要它自己那一套上游 DLL，
-   所以"拷到别处单独跑"不成。**未根治**（同 §166.5）。
+8. **生成的实例是自足的**（实测：只导入系统库，`px_` 前缀的导入 0 个）——
+   cargo 对 path 依赖选 rlib ⇒ 上游静态链进去。所以**永远不要**从 `target/mono/` 往
+   `target/debug/` 拷任何 `px_*.dll`：那是另一个构建图的产物，拷了就把正确的覆盖掉
+   （这条错只在运行期冒出来，`cargo build` 还判它 fresh）。生成器每次都会读 PE 导入表
+   验一遍（`assert_self_contained`）。

@@ -263,9 +263,79 @@ fn main() {
         deposit.display(),
         bytes as f64 / (1024.0 * 1024.0),
     );
-    println!(
-        "⚠ 这一份 dylib 在运行时还要它自己的上游 DLL（`dylib` 这个 crate-type 的 ABI）；\
-         现在靠主 workspace 的 `target/debug/` 提供 —— 见笔记 §166.5。"
+    // ⚠ 实测：生成的实例**只导入系统库**（cargo 对 path 依赖选的是 rlib ⇒ 上游静态链进去）。
+    //   所以它自足、不需要任何兄弟 DLL。这一条是**脆的**（哪天有上游改成纯 `dylib`
+    //   crate-type 就变），所以在生成时检查一遍 —— 见 `assert_self_contained`。
+    assert_self_contained(&deposit);
+    println!("自足：只导入系统库（没有任何 px_* DLL 依赖）");
+}
+
+/// ⚠ 生成的实例必须是**自足**的：它只该导入系统库。
+///
+/// 判据来自 PE 头里那张导入表 —— 读出它列的 DLL 名，任何 `px_` 前缀的就是"不自足"。
+///
+/// 为什么值得在生成时查：一旦它依赖了某个兄弟 DLL，装载就成了"两边构建图的产物
+/// 要互相匹配"，而两份构建图各有各的 `Cargo.lock` —— 那种错**只在运行期**出现
+/// （`LoadLibraryExW failed`），而且 `cargo build` 会判它 fresh、不重编，很难查。
+fn assert_self_contained(dll: &Path) {
+    let bytes = std::fs::read(dll).unwrap_or_else(|err| panic!("读不了 {}：{err}", dll.display()));
+    let pe = u32::from_le_bytes(bytes[0x3c..0x40].try_into().unwrap()) as usize;
+    assert_eq!(bytes[pe], b'P', "{} 不是 PE", dll.display());
+    assert_eq!(bytes[pe + 1], b'E', "{} 不是 PE", dll.display());
+    let sections = u16::from_le_bytes(bytes[pe + 6..pe + 8].try_into().unwrap()) as usize;
+    let optional_size = u16::from_le_bytes(bytes[pe + 20..pe + 22].try_into().unwrap()) as usize;
+    let optional = pe + 24;
+    assert_eq!(
+        u16::from_le_bytes(bytes[optional..optional + 2].try_into().unwrap()),
+        0x20b,
+        "只认 PE32+（64 位）"
+    );
+    // 数据目录表在 PE32+ 的 optional header 偏移 112 处；第 1 项是导入表。
+    let directories = optional + 112;
+    let imports_rva = u32::from_le_bytes(
+        bytes[directories + 8..directories + 12].try_into().unwrap(),
+    ) as usize;
+    let imports_size = u32::from_le_bytes(
+        bytes[directories + 12..directories + 16].try_into().unwrap(),
+    ) as usize;
+
+    let mut spans = Vec::new();
+    for index in 0..sections {
+        let header = optional + optional_size + index * 40;
+        let virtual_address =
+            u32::from_le_bytes(bytes[header + 12..header + 16].try_into().unwrap()) as usize;
+        let virtual_size =
+            u32::from_le_bytes(bytes[header + 8..header + 12].try_into().unwrap()) as usize;
+        let raw = u32::from_le_bytes(bytes[header + 20..header + 24].try_into().unwrap()) as usize;
+        spans.push((virtual_address, virtual_size.max(1), raw));
+    }
+    let to_offset = |rva: usize| -> Option<usize> {
+        spans
+            .iter()
+            .find(|(address, size, _)| rva >= *address && rva < address + size)
+            .map(|(address, _, raw)| raw + (rva - address))
+    };
+
+    let mut at = to_offset(imports_rva).expect("导入表不在任何节里");
+    let end = at + imports_size;
+    let mut unwanted = Vec::new();
+    while at < end {
+        let entry = &bytes[at..at + 20];
+        let name_rva = u32::from_le_bytes(entry[12..16].try_into().unwrap()) as usize;
+        if name_rva == 0 {
+            break;
+        }
+        let name_at = to_offset(name_rva).expect("DLL 名不在任何节里");
+        let name_end = bytes[name_at..].iter().position(|byte| *byte == 0).expect("DLL 名没有收尾") + name_at;
+        let name = String::from_utf8_lossy(&bytes[name_at..name_end]).to_string();
+        if name.to_ascii_lowercase().starts_with("px_") {
+            unwanted.push(name);
+        }
+        at += 20;
+    }
+    assert!(
+        unwanted.is_empty(),
+        "生成的实例不自足：它导入了 {unwanted:?}（上游本该静态链进去）。这种错只在运行期冒出来（LoadLibraryExW failed），所以在这儿拦住。"
     );
 }
 
