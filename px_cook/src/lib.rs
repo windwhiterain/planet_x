@@ -152,6 +152,13 @@ pub trait PxOp {
     const INPUTS: &'static [&'static str];
     /// 产物档：决定键里要不要掺评审相机。
     const KIND: px_graph_schema::OpKind;
+    /// ⚠ **声明的域必须与输出域推出来的一致**（相机掺不掺、解码走哪条都从它推）。
+    /// 语言管不住这件事（写错照样编译），所以做成一条编译期断言。
+    /// 它不可见、不占空间，只在有人引用时才求值 —— 宏会引用它。
+    const KIND_MATCHES_PAYLOAD: () = assert!(
+        crate::op_kind_eq(Self::KIND, <Self::Payload as payload::Build>::KIND),
+        "声明的 OpKind 与输出域对不上（Field/Mesh 掺相机、Volume 不掺）",
+    );
     /// 算子源码（含共享依赖）的 FNV-1a —— 改实现必然重算那一格。
     ///
     /// ⚠ 它是 `const`（描述符是 `static`），且图侧（键里）与 dylib 侧（描述符）**同一个数**。
@@ -188,6 +195,11 @@ pub mod payload {
     pub struct Kind<P>(pub std::marker::PhantomData<P>);
 
     pub trait Build: Sized {
+        /// 产物档 —— 相机口径与解码路径都从它推。
+        ///
+        /// ⚠ 声明里的 `OpKind` 必须与它一致；`px_op!` 里有 `const` 断言看着，
+        /// 所以"写错域"是编译错而不是运行期的怪事。
+        const KIND: px_graph_schema::OpKind;
         const WITH_CAMERAS: bool;
         fn encode(payload: &Self) -> Result<Vec<u8>, String>;
         /// 上游字节 → 类型化的值。场载荷不含投影，所以要 `projection` 补回去。
@@ -195,6 +207,7 @@ pub mod payload {
     }
 
     impl Build for Field {
+        const KIND: px_graph_schema::OpKind = px_graph_schema::OpKind::Field;
         const WITH_CAMERAS: bool = true;
         fn encode(payload: &Self) -> Result<Vec<u8>, String> {
             px_field_schema::payload::encode(payload).placeholder()
@@ -206,6 +219,7 @@ pub mod payload {
     }
 
     impl Build for VolumeData {
+        const KIND: px_graph_schema::OpKind = px_graph_schema::OpKind::Volume;
         const WITH_CAMERAS: bool = false;
         fn encode(payload: &Self) -> Result<Vec<u8>, String> {
             px_volume_schema::payload::encode(payload).placeholder()
@@ -217,6 +231,7 @@ pub mod payload {
     }
 
     impl Build for MeshData {
+        const KIND: px_graph_schema::OpKind = px_graph_schema::OpKind::Mesh;
         const WITH_CAMERAS: bool = true;
         fn encode(payload: &Self) -> Result<Vec<u8>, String> {
             px_mesh_schema::payload::encode(payload).placeholder()
@@ -366,6 +381,7 @@ macro_rules! px_op {
             /// 常数上下文可用（描述符是 `static`）；图侧与 dylib 侧同一个数。
             const SOURCE_HASH: u64 = $crate::source_hash_of(&$sources);
 
+
             fn params() -> $crate::params::Kind<$params> {
                 $crate::params::Kind(std::marker::PhantomData)
             }
@@ -388,6 +404,36 @@ macro_rules! px_op {
             }
         }
     };
+}
+
+/// `const` 上下文里的 `OpKind` 相等。
+pub const fn op_kind_eq(left: px_graph_schema::OpKind, right: px_graph_schema::OpKind) -> bool {
+    // `OpKind` 是 `Copy` 的简单枚举 ⇒ 比较判别式。⚠ 加变体时这里要跟着改。
+    // ⚠ 不能写成闭包：`const fn` 里闭包调用还没有 RFC。
+    const fn index(kind: px_graph_schema::OpKind) -> u8 {
+        match kind {
+            px_graph_schema::OpKind::Field => 0,
+            px_graph_schema::OpKind::Mesh => 1,
+            px_graph_schema::OpKind::Volume => 2,
+        }
+    }
+    index(left) == index(right)
+}
+
+/// `const` 上下文里的字符串相等（`str ==` 在那里用不了）。
+pub const fn str_eq(left: &str, right: &str) -> bool {
+    let (left, right) = (left.as_bytes(), right.as_bytes());
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut index = 0;
+    while index < left.len() {
+        if left[index] != right[index] {
+            return false;
+        }
+        index += 1;
+    }
+    true
 }
 
 /// 算子源码清单的哈希（`SOURCE_HASH` 的算法）——**const fn**，因为描述符是 `static`。
@@ -596,6 +642,21 @@ macro_rules! px_dylib_call {
 #[macro_export]
 macro_rules! px_op_table {
     ($lib:literal, $($op:ty),+ $(,)?) => {
+        // ⚠ **编译期**把"宏第一个参数 = crate 名"这条钉死。
+        //   驱动按**文件名词干**算入口符号（`px_volume_op.dll` → `px_volume_op_table`），
+        //   而 dll 名派生自 crate 名 ⇒ 两者不一致就是运行期 `GetProcAddress failed`。
+        //   语言管不住这件事，所以在这儿当场炸（比那条门早一步）。
+        const _: () = assert!(
+            $crate::str_eq(env!("CARGO_PKG_NAME"), $lib),
+            "px_op_table! 的第一个参数必须与 crate 名（= dll 名）一致，否则驱动找不到入口符号",
+        );
+
+        // ⚠ 引用每条"域与载荷一致"的断言 —— trait 里的默认常量是惰性的，读了才求值。
+        //   于是"OpKind 写错"在**算子库编译时**就炸（图侧不引用它，那边不必管）。
+        const _: () = {
+            $(let _ = <$op as $crate::PxOp>::KIND_MATCHES_PAYLOAD;)+
+        };
+
         #[unsafe(export_name = concat!($lib, "_table"))]
         pub extern "Rust" fn table() -> &'static $crate::px_graph_schema::OpTable {
             static OPS: &[$crate::px_graph_schema::OpDescriptor] = &[

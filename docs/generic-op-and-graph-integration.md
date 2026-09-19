@@ -1,327 +1,211 @@
 # 写一个泛型算子库，再接进 graph scripts
 
-> 这份文档是**操作清单**：从一个空目录到图脚本跑出产物，一共要写哪些文件、敲哪些命令、
-> 每处约束是为什么。所有代码片段都与仓里现有代码对得上（`px_volume_op` 是已落地的实例）。
+> **操作清单**：从一个空目录到图脚本跑出产物，一共要写哪些文件、敲哪些命令、每处约束是为什么。
+> 所有片段与仓里代码**逐字对齐**（`px_field_op` / `px_volume_op` / `px_mesh_op` 是已落地的实例）。
 >
-> 例子用 `mesh.iso`（**吃一个场函数、吐一张网格**）—— 它比现有的体积算子更"泛型"，
-> 正好把三条边界（schema / dylib / 图脚本）都走一遍。⚠ 这个算子本身**没落地**，
-> 是文档例子；`px_volume_op::CloudCoarse` 是它的已落地对应物。
+> 例子里那个 `mesh.iso`（吃场函数吐网格）是**文档例子，没落地** —— 它比现有算子更"泛型"，
+> 正好把三条边界都走一遍。`px_volume_op::CloudCoarse` 是它的已落地对应物。
 
 ---
 
-## 0. 先分清三层
+## 0. 图脚本里只看到这些（先把结论摆出来）
+
+```rust
+use px_cook::{cook, Unary1 as One, Unary2 as Two, Unary3 as Three};
+
+let clusters = cook::<field::Fbm>(&cache, "clusters", (), canvas)?;
+let carved   = cook::<field::Warp>(&cache, "carved", Two { a: billows, b: flow }, canvas)?;
+let mixed    = cook::<field::Mix>(&cache, "mixed", Three { a: clusters, b: carved, c: weight }, canvas)?;
+let coarse   = cook::<volume::CloudCoarse>(&cache, "coarse", One { a: mixed.clone() }, canvas)?;
+let proxy    = cook::<mesh::Proxy>(&cache, "proxy", mesh::VolumeInput { a: coarse }, canvas)?;
+```
+
+**就这些**。没有 `OpKind`、没有 `encode`/`decode`、没有 `cook_field`/`cook_volume`/`cook_mesh`、
+没有 `&[&a, &b]`、没有描述符、没有注册表。域、相机口径、编解码、身份全从算子类型推。
+
+三件事因此是**编译期**的：
+
+| | 靠什么 | 报错长什么样 |
+|---|---|---|
+| 输入个数/形状 | `O::Inputs`（关联类型钉死） | `expected Unary3<Cooked<Field>>, found Unary2<Cooked<Field>>` |
+| 输出域 | `O::Payload` | 把体积喂给声明 `In<Field>` 的结构就编不过 |
+| 参数类型 | `O::Params` | 参数文件字段写错当场报（`deny_unknown_fields`） |
+
+---
+
+## 1. 三层分工
 
 ```text
 px_graph_schema::op      ① 契约：OpTable / OpDescriptor / OpCall / ParamsCanonical
         ↑
-px_*_schema              ② 数据：载荷类型 + 参数字段 + 序列化（**跨 dylib 边界只走这里**）
+px_<域>_schema           ② 数据：超参数 struct（serde）+ 载荷类型 + 序列化
         ↑
-px_*_op                  ③ 实现：算法体 + dylib 入口 + **类型化契约**（rlib 那一半）
+px_<域>_op               ③ 实现（dylib）+ **声明**（rlib：typed.rs 里那几行宏）
         ↑
-px_graphs                ④ 图脚本：普通 Rust 调用链（静态链 ③ 的 rlib，运行时装载 ③ 的 dylib）
+px_graphs                ④ 图脚本：普通 Rust 调用链
 ```
 
 **一句话判据**：算子的**实现**住在 dylib ⇒ 改实现不重编图程序；
-图脚本**静态链**算子的 rlib ⇒ 参数类型/输入个数/输出域在编译期判得出来。
-两条同时成立的关键是：**rlib 那一半只做接线，不含实现**。
+图脚本**静态链**算子的 rlib ⇒ 参数/输入/输出都在编译期判。
+两条同时成立的关键是：**rlib 那一半只有声明，没有实现**。
 
 ---
 
-## 1. 全部要写的文件
+## 2. 全部要写的文件
 
-| # | 文件 | 谁写 | 干什么 |
-|---|---|---|---|
-| 1 | `px_<域>_schema/src/params.rs`（改） | 加一段 | 这个算子的参数字段 + 默认值 + `canonical` 分支 |
-| 2 | `px_<域>_schema/src/payload.rs`（改） | 加两个函数 | 载荷 ↔ 字节（跨边界只走它） |
-| 3 | `px_<域>_op/Cargo.toml`（改） | 加一行 | `crate-type = ["dylib", "rlib"]` |
-| 4 | `px_<域>_op/src/lib.rs`（改） | 加一段 | 实现体 + `DESCRIPTOR` + `call` 分支 + `eval_*` 入口 |
-| 5 | `px_<域>_op/src/typed.rs`（改） | 加一段 | `impl Op` —— **接线，不含实现** |
-| 6 | `px_graphs/Cargo.toml`（改） | 加一行 | `px_<域>_op = { path = "../px_<域>_op" }` |
-| 7 | `px_graphs/src/bin/<图>.rs`（改） | 加几行 | `cook_*::<算子>(...)` 调用 |
-| 8 | `art/<图>/<节点名>.toml` | 新建 | 这个节点自己的参数 |
-| 9 | `px_<域>_op/src/op.rs`（可选） | 新建 | **泛型缝**：只在这一个算子泛型时才拆出来 |
+### 2.1 算子库作者
 
-**只有 #9 与"泛型"有关**，其余 1–8 是任何算子都要走的。下面逐个写。
+| # | 文件 | 写什么 |
+|---|---|---|
+| 1 | `px_<域>_schema/src/params.rs` | 超参数 struct：`#[derive(PxParams, Serialize, Deserialize, Default)]` |
+| 2 | `px_<域>_schema/src/payload.rs` | 载荷 ↔ 字节（跨 dylib 边界只走这里） |
+| 3 | `px_<域>_op/Cargo.toml` | `crate-type = ["dylib", "rlib"]` + `px_cook` / `px_derive` |
+| 4 | `px_<域>_op/src/<算子>.rs` | **算法体**：普通 Rust 函数 |
+| 5 | `px_<域>_op/src/typed.rs` | **声明**：`px_op!` 一行 / 算子 + 输入别名 |
+| 6 | `px_<域>_op/src/lib.rs` | **三行宏**（见 §2.3） |
 
----
+### 2.2 图作者
 
-## 2. 逐文件
+| # | 文件 | 写什么 |
+|---|---|---|
+| 7 | `px_graphs/Cargo.toml` | `px_<域>_op`（`[dependencies]` **和** `[dev-dependencies]` 各一条） |
+| 8 | `px_graphs/src/bin/<图>.rs` | `cook::<算子>(...)` 调用链 |
+| 9 | `art/<图>/<节点名>.toml` | 这个节点的**超参数** |
 
-### ① `px_<域>_schema/src/params.rs`
-
-```rust
-pub const ISO: &str = "mesh.iso";
-
-pub mod iso {
-    use serde::{Deserialize, Serialize};
-
-    #[derive(Debug, Clone, Serialize, Deserialize)]
-    #[serde(default, deny_unknown_fields)]
-    pub struct Params {
-        /// 等值面的阈值。场值 ≥ 它的地方算"在实体里"。
-        pub level: f32,
-        /// 参数空间里每个轴切多少段（越大越细，也越慢）。
-        pub subdivisions: u32,
-    }
-
-    impl Default for Params {
-        fn default() -> Self {
-            Self { level: 0.5, subdivisions: 96 }
-        }
-    }
-}
-```
-
-⚠ `deny_unknown_fields` **要开**：图侧参数文件写错字段名时，这是唯一能在"读参数"那一刻
-就报出来的机制（不然会静默用默认值）。见 §5 第 3 条。
-
-然后在同文件的 `canonical(op_id, toml_text)` 里加一条分支：
-
-```rust
-pub fn canonical(op_id: &str, toml_text: Option<&str>) -> Result<String, String> {
-    match op_id {
-        // …已有的…
-        ISO => Ok(px_graph_schema::canonical_params(&parse::<iso::Params>(toml_text)?)),
-        other => Err(format!("不认识算子 {other}")),
-    }
-}
-```
-
-⚠ 这一条是**契约要求**：`ParamsCanonical` 必须由算子那一侧实现（默认值与字段集在它手里），
-而且**不求值** —— 所以驱动的"先 key 后 cook"不变。
-
-### ② `px_<域>_schema/src/payload.rs`
-
-```rust
-pub fn encode(mesh: &MeshData) -> PayloadBundle { /* … */ }
-
-pub fn decode(bytes: &[u8]) -> Result<MeshData, String> {
-    let bundle = PayloadBundle::from_bytes(bytes)?;
-    // …
-}
-```
-
-⚠ 载荷里**存的是内容，不是身份**：`PayloadBundle::new(kind, manifest_params, blobs)` 的
-清单 `params` 只放形状数（顶点数/三角形数那种），**别把节点名或参数写进去** ——
-节点名是驱动在写盘时补的（`Driver::store` 里的 `bundling`）。这一条踩过：漏了它
-产物里 `id` 会是空的，而"逐字节对账"才抓得到。
-
-### ③ `px_<域>_op/Cargo.toml`
-
-```toml
-[lib]
-# ⚠ `dylib` 是给驱动装载的那一份；`rlib` 是给图脚本静态拿类型的那一份。
-# 两个都要 —— 只留 rlib 就没法动态装载，只留 dylib 图脚本就没有类型检查。
-crate-type = ["dylib", "rlib"]
-
-[dependencies]
-px_cook = { path = "../px_cook" }          # 类型化契约（`Op` / `FieldFn` / `Cooked`）
-px_graph_schema = { path = "../px_graph_schema" }
-px_<域>_schema = { path = "../px_<域>_schema" }
-serde_json = { version = "1", features = ["float_roundtrip"] }
-```
-
-⚠ `float_roundtrip` **必须开**：默认的浮点解析不是正确舍入的，"读进来再写回去"不是恒等，
-而本仓库的判据是逐字节的。
-
-### ④ `px_<域>_op/src/lib.rs` —— 实现 + dylib 入口
+### 2.3 一个算子库的 `lib.rs` 全文
 
 ```rust
 pub mod typed;
+pub mod ops;          // 算法体
 
-use px_cook::field_fn::{FieldFn, SampleField};
-use px_field_schema::field::Field;
-use px_graph_schema::identity::fnv1a_sources;
-use px_graph_schema::{
-    Grid, OpCall, OpDescriptor, OpKind, OpTable, ParamsCanonical, PayloadBundle,
-};
-use px_<域>_schema::{params, payload, MeshData};
-
-pub const VERSION: u32 = 1;
-
-/// ⚠ 身份覆盖**共享依赖**：`lib.rs` 不动而 `noise.rs` 改了，也必须让身份变（§28.2）。
-pub const SOURCE_HASH: u64 = fnv1a_sources(&[
-    include_str!("lib.rs"),
-    include_str!("op.rs"),
-    include_str!("../../px_<域>_schema/src/mesh.rs"),
-    include_str!("../../px_<域>_schema/src/params.rs"),
-    include_str!("../../px_<域>_schema/src/payload.rs"),
-    include_str!("../../px_field_schema/src/field.rs"),
-]);
-
-pub const INPUTS: &[&str] = &["field"];
-
-pub const DESCRIPTOR: OpDescriptor = OpDescriptor {
-    id: params::ISO,
-    version: VERSION,
-    source_hash: SOURCE_HASH,
-    inputs: INPUTS,
-    kind: OpKind::Mesh,
-};
-
-/// **泛型方法**：算法体对"场是什么"没有假设，只要求它能按方向取值。
-///
-/// ⚠ 这个签名就是"泛型算子"的全部含义。`F` 的实例在**调用方**（图侧 dylib 或
-/// 图脚本）单态化 —— 见 §4。
-pub fn eval<F: FieldFn>(params: &params::iso::Params, field: &F) -> MeshData {
-    // …按 params.level 抽等值面，每一步问 field.cover(cloud, direction)…
-}
-
-/// 老路径（dylib 那一半）用的入口：上游那张**采样好的场**。
-pub fn eval_sampled(params: &params::iso::Params, field: &Field) -> MeshData {
-    eval(params, &SampleField { field })
-}
-
-#[unsafe(no_mangle)]
-pub extern "Rust" fn px_<域>_op_table() -> &'static OpTable {
-    static TABLE: OpTable = OpTable {
-        ops: &[DESCRIPTOR],
-        canonical_params: params::canonical as ParamsCanonical,
-        call: call as OpCall,
-    };
-    &TABLE
-}
-
-extern "Rust" fn call(
-    op_id: &str,
-    params_json: &str,
-    grid: Grid,
-    inputs: &[&[u8]],
-) -> Result<Vec<u8>, String> {
-    match op_id {
-        params::ISO => {
-            let params: params::iso::Params = serde_json::from_str(params_json)
-                .map_err(|err| format!("参数 JSON 解不开：{err}"))?;
-            let field = px_field_schema::payload::decode(inputs[0], grid.projection)?;
-            let mesh: MeshData = eval_sampled(&params, &field);
-            payload::encode(&mesh).placeholder()
-        }
-        other => Err(format!("px_<域>_op 不认识算子 {other}")),
-    }
-}
+px_cook::px_canonical_params!(typed::Fbm, typed::Mix);   // 超参数规范化
+px_cook::px_dylib_call!(typed::Fbm, typed::Mix);         // 字节 → 字节
+px_cook::px_op_table!("px_field_op", typed::Fbm, typed::Mix);  // 入口符号
 ```
 
-⚠ `#[unsafe(no_mangle)]` 的函数名**必须**是 `<库名>_table`：驱动按**文件名词干**算入口名
-（`px_mesh_op.dll` → `px_mesh_op_table`），名字不对就是运行期
-`GetProcAddress failed`，没有任何编译期提示。
-
-⚠ `OpKind` 决定图脚本该用哪个入口，也决定**键里掺不掺评审相机**：
-
-| `OpKind` | 图脚本入口 | 键里掺相机？ |
-|---|---|---|
-| `Field` | `cook_field::<Op>(...)` | 掺（产物里带相机表） |
-| `Mesh` | `cook_mesh::<Op>(...)` | 掺 |
-| `Volume` | `cook_volume::<Op>(...)` | **不掺**（相机是"怎么看"，体积没人看） |
-
-掺了相机就意味着产物内容随相机变 ⇒ 相机必须进键，否则会出现"同一个键、不同内容"。
-这一条由 `cook_*` 那一层统一处理，算子不用管。
-
-### ⑤ `px_<域>_op/src/typed.rs` —— 类型化契约（**接线，不含实现**）
-
-```rust
-use px_cook::{Cooked, Identity, Op};
-use px_field_schema::field::Field;
-use px_graph_schema::Grid;
-use px_<域>_schema::{params, MeshData};
-
-/// 一个具体算子：`impl Op` 之后，图脚本就能 `cook_mesh::<Iso>(...)`。
-///
-/// ⚠ 这里**一行实现都没有** —— `cook` 转发到 `crate::eval_sampled`。
-/// 一旦把实现搬进来，图程序就静态链住了算法体 ⇒ 改算法要重编图程序
-/// ——「类型检查」与「改实现不重编」两条会互斥。
-pub struct Iso;
-
-impl Op for Iso {
-    const IDENTITY: Identity = Identity {
-        id: params::ISO,
-        version: crate::VERSION,
-        // ⚠ 与 `lib.rs` 的 `SOURCE_HASH` **同一份清单、同一份算法**。
-        // 漏一份就会「改了它而身份没变」⇒ 缓存静默给旧产物。
-        source_hash: crate::SOURCE_HASH,
-    };
-
-    type Params = params::iso::Params;
-    // 输入形态在**类型里**：个数接错、域接错都编译不过。
-    type Inputs<'a> = &'a Cooked<Field>;
-    type Payload = MeshData;
-
-    fn cook(params: &Self::Params, field: &Self::Inputs<'_>, _grid: Grid) -> MeshData {
-        crate::eval_sampled(params, field.field())
-    }
-}
-```
-
-⚠ `type Inputs<'a>` 的三种写法（对应"几个上游"）：
-
-| 几个上游 | 写法 |
-|---|---|
-| 0 | `()` |
-| 1 | `&'a Cooked<Field>` |
-| N | `&'a [&'a Cooked<Field>; N]`（**数组长度就是个数**，写进类型里） |
-
-### ⑥⑦ 图脚本侧
-
-`px_graphs/Cargo.toml`：
-
-```toml
-[dependencies]
-px_cook = { path = "../px_cook" }
-px_<域>_op = { path = "../px_<域>_op" }   # ← 静态拿类型；实现仍在 dylib
-
-[dev-dependencies]
-px_<域>_op = { path = "../px_<域>_op" }   # ← 只为把 dylib 编出来给测试/老路径用
-```
-
-⚠ **这两条不能合并**：合并进 `[dependencies]` 就不会再编出 dylib；
-合并进 `[dev-dependencies]` 图脚本就拿不到类型。`tests/crate_graph.rs` 那道门看着这件事。
-
-`px_graphs/src/bin/<图>.rs`：
-
-```rust
-use px_cook::cook_mesh;
-use px_<域>_op::typed as iso;
-
-let height = cook_field::<field::Fbm>(&cache, "continents", (), canvas)?;
-let mesh = cook_mesh::<iso::Iso>(&cache, "relief", &height, canvas)?;
-```
-
-⚠ 参数文件按**节点名**取（`art/<图>/relief.toml`）—— `cook_*` 的第二个参数既是节点名、
-也是参数文件名。同一个算子在不同图/不同节点下可以有不同的参数文件。
-
-### ⑧ `art/<图>/relief.toml`
-
-```toml
-level = 0.52
-subdivisions = 128
-```
-
-（`deny_unknown_fields` 开着 ⇒ 写错字段名会当场报，不会静默用默认值。）
+⚠ `px_op_table!` 的第一个参数必须等于 **crate 名**（dll 名）：驱动按**文件名词干**算入口符号
+（`px_field_op.dll` → `px_field_op_table`）。写错是**编译错**（`const` 断言），不是运行期惊喜。
 
 ---
 
-## 3. 命令
+## 3. 逐件写清
+
+### 3.1 超参数：`px_<域>_schema/src/params.rs`
+
+```rust
+#[derive(Debug, Clone, Serialize, Deserialize, Default, px_derive::PxParams)]
+#[serde(default, deny_unknown_fields)]
+pub struct Params {
+    pub frequency: f32,
+    pub octaves: u32,
+}
+```
+
+- `PxParams` **必须**：它生成 `PxKeyed`（每个字段按自己的类型写进键）。
+  手写的话，"加了字段却忘了进 `key`"是个**静默** bug —— 改了参数却命中旧产物。
+- `deny_unknown_fields` **要开**：参数文件写错字段名时，这是唯一在"读参数"那刻就报的机制。
+- 纯局部开关（不进键的那种）加 `#[nohash]`。
+
+新增字段类型时要在 `px_graph_schema::HashField` 上加一条实现（闭集，编译器会当场报）。
+
+### 3.2 算法体：`px_<域>_op/src/ops/fbm.rs`
+
+普通 Rust 函数，签名怎么写都行 —— 它只被 `typed.rs` 里那一声 `render` 调用。
+
+```rust
+pub fn eval(params: &params::fbm::Params, inputs: &[&Field], grid: Grid) -> Field { … }
+```
+
+### 3.3 声明：`px_<域>_op/src/typed.rs`
+
+```rust
+use px_cook::{px_op, Cooked, Unary1, Unary2, Unary3};
+use px_graph_schema::OpKind;
+
+pub struct Fbm;
+pub struct Mix;
+
+px_op! { Fbm = params::FBM, 4, params::fbm::Params, (), Field,
+         OpKind::Field, &[],
+         [include_str!("fbm.rs"),
+          include_str!("../noise.rs"),
+          include_str!("../../px_field_schema/src/field.rs"),
+          include_str!("../../px_field_schema/src/params.rs")],
+         |p, _i, g| crate::ops::fbm::eval(p, &[], g) }
+
+px_op! { Mix = params::MIX, 1, params::mix::Params, Unary3<Cooked<Field>>, Field,
+         OpKind::Field, &["a", "b", "mask"],
+         [include_str!("mix.rs"),
+          include_str!("../../px_field_schema/src/field.rs"),
+          include_str!("../../px_field_schema/src/params.rs")],
+         |p, i, g| crate::ops::mix::eval(p, &[i.a.sample(), i.b.sample(), i.c.sample()], g) }
+```
+
+参数顺序：`名字 = id, 版本, 超参数类型, 输入形状, 输出域, OpKind, 输入名, 源码清单, |超参数, 输入, 画布| 怎么算`。
+
+| 字段 | 是什么 |
+|---|---|
+| `id` / `版本` | 键认得出的那一半。⚠ **版本只在接口变了时才升**；改实现不用动（源码哈希自己会变） |
+| `超参数类型` | 从 `art/<图>/<节点>.toml` 解出来的那个 struct |
+| `输入形状` | `()` / `Unary1<Cooked<T>>` / `Unary2<…>` / `Unary3<…>` —— **个数写进类型里** |
+| `输出域` | `Field` / `VolumeData` / `MeshData` —— 相机口径与编解码都从它推 |
+| `OpKind` | 描述符里的档；**必须与输出域一致**（`Field`↔`Field`、`VolumeData`↔`Volume`…）。⚠ 不一致是**编译错**（`px_op!` 里的 `const` 断言） |
+| `输入名` | 老路径描述符里的输入名（`["coverage"]` 那种）。图侧真正的检查在 `输入形状` 上 |
+| `源码清单` | **它自己的实现文件 + 它依赖的共享件**。漏一份 ⇒ 改了它却命中旧产物 |
+
+### 3.4 输出域与相机
+
+`OpKind` 决定键里掺不掺评审相机：`Field`/`Mesh` 掺、`Volume` **不掺**（相机是"怎么看"）。
+这一条由 `cook` 统一处理，算子不用管 —— 但它必须与 `Payload` 对得上，否则会出现
+"同一个键、不同内容"。
+
+### 3.5 图脚本
+
+```rust
+use px_cook::{Cooked, Unary1 as One, Unary2 as Two, Unary3 as Three, cook};
+
+// 无上游
+let clusters = cook::<field::Fbm>(&cache, "clusters", (), canvas)?;
+// 两个上游：具名字段
+let carved = cook::<field::Warp>(&cache, "carved", Two { a: billows, b: flow }, canvas)?;
+// 三个
+let mixed = cook::<field::Mix>(&cache, "mixed", Three { a: clusters, b: carved, c: weight }, canvas)?;
+// 体积与网格
+let coarse = cook::<volume::CloudCoarse>(&cache, "coarse", One { a: mixed.clone() }, canvas)?;
+let proxy = cook::<mesh::Proxy>(&cache, "proxy", mesh::VolumeInput { a: coarse }, canvas)?;
+```
+
+- **上游是值，不是引用**：`Cooked<T>` 里是值 ⇒ 同一份被多处用就 `.clone()`。
+  深拷一次比借用的 `'a` 链条干净（实测：引用版会把整个调用链拖进生命周期标注）。
+- `cook` 的第二个类型参数**不用写** —— `inputs` 收的是 `O::Inputs`，关联类型会反推。
+- 参数文件按**节点名**取（`art/<图>/mixed.toml`）。同一个算子在不同节点下可以有不同参数。
+
+### 3.6 参数文件 `art/<图>/mixed.toml`
+
+```toml
+frequency = 1.7
+octaves = 6
+```
+
+超参数**留在这里**（不在 Rust 里）：改调参只需要重跑图，不重编。
+
+---
+
+## 4. 命令
 
 ```bash
-# 1) 类型化那一路直接编（图脚本会静态拿 op 的 rlib）
-cargo build -p px_graphs --bin <图>
-
-# 2) 把 dylib 编出来，供**老路径**与测试用
-cargo build -p px_<域>_op
-
-# 3) 跑图
-cargo run -q -p px_graphs --bin <图>
-
-# 4) 测试（含两条门：算子不许依赖 px_graph、图库不许静态链算子）
-cargo test -p px_graphs
+cargo build -p px_graphs --bin <图>     # 类型化那一路
+cargo build -p px_<域>_op              # 把 dylib 编出来（老路径/测试用）
+cargo run   -q -p px_graphs --bin <图>  # 跑图
+cargo test  -p px_graphs                # 两条门（见 §5）
 ```
 
 ---
 
-## 4. 泛型算子额外要做的一步（可选，只有泛型才需要）
+## 5. 泛型算子额外的一步：让它有"实例落点"
 
-上面 ①②③④⑤ 已经支持"参数类型 + 输入个数 + 输出域"的编译期检查。
-**但 `eval<F: FieldFn>` 的实例还没有落点** —— 若要让图侧**现写**一个场函数
-（不先栅格化成一张场），就得让实例住在**图侧自建的 dylib** 里：
+上面 1–9 已经给了编译期检查。**但 `render` 的实例还没落点** ——
+若要让图侧**现写**一个场函数（不先栅格化成一张场），实例必须住在**图侧自建的 dylib** 里：
 
 ```text
 px_graphs/src/bin/<图>/mono/
@@ -334,39 +218,48 @@ px_graphs/src/bin/<图>/mono/
 cargo run -q -p px_graphs --bin mono-gen -- px_graphs/src/bin/<图>/mono/fields.rs
 ```
 
-生成器只吃 **stage 1 的路径**，其余全部推出来（stage 1 可以在任何位置）：
-同目录同主名的 `.mono` 是声明，同目录的 `template.*` 是模板，
-产物落 `target/debug/<库名>_op.dll`。图脚本用 `node(<id>, <节点名>, &[&上游])` 接上。
+生成器只吃 **stage 1 的路径**，其余全从它推出来（stage 1 可以在任何位置）：
 
-读数（已实测）：改一行场函数 → 生成 + 编 **1.7 s**，同期图程序 exe 的 sha256 **不变**，缓存键必变。
+| 从哪来 | 是什么 |
+|---|---|
+| 命令行 | stage 1 的 `.rs` |
+| 同目录、同主名的 `<主名>.mono` | 声明（`lib` 默认 `px_mono_<主名>`） |
+| 同目录的 `template.*` | stage 2 的三份模板 |
+| 计算的 | `target/mono/<库名>/{crate,build}` → `target/debug/<库名>_op.dll` |
 
-**为什么必须这个形状**：泛型的实例化要求「`eval<F>` 的定义」与「类型参数 `F`」在**同一个
+图脚本用 `node(<id>, <节点名>, &[&上游])` 接上（老路径，因为这一份实例导出的是描述符表）。
+
+**读数**（已实测）：改一行场函数 → 生成 + 编 **1.7 s**，同期图程序 exe 的 sha256 **不变**，键必变。
+
+**为什么必须这个形状**：泛型的实例化要求「`render<F>` 的定义」与「类型参数 `F`」在**同一个
 编译单元**里；`F` 是图侧的东西、图程序是 `bin` ⇒ 实例只能落在图侧自建的 dylib 里。
 
 ---
 
-## 5. 会咬人的地方（都踩过）
+## 6. 会咬人的地方（都踩过）
 
-1. **入口名由库名派生**（`<文件名词干>_table`）。改名 DLL 而不改导出函数名 ⇒
-   运行期 `GetProcAddress failed`，编译期毫无提示。
+1. **入口符号由库名派生**（`<文件名词干>_table`）。`px_op_table!` 现在有 `const` 断言看着它 ⇒
+   写错是编译错。**但改了 crate 名之后别忘了同步那个字面量。**
 
-2. **`typed.rs` 里不许放实现**。放了就失去「改算法不重编图程序」；而 `px_graph` 也
-   不许静态依赖算子（那道门看住）。
-   反过来说：**dylib 那一半不许依赖 `px_graph`** —— 否则运行时装载会让**同一个进程里
-   出现两份驱动**（CAS / 清单 / 索引各一份）。这比"重编"严重得多，门也看着。
+2. **`typed.rs` 里不许放实现**（放了就失去"改算法不重编图程序"）；
+   **dylib 那一半不许依赖 `px_graph`**（否则同一进程两份驱动，比"重编"严重得多）。
+   两道门看着：`px_graphs/tests/crate_graph.rs`。
 
-3. **参数文件写错字段名是运行期才报**，除非 `deny_unknown_fields` 开着。
-   而且缺文件是**静默用默认值** —— 设计师看不到自己少写了什么。这是当前最扎的一处。
+3. **参数写错字段名**：靠 `deny_unknown_fields` 当场报；**缺文件是静默用默认值**
+   —— 设计师看不到自己少写了什么。**这一处还扎人**。
 
-4. **身份清单（`SOURCE_HASH` 的 `include_str!` 列表）漏一份** ⇒ 改了那个共享依赖而身份没变
-   ⇒ 缓存静默给旧产物。`px_graph/tests/source_hash.rs` 那道门在看着它（至少两段、点到共享依赖）。
+4. **身份清单漏一份** ⇒ 改了共享依赖而身份没变 ⇒ 缓存静默给旧产物。
+   `px_graph/tests/source_hash.rs` 那道门扫每个算子那段清单（至少两段 + 点到共享依赖）。
 
-5. **载荷里别放节点名**。节点名与相机表是**驱动**在写盘时补的（`Driver::store::bundling`）；
-   算子只回一个占位载荷（`bundle.placeholder()`）。漏了这一步产物里 `id` 会是空的。
+5. **`OpKind` 必须与 `Payload` 一致**（相机掺不掺、解码走哪条都从它推）——
+   `px_op!` 里那条 `const` 断言会在算子库编译时炸，不是运行期的怪事。
 
-6. **生成物与主 workspace 不能同时污染同一个 `target/`**。混过之后 `target/debug/` 里的
-   算子 DLL 会变成半成品，而 `cargo build` **判它 fresh 不重编** ⇒ 莫名
-   `LoadLibraryExW failed`。恢复只能 `cargo clean`。**未根治**（见笔记 §166.5）。
+6. **载荷里别放节点名**：节点名与相机是**驱动**写盘时补的（`Driver::store` 的 `bundling`）。
+   算子只回 `bundle.placeholder()`。
 
-7. **`dylib` 这个 crate-type 的 ABI 是递归的**：生成的实例在运行时还要它自己那一套上游 DLL。
-   所以"把生成的 dylib 单独拷到别处跑"不成 —— 见第 6 条与 §166.5。
+7. **生成物与主 workspace 不能同时污染同一个 `target/`**：混过之后算子 DLL 会变成半成品，
+   而 `cargo build` **判它 fresh 不重编** ⇒ 莫名 `LoadLibraryExW failed`；只能
+   `cargo clean -p <那几个算子 crate>`。**未根治**（笔记 §166.5）。
+
+8. **`dylib` 这个 crate-type 的 ABI 是递归的**：生成的实例运行时还要它自己那一套上游 DLL，
+   所以"拷到别处单独跑"不成。**未根治**（同 §166.5）。
