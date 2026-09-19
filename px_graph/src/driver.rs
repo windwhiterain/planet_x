@@ -8,10 +8,10 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
 use px_graph_schema::{
-    GraphSpec, Grid, Key, ManifestEntry, OpKind, PayloadBundle,
+    GraphSpec, Grid, Key, ManifestEntry, PayloadBundle,
     fnv1a, hex, hex_short,
 };
-use px_protocol::art::{Camera, Domain};
+use px_protocol::art::Camera;
 use px_protocol::stream::{self, Frame};
 
 use px_field_schema::field::{Field, Stats};
@@ -130,44 +130,35 @@ impl Cache for Driver {
 
         // ⚠ 清单那三个读数由**算子那一侧**算（类型化的值在它手里，不必让驱动解字节猜域）。
         let (min, max, mean) = report.stats;
-        if !report.hit {
-            let entry = ManifestEntry {
+        // ⚠ **命中也要记**：清单是"这一趟图的成员与它们的键"，下游（`scene` 按节点名查键）
+        //   靠它。只在重算时记的话，一趟全命中的运行会写出**空清单**，下游当场断
+        //   （实测：`scene` 报"图 'planet' 的清单是空的"）。
+        context
+            .manifest
+            .lock()
+            .expect("清单锁坏了")
+            .push(ManifestEntry {
                 node: report.node.to_string(),
                 op: report.op.to_string(),
                 op_version: interface_version(report.interface),
                 key: hex(&report.key),
-                hit: false,
+                hit: report.hit,
                 millis: report.millis,
                 bytes: bytes.len() as u64,
                 min: min as f32,
                 max: max as f32,
                 mean: mean as f32,
-            };
-            println!(
-                "重算 {:<12} {:<16} @{}  {}  {:>5} ms  {:>9} B",
-                report.node,
-                report.op,
-                interface_tag(report.interface),
-                hex_short(&report.key),
-                report.millis,
-                bytes.len(),
-            );
-            context
-                .manifest
-                .lock()
-                .expect("清单锁坏了")
-                .push(entry);
-        } else {
-            println!(
-                "命中 {:<12} {:<16} @{}  {}  {:>5} ms  {:>9} B",
-                report.node,
-                report.op,
-                interface_tag(report.interface),
-                hex_short(&report.key),
-                report.millis,
-                bytes.len(),
-            );
-        }
+            });
+        println!(
+            "{} {:<12} {:<16} @{}  {}  {:>5} ms  {:>9} B",
+            if report.hit { "命中" } else { "重算" },
+            report.node,
+            report.op,
+            interface_tag(report.interface),
+            hex_short(&report.key),
+            report.millis,
+            bytes.len(),
+        );
         Ok(())
     }
 
@@ -280,26 +271,6 @@ fn context() -> &'static Context {
 
 
 
-
-fn volume_stats(volume: &VolumeData) -> Stats {
-    let mut min = f32::INFINITY;
-    let mut max = f32::NEG_INFINITY;
-    let mut sum = 0.0_f64;
-    for value in &volume.data {
-        min = min.min(*value);
-        max = max.max(*value);
-        sum += *value as f64;
-    }
-    Stats {
-        min,
-        max,
-        mean: if volume.data.is_empty() {
-            0.0
-        } else {
-            (sum / volume.data.len() as f64) as f32
-        },
-    }
-}
 
 pub fn finish() {
     let context = context();

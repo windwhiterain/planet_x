@@ -25,7 +25,6 @@
 
 pub mod identity;
 pub mod keys;
-pub mod op_kind;
 pub mod payload;
 pub mod protocol;
 
@@ -34,6 +33,5 @@ pub use identity::{HashField, PxKeyed, fnv1a_sources};
 pub use keys::{
     Key, canonical_params, hex, hex_short, key_with_cameras, node_key, payload_fingerprint,
 };
-pub use op_kind::OpKind;
 pub use payload::PayloadBundle;
 pub use protocol::{GraphSpec, Grid, ManifestEntry};

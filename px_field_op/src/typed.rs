@@ -9,7 +9,6 @@
 use px_cook::{Cooked, px_op};
 use px_field_schema::field::Field;
 use px_field_schema::params;
-use px_graph_schema::OpKind;
 
 // ── 图参数的形状：一个算子一个 ────────────────────────────────────────────────
 //
@@ -45,7 +44,7 @@ macro_rules! field_op {
         $(#[$meta])*
         pub struct $name;
 
-        px_op! { $name = $id, $params, $inputs, Field, OpKind::Field,
+        px_op! { $name = $id, $params, $inputs, Field,
                  |p, i, g| $expr(p, i, g) }
     };
 }

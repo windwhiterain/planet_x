@@ -109,8 +109,6 @@ impl Cooked<MeshData> {
 /// `#[derive(PxOp)]` 会把它生成出来；`clouds.rs` 里也能按需手写（见那个演示分支）。
 pub trait PxOp {
     const ID: &'static str;
-    /// 产物档：决定键里要不要掺评审相机。
-    const KIND: px_graph_schema::OpKind;
     /// **源码指纹**（`build.rs` 算的十六进制）—— 改实现必然重算那一格。
     ///
     /// ⚠ 由 `build.rs` 生成、`env!("PX_SOURCE_HASH")` 取用：**没有手维护的清单**。
@@ -169,11 +167,11 @@ pub mod payload {
     }
 
     pub trait Build: Sized {
-        /// 产物档 —— 相机口径与解码路径都从它推。
+        /// **产物里带不带评审相机表？** 场/网格带，体积不带。
         ///
-        /// ⚠ 声明里的 `OpKind` 必须与它一致；`px_op!` 里有 `const` 断言看着，
-        /// 所以"写错域"是编译错而不是运行期的怪事。
-        const KIND: px_graph_schema::OpKind;
+        /// ⚠ 就是这一条 —— 不再有并行的 `OpKind`。域**就是**这个类型：
+        ///   `O::Payload = VolumeData` 已经说明了一切，再声明一次只会多一个能写错的地方。
+        const WITH_CAMERAS: bool;
         /// **这个域的产物尺寸是不是就是画布？**
         ///
         /// * `true`（场）：分辨率 = 画布 ⇒ 画布必须进键，否则"改了画布却命中旧分辨率"。
@@ -191,7 +189,7 @@ pub mod payload {
     }
 
     impl Build for Field {
-        const KIND: px_graph_schema::OpKind = px_graph_schema::OpKind::Field;
+        const WITH_CAMERAS: bool = true;
         const RESOLUTION_IS_CANVAS: bool = true;
         fn stats(payload: &Self) -> (f64, f64, f64) {
             let stats = payload.stats();
@@ -207,7 +205,7 @@ pub mod payload {
     }
 
     impl Build for VolumeData {
-        const KIND: px_graph_schema::OpKind = px_graph_schema::OpKind::Volume;
+        const WITH_CAMERAS: bool = false;
         const RESOLUTION_IS_CANVAS: bool = false;
         fn stats(payload: &Self) -> (f64, f64, f64) {
             // ⚠ 逐元素 + 用 f64 累加：与老路径 `volume_stats` 逐字一致。
@@ -234,7 +232,7 @@ pub mod payload {
     }
 
     impl Build for MeshData {
-        const KIND: px_graph_schema::OpKind = px_graph_schema::OpKind::Mesh;
+        const WITH_CAMERAS: bool = true;
         const RESOLUTION_IS_CANVAS: bool = false;
         fn stats(payload: &Self) -> (f64, f64, f64) {
             // 与老路径同一口径：`min` = 顶点数、`max` = 三角形数、`mean` = 0。
@@ -337,10 +335,8 @@ where
     inputs.collect(&mut hasher);
     let base = *hasher.finalize().as_bytes();
     // ⚠ 相机那一档：产物里带着相机表 ⇒ 相机变了产物内容就变 ⇒ 必须进键。
-    // ⚠ 相机口径从**域**推（`OpKind`）：Field/Mesh 的产物里带相机表，Volume 不带。
-    //   从前这是一个独立的 `Payload::WITH_CAMERAS` —— 它与 `KIND` 一一对应，
-    //   两处真相迟早会对不上。
-    let with_cameras = O::KIND != px_graph_schema::OpKind::Volume;
+    // ⚠ 相机口径从**载荷类型**推：域就是这个类型，没有第二处声明。
+    let with_cameras = <O::Payload as payload::Build>::WITH_CAMERAS;
     let key = if with_cameras {
         px_graph_schema::key_with_cameras(base, cache.cameras())
     } else {
@@ -394,7 +390,6 @@ where
 ///
 /// ```ignore
 /// px_op! { Fbm = params::FBM, params::fbm::Params, (), Field,
-///          OpKind::Field, &[],
 ///          |p, _i, g| crate::ops::fbm::eval(p, &[], g) }
 /// ```
 ///
@@ -406,12 +401,10 @@ where
 #[macro_export]
 macro_rules! px_op {
     ($name:ident = $id:expr, $params:ty, $inputs:ty, $payload:ty,
-     $kind:expr,
      |$p:ident, $i:ident, $g:ident| $body:expr
      $(, interface = $interface:literal)?) => {
         impl $crate::PxOp for $name {
             const ID: &'static str = $id;
-            const KIND: $crate::px_graph_schema::OpKind = $kind;
 
             type Params = $params;
             type Inputs = $inputs;
@@ -453,15 +446,6 @@ macro_rules! px_op {
             }
         }
 
-        /// ⚠ **声明的域必须与输出域推出来的一致**（相机掺不掺、画布算不算分辨率都从它推）。
-        /// 语言管不住这件事，所以做成一条编译期断言。
-        const _: () = assert!(
-            $crate::op_kind_eq(
-                <$name as $crate::PxOp>::KIND,
-                <$payload as $crate::payload::Build>::KIND,
-            ),
-            "声明的 OpKind 与输出域对不上（Field/Mesh 掺相机、Volume 不掺）",
-        );
     };
 }
 
@@ -481,18 +465,6 @@ pub const fn str_eq(left: &str, right: &str) -> bool {
     true
 }
 
-/// `const` 上下文里的 `OpKind` 相等。
-pub const fn op_kind_eq(left: px_graph_schema::OpKind, right: px_graph_schema::OpKind) -> bool {
-    // ⚠ 不能写成闭包：`const fn` 里闭包调用还没有 RFC。
-    const fn index(kind: px_graph_schema::OpKind) -> u8 {
-        match kind {
-            px_graph_schema::OpKind::Field => 0,
-            px_graph_schema::OpKind::Mesh => 1,
-            px_graph_schema::OpKind::Volume => 2,
-        }
-    }
-    index(left) == index(right)
-}
 
 /// **接口形状的哈希** —— 它取代了手写的 `version`。
 ///
@@ -517,7 +489,6 @@ pub fn interface_hash(parts: &[&str]) -> u64 {
     u64::from_le_bytes(bytes)
 }
 
-/// `const` 上下文里的 `OpKind` 相等。
 /// **无上游**那一档的形状：它没有名字问题，留在契约里。
 impl PxInputs for () {
     fn collect(&self, _hasher: &mut blake3::Hasher) {}
@@ -590,18 +561,9 @@ mod tests {
             !<px_mesh_schema::MeshData as Build>::RESOLUTION_IS_CANVAS,
             "网格的尺寸由参数给 ⇒ 画布与它无关"
         );
-        // 顺带把"域与载荷一致"那条口径也读一遍（`px_op!` 里已经断言过，这里是第二只眼睛）。
-        assert_eq!(
-            <px_field_schema::field::Field as Build>::KIND,
-            px_graph_schema::OpKind::Field
-        );
-        assert_eq!(
-            <px_volume_schema::VolumeData as Build>::KIND,
-            px_graph_schema::OpKind::Volume
-        );
-        assert_eq!(
-            <px_mesh_schema::MeshData as Build>::KIND,
-            px_graph_schema::OpKind::Mesh
-        );
+        // 顺带把"相机口径"也读一遍（`cook` 用它，不再有并行的 `OpKind`）。
+        assert!(<px_field_schema::field::Field as Build>::WITH_CAMERAS);
+        assert!(!<px_volume_schema::VolumeData as Build>::WITH_CAMERAS);
+        assert!(<px_mesh_schema::MeshData as Build>::WITH_CAMERAS);
     }
 }

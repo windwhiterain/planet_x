@@ -5,7 +5,6 @@
 
 use px_cook::{Cooked, px_op};
 use px_field_schema::field::Field;
-use px_graph_schema::OpKind;
 use px_volume_schema::{VolumeData, params};
 
 /// 烘一份体积要吃的东西：**一张覆盖度场**。
@@ -21,5 +20,4 @@ pub type VolumeOut = Cooked<VolumeData>;
 pub struct CloudCoarse;
 
 px_op! { CloudCoarse = params::CLOUD_COARSE, params::Params, CloudCoarseInput, VolumeData,
-         OpKind::Volume,
          |p, i, _g| crate::eval_sampled(p, i.coverage.sample()) }

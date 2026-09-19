@@ -24,7 +24,7 @@ let proxy    = cook::<mesh::Proxy>(&cache, "proxy",
                    mesh::ProxyInput { volume: coarse })?;
 ```
 
-**就这些**。没有 `OpKind`、没有 `encode`/`decode`、没有 `cook_field`/`cook_volume`/`cook_mesh`、
+**就这些**。没有 `encode`/`decode`、没有 `cook_field`/`cook_volume`/`cook_mesh`、
 没有 `&[&a, &b]`、没有描述符、没有注册表、没有字符串 id。域、相机口径、编解码、身份全从算子类型推。
 
 三件事因此是**编译期**的：
@@ -40,7 +40,7 @@ let proxy    = cook::<mesh::Proxy>(&cache, "proxy",
 ## 1. 三层分工
 
 ```text
-px_graph_schema          ① 契约：键 / 载荷格式 / OpKind / 参数规范化
+px_graph_schema          ① 契约：键 / 载荷格式 / 参数规范化
         ↑
 px_<域>_schema           ② 数据：超参数 struct（serde）+ 载荷类型 + 序列化
         ↑
@@ -127,13 +127,12 @@ pub fn eval(params: &params::fbm::Params, inputs: &[&Field], grid: Grid) -> Fiel
 
 ```rust
 use px_cook::{Cooked, px_op};
-use px_graph_schema::OpKind;
 
 pub struct Fbm;
 pub struct Mix;
 
 px_op! { Fbm = params::FBM, 4, params::fbm::Params, (), Field,
-         OpKind::Field, &[],
+
          [include_str!("fbm.rs"),
           include_str!("../noise.rs"),
           include_str!("../../px_field_schema/src/field.rs"),
@@ -141,14 +140,14 @@ px_op! { Fbm = params::FBM, 4, params::fbm::Params, (), Field,
          |p, _i, g| crate::ops::fbm::eval(p, &[], g) }
 
 px_op! { Mix = params::MIX, 1, params::mix::Params, MixInput, Field,
-         OpKind::Field, &["a", "b", "mask"],
+
          [include_str!("mix.rs"),
           include_str!("../../px_field_schema/src/field.rs"),
           include_str!("../../px_field_schema/src/params.rs")],
          |p, i, g| crate::ops::mix::eval(p, &[i.a.sample(), i.b.sample(), i.c.sample()], g) }
 ```
 
-参数顺序：`名字 = id, 超参数类型, 输入形状, 输出域, OpKind, 输入名, |超参数, 输入, 画布| 怎么算`。
+参数顺序：`名字 = id, 超参数类型, 输入形状, 输出域, |超参数, 输入, 画布| 怎么算`。
 
 ⚠ **没有「版本」这一栏，也没有「源码清单」那一栏** —— 身份两半都是自动的，见 §3.3c。
 
@@ -158,7 +157,7 @@ px_op! { Mix = params::MIX, 1, params::mix::Params, MixInput, Field,
 | `超参数类型` | 从 `art/<图>/<节点>.toml` 解出来的那个 struct |
 | `输入形状` | 这个算子**自己定义**的输入 struct（`()` = 不吃上游）—— 见 §3.3b |
 | `输出域` | `Field` / `VolumeData` / `MeshData` —— 相机口径与编解码都从它推 |
-| `OpKind` | 描述符里的档；**必须与输出域一致**（`Field`↔`Field`、`VolumeData`↔`Volume`…）。⚠ 不一致是**编译错**（`px_op!` 里的 `const` 断言） |
+| `输出域` | `Field` / `VolumeData` / `MeshData`。⚠ **域就是这个类型** —— 不再有并行的 `OpKind`：相机掺不掺、画布算不算分辨率都由 `Payload` 自己声明（`WITH_CAMERAS` / `RESOLUTION_IS_CANVAS`）。一个声明，没有能对不上的第二处 |
 | `输入形状` | 这个算子**自己定义**的输入 struct —— 输入个数与域都在里面 |
 
 ### 3.3b 图参数的形状：**算子自己定义**，两条 impl 由宏生成
@@ -221,9 +220,9 @@ pub struct MixInput {
 
 ### 3.4 输出域与相机
 
-`OpKind` 决定键里掺不掺评审相机：`Field`/`Mesh` 掺、`Volume` **不掺**（相机是"怎么看"）。
-这一条由 `cook` 统一处理，算子不用管 —— 但它必须与 `Payload` 对得上，否则会出现
-"同一个键、不同内容"。
+**域（`Payload` 类型）决定键里掺不掺评审相机**：场/网格掺、体积**不掺**（相机是「怎么看」）。
+这一条由 `cook` 统一处理，算子不用管 —— 而且**没有第二个地方要写它**：
+域就是 `Payload` 类型，`WITH_CAMERAS` 由那个类型自己声明。
 
 ### 3.5 图脚本
 
@@ -326,16 +325,15 @@ dylib，图程序按 op id 运行时装上，于是**改场函数不必重编图
    源码指纹由 `build.rs` 遍历源码树算，接口哈希由三个类型名推。
    `px_graph/tests/source_hash.rs` 那道门现在守的是「**没有人再把清单加回来**」。
 
-5. **`OpKind` 必须与 `Payload` 一致**（相机掺不掺、解码走哪条都从它推）——
-   `px_op!` 里那条 `const` 断言会在算子库编译时炸，不是运行期的怪事。
+5. ~~`OpKind` 必须与 `Payload` 一致~~ —— **这一条已经不存在了**。不再有 `OpKind`：
+   域就是 `Payload` 类型。从前那条 `const` 断言守的是“你写了个冗余字段又写错了”，
+   现在连字段都没有（`WITH_CAMERAS` / `RESOLUTION_IS_CANVAS` 直接挂在 `Payload` 上）。
 
 6. **载荷里别放节点名**：节点名与相机是**驱动**写盘时补的（`Driver::store` 的 `bundling`）。
    算子只回 `bundle.placeholder()`。
 
-7. **生成物与主 workspace 各用各的 `target/`**：两份构建图各有各的依赖解析（各一份
-   `Cargo.lock`），产物**不能互换**。混过之后算子 DLL 会变成半成品，而 `cargo build`
-   **判它 fresh 不重编** ⇒ 莫名 `LoadLibraryExW failed`；只能
-   `cargo clean -p <那几个算子 crate>`。
+7. ~~生成物与主 workspace 各用各的 `target/`~~ —— **这条随 dylib 一起没了**：
+   算子不再产出 dylib，也就没有“两个构建图互相覆盖同名 DLL”这件事。
 
 8. **生成的实例是自足的**（实测：只导入系统库，`px_` 前缀的导入 0 个）——
    cargo 对 path 依赖选 rlib ⇒ 上游静态链进去。所以**永远不要**从 `target/mono/` 往
