@@ -30,6 +30,7 @@ mod report;
 mod serve;
 mod shader;
 mod shot;
+mod spans;
 mod stubs;
 mod vec;
 mod viewer;
@@ -59,6 +60,11 @@ fn usage() -> String {
         "        它服务的是 S7 那条「改一个 .wgsl ⇒ 约 1 秒内**画面**变」：判据的尺子是图，不是日志。",
         "      --time N：**保留态的读数** —— 准备一次、连画 N 帧，报「准备 / 第 1 帧（含建管线）/",
         "        第 2..N 帧（中位）」三段墙钟；落盘的是最后一帧（与不带 --time 的那张逐字节相同）。",
+        "      --spans 预热,测量：**逐条 pass 的 GPU 编码器级时间戳**（J4 的仪器）。",
+        "        一条保留态会话 + 预热帧 + 测量帧；每条 pass 报两套边界（包络 / pass 内 ——",
+        "        后者与 Bevy 的 `elapsed_gpu` 同一套），另有帧级一条与匹配子集之和。",
+        "        ⚠ 两个数都必须显式写（不给缺省）；⚠ 与 --sheet 互斥（槽按单张排）。",
+        "        ⚠ 这个数**不叫** `gpu_ms`：那个名字在 Bevy 那边是七段之和（见 src/spans.rs）。",
         "  px_render_wgpu --scene 文档.pxart --out sheet.png --sheet [--columns N] [--offline]",
         "      **对照图**（J2）：12 格 × 960×640 拼成一张 3840×1920 —— 相机表来自产物",
         "      （`.pxart` 的 `cameras`），格子的排布是渲染器的事（缺省 4 列）。",
@@ -133,6 +139,14 @@ struct Options {
     /// 从前一条 `render::run` = 从读文档到建管线重来一遍，量到的只有"重新准备一帧"的代价。
     /// 0 = 不开（缺省）；缺省不是"画一帧" —— 那是 `--offline` 那条路本来的行为。
     time: u32,
+    /// `--spans 预热,测量`：**逐条 pass 的 GPU 编码器级时间戳**（J4 的仪器）。
+    ///
+    /// ⚠ 两个数都**必须显式写**，一个缺省都不给：预热多少帧、量多少帧是**仪器的一部分**
+    /// （§147.4 记过"参照图自己在一次会话里漂了 4.5×"），给它一个我挑的缺省，
+    /// 就等于把"这个读数是在什么条件下取的"藏起来。与 `--time`/`--image-hash` 同一条规矩。
+    ///
+    /// ⚠ 它与 `--sheet` 互斥：时间戳槽是按**单张**排的（见 `render::Session::draw_stamps`）。
+    spans: Option<(u32, u32, u32)>,
     /// `--image-hash`：**窗口**每帧把回读出来那张图的 sha16 与墙钟时刻打进日志。
     ///
     /// ⚠ 它服务的是 S7 第二条判据（改一个 `.wgsl` ⇒ 约 1 秒内**画面**变）：
@@ -214,6 +228,7 @@ impl Default for Options {
             offline: false,
             stats: false,
             time: 0,
+            spans: None,
             image_hash: false,
             serve: false,
             port: 0,
@@ -264,6 +279,38 @@ fn parse_cam(flag: &str, text: &str) -> Result<[f32; 3], String> {
     Ok([parts[0], parts[1], parts[2]])
 }
 
+/// `--spans 预热,测量,轮数`：三个数**都**要显式写。
+///
+/// ⚠ 不给缺省是**判据的一部分**（不是风格）：预热几帧、量几帧、交错几轮决定了
+/// "时钟被拉起来没有 / 有没有外来负载混进来"，也就是这个读数在什么条件下取的。
+/// 给它一个我挑的缺省，就等于把那个条件藏起来 —— 而 §147.4 记过的正是"同一份参照图
+/// 在一次会话里漂了 4.5×"。轮数还是**代价**的一部分（整批 draw 次数 = 轮 × 档 × (预热+测量)）。
+fn parse_spans(text: &str) -> Result<(u32, u32, u32), String> {
+    let parts: Vec<&str> = text.split(',').map(str::trim).collect();
+    let [warm, measured, rounds] = parts.as_slice() else {
+        return Err("--spans 要 `预热,测量,轮数` 三个数（例如 --spans 8,24,4）：\
+                    ⚠ 三个都**必须**写 —— 不给缺省，因为「预热几帧、交错几轮」是这个读数的一部分，\
+                    而轮数还是整批代价的一部分"
+            .to_string());
+    };
+    let warm: u32 = warm
+        .parse()
+        .map_err(|_| format!("--spans 的预热帧 '{warm}' 不是个非负整数"))?;
+    let measured: u32 = measured
+        .parse()
+        .map_err(|_| format!("--spans 的测量帧 '{measured}' 不是个正整数"))?;
+    let rounds: u32 = rounds
+        .parse()
+        .map_err(|_| format!("--spans 的轮数 '{rounds}' 不是个正整数"))?;
+    if measured == 0 {
+        return Err("--spans 的测量帧是 0：那一位必须是正的（预热帧不进读数）".to_string());
+    }
+    if rounds == 0 {
+        return Err("--spans 的轮数是 0：那一位必须是正的".to_string());
+    }
+    Ok((warm, measured, rounds))
+}
+
 impl Options {
     fn parse() -> Result<Self, String> {
         let mut options = Self::default();
@@ -283,6 +330,7 @@ impl Options {
                         .parse()
                         .map_err(|_| "--time 需要一个整数（连画几帧）".to_string())?
                 }
+                "--spans" => options.spans = Some(parse_spans(&next("--spans")?)?),
                 "--serve" => options.serve = true,
                 "--autostart" => options.autostart = true,
                 // 收下但不生效：见 `Options::fps` 那段（harness 起性能那两路时会传它）。
@@ -823,6 +871,14 @@ fn main() {
         std::process::exit(64);
     }
 
+    // ⚠ `--spans` 与 `--time` 同一族，而且更强：它量的是**本进程**那些编码器上的
+    //    GPU 时间戳。服务那条路一条请求画一帧、按需渲染，`--perf` 那条路要的是
+    //    "逐帧采样的帧循环"（§147.2 的 R 判据靠的正是服务里没有这个循环）。
+    if options.spans.is_some() {
+        eprintln!("--spans 是离线那条路（--offline）的仪器：它量的是本进程那些编码器上的 GPU 时间戳，而服务那条路一条请求只画一帧");
+        std::process::exit(64);
+    }
+
     if options.shots.is_empty() {
         eprintln!("{WORLD_REFUSAL}");
         std::process::exit(64);
@@ -851,9 +907,26 @@ fn run_offline(options: &Options) -> i32 {
         eprintln!("--perf/--windows 要的是**计时用的帧循环**（服务那条路的活），而离线这条路一次只画一帧");
         return 64;
     }
+    // ⚠ `--spans` 与 `--sheet` 互斥：时间戳槽是按**单张**排的（见 `Session::draw_stamps`），
+    //    12 格会往同一批格上写 12 遍 —— wgpu 不会拦，而读到的是最后一格那个数。
+    if options.spans.is_some() && options.sheet {
+        eprintln!(
+            "--spans 与 --sheet 不能同时用：时间戳槽是按**单张**排的（每条 pass 四格 + 帧级两格），\
+             12 格会往同一批格上写 12 遍，读到的只是其中一遍。\
+             要对对照图计时，请把 12 格拆成 12 次单张（那也是 J2 判据量过的事）"
+        );
+        return 64;
+    }
+    // ---- `--spans`：**多份文档、每份只准备一次、按轮交错**（见 `run_spans`）----
+    // ⚠ 它排在"只画一份"那条检查**之前**：那条规矩挡的是"批量请求"（服务那条路的活），
+    //    而这台仪器**要**几份文档 —— 交错取样（§147.4）与"每份只 open 一次"是它的一部分。
+    if let Some((warm, measured, rounds)) = options.spans {
+        return run_spans(options, warm, measured, rounds, views_of(options));
+    }
     let [shot] = options.shots.as_slice() else {
         eprintln!(
-            "离线那条路一次只画**一份**文档（给了 {} 份）：批量是请求的概念，交给服务去做",
+            "离线那条路一次只画**一份**文档（给了 {} 份）：批量是请求的概念，交给服务去做。\
+             ⚠ 例外是 `--spans`：那条路**要**几份文档（交错取样是那台仪器的一部分）",
             options.shots.len()
         );
         return 64;
@@ -874,8 +947,6 @@ fn run_offline(options: &Options) -> i32 {
         views_of(options),
     )
 }
-
-/// `--time N`：**准备一次、连画 N 帧**，把"准备"与"每帧"的分界读出来。
 ///
 /// ⚠ 三件事必须一起报，否则这个读数会被读错（本工程为"量错了什么"付过学费）：
 /// ① **准备**花了多久（它只发生一次，含文档 / CAS 成员 / 句柄 / 那一层）；
@@ -927,6 +998,204 @@ fn run_frames(
         "⚠ 落盘的是**最后一帧**那张图，而它必须与不带 --time 的那一次逐字节相同（同一条渲染路）"
     );
     last.ok_or_else(|| "--time 至少要 1 帧".to_string())
+}
+
+/// `--spans 预热,测量,轮数`：**多份文档、每份只准备一次、按轮交错**的逐条 pass GPU 时间戳读数
+/// —— J4 的仪器。
+///
+/// ## 仪器的全部内容（少一条这个读数就会被读错）
+///
+/// ① **每份文档只 `Session::open` 一次**，然后所有轮次都在那一条保留态上 `draw`。
+///    ⚠ 这一条不是优化，是**仪器的正确性**：`open` 是重 CPU 的那一半（装载 574–802 ms，
+///    其中 `planet` 一份网格解码 + 审计 529 ms，§151 实测）。一轮一次 `open` 会把这段
+///    准备噪声混进"漂移"里 —— 报出来的漂移有一部分是仪器自己造的；而且它会把整台机器
+///    按住 N 倍（"任何会长期按住整台机器的东西，都得是显式、说得出代价的"）。
+/// ② **按轮交错**几份文档：`for 轮 { for 档 { 预热 + 测量 } }`。§147.4 记过"参照图自己
+///    在一次会话里漂了 4.5×（重场景先测会把时钟拉上去）"—— 交错 + 每轮自带预热帧是压它的办法。
+/// ③ 每档落盘的是**最后一帧**那张图 ⇒ 它必须与不带 `--spans` 的那一次**逐字节相同**
+///    —— 这是"这台仪器没改画面"唯一能被单独验的机会。
+/// ④ 读数按 `[span-map]` / `[span]` / `[span-sum]` 打出来（`spans::Reading::report`），
+///    每个字段名就是它的定义；**这个数不叫 `gpu_ms`**（那个名字在 Bevy 那边的含义是
+///    `render/**/elapsed_gpu` 七段之和，见 `spans.rs` 顶上那张表）。
+/// ⑤ **代价是读数的一部分**：整批的墙钟与"开了几次文档"都打出来。预热帧 + 测量帧 × 轮数 ×
+///    档数是可预期的，写在 `[spans-plan]` 那一行里。
+fn run_spans(
+    options: &Options,
+    warm: u32,
+    measured: u32,
+    rounds: u32,
+    views: render::Views,
+) -> i32 {
+    use std::time::Instant;
+    let gpu = gpu::connect();
+    // ⚠ 三个 feature 都要（少一个就没有与 Bevy 同一套边界那个数）⇒ **当场拒**，
+    //    不退化成一个语义不同的读数（§104 第 12 条那条"降级成 null"说的是产品路径，
+    //    而这里是一个**判据**：量不了就说量不了）。
+    let missing = spans::missing_features(&gpu.adapter);
+    if !missing.is_empty() {
+        eprintln!(
+            "这一台设备缺 {} ⇒ 逐条 pass 的 GPU 时间戳量不了。\
+             ⚠ 不许退化成「只量包络」那种数：它与 Bevy 的 `elapsed_gpu` 不是同一套边界，\
+             放进同一个字段比没有这个数坏（§147）",
+            missing.join(" / ")
+        );
+        return 1;
+    }
+    let width = options.width;
+    let height = options.height;
+    // 每一份文档都要有自己的落盘路径（图是判据的一部分：仪器不许改画面）。
+    let mut shots: Vec<(PathBuf, PathBuf)> = Vec::with_capacity(options.shots.len());
+    for shot in &options.shots {
+        match shot.out.as_ref().or(options.out.as_ref()) {
+            Some(out) => shots.push((shot.scene.clone(), out.clone())),
+            None => {
+                eprintln!(
+                    "`--spans` 那一档每一份 --scene 都要有 --out（这一份是 {}）：\
+                     落盘那张图是判据的一部分 —— 它必须与不带 --spans 的那一次逐字节相同",
+                    shot.scene.display()
+                );
+                return 64;
+            }
+        }
+    }
+    if shots.is_empty() {
+        eprintln!("`--spans` 至少要一份 --scene");
+        return 64;
+    }
+
+    println!(
+        "[spans-plan] 文档 {} 份｜轮数 {rounds}｜每轮每档 {warm} 预热 + {measured} 测量帧｜\
+         一共 {} 次 draw｜尺寸 {width}x{height}",
+        shots.len(),
+        rounds as usize * shots.len() * (warm + measured) as usize
+    );
+    let started = Instant::now();
+    // ---- 每份文档**只开一次**（`Session::open` 是重 CPU 的那一半）----
+    let mut sessions: Vec<(String, render::Session, spans::Recorder, Option<render::Rendered>)> =
+        Vec::with_capacity(shots.len());
+    for (scene, _) in &shots {
+        let opened = Instant::now();
+        let session =
+            match render::Session::open(&gpu, scene, &art::default_pcg_root(), views, width, height)
+            {
+                Ok(session) => session,
+                Err(message) => {
+                    eprintln!("打开 {} 失败：{message}", scene.display());
+                    return 1;
+                }
+            };
+        let labels = session.pass_kinds();
+        let recorder = match spans::Recorder::new(
+            &gpu.device,
+            &gpu.queue,
+            labels,
+            rounds,
+            warm,
+            measured,
+        ) {
+            Ok(recorder) => recorder,
+            Err(message) => {
+                eprintln!("{} 的时间戳槽建不出来：{message}", scene.display());
+                return 1;
+            }
+        };
+        println!(
+            "[spans-plan] 档 {}｜pass {} 条｜一帧 {} 格｜准备 {:.1} ms｜时间戳周期 {} ns",
+            scene.display(),
+            recorder.passes(),
+            spans::FrameStamps::stride_of(recorder.passes()),
+            opened.elapsed().as_secs_f64() * 1e3,
+            gpu.queue.get_timestamp_period()
+        );
+        sessions.push((scene.display().to_string(), session, recorder, None));
+    }
+    let prepare_ms = started.elapsed().as_secs_f64() * 1e3;
+    println!(
+        "[spans-plan] 全部准备完 = {prepare_ms:.1} ms（{} 份文档，**每份只付一次**）",
+        shots.len()
+    );
+
+    // ---- 交错取样：一轮里把每档各画一遍 ----
+    let draws_started = Instant::now();
+    for round in 0..rounds {
+        for (slot, (name, session, recorder, last)) in sessions.iter_mut().enumerate() {
+            for index in 0..(warm + measured) {
+                // ⚠ 槽的帧号是**全局**的（这一份文档第几帧），轮与轮之间不重复。
+                let frame = round * (warm + measured) + index;
+                let stamps = recorder.stamps(frame);
+                match session.draw_stamps(&gpu, views, width, height, &stamps) {
+                    Ok(rendered) => {
+                        recorder.note_calls(rendered.timestamp_calls);
+                        *last = Some(rendered);
+                    }
+                    Err(message) => {
+                        eprintln!("画 {name} 失败：{message}");
+                        return 1;
+                    }
+                }
+            }
+            let _ = slot;
+        }
+    }
+    let draw_ms = draws_started.elapsed().as_secs_f64() * 1e3;
+    println!(
+        "[spans-plan] 画完 = {draw_ms:.1} ms（{} 次 draw）｜整批墙钟 {:.1} ms",
+        rounds as usize * sessions.len() * (warm + measured) as usize,
+        started.elapsed().as_secs_f64() * 1e3
+    );
+
+    // ---- 读数 + 落盘 ----
+    let mut failed = 0;
+    for (slot, (name, _session, recorder, last)) in sessions.into_iter().enumerate() {
+        let readings = match recorder.finish(&gpu.device, &gpu.queue) {
+            Ok(readings) => readings,
+            Err(message) => {
+                eprintln!("{name} 的时间戳读数算不出来：{message}");
+                failed += 1;
+                continue;
+            }
+        };
+        for reading in &readings {
+            for line in reading.report(name.as_str(), width, height) {
+                println!("{line}");
+            }
+        }
+        let Some(rendered) = last else {
+            eprintln!("{name} 一帧都没画出来");
+            failed += 1;
+            continue;
+        };
+        for line in &rendered.audit {
+            println!("{line}");
+        }
+        let (_, out) = &shots[slot];
+        match shot::write_png(out, rendered.width, rendered.height, rendered.pixels) {
+            Ok(bytes) => {
+                println!(
+                    "写出：{} → {}（{}×{}，{} 字节，sha256 {}）",
+                    shots[slot].0.display(),
+                    out.display(),
+                    rendered.width,
+                    rendered.height,
+                    bytes,
+                    digest::short(out)
+                );
+            }
+            Err(message) => {
+                eprintln!("{message}");
+                failed += 1;
+            }
+        }
+    }
+    println!(
+        "⚠ 这个数**不是** Bevy 报告里的 `gpu_ms`（那个是 `render/**/elapsed_gpu` 七段之和）：\
+         这里报的是本文档那些 pass 的编码器级 span，同名会让人以为它们是一回事（§147）"
+    );
+    if failed > 0 {
+        1
+    } else {
+        0
+    }
 }
 
 /// 命令行那一档「怎么看」→ `render::Views`（**离线**那条路的翻译；服务那条路在

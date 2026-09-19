@@ -257,6 +257,12 @@ pub struct Rendered {
     /// 而"再读一遍"就是同一条真本的第二份副本 —— 两次读之间文档被换掉的话，
     /// 报告里的"该有云"与画出来的那张图说的就不是同一份产物了。
     pub declared_clouds: bool,
+    /// 这一帧里**执行器发了几条时间戳命令**（J4 的仪器；不要仪器时恒 0）。
+    ///
+    /// ⚠ 它是一个**读数**，不是一个统计：判据要拿它的下界那一格证"不要的时候一条都没发"
+    /// （§149 `viewport: None` 那条先例：缺席 ⇒ 零调用）。条数由执行器在**写的那一刻**
+    /// 累加（`px_pass` 里只有两个出口），所以 `0` 就是"一条都没发"。
+    pub timestamp_calls: u32,
 }
 
 /// 一笔 draw 在 GPU 上的几何：顶点/索引缓冲 + **产物的属性表**。
@@ -1844,6 +1850,37 @@ impl Session {
         width: u32,
         height: u32,
     ) -> Result<Rendered, String> {
+        self.draw_with(gpu, views, width, height, None)
+    }
+
+    /// [`Session::draw`] 的**计时那一档**：多写逐条 pass 的 GPU 时间戳（J4 的仪器）。
+    ///
+    /// ⚠ 与 [`Session::draw`] 是**同一具实体**（`draw_with`），所以"带仪器的那一帧"与
+    /// "不带仪器的那一帧"记进编码器的命令逐条相同，只多出 `write_timestamp` 那几条。
+    /// 落盘那张图因此必须与不带 `--spans` 的那一次**逐字节相同** —— 这是这台仪器
+    /// 唯一能被单独验的机会（J1 那张图就是它）。
+    ///
+    /// ⚠ 只排**一格**的槽（对照图 12 格不排）：12 格 × 每条 pass 四格是"12 份 span"，
+    /// 与"一帧一条 pass 一份 span"不是同一个量，而判据要比的正是后者。
+    pub fn draw_stamps(
+        &mut self,
+        gpu: &Gpu,
+        views: Views,
+        width: u32,
+        height: u32,
+        stamps: &crate::spans::FrameStamps<'_>,
+    ) -> Result<Rendered, String> {
+        self.draw_with(gpu, views, width, height, Some(stamps))
+    }
+
+    fn draw_with(
+        &mut self,
+        gpu: &Gpu,
+        views: Views,
+        width: u32,
+        height: u32,
+        stamps: Option<&crate::spans::FrameStamps<'_>>,
+    ) -> Result<Rendered, String> {
         // ---- 怎么看：相机与格子（纯 CPU；换相机就是在这一行之后生效的）----
         let (placements, target) = placements(views, &self.spec, width, height)?;
         // 换尺寸 / 换格数 ⇒ 重开一份（`Layer` 里那些东西与新尺寸不一致时不能复用）。
@@ -1865,11 +1902,39 @@ impl Session {
             let (path, root) = (self.scene_path.clone(), self.pcg_root.clone());
             *self = Session::open(gpu, &path, &root, views, width, height)?;
         }
+        // ⚠ 重开一份**不改变 pass 条数**（同一份文档），而调用方是按条数排的槽
+        //    ⇒ 对不上就是"宿主与调用方对『这一帧有几条 pass』意见不一致"，
+        //    当场拒，而不是读到别的格上（读错格不会响，只会给出一个假数）。
+        if let Some(stamps) = stamps {
+            if stamps.passes() as usize != self.executed_plan.passes.len() {
+                return Err(format!(
+                    "时间戳槽是按 {} 条 pass 排的，而这一帧的计划里有 {} 条：\
+                     槽与实物对不上（读到的会是别的 pass 的格）",
+                    stamps.passes(),
+                    self.executed_plan.passes.len()
+                ));
+            }
+        }
         // 把这一层**移出来**：`self` 的其余字段要同时借（`executor` 要 `&mut`）。
         let mut layer = self.layer.take().expect("上面刚保证过它在");
-        let outcome = self.draw_into(gpu, &mut layer, views, &placements, target, width, height);
+        let outcome = self.draw_into(
+            gpu, &mut layer, views, &placements, target, width, height, stamps,
+        );
         self.layer = Some(layer);
         outcome
+    }
+
+    /// 这一份计划里每条 pass 的 `(label, kind)`，**按数组顺序**。
+    ///
+    /// ⚠ 这是 `--spans` 排时间戳槽的**唯一**来源：执行器写的时候用的就是同一个数组顺序
+    /// （`px_pass::PassTimestamps::slots` 收的 `index` 就是这个位置），
+    /// 于是"写的人"与"读的人"不可能漂开。
+    pub fn pass_kinds(&self) -> Vec<(String, px_pass::PassKind)> {
+        self.executed_plan
+            .passes
+            .iter()
+            .map(|pass| (pass.label.clone(), pass.kind))
+            .collect()
     }
 
     /// [`Session::draw`] 的实体：`layer` 已经从 `self` 里移出来了，于是它的 `cells`
@@ -1884,7 +1949,21 @@ impl Session {
         target: (u32, u32),
         width: u32,
         height: u32,
+        stamps: Option<&crate::spans::FrameStamps<'_>>,
     ) -> Result<Rendered, String> {
+        // ⚠ 时间戳槽是按**单张**排的（`--spans` 与 `--sheet` 互斥，命令行那一档也说了一遍）：
+        //    12 格会让同一个下标被写 12 次 —— wgpu 不会拦，而读到的是最后一格那个数，
+        //    也就是"12 格里随便一格的某一个 pass"，看着像个正常读数。当场拒。
+        if let Some(stamps) = stamps {
+            if placements.len() != 1 {
+                return Err(format!(
+                    "这一帧有 {} 格，而时间戳槽只按**单张**排（每帧 {} 格）：\
+                     12 格会往同一批格上写 12 遍，读到的只是其中一遍",
+                    placements.len(),
+                    crate::spans::FrameStamps::stride_of(stamps.passes())
+                ));
+            }
+        }
         // ⚠ 拆字段（而不是一个 `&self`）：`executor.execute` 要 `&mut`，`cell_materials` 要 `&`
         //    —— 同一结构体的不同字段可以同时借，走一次 `&self` 就不行（`draw` 里那条注释）。
         let Session {
@@ -1905,6 +1984,7 @@ impl Session {
         } = self;
         // ---- 审计：文档那几行原样重放，"怎么看"现算，次序与加保留态之前逐字相同 ----
         let mut audit: Vec<String> = Vec::with_capacity(audit_head.len() + audit_rest.len() + 8);
+        let mut timestamp_calls = 0_u32;
         audit.extend(audit_head.iter().cloned());
         audit.extend(describe_views(views, placements, width, height, target));
         audit.extend(audit_rest.iter().cloned());
@@ -1991,6 +2071,10 @@ impl Session {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("px_render_wgpu 的一帧（一格一次）"),
             });
+        // 帧级那一对 span 的**起点**：清屏**之前**（清屏也是这一帧的 GPU 活）。
+        if let Some(stamps) = stamps {
+            stamps.begin_frame(&mut encoder);
+        }
         // ⚠ 宿主目标**每帧先清成透明黑**（= 新纹理按规范的内容）：保留态让它跨帧活着，
         //    而帧图里 `blit` 那条 pass 的状态是 `color=load`（`art/frame/default.toml:169`）
         //    —— "load 一张新图"读到的就是零。少了这一清，"上一帧的像素"会留在这一帧没人
@@ -2047,8 +2131,29 @@ impl Session {
                 geometries: &resolved_geometry,
                 materials: &table,
             };
-            let audit_text = executor.execute(&gpu.device, &mut encoder, executed_plan, &frame)?;
+            let audit_text = match stamps {
+                Some(stamps) => {
+                    let (text, calls) = executor.execute_timed(
+                        &gpu.device,
+                        &mut encoder,
+                        executed_plan,
+                        &frame,
+                        stamps.executor_view(),
+                    )?;
+                    timestamp_calls += calls;
+                    text
+                }
+                None => executor.execute(&gpu.device, &mut encoder, executed_plan, &frame)?,
+            };
             audit.push(format!("第 {} 格的执行器审计：\n{audit_text}", placement.index));
+        }
+        // 帧级那一对 span 的**终点**：最后一格的最后一条 pass 之后。
+        // ⚠ 紧接着就**在这一条编码器里**把这一帧那几格搬走（`resolve_now`）——
+        //    位置不是随便挑的：见 `spans::Recorder` 顶上那段（事后另起一条提交去 resolve
+        //    读到的是全 0，实测）。
+        if let Some(stamps) = stamps {
+            stamps.end_frame(&mut encoder);
+            stamps.resolve_now(&mut encoder);
         }
         gpu.queue.submit(Some(encoder.finish()));
         // 这一层从此"被画过"了：池子里的纹理带着这一帧的内容（见 `Layer::used`）。
@@ -2070,6 +2175,7 @@ impl Session {
             //    理由必须跟着名字一起出来 —— 那时候这里要重新有内容。
             skipped: Vec::new(),
             declared_clouds: spec.expects.iter().any(|tag| tag == "clouds"),
+            timestamp_calls,
         })
     }
 

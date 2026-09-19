@@ -1480,6 +1480,157 @@ pub struct Frame<'a> {
     pub materials: &'a [ResolvedMaterial<'a>],
 }
 
+// ---------------------------------------------------------------------------
+// 逐条 pass 的 GPU 时间戳（**可选**，J4 的仪器；见 [`Executor::execute_timed`]）
+// ---------------------------------------------------------------------------
+
+/// 一帧里**每条 pass** 占的时间戳格数（开 render pass 的那两种；见 [`frame_slots`]）。
+///
+/// 四格 = 两套边界各一对，理由见 [`PassTimestamps`]。⚠ **copy 只占两格**
+/// （它不开 render pass，没有"pass 里"那一对）。
+pub const TIMESTAMP_SLOTS_PER_PASS: u32 = 4;
+
+/// 一帧的**帧级**格数：编码器的起 / 止那一对。
+///
+/// ⚠ 两格不是一格：`begin` 写在**宿主目标清屏那条 pass 之前**，`end` 写在最后一格的
+/// 最后一条 pass **之后** ⇒ 这一对量的是"这一帧 GPU 上真的忙了多久"，含清屏。
+pub const TIMESTAMP_FRAME_SLOTS: u32 = 2;
+
+/// 一条 pass 占几格：开 render pass 的四格，copy 两格。
+pub fn pass_slot_count(kind: PassKind) -> u32 {
+    match kind {
+        PassKind::Geometry | PassKind::Fullscreen => TIMESTAMP_SLOTS_PER_PASS,
+        PassKind::Copy | PassKind::Compute => 2,
+    }
+}
+
+/// **一帧的格排布**：按 pass 的次序一条一条排，最后留帧级那两格。
+///
+/// 返回 `(每条 pass 的格, 帧级那一对的起点)`；一帧一共 `帧级起点 + TIMESTAMP_FRAME_SLOTS` 格。
+///
+/// ⚠⚠ **copy 只排两格，不是"排四格、空两格"** —— 这一条是**实测**出来的：
+/// 把没写过的格也 resolve 进去，`vkCmdCopyQueryPoolResults` 的
+/// `VK_QUERY_RESULT_WAIT_BIT` 会永远等一个不会到的结果 ⇒ **GPU 挂死 ⇒ 设备丢失**
+/// （实测：`Error in Device::poll: Validation Error / Parent device is lost`，
+/// 之后连新建的缓冲都变成 invalid —— 报错指向一个与被量对象无关的缓冲）。
+/// ⇒ 排布里**不许有没人写的格**。
+///
+/// ⚠ 这张排布由**调用方算一次、交进执行器**（[`PassTimestamps::new`] 拿的就是它）：
+/// 执行器不自己算下标，于是"写的人"与"读的人"不可能漂开。
+pub fn frame_slots(kinds: &[PassKind]) -> (Vec<PassSlots>, u32) {
+    let mut out = Vec::with_capacity(kinds.len());
+    let mut cursor = 0_u32;
+    for kind in kinds {
+        let slots = match kind {
+            PassKind::Geometry | PassKind::Fullscreen => PassSlots {
+                envelope: (cursor, cursor + 3),
+                inside: Some((cursor + 1, cursor + 2)),
+            },
+            // copy：只有包络那一对 —— 它自己就是起 / 止两条命令。
+            // compute 在 `Plan::check` 就当场拒了（走不到这里），排成 copy 那一档。
+            PassKind::Copy | PassKind::Compute => PassSlots {
+                envelope: (cursor, cursor + 1),
+                inside: None,
+            },
+        };
+        cursor += pass_slot_count(*kind);
+        out.push(slots);
+    }
+    (out, cursor)
+}
+
+/// 一条 pass 的格。
+///
+/// `inside` 是 `Option`：**只有开 render pass 的那两种 pass 才有"pass 里"那一对**。
+/// copy 是一次搬运（不开 pass、不挂附件），它写不了"pass 里"的时间戳 ——
+/// 给 `None` 而不是"填一对与包络相同的数"：那两格**根本不排**（见 [`frame_slots`]），
+/// 而"这条 pass 的 inside 恰好等于 envelope"必须是一个**说出来的事实**，不是巧合。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PassSlots {
+    /// 包络那一对：`begin` 在 `vkCmdBeginRenderPass` **之前**、`end` 在 `vkCmdEndRenderPass` **之后**。
+    pub envelope: (u32, u32),
+    /// pass **里面**的第一条/最后一条命令。`None` = 这条 pass 不开 render pass。
+    pub inside: Option<(u32, u32)>,
+}
+
+/// 逐条 pass 的 GPU 时间戳槽。**槽的下标只有这一个来源**：宿主按它读、执行器按它写，
+/// 于是"写的人"与"读的人"不可能漂开。
+///
+/// ## 为什么一条 pass 要**两套**边界
+///
+/// 判据（J4）要拿这个数与 Bevy 宿主比，而 Bevy 的边界与我们"顺手能写"的那一对**不一样**：
+///
+/// | 口径 | 写在哪 | 含不含 pass 的开/关 |
+/// |---|---|---|
+/// | `envelope` | `RenderPassTimestampWrites`：`wgpu-hal-29.0.4/src/vulkan/command.rs:883-892` 的 begin 在 `vkCmdBeginRenderPass` **之前**、`:918` 的 end 在 `vkCmdEndRenderPass` **之后** | **含**（附件 load/store 与状态切换都算在里面） |
+/// | `inside` | `RenderPass::write_timestamp`：pass **里面**的第一条/最后一条命令 | 不含 |
+///
+/// Bevy 用的是 `inside` 那一套：`bevy_render-0.19.1/src/diagnostic/internal.rs:455-478`
+/// 的 `begin_pass`/`end_pass` 都是 `pass.write_timestamp`（`RenderPass::write_timestamp`）。
+/// ⇒ **要与 Bevy 比，比的是 `inside`**；而 `envelope` 也要写、也要报 ——
+/// 两个数之差就是"口径差"，它可能与 `rings − bare` 那 0.16 ms 同量级
+/// ⇒ **不量就不能说"边界不同但无所谓"**。⚠ 这一栏是**口径差**，不是渲染耗时，
+/// 谁把它当成"Bevy 那个数"用，谁就把两个不同的问题混成了一个。
+///
+/// ## 缺席是零开销，而且是**可证**的零开销
+///
+/// 调用方不要（[`Executor::execute`]）时 `stamps` 是 `None` ⇒ **连查询集都不存在**
+/// （宿主根本不建），而全仓所有时间戳写入都收在 [`write_stamp`] 与
+/// [`PassTimestamps::pass_writes`] 两处，计数与写入在**同一行**上
+/// ⇒ 审计里那个"发了几条"的读数 `0` 就是"一条都没发"。
+/// 这是 §149 `viewport: None` 那条先例的同一条规矩：**缺席 ⇒ 零调用**，
+/// 不是"按整幅算一次"。
+pub struct PassTimestamps<'a> {
+    query_set: &'a wgpu::QuerySet,
+    /// 每条 pass 的格 —— **调用方（宿主）按 [`frame_slots`] 排好交进来**。
+    /// 执行器只按下标取，一个算式都不自己算。
+    slots: &'a [PassSlots],
+}
+
+impl<'a> PassTimestamps<'a> {
+    pub fn new(query_set: &'a wgpu::QuerySet, slots: &'a [PassSlots]) -> Self {
+        PassTimestamps { query_set, slots }
+    }
+
+    /// 第 `index` 条 pass 的格。`None` = 交进来的排布里没有这一条
+    /// （那说明计划与排布不是同一次算出来的 —— 调用方当场拒，别读别人的格）。
+    pub fn slots(&self, index: usize) -> Option<PassSlots> {
+        self.slots.get(index).copied()
+    }
+
+    /// 排布里排了几条 pass（与计划的条数对不上时，拒词里要报出来）。
+    pub fn len(&self) -> usize {
+        self.slots.len()
+    }
+
+    /// 这条 pass 开 render pass 时交给 `RenderPassDescriptor` 的那一对 —— **一次两条**。
+    fn pass_writes(&self, slots: PassSlots, calls: &mut u32) -> wgpu::RenderPassTimestampWrites<'a> {
+        *calls += 2;
+        wgpu::RenderPassTimestampWrites {
+            query_set: self.query_set,
+            beginning_of_pass_write_index: Some(slots.envelope.0),
+            end_of_pass_write_index: Some(slots.envelope.1),
+        }
+    }
+}
+
+/// 写一条**编码器级**时间戳，并把"发了几条"记下来。
+///
+/// ⚠ 全仓所有时间戳写入只有两个出口：这里与 [`PassTimestamps::pass_writes`]。
+/// 计数与写入在**同一行**上 ⇒ 审计里那个数就是"这一帧发了几条时间戳命令"，
+/// `0` ⟺ 一条都没发（"不要"那一档的可证零开销）。
+fn write_stamp(
+    stamps: Option<&PassTimestamps<'_>>,
+    encoder: &mut CommandEncoder,
+    index: u32,
+    calls: &mut u32,
+) {
+    if let Some(stamps) = stamps {
+        encoder.write_timestamp(stamps.query_set, index);
+        *calls += 1;
+    }
+}
+
 /// 这一条 pass 在宿主那块**格子**里怎么落（见 [`Frame::viewport`]）。
 ///
 /// 三种，每一条都有实测依据（仪器 `target/sheet/e-c.ps1`、`e-d.ps1`）：
@@ -2272,6 +2423,12 @@ impl Executor {
         Ok(pipeline)
     }
 
+    /// 跑完一份计划：逐条 pass 按数组顺序记进**调用方给的**编码器，返回审计。
+    ///
+    /// ⚠ **一个时间戳都不发**（`stamps` 是 `None`；见 [`PassTimestamps`] 那条"缺席 ⇒ 零调用"）。
+    /// 这个签名是 §149 之后所有调用方（`px_render` 也好、本宿主的每一条渲染路也好）
+    /// 都在用的那一个 —— 加仪器**不许**动它，否则"仪器进每一帧"这句话就成了
+    /// "每一帧的路径都被改过"。
     pub fn execute(
         &mut self,
         device: &Device,
@@ -2279,9 +2436,49 @@ impl Executor {
         plan: &Plan,
         frame: &Frame<'_>,
     ) -> Result<String, String> {
+        self.execute_inner(device, encoder, plan, frame, None)
+            .map(|(audit, _)| audit)
+    }
+
+    /// [`Executor::execute`] 的**计时那一档**：逐条 pass 写编码器级时间戳。
+    ///
+    /// 返回 `(审计, 这一帧发了几条时间戳命令)`。条数是**读数**，不是附带品：
+    /// 判据用它的**下界那一格**（`execute` 应当恒为 `0`）来证"不要的时候一条都没发"。
+    ///
+    /// ⚠ 前提是**调用方**已经建好查询集、并且这一台设备真有
+    /// `TIMESTAMP_QUERY` + `TIMESTAMP_QUERY_INSIDE_ENCODERS` + `TIMESTAMP_QUERY_INSIDE_PASSES`
+    /// （本机 RTX 3060 / 596.36 三个全开，§104 第 12 条）。执行器**不去查这件事**：
+    /// 它拿到的是一个查询集，没有就什么都写不了 —— 而"这一台量不了"该由宿主
+    /// 当场拒并说清缺哪一个 feature，**不是**在这里退化成一个语义不同的数。
+    ///
+    /// ⚠ 槽的下标由 [`PassTimestamps::slots`] 定，宿主读的时候调的是**同一个函数**。
+    pub fn execute_timed(
+        &mut self,
+        device: &Device,
+        encoder: &mut CommandEncoder,
+        plan: &Plan,
+        frame: &Frame<'_>,
+        stamps: PassTimestamps<'_>,
+    ) -> Result<(String, u32), String> {
+        self.execute_inner(device, encoder, plan, frame, Some(stamps))
+    }
+
+    /// [`Executor::execute`] 与 [`Executor::execute_timed`] 的**同一具实体**
+    /// —— 两条出口共用它，所以"带仪器的那一帧"与"不带仪器的那一帧"记进编码器的命令
+    /// 逐条相同，只多出时间戳那几条。
+    fn execute_inner(
+        &mut self,
+        device: &Device,
+        encoder: &mut CommandEncoder,
+        plan: &Plan,
+        frame: &Frame<'_>,
+        stamps: Option<PassTimestamps<'_>>,
+    ) -> Result<(String, u32), String> {
+        let wants_timestamps = stamps.is_some();
+        let mut calls = 0_u32;
         plan.check()?;
         if plan.is_empty() {
-            return Ok("pass 表是空的：这一帧没有任何 pass".to_string());
+            return Ok(("pass 表是空的：这一帧没有任何 pass".to_string(), calls));
         }
         // ⚠ 每一个 seed 过的名字都必须被**这份计划**用到（§131 的后半条）。
         //
@@ -2318,6 +2515,24 @@ impl Executor {
         let mut audit: Vec<String> = Vec::new();
 
         for (index, pass) in plan.passes.iter().enumerate() {
+            // ---- 时间戳：这一条 pass 的格（**由宿主排好交进来**；没要就一格都没有）----
+            //
+            // ⚠ 执行器不自己算下标：算的人与读的人一旦各算一份，漂开的那天读数照样打得出来
+            //    （只是量的是别人的 pass）。排布对不上就是"计划与排布不是同一次算的" ⇒ 当场拒。
+            let slots: Option<PassSlots> = match stamps.as_ref() {
+                Some(stamps) => match stamps.slots(index) {
+                    Some(slots) => Some(slots),
+                    None => {
+                        return Err(format!(
+                            "时间戳排布里只有 {} 条 pass，而这一条是第 {index} 条（'{}'）：\
+                             计划与排布不是同一次算出来的 —— 照着读会读到别人的格",
+                            stamps.len(),
+                            pass.label
+                        ))
+                    }
+                },
+                None => None,
+            };
             // ---- copy（§131）：一次搬运。**不建管线、不开 render pass、不挂附件** ----
             //
             // ⚠ 帧序 = 数组顺序：执行器不替它排序，也不为它插入任何别的一步
@@ -2343,6 +2558,11 @@ impl Executor {
                     height: source.height(),
                     depth_or_array_layers: source.depth_or_array_layers(),
                 };
+                // ⚠ copy **不开 render pass** ⇒ 它只有包络那一对（`slots.inside` 是 `None`），
+                //    而那一对就是它全部的读数：两条编码器级时间戳把这**一次搬运**夹住。
+                if let Some(slots) = slots {
+                    write_stamp(stamps.as_ref(), encoder, slots.envelope.0, &mut calls);
+                }
                 encoder.copy_texture_to_texture(
                     TexelCopyTextureInfo {
                         texture: &source,
@@ -2358,6 +2578,9 @@ impl Executor {
                     },
                     extent,
                 );
+                if let Some(slots) = slots {
+                    write_stamp(stamps.as_ref(), encoder, slots.envelope.1, &mut calls);
+                }
                 audit.push(format!(
                     "pass {index} '{}'（copy）搬运 '{source_name}' → '{target_name}'｜{}×{} {:?}\
                      ｜不建管线、不开 render pass",
@@ -2580,15 +2803,35 @@ impl Executor {
                 }),
                 (None, _) => None,
             };
+            // ---- 时间戳：包络那一对交给 `RenderPassDescriptor`，pass 内那一对在 pass 里写 ----
+            //
+            // ⚠ 次序有两种，而这两种**都是必要的**（`PassTimestamps` 那张表）：
+            //    包络由 `timestamp_writes` 写（hal 保证在 begin/end render pass 之外），
+            //    而"pass 里"那一对必须在 `begin_render_pass` **之后**写 ——
+            //    它们是两次不同的调用，`calls` 因此一次 +2、一次 +2（共四条）。
+            let pass_slots: Option<PassSlots> = slots;
+            let timestamp_writes = stamps
+                .as_ref()
+                .zip(pass_slots)
+                .map(|(stamps, slots)| stamps.pass_writes(slots, &mut calls));
             let descriptor = RenderPassDescriptor {
                 label: Some(pass_label.as_str()),
                 color_attachments: &color_attachments,
                 depth_stencil_attachment: depth_attachment,
-                timestamp_writes: None,
+                timestamp_writes,
                 occlusion_query_set: None,
                 multiview_mask: None,
             };
             let mut render_pass = encoder.begin_render_pass(&descriptor);
+            // ⚠ 写在**所有 set_/draw 之前**：Bevy 的 `begin_pass` 就是 pass 里的第一条命令
+            //    （`internal.rs:455-465`：`open_span` 之前先 `pass.write_timestamp` 一次）。
+            //    与 Bevy 同一套边界是这个仪器唯一值得存在的方式 —— 差一格就不是同一个量。
+            if let (Some(stamps), Some(slots)) = (stamps.as_ref(), pass_slots) {
+                if let Some((begin, _)) = slots.inside {
+                    render_pass.write_timestamp(stamps.query_set, begin);
+                    calls += 1;
+                }
+            }
             // 格子：内容那一条按 viewport 落位，交给宿主目标那一条只按 scissor 裁剪。
             match space {
                 CellSpace::Whole => {}
@@ -2630,6 +2873,14 @@ impl Executor {
                         }
                         None => render_pass.draw(0..geometry.vertex_count, geometry.instances.clone()),
                     }
+                }
+            }
+            // ⚠ 写在**所有 draw 之后、`drop` 之前**：Bevy 的 `end_pass` 也是 pass 里的
+            //    最后一条命令（`internal.rs:467-471`）。
+            if let (Some(stamps), Some(slots)) = (stamps.as_ref(), pass_slots) {
+                if let Some((_, end)) = slots.inside {
+                    render_pass.write_timestamp(stamps.query_set, end);
+                    calls += 1;
                 }
             }
             drop(render_pass);
@@ -2693,7 +2944,18 @@ impl Executor {
                 }
             ));
         }
-        Ok(audit.join("\n"))
+        // ⚠ 这一行是**读数**，不是附注：判据要拿它证"不要仪器的那一帧一条时间戳都没发"。
+        //    它由 [`write_stamp`] / [`PassTimestamps::pass_writes`] 与写入**同一行**地累加，
+        //    所以 `0` 就是"一条都没发"，而不是"我没数"。
+        audit.push(format!(
+            "时间戳：这一帧发了 {calls} 条（{}）",
+            if wants_timestamps {
+                "每条 pass 四格：包络一对 + pass 内一对；copy 不开 pass ⇒ 只有包络那一对"
+            } else {
+                "**没有要** —— 调用方没给查询集，一条 write_timestamp 都没发"
+            }
+        ));
+        Ok((audit.join("\n"), calls))
     }
 
     /// 一条 copy 的两端：**都必须是文档声明的资源**（池子里那两张纹理）。
@@ -3457,6 +3719,54 @@ fn vs_main(@location(0) position: vec3<f32>) -> Out {
         );
     }
 
+    /// **时间戳的格怎么排**（纯数据，无 GPU）。
+    ///
+    /// ⚠ 这一条钉的是"宿主读的人"与"执行器写的人"用的是**同一张排布**
+    /// （[`frame_slots`] 算一次，`PassTimestamps` 拿的就是它）：开 render pass 的四格，
+    /// **copy 只两格**（它不开 pass），最后帧级两格。
+    ///
+    /// ⚠⚠ "copy 只两格"不是省地方，是**不许有没人写的格**：把没写过的格也 resolve 进去，
+    /// `VK_QUERY_RESULT_WAIT_BIT` 会等一个不会到的结果 ⇒ GPU 挂死 ⇒ **设备丢失**
+    /// （实测：`Error in Device::poll / Parent device is lost`，之后新建的缓冲都变成 invalid）。
+    #[test]
+    fn the_timestamp_slots_have_no_gap_a_copy_leaves_unwritten() {
+        assert_eq!(TIMESTAMP_SLOTS_PER_PASS, 4);
+        assert_eq!(TIMESTAMP_FRAME_SLOTS, 2);
+        // 三条 pass（geometry / copy / fullscreen）+ 帧级两格。
+        let kinds = [PassKind::Geometry, PassKind::Copy, PassKind::Fullscreen];
+        let (slots, frame_begin) = frame_slots(&kinds);
+        assert_eq!(
+            slots[0],
+            PassSlots {
+                envelope: (0, 3),
+                inside: Some((1, 2)),
+            }
+        );
+        assert_eq!(
+            slots[1],
+            PassSlots {
+                envelope: (4, 5),
+                inside: None,
+            },
+            "copy 不开 render pass ⇒ 它只有两格（那两格就是起 / 止），不是四格里空两格"
+        );
+        assert_eq!(
+            slots[2],
+            PassSlots {
+                envelope: (6, 9),
+                inside: Some((7, 8)),
+            }
+        );
+        assert_eq!(frame_begin, 10, "帧级那一对紧跟在最后一条 pass 之后");
+        // **没有空档**：0..frame_begin+2 每一格都属于某一条 pass 或帧级那一对。
+        assert_eq!(
+            pass_slot_count(PassKind::Geometry) + pass_slot_count(PassKind::Copy)
+                + pass_slot_count(PassKind::Fullscreen),
+            frame_begin
+        );
+        assert_eq!(frame_begin + TIMESTAMP_FRAME_SLOTS, 12, "一帧一共 12 格");
+    }
+
     /// **几何写宿主目标 + 格子**：当场拒，而且拒词要说清是哪一条 pass、是什么形状。
     #[test]
     fn a_geometry_pass_writing_the_host_target_is_refused() {
@@ -3577,6 +3887,248 @@ fn vs_main(@location(0) position: vec3<f32>) -> Out {
         assert_eq!(pixels[0], WHITE, "格子里那一笔应当被移到右半幅（(6,4) 白）");
         assert_eq!(pixels[1], RED, "(4,4) 落在三角外面 ⇒ 清屏色（不带格子时它是白的）");
         assert_eq!(pixels[2], RED, "格子外面一个像素都不许动");
+    }
+
+    /// **时间戳真的记下了这一条 pass**（J4 的仪器自己那一条判据）。
+    ///
+    /// 为什么非要有它：这台仪器会在**每一帧**上跑，而它坏掉的样子是**静默的** ——
+    /// 查询没写进去 / 被重置 / 读错格，打出来的都是 `0.0000 ms`，看着像一个"很轻的 pass"
+    /// （而 §147 记过的正是"一个数放进一个字段里，比没有这个数坏"）。
+    /// 所以这一条不看"有没有报数"，看的是**读数本身站不站得住**：
+    ///
+    /// - `inside_end > inside_begin`、`envelope_end >= inside_end`
+    ///   （顺序：包络起 ≤ pass 内起 ≤ pass 内止 ≤ 包络止）；
+    /// - 一条**真画了像素**的 geometry pass 上，`inside` 那一段**严格大于 0**；
+    /// - 返回的"发了几条"与格的排法一致（一条 render pass = 4 条）；
+    /// - 不要仪器的那一档（`execute`）**审计里写着 0 条**，而且它连查询集都不用建。
+    ///
+    /// ⚠ 它只钉"这台仪器在这台机器上拿到了一个**说得通的**数"，钉不到"这个数与 Bevy 的
+    /// 是同一个量" —— 那是 `px_render_wgpu` 那一侧的对照表与映射表的事（J4 的报告）。
+    #[test]
+    fn the_timestamps_measure_the_pass_and_the_reading_is_not_all_zero() {
+        use wgpu::Features;
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::VULKAN,
+            ..wgpu::InstanceDescriptor::new_without_display_handle()
+        });
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            force_fallback_adapter: false,
+            compatible_surface: None,
+        }))
+        .expect("Vulkan 适配器");
+        // 判据要的是**三个 feature 都在**：这一台没有就量不了（§104 第 12 条：产品路径
+        // 降级成 null 是对的，而**判据**不许退化成"量一个语义不同的东西"）。
+        let wanted = Features::TIMESTAMP_QUERY
+            | Features::TIMESTAMP_QUERY_INSIDE_ENCODERS
+            | Features::TIMESTAMP_QUERY_INSIDE_PASSES;
+        let available = adapter.features();
+        assert!(
+            available.contains(wanted),
+            "后端断言失败：这一台缺时间戳能力（{:?} 里没有 {:?}）⇒ \
+             逐条 pass 的 GPU 时间戳在这台机器上量不了；这一条**不静默跳过**",
+            available,
+            wanted - available
+        );
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("px_pass 判据设备（时间戳）"),
+            required_features: wanted,
+            required_limits: wgpu::Limits::default(),
+            experimental_features: wgpu::ExperimentalFeatures::disabled(),
+            memory_hints: wgpu::MemoryHints::MemoryUsage,
+            trace: wgpu::Trace::Off,
+        }))
+        .expect("带时间戳的设备");
+
+        let side = SIDE;
+        let target = device.create_texture(&TextureDescriptor {
+            label: Some("px_pass 判据：时间戳那张目标"),
+            size: Extent3d {
+                width: side,
+                height: side,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: GpuDimension::D2,
+            format: TextureFormat::Rgba8UnormSrgb,
+            usage: TextureUsages::RENDER_ATTACHMENT
+                | TextureUsages::TEXTURE_BINDING
+                | TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let spec = ResourceSpec {
+            name: "a".to_string(),
+            format: Format::Rgba8UnormSrgb,
+            size: SizeRule::View,
+            layers: 1,
+            usage: vec![Use::RenderAttachment, Use::TextureBinding, Use::CopySrc],
+        };
+        let mut executor = Executor::new();
+        executor
+            .seed(&spec, side, side, target.clone())
+            .expect("把中间目标 seed 进池子");
+        let plan = plan_with(
+            vec![spec],
+            vec![PassPlan {
+                kind: PassKind::Geometry,
+                label: "opaque".to_string(),
+                vertex_shader: TRIANGLE_VERTEX.to_string(),
+                vertex_entry: "vs_main".to_string(),
+                writes: vec!["a".to_string()],
+                draws: vec![draw("near", "white")],
+                render: RenderState::parse(STATE_BASE).expect("状态文本"),
+                ..Default::default()
+            }],
+        );
+
+        let near = vertex_buffer(&device, 0.5);
+        let vertex_layout = VertexBufferLayout {
+            array_stride: 12,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &TINT_ATTRIBUTES,
+        };
+        let geometries = [ResolvedGeometry {
+            name: "near",
+            vertices: Some((&near, vertex_layout.clone())),
+            indices: None,
+            vertex_count: 3,
+            instances: 0..1,
+        }];
+        let tint_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+            label: Some("px_pass 判据材质布局（时间戳）"),
+            entries: &[BindGroupLayoutEntry {
+                binding: 0,
+                visibility: ShaderStages::FRAGMENT,
+                ty: BindingType::Buffer {
+                    ty: BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+        let white = test_material(&device, &tint_layout, [1.0, 1.0, 1.0, 1.0]);
+        let materials = [resolved_material("white", &white, &tint_layout, Cull::None)];
+        let frame = Frame {
+            width: side,
+            height: side,
+            viewport: None,
+            sets: &[],
+            geometries: &geometries,
+            materials: &materials,
+        };
+
+        // ---- ① 不要仪器那一档：审计里必须写着 0 条 ----
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("px_pass 判据（不要时间戳）"),
+        });
+        let audit = executor
+            .execute(&device, &mut encoder, &plan, &frame)
+            .unwrap_or_else(|err| panic!("execute 失败：{err}"));
+        assert!(
+            audit.contains("时间戳：这一帧发了 0 条"),
+            "不要仪器的那一档必须**明说一条都没发**（缺席 ⇒ 零调用）：{audit}"
+        );
+
+        // ---- ② 要仪器那一档：一条 geometry pass 四格 + 帧级两格 ----
+        let (layout, frame_begin) = frame_slots(&[PassKind::Geometry]);
+        let count = frame_begin + TIMESTAMP_FRAME_SLOTS;
+        let query_set = device.create_query_set(&wgpu::QuerySetDescriptor {
+            label: Some("px_pass 判据时间戳"),
+            ty: wgpu::QueryType::Timestamp,
+            count,
+        });
+        let bytes = u64::from(count) * u64::from(wgpu::QUERY_SIZE);
+        let align = u64::from(wgpu::QUERY_RESOLVE_BUFFER_ALIGNMENT);
+        let resolve = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("px_pass 判据时间戳 resolve"),
+            size: bytes.div_ceil(align) * align,
+            usage: BufferUsages::QUERY_RESOLVE | BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("px_pass 判据时间戳回读"),
+            size: bytes.div_ceil(align) * align,
+            usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let stamps = PassTimestamps::new(&query_set, &layout);
+        let expected = stamps.slots(0).expect("第 0 条 pass 的格");
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("px_pass 判据（要时间戳）"),
+        });
+        // 帧级那一对：写在所有 pass 之外（宿主在 `render.rs` 里就是这么写的）。
+        encoder.write_timestamp(&query_set, frame_begin);
+        let (audit, calls) = executor
+            .execute_timed(&device, &mut encoder, &plan, &frame, stamps)
+            .unwrap_or_else(|err| panic!("execute_timed 失败：{err}"));
+        encoder.write_timestamp(&query_set, frame_begin + 1);
+        queue.submit(Some(encoder.finish()));
+
+        // ⚠⚠ 这一格是**量出来的**，不是设计出来的：resolve 必须与那些 `write_timestamp`
+        //    在**同一条命令缓冲**里。见 `Recorder::finish` 那段（wgpu-core 在每条 pass
+        //    的开头为它要用的那几格发一条 `vkCmdResetQueryPool`，而这件事在
+        //    "resolve 另起一条提交"的形状下会把已经写好的值抹掉）。
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("px_pass 判据（时间戳 resolve）"),
+        });
+        encoder.resolve_query_set(&query_set, 0..count, &resolve, 0);
+        encoder.copy_buffer_to_buffer(&resolve, 0, &readback, 0, bytes);
+        queue.submit(Some(encoder.finish()));
+
+        let slice = readback.slice(..);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = sender.send(result);
+        });
+        device
+            .poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: Some(std::time::Duration::from_secs(60)),
+            })
+            .expect("等时间戳");
+        receiver
+            .recv()
+            .expect("映射回调")
+            .expect("映射时间戳缓冲");
+        let ticks: Vec<u64> = {
+            let data = slice.get_mapped_range();
+            data.chunks_exact(8)
+                .map(|chunk| u64::from_le_bytes(chunk.try_into().expect("8 字节")))
+                .collect()
+        };
+        readback.unmap();
+        let slots = expected;
+        println!(
+            "审计：{audit}\n时间戳（{} 格）：{:?}｜pass 内那一对 {:?}",
+            ticks.len(),
+            ticks,
+            slots.inside
+        );
+        assert_eq!(
+            calls, TIMESTAMP_SLOTS_PER_PASS,
+            "一条 render pass 该发四条（包络一对 + pass 内一对）"
+        );
+        let (inside_begin, inside_end) = slots.inside.expect("geometry pass 有 pass 内那一对");
+        let inside = ticks[inside_end as usize].wrapping_sub(ticks[inside_begin as usize]);
+        let envelope = ticks[slots.envelope.1 as usize].wrapping_sub(ticks[slots.envelope.0 as usize]);
+        let whole = ticks[frame_begin as usize + 1].wrapping_sub(ticks[frame_begin as usize]);
+        println!(
+            "读数（格，周期 {} ns）：pass 内 {inside}｜包络 {envelope}｜帧级 {whole}",
+            queue.get_timestamp_period()
+        );
+        // ⚠ 三条断言一起才排得掉"读数恒 0"：只判"有没有数"会被 `0.0000` 蒙过去。
+        assert!(inside > 0, "一条真画了像素的 pass，pass 内那一段必须 > 0 格（实测 {inside}）");
+        assert!(
+            envelope >= inside,
+            "包络含 pass 的开/关 ⇒ 它不可能比 pass 内那一段还短（包络 {envelope} < 内 {inside}）"
+        );
+        assert!(
+            whole >= envelope,
+            "帧级那条 span 含这条 pass 的全部 + 清屏 ⇒ 不可能比一条 pass 的包络还短\
+             （帧级 {whole} < 包络 {envelope}）"
+        );
     }
 
     /// 把 `encoder` 里录好的东西交出去，回读指定的几个像素。
