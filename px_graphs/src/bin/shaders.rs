@@ -11,7 +11,7 @@ const SOURCE_HASH: u64 = px_ops::noise::fnv1a(include_str!("shaders.rs"));
 /// 而「加一种材质 / 加一份 shader」正是美术要做的事 —— 那正是这一轮要拆掉的墙。
 ///
 /// 判据「是不是入口」只有一条：**没有 `#define_import_path`**（那是模块的标记；
-/// 库住 `px_render/assets/shaders`，规则住在 `px_shader::import_path_of`）。
+/// 库住 `art/shaders/lib`，规则住在 `px_shader::import_path_of`）。
 /// 排在名字序上 ⇒ 同一棵树两次烘出来的清单逐字节相同。
 fn entry_slots() -> Result<Vec<String>, String> {
     let dir: PathBuf = Path::new("art").join("shaders");

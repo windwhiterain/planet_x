@@ -3652,3 +3652,63 @@ rings 1358/1339 → 1397/1355；soft 1668/1688 → 1667/1677 ms ⇒ **在 ±1–
 - 2240×1400 那两栏**没有**在 Bevy 侧同时取过；锚的读数本身就是**同一会话里先后测的差**。
 
 
+
+---
+
+## §154 S8-a 完成：剥离（提交见同一笔）
+
+### 判据（reviewer 复跑；与动手前基线**逐行相同**）
+
+J1 六档与 `art/anchor/*.png` **逐字节相同**｜J2 `A94F9F2D1437C06C`｜J3 四条 ✓
+｜逃生门六份**文件字节**与 `art/anchor/frozen/*.pxart` **逐字节相同**。
+测试 **308 passed / 0 failed**（逐 crate：px_pass 34｜px_render_wgpu 77｜px_shader 20
+｜px_protocol 40｜px_graphs 22｜px_probe 3｜px_ops 25｜px_verify 3｜planet_x 84）。
+⇒ §105 的 S8 判据成立。
+
+### ⚠「px_render 那一行」是**没有了**，不是变绿了
+
+```
+$ cargo test -p px_render
+error: package ID specification `px_render` did not match any packages
+help: a package with a similar name exists: `px_shader`
+```
+那 3 条红随 crate 消失。⚠ **"一条红灯消失了"与"一条红灯被修好了"在报告里长得一模一样**
+⇒ 这一行照原样留着，连同它的原文报错。`Cargo.lock` 里 bevy 一族 **0 条**。
+
+### ⚠ brief 有一条在 crate 布局上落不下去（实现方查出不猜）
+
+"把 `px_probe` 指向新宿主" —— **`px_render_wgpu` 只有 bin target、没有 `src/lib.rs`** ⇒ 依赖不到。
+用户裁 A：宿主桩表文本搬进 **`px_shader::host_stubs`**，宿主变 `pub use`，**`px_probe` 只依赖 `px_shader`**。
+依据：**这条契约在本仓本来就只有一处文本**（`stubs.rs:27-30`："抄第二份 = §66.1 那颗雷"；
+`HOST_VIEW_STUB` 已因同一理由住在 `px_shader`）。
+
+### 三条读数，**必须分开说**
+
+| # | 读数 | 证据 |
+|---|---|---|
+| 一 | **产物不变** | 逃生门六份**文件字节**与靶子逐字节相同，而文档里钉着每个 shader 成员的**内容键** ⇒ 任何一个产物键都没动（指纹只哈希 `(模块名, 源码)` 与外部符号名，**从不含路径**） |
+| 二 | **探针编的文本变了** | 4 份入口 3 份不同（surface 20730→25915 B｜atmosphere 8229→8311｜clouds 47569→52769）；**`ring.wgsl` 逐字节相同 —— 它一个差别符号都不 import，是负对照** |
+| 三 | ⚠ **探针在 GPU 上的读数逐行没变** | 临时换回 `bevy_stub` 再换回跑 `--bin gradient`：**59 行 vs 59 行逐行相同** |
+
+⇒ **文本变了，数没变**。⇒ **"重登记"对文本是实的，对数是空动作** ——
+这条读数实现方自己加的，**它决定了"重登记"到底是不是一个真动作**。
+
+### ⚠ `gradient` 探针 1/8 红 —— 预存，且**先归因再报**
+
+换回旧桩表跑：**同一个 check、同一个数**（`2.2587842e-1`），与 `08-renderer.md:637-638`、
+`10-handoff.md:299` 登记的已知红逐字相同。§46.3 的 arbiter（`--bin field_dual`）全绿。
+
+### 工具：**原地退休并说清**，不删
+
+`frame-probe.ps1` 的 Perf/Stable 加 `Stop-RetiredPhase`（入口第一句）⇒ `-Phase stable` 退出码 1、
+**没起服务、没重烘**，并说清"那支宿主不在了且不可重建……本宿主有的是 `--spans`"。
+⚠ 不删那几百行的理由：**那几栏量法本身就是记录**，而"它不能再跑"必须**由脚本自己说**。
+就绪门一字未改｜`-Phase shot` 六档实跑：字节数与 §147.1 **逐字相同**、无残留进程与租约。
+服务端拒词改了措辞并**重量**（原末句指向已删除的 Bevy 宿主 = 死指针），
+并加测试钉住它不许长回去。
+
+### ⚠⚠ 一条属于**将来**的坑（实现方记下）
+
+**指纹与产物键哈希的是"盘上那些字节"，而工作副本是 CRLF**（`core.autocrlf=true`，index 是 LF）
+⇒ **换一台 checkout 约定不同的机器重烘，键会变、逃生门六份文件字节也会变。**
+⇒ 今天全绿的前提是"**锚和我是在同一种行尾约定下量的**"。**进 S8-c。**

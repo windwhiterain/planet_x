@@ -528,7 +528,8 @@ pub fn load_frame_material(
 /// 两道对账都是"拒绝，而不是静默出图"（与 Bevy 宿主同款，改的只是措辞）：
 ///
 /// 1. **include 闭包**（§52.3）：`#import planet_x::…` 的真本住在
-///    `px_render/assets/shaders/*.wgsl`，由组装器在**运行期**读盘。改了库、没重烘 ⇒
+///    `art/shaders/lib/*.wgsl`（S8-a 从 `px_render/assets/shaders` 搬过来），
+///    由组装器在**运行期**读盘。改了库、没重烘 ⇒
 ///    场景指的还是老产物、而组装用的是新库 —— 画出来的东西既不是老那一版、也不是新那一版，
 ///    而键 / 清单 / 场景键 / 槽版本**全都没动**：所有门都是绿的。所以在这里当场拒。
 /// 2. **schema descriptor**（§74.3）：反射**规则本身**会变（契约表加宽、`ParamKind` 多一档、

@@ -6,13 +6,17 @@ edition = "2024"
 # 探针不是测试：它有 GPU、要几分钟、退出码才是判据（§47）。
 # 所以它不进 workspace 的 default-members，`cargo test` 不会碰它。
 [dependencies]
-px_render = { path = "../px_render" }
+# ⚠ **不依赖任何宿主 crate**（S8-a 之前它只为了 `px_render::shaders::assemble` 而依赖 bevy 宿主）。
+# 现在它要的两样都在共享叶子 crate `px_shader` 里：路径约定（`workspace_roots` /
+# `workspace_source_of`）与**裸 wgpu 宿主那张桩表**（`host_stubs::wgpu_host_stub`，
+# 宿主那侧 `px_render_wgpu::stubs` 只是 `pub use` 同一份 ⇒ "探针编的文本"与"宿主编的文本"
+# 由**文本同源**保证，不是由 crate 依赖保证）。宿主 crate 也依赖不到：它只有 bin target。
+px_shader = { path = "../px_shader" }
 px_verify = { path = "../px_verify" }
 # 绑定组编号与渲染器**同一份来源**（契约表 `px_protocol::material`）：探针不再自己写死 2。
 px_protocol = { path = "../px_protocol" }
 # 参数块的**布局**也来自契约：`params.rs` 反射 `clouds.wgsl` 自己声明的结构体，
 # 探针那份 `CloudParams` 只剩「值」（原来它是一份手抄的字节镜像，§69 S2）。
-px_shader = { path = "../px_shader" }
 wgpu = "29"
 bytemuck = { version = "1", features = ["derive"] }
 pollster = "0.4"

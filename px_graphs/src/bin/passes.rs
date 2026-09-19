@@ -542,5 +542,11 @@ fn main() {
         px_ops::hex_short(&key),
         bytes
     );
-    println!("请求：px_render --scene {}", artifact.display());
+    // ⚠ S8-a：`px_render`（bevy 宿主）已删，这条提示改指**新宿主**，
+    //   而且写全**离线出图**那条路（新宿主的 `--scene --out` 缺省是"交给在跑的服务"，
+    //   离线必须显式写 `--offline`，见 §147.5 —— 少了它这条提示就又成了半句命令）。
+    println!(
+        "渲染：px_render_wgpu --offline --scene {} --out x.png --width 960 --height 640",
+        artifact.display()
+    );
 }

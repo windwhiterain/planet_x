@@ -29,8 +29,10 @@ pub type Stubs = fn(&str) -> Option<&'static str>;
 /// **最小声明**，只让离线文本解析得过去，**不是**运行期真正用的实现。
 ///
 /// ⚠ 运行期归 naga_oil 按 Bevy 自己的 `bevy_pbr` 兑现；这张表只服务"离线把文本拼出来"
-/// 这一件事（`px_shader::reflect` 与 `px_render/tests/shaders.rs`）。
-/// 裸 wgpu 宿主（`px_render_wgpu`）**不传这张**，它传自己那份（含真的 cube 影子实现）。
+/// 这一件事（`px_shader::reflect` 与烘图侧）。
+/// 裸 wgpu 宿主（`px_render_wgpu`）**不传这张**，它传自己那份 —— 文本住在
+/// [`crate::host_stubs`]（S8-a 从宿主 crate 搬过来，理由见那个模块的头），
+/// 含真的 cube 影子实现。
 pub fn bevy_stub(symbol: &str) -> Option<&'static str> {
     match symbol {
         "bevy_pbr::forward_io::VertexOutput" => Some(

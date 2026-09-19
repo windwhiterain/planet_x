@@ -78,8 +78,19 @@ fn main() {
         );
     }
 
+    // ⚠ S8-a：这里原来打的是 bevy 宿主的命令行
+    //   （`--planet … --mesh … --palette rocky --clouds … --cloud-slope …`）。
+    //   那支宿主已经删掉，本仓只剩 `px_render_wgpu`，而它**只吃 `.pxart` 场景文档**
+    //   —— 没有"现场拿几个成员拼一个场景"这条路。⇒ 打一条**真跑得起来**的命令，
+    //   而不是留一句谁也无法执行的提示（把成员配成场景的地方是 `art/scene/*.toml`）。
+    // ⚠ 改这几行会动 `SOURCE_HASH`（本文件自己），但它只用来打一句"源码变了"的警告、
+    //   **不进任何产物键**（`px_ops/src/lib.rs` 里那条 `graph_source_hash` 的用法）。
     println!(
-        "渲染：px_render --planet <HEIGHT.pxart> --mesh <MESH.pxart> --palette rocky --clouds {} --cloud-slope {},{},{}",
+        "看这一份内容：先 `cargo run -q -p px_graphs --bin scene <档>` 出场景文档（配方在 art/scene/），\
+         再 `cargo run -q -p px_render_wgpu -- --offline --scene <产物> --out x.png --width 960 --height 640`"
+    );
+    println!(
+        "  这一趟烘的成员（要在 art/scene/ 里自己接上）：clouds {}｜slope_x {}｜slope_y {}｜slope_z {}",
         px_ops::artifact_path_of(&mixed.key).display(),
         px_ops::artifact_path_of(&slope_x.key).display(),
         px_ops::artifact_path_of(&slope_y.key).display(),

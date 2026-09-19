@@ -378,7 +378,9 @@ fn steps_of(request: &Request) -> Result<Vec<Step>, String> {
              + 每条 pass 的编码器级 GPU 时间戳），而本宿主现在**按需渲染** —— \
              预览窗口（S7 前半）那个循环只在画面变了时画一帧，给不出逐帧序列、也没有那七段 span。\
              报告里的 `gpu_ms` / `pair` 因此没有可比对象（Bevy 那几段按 §104 第 4 条切，\
-             与「按需画 N 次」不是同一个量）。要计时读数请走 Bevy 宿主。",
+             与「按需画 N 次」不是同一个量）。要计时读数请走 `--spans 预热,测量`：\
+             它量的是**逐条 pass** 的编码器级时间戳（§153 的 J4 仪器）—— \
+             ⚠ 那个数**不叫** `gpu_ms`，与这一路说的 `gpu_ms` 不是同一个量。",
             request.job.name()
         ));
     }
@@ -522,6 +524,10 @@ mod tests {
 
     /// 能力拒词钉的是"理由对不对"，不是"有没有拒"：性能那两路要说的必须是
     /// "需要帧循环"、并且指路 S7。
+    ///
+    /// ⚠ S8-a 补一条：拒词**不许再指路一个已经不存在的宿主**。它原来收在
+    /// "要计时读数请走 Bevy 宿主" —— 而 `px_render` 已经删了，那句话会把人指进空处。
+    /// 现在它指向本宿主真有的那件仪器（`--spans`），这条断言就是不让死指针长回来。
     #[test]
     fn the_capability_refusals_name_the_real_reason() {
         let perf = Request {
@@ -536,6 +542,14 @@ mod tests {
         let why = steps_of(&perf).unwrap_err();
         assert!(why.contains("帧循环"), "拒词要说对理由：{why}");
         assert!(why.contains("S7"), "而且要指路：{why}");
+        assert!(
+            !why.contains("Bevy 宿主"),
+            "拒词不许指路一个已经删掉的宿主（S8-a）：{why}"
+        );
+        assert!(
+            why.contains("--spans"),
+            "要指路到本宿主**真有的**那件计时仪器 —— 而且要说清它量的是别的量：{why}"
+        );
     }
 
     /// 一次都没有的批量、少 `out` 的一步、0 尺寸：三条都是**当场拒**，不是"画一半"。

@@ -13,12 +13,11 @@ use std::path::{Path, PathBuf};
 use px_shader::ModuleTable;
 use px_shader::assemble::Stubs;
 
-/// 入口 shader 的内容根（`art/shaders`）与库根（`<asset_root>/shaders`）。
+/// 入口 shader 的内容根（`art/shaders`）与库根（`art/shaders/lib`）。
 ///
-/// ⚠ **库根今天指在 `px_render/assets/shaders`**：那是本仓的既有约定
-/// （`px_shader::workspace_roots`），库的内容住在那里，与"谁来渲染"无关。
-/// S8 删掉 Bevy 宿主时，这批库要跟着搬到新家 —— 那一档的第一件事就是这里，
-/// 所以**只留这一个函数**当落点，别在别处再写一遍路径。
+/// ⚠ **两个根都归 `px_shader::workspace_roots` 说了算**（S8-a 之后库搬去 `art/shaders/lib/`）：
+/// 这个函数只是把"本 crate 住在工作区里的哪一格"喂进去，**不再自己拼路径** ——
+/// 宿主、烘图侧、探针三方对"库在哪"只能有一个答案。
 pub fn roots() -> Vec<PathBuf> {
     px_shader::workspace_roots(workspace())
 }
@@ -51,8 +50,8 @@ pub fn assemble(entry: &str, modules: &ModuleTable, stubs: Stubs) -> String {
     px_shader::assemble::render_source(entry, modules, stubs, &mut seen)
 }
 
-/// 名字 → 入口文本。两处都找：内容（`art/shaders`）与库（`assets/shaders`）。
-/// 与 `px_render::shaders::shader_source_of` 同口径，**重名要报错**。
+/// 名字 → 入口文本。规则住在 `px_shader::workspace_source_of`：在 `workspace_roots`
+/// 那两个根下按文件名找，**重名要报错**（不许先到先得 —— 那会让两边各测一份）。
 pub fn source_of(name: &str) -> (String, PathBuf) {
     try_source_of(name).unwrap_or_else(|err| panic!("{err}"))
 }
@@ -63,34 +62,11 @@ pub fn source_of(name: &str) -> (String, PathBuf) {
 /// 而**热重载**那条路要能"这一份不重载，并说清为什么不"—— 一个 panicking 的取法
 /// 会把"盘上少了一个文件"变成"窗口整个没了"。取法本身只有一份（这里），
 /// 两个入口只差"拿不到时怎么办"。
+///
+/// ⚠ 查找规则本身**不住在这里**（S8-a）：`px_probe` 也要按同一条规则找入口，而它依赖不到
+/// 本 crate（本 crate 只有 bin target）⇒ 规则搬进共享叶子 crate，这里只剩"喂工作区根"。
 pub fn try_source_of(name: &str) -> Result<(String, PathBuf), String> {
-    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let candidates = [manifest.join("../art/shaders"), manifest.join("assets/shaders")];
-    let mut found: Vec<PathBuf> = candidates
-        .iter()
-        .map(|root| root.join(name))
-        .filter(|path| path.exists())
-        .collect();
-    match found.len() {
-        1 => {
-            let path = found.remove(0);
-            let text = std::fs::read_to_string(&path)
-                .map_err(|err| format!("读不了 {}：{err}", path.display()))?;
-            Ok((text, path))
-        }
-        0 => Err(format!(
-            "哪里都找不到 shader '{name}'（找过 {}）",
-            manifest.display()
-        )),
-        _ => Err(format!(
-            "shader '{name}' 在两处都有：{} —— 名字必须唯一，否则测的是这一份、用的是那一份",
-            found
-                .iter()
-                .map(|path| path.display().to_string())
-                .collect::<Vec<_>>()
-                .join(" / ")
-        )),
-    }
+    px_shader::workspace_source_of(workspace(), name)
 }
 
 /// 盘上**所有可能被热重载**的 `.wgsl`：两个 shader 根 + 帧图那一档（`art/frame/*.wgsl`）。
@@ -100,7 +76,7 @@ pub fn try_source_of(name: &str) -> Result<(String, PathBuf), String> {
 /// 而"哪几份真的变了"由**组装后逐字比较**给出（那是读数，不是推断），所以扫宽一点不危险，
 /// 只会多报一条"这个文件变了，但没有哪一槽的文本跟着变"。
 ///
-/// ⚠ `art/frame/` 不是 shader 库根（`px_shader::roots` 里没有它）：它是**帧自己的**那几个
+/// ⚠ `art/frame/` 不是 shader 库根（`px_shader::workspace_roots` 里没有它）：它是**帧自己的**那几个
 /// 阶段住的地方（`vertex_mesh.wgsl` / `vertex_sky.wgsl` / 帧材质的入口）。热重载要看它，
 /// 因为判据说的是"改一个 `.wgsl` 存盘"；而那几个文件**今天只有帧材质那一份有来源**
 /// （顶点阶段在文档里是内联全文、没有名字），见 `Session::shader_slots` 那段。

@@ -12,7 +12,11 @@
        这里改成从 `target/pcg/<图>/manifest.json` 按节点名取 `key`，再拼 CAS 路径。
 
     2) 起/停渲染服务，并把**被拒绝**与**管线编译失败**当硬失败。
-       客户端退出码非 0、日志里出现 Refused / failed to process shader，立刻抛错。
+       客户端退出码非 0、日志里出现 Refused / `后端断言失败`，立刻抛错。
+       ⚠ 这条曾是 bevy 宿主那两句（`failed to process shader` / DXGI 的 `设备实例已经暂停`），
+       随 S8-a 一起退休：新宿主**没有队列可等**（`create_render_pipeline` 是同步的，
+       §104 第 5 条），坏管线在**收到请求那一刻**就回 `Refused` ⇒ 客户端退出码非 0，
+       走的是这条闸的第一句。那两句留着也不会再匹配 —— 写在 `$HarnessFailPattern` 的注释里。
 
   3) **断言整批场景钉的是同一份 shader**（`Assert-ShaderMembersAgree`）。
         场景把 WGSL 钉在内容键上（`08-renderer.md` §52.3）。只要有一档钉的是**旧** WGSL，
@@ -27,6 +31,21 @@
   4) **后端只管子进程**：以前这里无条件 `$env:WGPU_BACKEND='dx12'`，任何 dot-source 过
      它的 shell 里起的 viewer 都继承了 dx12 —— 同一 exe/场景/shader 下 dx12 40.1 ms、
      vulkan 17.5 ms（2.3×），"云变慢"就是这么来的。现在改成起子进程时**现设现还原**。
+
+  ⚠⚠ **S8-a：驱动的那支 exe 从 `px_render.exe`（bevy 锚宿主）换成 `px_render_wgpu.exe`。**
+     `px_render` 这个 crate 连同 `assets/` 一起删掉了（shader 库搬去 `art/shaders/lib/`），
+     所以**任何指向它的默认值都是死指针**，这里三处（`$Exe` / `$HarnessExe` / 单一实例闸的
+     进程名前缀）一并对齐。就绪信号**不用改**：新宿主打的是同一行
+     「渲染管线全部就绪…」（`px_render_wgpu/src/serve.rs:101`，§147 逐字搬过来的）。
+
+  ⚠ **随锚退休的两条路（不要在这里再补）**：`frame-probe.ps1` 的 **Perf** 与 **Stable**
+     两路要的是「计时用的帧循环」（逐帧采样 / 丢窗 / 等 K 帧 + 每条 pass 的编码器级
+     GPU 时间戳），而新宿主**按需渲染**（一条请求画一帧就回话）⇒ 服务端**当场拒**，
+     拒词自己写着理由（`px_render_wgpu/src/serve.rs`）。**能读出可比计时数的那支宿主
+     已经不在了**（锚 exe 不可重建，见 `art/anchor/README.md`）⇒ 这两路**不再修**，
+     它们的量法留在 git 历史与 `.agents/notes/art/15-render-wgpu.md` §147/§153 里。
+     本宿主**有的**那件计时仪器是 `px_render_wgpu --spans 预热,测量`（§153 的 J4 仪器，
+     量的是**逐条 pass** 的编码器级时间戳），它不是 `--perf` 的替代品 —— 名字与口径都不同。
 #>
 
 $ErrorActionPreference = 'Stop'
@@ -38,14 +57,22 @@ function Get-HarnessChildEnv {
     return @{ WGPU_BACKEND = $HarnessBackend }
 }
 
-if (-not $Exe) { $Exe = 'target\debug\px_render.exe' }
+if (-not $Exe) { $Exe = 'target\debug\px_render_wgpu.exe' }
 
 $HarnessCacheRoot = 'target\pcg'
 $HarnessLease = 'target\render-server.json'
-$HarnessExe = 'target\debug\px_render.exe'
-# `后端断言失败` 是 px_render 在拿到 adapter 后校验后端的固定串：环境里混进 dx12 时
-# 进程会立刻退 2，这里把它当硬失败，不然要等满 180 s 超时才发现。
-$HarnessFailPattern = 'Refused|管线编译失败|failed to process shader|设备实例已经暂停|0x887A0005|后端断言失败'
+# 「这一套仪器驱动的那支 exe」。⚠ 今天**没有调用方**（原来是给"改前那支"留的位），
+# 但它是"这批读数是在哪支 exe 上取的"这句话的落点，所以照样对齐到新宿主，不许留死指针。
+$HarnessExe = 'target\debug\px_render_wgpu.exe'
+# 硬失败模式。⚠ 逐条说清哪几个还活着：
+#   Refused              活着 —— 新宿主对能力之外的请求回的就是 `Frame::Refused`（`serve.rs`）
+#   后端断言失败          活着 —— `px_render_wgpu/src/gpu.rs:14` 的 `BACKEND_ASSERT`
+#   管线编译失败          退休 —— bevy 宿主排队建管线那一路的词，新宿主是同步建的（§104 第 5 条）
+#   failed to process shader / 设备实例已经暂停 / 0x887A0005
+#                        退休 —— bevy 的资产与 DXGI 设备丢失那两句；新宿主锁死 Vulkan，
+#                        也没有"资产异步装载"这一层。留着无害（匹配不到），但**不许**把它们
+#                        当成"门还在"的证据：真正拦住坏管线的是客户端退出码那一条。
+$HarnessFailPattern = 'Refused|后端断言失败|管线编译失败|failed to process shader|设备实例已经暂停|0x887A0005'
 
 function Get-GraphManifest {
     param([string]$Graph)
