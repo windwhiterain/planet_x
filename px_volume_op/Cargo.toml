@@ -13,4 +13,7 @@ px_field_schema = { path = "../px_field_schema" }
 px_volume_schema = { path = "../px_volume_schema" }
 # 参照场那一侧：烘出来的粗场要能与它逐位对上（§28.2 的共享依赖）。
 px_verify = { path = "../px_verify" }
+# ⚠ 类型化契约那一层（`src/typed.rs`）：图脚本静态链接的是**它**，不是本 crate 的 dylib。
+px_cook = { path = "../px_cook" }
+serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }

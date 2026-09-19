@@ -10,6 +10,7 @@ use px_graph_schema::{OpCall, OpDescriptor, OpTable, ParamsCanonical, PayloadBun
 
 pub mod noise;
 pub mod ops;
+pub mod typed;
 
 use px_graph_schema::Grid;
 

@@ -15,9 +15,9 @@ pub mod driver;
 pub mod generate;
 
 pub use driver::{
-    Artifact, Payload, artifact_path_of, begin, cache_root, finish, graph_manifest, manifest_key_of,
-    node, params_text, scene_key, shader_key, workspace_root, write_graph_manifest, write_shader,
-    SHADER_VERSION,
+    Artifact, Cache, Driver, Payload, Report, artifact_path_of, begin, cache_root, driver, finish,
+    graph_manifest, manifest_key_of, node, params_text, scene_key, shader_key, workspace_root,
+    write_graph_manifest, write_shader, SHADER_VERSION,
 };
 pub use px_graph_schema::{
     GraphSpec, Grid, IndexEntry, Key, ManifestEntry, canonical_params, fnv1a, fnv1a_sources, hex,

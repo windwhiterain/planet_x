@@ -17,6 +17,14 @@ px_volume_schema = { path = "../px_volume_schema" }
 px_mesh_schema = { path = "../px_mesh_schema" }
 # 参照场（判据仪器与体积算子共用同一份）。
 px_verify = { path = "../px_verify" }
+# ⚠ **类型化的算子契约**（`px_cook`）+ 各领域的算子**类型**（`px_*_op` 的 rlib 那一半）。
+# 图脚本静态链接的是这一份：于是参数类型、输入个数、输出域全是**编译期**的事。
+# ⚠ 与 `[dev-dependencies]` 里那三条不是一回事：那三条只为把 dylib 编出来，
+#   而这三条是图脚本真的要用的**类型**（老 `node()` 路径仍在，两条并存）。
+px_cook = { path = "../px_cook" }
+px_field_op = { path = "../px_field_op" }
+px_volume_op = { path = "../px_volume_op" }
+px_mesh_op = { path = "../px_mesh_op" }
 px_shader = { path = "../px_shader" }
 px_protocol = { path = "../px_protocol" }
 serde = { version = "1", features = ["derive"] }

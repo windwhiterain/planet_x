@@ -13,5 +13,7 @@ crate-type = ["dylib", "rlib"]
 px_protocol = { path = "../px_protocol" }
 px_graph_schema = { path = "../px_graph_schema" }
 px_field_schema = { path = "../px_field_schema" }
+# ⚠ 类型化契约那一层（`src/typed.rs`）：图脚本静态链接的是**它**，不是本 crate 的 dylib。
+px_cook = { path = "../px_cook" }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }

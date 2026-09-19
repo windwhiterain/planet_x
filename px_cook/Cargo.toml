@@ -1,0 +1,24 @@
+[package]
+name = "px_cook"
+version = "0.1.0"
+edition = "2024"
+
+# ⚠ 它**一个算子实现都不依赖**：这里只有「一个算子长什么样、怎么叫」的**类型化契约**，
+# 实现住在 `px_*_op` 的 dylib 里。图脚本静态链接本 crate ⇒ 类型检查拿得到；
+# 改算子实现只重编那个 dylib，图脚本与图程序一动不动（判据见 tests/）。
+[dependencies]
+px_graph = { path = "../px_graph" }
+px_graph_schema = { path = "../px_graph_schema" }
+px_protocol = { path = "../px_protocol" }
+px_field_schema = { path = "../px_field_schema" }
+px_volume_schema = { path = "../px_volume_schema" }
+px_mesh_schema = { path = "../px_mesh_schema" }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["float_roundtrip"] }
+toml = "0.8"
+blake3 = "1"
+
+[dev-dependencies]
+px_field_op = { path = "../px_field_op" }
+px_volume_op = { path = "../px_volume_op" }
+px_mesh_op = { path = "../px_mesh_op" }

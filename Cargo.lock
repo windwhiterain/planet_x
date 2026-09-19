@@ -1377,9 +1377,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "px_cook"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "px_field_op",
+ "px_field_schema",
+ "px_graph",
+ "px_graph_schema",
+ "px_mesh_op",
+ "px_mesh_schema",
+ "px_protocol",
+ "px_volume_op",
+ "px_volume_schema",
+ "serde",
+ "serde_json",
+ "toml",
+]
+
+[[package]]
 name = "px_field_op"
 version = "0.1.0"
 dependencies = [
+ "px_cook",
  "px_field_schema",
  "px_graph_schema",
  "px_protocol",
@@ -1430,6 +1450,7 @@ name = "px_graphs"
 version = "0.1.0"
 dependencies = [
  "px-scene",
+ "px_cook",
  "px_field_op",
  "px_field_schema",
  "px_graph",
@@ -1451,6 +1472,7 @@ name = "px_mesh_op"
 version = "0.1.0"
 dependencies = [
  "isosurface",
+ "px_cook",
  "px_field_schema",
  "px_graph_schema",
  "px_mesh_schema",
@@ -1539,11 +1561,13 @@ dependencies = [
 name = "px_volume_op"
 version = "0.1.0"
 dependencies = [
+ "px_cook",
  "px_field_schema",
  "px_graph_schema",
  "px_protocol",
  "px_verify",
  "px_volume_schema",
+ "serde",
  "serde_json",
 ]
 

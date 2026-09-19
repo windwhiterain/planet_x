@@ -7,6 +7,8 @@
 //!
 //! 参照场住在 `px_verify::proxy`（判据仪器也用它）——这里只负责撒点、算场、存网格。
 
+pub mod typed;
+
 use px_field_schema::field::{Field, tangent_frame};
 use px_field_schema::payload as field_payload;
 use px_graph_schema::identity::fnv1a_sources;

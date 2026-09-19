@@ -6,6 +6,8 @@
 use px_graph_schema::{Grid, OpCall, OpDescriptor, OpTable, ParamsCanonical};
 use px_mesh_schema::{params, payload as mesh_payload};
 
+pub mod typed;
+
 pub mod cubesphere;
 pub mod proxy;
 

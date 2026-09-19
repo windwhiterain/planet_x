@@ -12,5 +12,7 @@ px_graph_schema = { path = "../px_graph_schema" }
 px_field_schema = { path = "../px_field_schema" }
 px_volume_schema = { path = "../px_volume_schema" }
 px_mesh_schema = { path = "../px_mesh_schema" }
+# ⚠ 类型化契约那一层（`src/typed.rs`）：图脚本静态链接的是**它**，不是本 crate 的 dylib。
+px_cook = { path = "../px_cook" }
 isosurface = "=0.1.0-alpha.0"
 serde_json = { version = "1", features = ["float_roundtrip"] }

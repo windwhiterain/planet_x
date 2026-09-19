@@ -30,7 +30,8 @@ pub mod op;
 pub mod payload;
 pub mod protocol;
 
-pub use identity::{FNV_OFFSET, FNV_PRIME, fnv1a, fnv1a_bytes, fnv1a_sources};
+pub use identity::{FNV_OFFSET, FNV_PRIME, fnv1a, fnv1a_bytes};
+pub use identity::fnv1a_sources;
 pub use keys::{
     Key, canonical_params, hex, hex_short, key_with_cameras, node_key, payload_fingerprint,
 };

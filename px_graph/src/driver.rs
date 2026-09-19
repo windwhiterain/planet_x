@@ -22,6 +22,181 @@ use px_mesh_schema::payload as mesh_payload;
 use px_volume_schema::payload as volume_payload;
 use px_volume_schema::{PATCHES, VolumeData};
 
+/// **缓存机制**：图脚本那边的类型化门面（`px_cook`）只认这一个接口。
+///
+/// ⚠ 它**不认识任何算子** —— 报上下文、读参数原文、查/写 CAS、记读数，就这四件事。
+/// 于是「类型化的算子契约」与「缓存的实现」各自独立：前者在 `px_cook`，
+/// 后者在这里，两边都不需要知道对方的算子长什么样。
+pub trait Cache {
+    fn graph_version(&self) -> u32;
+    fn canvas(&self) -> (u32, u32);
+    fn projection(&self) -> Domain;
+    fn cameras(&self) -> &[Camera];
+    /// `art/<图>/<name>.toml` 的原文；`None` = 文件不存在 ⇒ 用算子默认值。
+    fn params_text(&self, name: &str) -> Option<String>;
+    /// CAS 里那份字节。`PX_PCG_FRESH=1` 时一律 `None`（本次全部重算）。
+    fn fetch(&self, key: Key) -> Option<Vec<u8>>;
+    /// 键不在盘上：把产物写进 CAS、记索引与清单，并把读数打出来。
+    fn store(&self, report: Report<'_>, bytes: &[u8]) -> Result<(), String>;
+}
+
+/// 一次 cook 的读数 —— 与 `node()` 打出来的那几行同一档。
+pub struct Report<'a> {
+    pub node: &'a str,
+    pub op: &'static str,
+    pub op_version: u32,
+    pub key: Key,
+    pub hit: bool,
+    pub millis: u64,
+    pub bytes: usize,
+    /// 与老路径同一个口径：体积那一档不掺评审相机。
+    pub with_cameras: bool,
+}
+
+/// 缓存机制的句柄。`begin(GraphSpec)` 之后才有，用 `driver()` 取。
+pub struct Driver;
+
+impl Driver {
+    pub fn graph_version(&self) -> u32 {
+        context().spec.version
+    }
+}
+
+impl Cache for Driver {
+    fn graph_version(&self) -> u32 {
+        context().spec.version
+    }
+
+    fn canvas(&self) -> (u32, u32) {
+        (context().spec.width, context().spec.height)
+    }
+
+    fn projection(&self) -> Domain {
+        context().spec.projection
+    }
+
+    fn cameras(&self) -> &[Camera] {
+        &context().spec.cameras
+    }
+
+    fn params_text(&self, name: &str) -> Option<String> {
+        load_params_text(&context().param_dir, name)
+    }
+
+    fn fetch(&self, key: Key) -> Option<Vec<u8>> {
+        let context = context();
+        if context.fresh {
+            return None;
+        }
+        std::fs::read(artifact_path(&context.cache_root, &key)).ok()
+    }
+
+    fn store(&self, report: Report<'_>, bytes: &[u8]) -> Result<(), String> {
+        let context = context();
+        // ⚠ 算子回的是**无名、无相机**的占位载荷（"算子只回一个载荷，驱动把它补成产物"）。
+        // 所以这里必须把节点名与相机表补回去 —— 老路径那句话（`to_bytes(name, cameras)`）
+        // 在这一层同样成立，漏了就会写出"id 空、相机空"的产物（逐字节对账会当场抓到）。
+        let bytes = bundling(bytes, report.node, report.op, report.with_cameras, &context.spec)?;
+        let path = artifact_path(&context.cache_root, &report.key);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|err| format!("建目录 {} 失败：{err}", parent.display()))?;
+        }
+        std::fs::write(&path, &bytes)
+            .map_err(|err| format!("写产物 {} 失败：{err}", path.display()))?;
+
+        if !report.hit {
+            let payload = decode_payload(
+                &bytes,
+                kind_of(report.op),
+                context.spec.projection,
+                report.node,
+            );
+            let stats = payload_stats(&payload);
+            let entry = ManifestEntry {
+                node: report.node.to_string(),
+                op: report.op.to_string(),
+                op_version: report.op_version,
+                key: hex(&report.key),
+                hit: false,
+                millis: report.millis,
+                bytes: bytes.len() as u64,
+                min: stats.min,
+                max: stats.max,
+                mean: stats.mean,
+            };
+            println!(
+                "重算 {:<12} {:<16} v{}  {}  {:>5} ms  {:>9} B",
+                report.node,
+                report.op,
+                report.op_version,
+                hex_short(&report.key),
+                report.millis,
+                bytes.len(),
+            );
+            context
+                .manifest
+                .lock()
+                .expect("清单锁坏了")
+                .push(entry);
+        } else {
+            println!(
+                "命中 {:<12} {:<16} v{}  {}  {:>5} ms  {:>9} B",
+                report.node,
+                report.op,
+                report.op_version,
+                hex_short(&report.key),
+                report.millis,
+                bytes.len(),
+            );
+        }
+        Ok(())
+    }
+}
+
+/// 把算子回的占位载荷补成产物：**节点名 + 本次该带的相机表**。
+///
+/// ⚠ 相机那一档与老路径逐字同一条口径：体积不进相机（相机是「怎么看」，体积没人看）。
+fn bundling(
+    bytes: &[u8],
+    node: &str,
+    op_id: &str,
+    with_cameras: bool,
+    spec: &GraphSpec,
+) -> Result<Vec<u8>, String> {
+    let bundle = PayloadBundle::from_bytes(bytes)?;
+    let _ = op_id;
+    let cameras: &[Camera] = if with_cameras { &spec.cameras } else { &[] };
+    bundle.to_bytes(node, cameras)
+}
+
+/// 取缓存机制的句柄（`begin` 之后才有效）。
+pub fn driver() -> Driver {
+    Driver
+}
+
+fn kind_of(op_id: &str) -> OpKind {
+    if op_id.starts_with("volume.") || op_id == px_volume_schema::params::CLOUD_COARSE {
+        OpKind::Volume
+    } else if op_id.starts_with("mesh.") {
+        OpKind::Mesh
+    } else {
+        OpKind::Field
+    }
+}
+
+fn payload_stats(payload: &Payload) -> Stats {
+    match payload {
+        Payload::Field(field) => field.stats(),
+        Payload::Mesh(mesh) => Stats {
+            min: mesh.vertices() as f32,
+            max: mesh.triangles() as f32,
+            mean: 0.0,
+        },
+        Payload::Volume(volume) => volume_stats(volume),
+    }
+}
+
 pub enum Payload {
     Field(Field),
     Mesh(MeshData),
