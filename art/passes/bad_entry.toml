@@ -1,0 +1,16 @@
+# 坏**入口名**（§86.3 的第 1 行）：`fs_wrong` 在那份 WGSL 里不存在。
+#
+# 判据是**烘图时当场拒**、且拒词里要**列出它真有的入口** —— 因为这条错最容易变成
+# "运行期 wgpu 报 `Unable to find entry point`"，而那时报的是渲染器的错，
+# 离"配方里那一行拼错了"已经很远（§146.3 记了这个缺陷）。
+#
+# ⚠ 入口守卫在**接线之前**跑，所以读/写留不留都不影响这一条判据的拒词；
+# 这里留成与 `invert.toml` 一样的写法（读画面、写画面），让这份夹具自己说清它想干什么。
+[[passes]]
+kind = "fullscreen"
+label = "wrong-entry"
+shader = "px_grade"
+entry = "fs_wrong"
+reads = ["view"]
+writes = ["view"]
+params = { strength = 1.0 }

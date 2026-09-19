@@ -7,19 +7,30 @@
   渲染器只收 `--scene <路径>`。协议（`09-instruments.md` §57）把活分成几路，
   **每一路都回一份结构化 JSON 报告**（`--report <路径>` 落盘，同一份也回给调用方）：
 
-    · **性能主路径**（`--perf`，默认）：每个场景**等到条件成立**（管线就绪 + 资产装完 +
-      重建后已渲染 K 帧）再**逐帧**采 `-Frames` 帧（默认 60），报 min/p50/p90/p99/max +
-      原始逐帧序列 + 每次等待的实测耗时 + GPU 时间戳那一路。给两档就是**配对**，
-      报告里的 `pair` 直接给「被测档 − 参照档」的差值。
-      **默认动作是"改哪个场景就测哪个"**：`-Scenes` 只有一档时自动配上 `-Reference`（默认
-      `orbit-bare`）当地板 —— 单看绝对值没意义，要判的是**配对差**。轮数默认 1；
-      `-Rounds N` 是给**误差棒**用的，不必每次改东西都付。
-    · **老性能路**（`-Phase scene`，回退）：每个场景先出一张图，再收 `-Windows` 个干净窗口
-      （前面丢 `-DropWindows` 个）。协议 v10 语义一字未改，老脚本照走。
+    · **性能主路径**（`--perf`，默认）：⚠ **已随锚退休（S8-a）** —— 见下面那条横幅。
+    · **老性能路**（`-Phase scene`，回退）：⚠ **已随锚退休（S8-a）**。
     · **截图请求**（`-Phase shot`）：一串场景，每个出一张图就立刻切下一个；报告里每张图有
       产物键、路径、字节数、sha256、分辨率，以及可用性标记 `has_cloud`（防"丢云壳"）。
+    · **A/B 正对照**（`-Phase ab`）：同一对场景、只差 shader 成员键；A→B→A→B 逐字节复核。
 
-  `-Sweep` 才是大扫（5 档 × `-Rounds` 轮）—— 那是偶尔重测一次用的，不是日常。
+  ⚠⚠ **S8-a：Perf 与 Stable 两路退休了，别在这里把它们补回来。**
+     它们要的是**计时用的帧循环**（逐帧采样 / 丢窗 / 等 K 帧 + 每条 pass 的编码器级
+     GPU 时间戳），而今天唯一在的宿主（`px_render`，本脚本的 `$Exe` 已换成它）
+     **按需渲染**：一条请求画一帧就回话，给不出逐帧序列、也没有那七段 span
+     ⇒ 服务端收到这类请求**当场拒**，而那句拒词**指不到真正的原因**。
+     真正的原因是：**能给出可比 `gpu_ms` / `pair` 的那支宿主（bevy 锚 exe）已经不在了、
+     且不可重建**（冻结的构建产物，重建出来的不是同一个字节序列 —— `art/anchor/README.md`）。
+     ⚠ **§157 修正（2026-09-19）**：上面这句在写下时（S8-c）**不成立** —— 实测
+     `target/debug/px_render.exe` 是一支**还能跑的 Bevy 宿主**（六份冻产物出图与
+     `art/anchor/*.png` 逐字节全中，仪器 `target/pre-rename/bevy-six.ps1`）；**裁决是不留**，
+     改名又覆盖那个路径 ⇒ **从 §157 起这句成立**。全文与"拿回来的路"见 `art/anchor/README.md`
+     与 `15-render-wgpu.md` §157。
+     ⇒ 这两路由 `Stop-RetiredPhase` **当场拒并说清**（不是等 180 s 超时、也不是等服务端
+     回一句"这一路不在这一版"）。量法与全部读数留在 git 历史与 `15-render-wgpu.md` §147/§153。
+     本宿主**有的**计时仪器是 `px_render --spans 预热,测量`（§153 的 J4 仪器，量**逐条
+     pass** 的编码器级时间戳）—— ⚠ 它**不是** `--perf` 的替代品，名字与口径都不同。
+
+  `-Sweep` 才是大扫（5 档 × `-Rounds` 轮）—— ⚠ 它只服务那两条退休的路，今天一起失效。
 
   仪器这一侧只做三件事：**起/停服务**、**解析产物**、**把报告折成表**。
   「窗口/帧是从哪来的、有没有被污染」由服务端在报告里交代，harness 不再去数日志行。
@@ -31,6 +42,27 @@
   ⚠ 起服务前有 **shader 成员一致性断言**（`Assert-ShaderMembersAgree`）：整批场景必须钉同一份
   `shaders/clouds@<内容键>`。不一致就退出 —— 混版量出来的数没有意义（`-AllowMixedShaders`
   是给"故意交错两版"那个实验留的口子）。
+
+  ⚠⚠ **事故记录（4）：「判据跑的是哪一份产物」（§122 / §131.2 / §144 那条形状第四次咬人）。**
+  `Invoke-StablePhase` 里 `Resolve-Artifact`（按 `target/pcg/<图>/manifest.json` 解析路径）
+  曾经跑在 `Invoke-Bake` **之前**，而另外三个相位早就写着"次序不能反"并已修好 ——
+  **只有 stable 这一路漏了**。后果不是报错，而是**静默量错东西**：先取路径再重烘 ⇒ 这一轮量的
+  是**上一份**产物（实测：清单里还是老形状的 `orbit-bare`（键 `28a9b516c132`，无帧图），
+  于是探针拿它出了四档的数，而当时刚烘出来的是 `add550e772b2`）。
+  ⚠ 那批读数**本身是有效的**（它们来自老形状的 `orbit-bare` —— 那正是锚宿主能读的那种文档，
+  见下条），有问题的是**探针没说清它读的是哪一份**。⇒ 报告里那句"档"要能回答
+  "我跑的是哪份产物"，否则数与产物对不上账。
+  ⚠ 与之配套的另一条：`target/oracle/px_render-bevy.exe`（S-1 那支锚，git `4fc772d`）
+  **读不了帧图形状的文档**（`PassSchema` 那些栏是它之后才加的：`missing field 'shader'`）。
+  要给锚取数就走 `--bin scene <档> --no-frame-graph` 烘**老形状**产物 + 本探针 `-Bake:$false`
+  （老形状可以当"提问的靶子"，不能当"交付的形状"）。
+  ⚠⚠ **S8-c 标注：上面这条"要给锚取数"的路已经断了**（§154；`art/anchor/hashes.txt` §五）——
+  那支 exe 不在了、也不可重建（冻结的构建产物），所以**没有"给锚取数"这回事了**。
+  ⚠ **§157 修正（2026-09-19）**："断了"这句在写下时**不成立** —— 当时 `target/debug/px_render.exe`
+  是一支**还能跑的 Bevy 宿主**（六份冻产物出图与 `art/anchor/*.png` 逐字节全中）。
+  **裁决是不留**，改名又覆盖那个路径 ⇒ **从 §157 起成立**；要拿回来见 §157 的命令。
+  它读不了帧图形状这件事**仍然成立**（那是记录），老形状今天只剩**逃生门判据**这一个正当用途
+  （`art/anchor/README.md`）。上面那两行原文留着：它是"当时为什么这么设计相位"的出处。
 
 .EXAMPLE
   .\tools\frame-probe.ps1 -Scenes orbit-proxy
@@ -213,10 +245,38 @@ function Write-ShaderTable {
 }
 
 # ---------------------------------------------------------------------------
+# ⚠⚠ 两条**随锚退休**的路：Perf 与 Stable（S8-a）
+# ---------------------------------------------------------------------------
+#
+# 为什么是"当场拒并说清"而不是"删掉这几段代码"：**这条工具的量法本身是判据的一部分**
+# （§51.18 / §57 / §147.4 的配对差、漂移、第一窗口污染那几栏），删掉它等于把"我们量过什么"
+# 从脚本里抹掉。留着的代价只有一个：**它不能再跑** —— 而这一点必须由这里的一句话说出来，
+# 不许留给服务端去说：服务端只会说"这一路不在这一版"（`px_render/src/serve.rs`），
+# 那句话**指不到真正的原因**（能给出可比 `gpu_ms` / `pair` 的那支宿主已经不在了）。
+function Stop-RetiredPhase {
+    param([string]$Phase, [string]$What)
+    throw @"
+-Phase $Phase 已**随锚退休**（S8-a）：这条请求这里不会发出去。
+  它要的是 $What 那套**计时用的帧循环**（逐帧采样 / 丢窗 / 等"重建后已渲染 K 帧"
+  + 每条 pass 的编码器级 GPU 时间戳），而今天唯一在的宿主（px_render）是
+  **按需渲染**的：一条请求画一帧就回话，没有逐帧序列、也没有那七段 span。
+  ⚠ 而能给出可比 `gpu_ms` / `pair` 的那支宿主（bevy 锚 exe）**已经不在了，且不可重建**
+    —— 它是冻结的构建产物，重建出来的不是同一个字节序列（art/anchor/README.md）。
+  ⇒ 这两路**退休，不再修**。它们的量法与全部读数留在 git 历史与
+     .agents/notes/art/15-render-wgpu.md §147 / §153 里。
+  本宿主**有的**那件计时仪器是 `px_render --spans 预热,测量`（§153 的 J4 仪器）：
+    它量的是**逐条 pass** 的编码器级时间戳 —— ⚠ 它**不是** `--perf` 的替代品，
+    名字与口径都不同（那个数不叫 gpu_ms）。
+  还在的两条路：`-Phase shot`（判据图 + has_cloud）与 `-Phase ab`（A/B 正对照）。
+"@
+}
+
+# ---------------------------------------------------------------------------
 # 性能：新协议（一个服务，档间不重启）
 # ---------------------------------------------------------------------------
 function Invoke-ScenePhase {
     param([switch]$SkipBake)
+    Stop-RetiredPhase -Phase 'scene' -What 'Perf（逐帧采样 + 丢窗）'
     # ⚠ 次序不能反：`Get-Artifacts` 取的是**清单里的键**，而清单要重烘之后才指向新内容。
     # 先取路径再重烘 ⇒ 这一轮量的是上一份产物（实测踩过：改了 surface shader、键也换了，
     # 出图却一个像素没变 —— 因为整批场景路径还是旧的）。
@@ -426,6 +486,7 @@ function Get-FrameRec {
 
 function Invoke-StablePhase {
     param([switch]$SkipBake)
+    Stop-RetiredPhase -Phase 'stable' -What 'Stable（性能主路径）'
     # 配对规则（写在文档里，别让人猜）：
     #   · 给 1 档  ⇒ 它 + 参照档（默认 orbit-bare）= 一次配对测量；
     #   · 给 2 档  ⇒ 就是"改前 vs 改后"这一对，不再加参照；
@@ -446,10 +507,13 @@ function Invoke-StablePhase {
     }
     $needed = [ordered]@{}
     foreach ($unit in $units) { foreach ($name in $unit) { $needed[$name] = $true } }
-    $artifacts = [ordered]@{}
-    foreach ($name in $needed.Keys) { $artifacts[$name] = (Resolve-Artifact -Graph $Graph -Node $name) }
     $bakeNames = @($needed.Keys)
     if ($Bake -and -not $SkipBake) { Invoke-Bake -Names $bakeNames }
+    # ⚠ **次序不能反**（`Invoke-ScenePhase` / `Invoke-ShotPhase` / `Invoke-AbPhase` 顶上那句注释
+    #    是同一件事）：`Resolve-Artifact` 取的是**清单里的键**，而清单要重烘之后才指向新内容。
+    #    这一条在本相位**漏过一次**，代价见文件头「事故记录」第 4 条 —— 所以解析放在烘之后。
+    $artifacts = [ordered]@{}
+    foreach ($name in $needed.Keys) { $artifacts[$name] = (Resolve-Artifact -Graph $Graph -Node $name) }
     $table = Assert-ShaderMembersAgree -Artifacts $artifacts -AllowMixed:$AllowMixedShaders
     Write-Host ''
     Write-ShaderTable -Table $table
@@ -646,6 +710,7 @@ function Invoke-ShotPhase {
 # ---------------------------------------------------------------------------
 function Invoke-LegacyPhase {
     param($Artifacts, $Table)
+    Stop-RetiredPhase -Phase 'legacy（旧协议：单档冷启动 + 档间重启）' -What 'Perf（逐窗口采样）'
     $log = "target/$Tag-legacy.log"
     $err = "$log.err"
     $records = [ordered]@{}

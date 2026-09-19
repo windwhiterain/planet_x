@@ -16,10 +16,10 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use px_graphs::params::schema_of;
 use px_ops::generate::{self, Generated, Palette};
 use px_ops::{GraphSpec, ManifestEntry};
 use px_protocol::art::{Camera, TextureFormat};
-use px_protocol::material::{MaterialLayout, ParamKind, ParamSlot};
 use px_protocol::scene::{
     AlphaMode, CullMode, Environment, Geometry, Light, Material, Member, Object, Sampler, SceneSpec,
     TextureRef, Transform, Value,
@@ -62,6 +62,12 @@ struct SceneFile {
     /// `"review"` = 评审相机表；缺省也用它。
     #[serde(default)]
     cameras: Option<String>,
+    /// 用哪张**帧图**（`art/frame/<名>.toml`，§128）。不写 = `default`。
+    ///
+    /// ⚠ 帧图是**渲染器的形状**，不是内容：六个场景共用 `default` 那一份，
+    /// 这一栏是"这个场景要另一种帧图"的逃生门，不是每份内容都要写一遍的东西。
+    #[serde(default)]
+    frame: Option<String>,
     parts: Vec<PartFile>,
 }
 
@@ -165,61 +171,8 @@ impl PartFile {
 //   ⇒ 加一个 shader 参数要改 Rust（§79 的 W1）。2026-09-16 拆掉，判据换成「这份 shader 的契约」。
 // ---------------------------------------------------------------------------
 
-/// 一份 shader 成员的**契约**：从它的产物里读 schema descriptor（第二个 blob，`08-renderer.md` §80.2）。
-///
-/// 为什么不现反射：产物里那份就是**装载时会被拿来对账的那一份** —— 烘图侧要校验的是
-/// 「这份产物说它要什么」，不是「现在这份 WGSL 会反射出什么」。两者不一致时装载会拒，
-/// 那时候再报错就晚了（而且报的是渲染器的错，不是作者写错了配方）。
-fn schema_of(member: &Member, root: &Path) -> Result<MaterialLayout, String> {
-    let path = px_protocol::scene::cas_path(root, &member.key)?;
-    let (_, schema) = px_protocol::art::read_shader_parts(&path)
-        .map_err(|err| format!("读 shader 成员 {member} 的产物失败（{}）：{err}", path.display()))?;
-    let text = schema.ok_or_else(|| {
-        format!(
-            "shader 成员 {member} 的产物没有 schema descriptor：那是契约收口（§80）之前烘的。\n  \
-             先重烘：cargo run -p px_graphs --bin shaders"
-        )
-    })?;
-    MaterialLayout::from_json(&text)
-        .map_err(|err| format!("shader 成员 {member} 的 descriptor 解不开：{err}"))
-}
-
-/// TOML 里的一个值 → 产物里的值，**按 shader 声明的那一档**。
-fn coerce_value(slot: &ParamSlot, value: &toml::Value) -> Result<Value, String> {
-    let label = slot.kind.name();
-    match slot.kind {
-        ParamKind::F32 | ParamKind::I32 | ParamKind::U32 => match value {
-            toml::Value::Integer(number) => Ok(Value::Num(*number as f64)),
-            toml::Value::Float(number) => Ok(Value::Num(*number)),
-            other => Err(format!("要一个 {label}，实际是 {other:?}")),
-        },
-        ParamKind::Vec3 | ParamKind::Vec4 => {
-            let toml::Value::Array(items) = value else {
-                return Err(format!("要 {label}（一个数组），实际是 {value:?}"));
-            };
-            let wanted = if slot.kind == ParamKind::Vec3 { 3 } else { 4 };
-            if items.len() != wanted {
-                return Err(format!(
-                    "要 {label}（{wanted} 个数），实际给了 {} 个",
-                    items.len()
-                ));
-            }
-            let mut numbers = [0.0_f32; 4];
-            for (index, item) in items.iter().enumerate() {
-                numbers[index] = match item {
-                    toml::Value::Integer(number) => *number as f32,
-                    toml::Value::Float(number) => *number as f32,
-                    other => return Err(format!("第 {} 个数不是数：{other:?}", index + 1)),
-                };
-            }
-            if wanted == 3 {
-                Ok(Value::Triple([numbers[0], numbers[1], numbers[2]]))
-            } else {
-                Ok(Value::Quad(numbers))
-            }
-        }
-    }
-}
+// `schema_of`（产物里的 descriptor → 契约）与 `coerce_value`（TOML 值 → 按契约那一档）
+// 搬去了 `px_graphs::params`：pass 那条烘图路要的是**同一件事**，抄第二份就是第二个会漂开的真相。
 
 /// 配方参数表 + 编译器算出来的那些 → 材质参数表，并在**烘图时**按契约校验一遍。
 ///
@@ -239,46 +192,14 @@ fn material_params(
     root: &Path,
 ) -> Result<BTreeMap<String, Value>, String> {
     let layout = schema_of(shader, root)?;
-    let params = merge_params(part, structural, &layout, computed)?;
-    layout.pack(&params).map_err(|err| {
-        format!(
-            "part '{}' 的材质参数对不上 {} 的契约：{err}",
-            part.id, shader.node
-        )
-    })?;
-    Ok(params)
-}
-
-/// [`material_params`] 里**纯**的那一半：结构键跳过、契约里有名字的透传、两边都不是的报错。
-/// 单独拆出来是为了能直接测（另一半要读 CAS 里的 descriptor）。
-fn merge_params(
-    part: &PartFile,
-    structural: &[&str],
-    layout: &MaterialLayout,
-    computed: BTreeMap<String, Value>,
-) -> Result<BTreeMap<String, Value>, String> {
-    let mut params = computed;
-    for (key, value) in &part.params {
-        if structural.contains(&key.as_str()) {
-            continue;
-        }
-        let Some(slot) = layout.param(key) else {
-            return Err(format!(
-                "part '{}'（kind {}）不认识参数 '{key}'：\n  \
-                 编译器自己消化的结构键：{}\n  \
-                 这份 shader 声明的参数：{}\n  \
-                 ⇒ 要么名字拼错了，要么得先在 shader 的结构体里声明它（声明之后按名字透传，不用改 Rust）",
-                part.id,
-                part.kind,
-                structural.join(" / "),
-                layout.param_names(),
-            ));
-        };
-        let value = coerce_value(slot, value)
-            .map_err(|err| format!("part '{}' 的参数 '{key}'：{err}", part.id))?;
-        params.insert(key.clone(), value);
-    }
-    Ok(params)
+    px_graphs::params::merge_named(
+        &format!("part '{}'（kind {}）", part.id, part.kind),
+        &part.params,
+        structural,
+        &layout,
+        computed,
+    )
+    .map_err(|err| format!("{err}\n  shader 成员：{}", shader.node))
 }
 
 /// 烘图时的最后一道：这份参数表**打得进这份契约吗**（缺参 / 多参 / 类型不符都在这里红）。
@@ -566,7 +487,7 @@ fn ablate_code(name: &str) -> Result<u32, String> {
 
 /// **编译器自己消化的结构键**（行星）：半径 / 色板 / 灯 / 消融档这些是拿来**造场景**的，
 /// 不是材质参数。⚠ 它**不再是**「配方里只能写这些」的白名单（那是 §80 第 2 步拆掉的墙）：
-/// 名字只要在这份 shader 的契约里就按名字透传，两边都不是才报错（`merge_params`）。
+/// 名字只要在这份 shader 的契约里就按名字透传，两边都不是才报错（`px_graphs::params::merge_named`）。
 const PLANET_KEYS: [&str; 15] = [
     "palette",
     "displace",
@@ -586,7 +507,7 @@ const PLANET_KEYS: [&str; 15] = [
 ];
 
 /// **编译器自己消化的结构键**（云）：形状档、消融档、风——这些要么进几何、要么与云影同口径，
-/// 编译器得自己拿着算。名字在 shader 契约里的那些照旧**按名字透传**（`merge_params`）。
+/// 编译器得自己拿着算。名字在 shader 契约里的那些照旧**按名字透传**（`px_graphs::params::merge_named`）。
 const CLOUDS_KEYS: [&str; 24] = [
     "inner",
     "outer",
@@ -734,9 +655,16 @@ fn main() {
         cameras: Vec::new(),
     });
 
-    let recipe = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| DEFAULT_SCENE.to_string());
+    // 用法：scene [配方名] [--no-frame-graph]
+    // ⚠ `--no-frame-graph` 是**兼容逃生门**（见 `compile` 里那段注释），不是常规用法。
+    let mut recipe = DEFAULT_SCENE.to_string();
+    let mut with_graph = true;
+    for arg in std::env::args().skip(1) {
+        match arg.as_str() {
+            "--no-frame-graph" => with_graph = false,
+            other => recipe = other.to_string(),
+        }
+    }
     let path = PathBuf::from("art").join("scene").join(format!("{recipe}.toml"));
     let text = std::fs::read_to_string(&path)
         .unwrap_or_else(|err| panic!("读不了 {}：{err}", path.display()));
@@ -744,7 +672,8 @@ fn main() {
         .unwrap_or_else(|err| panic!("{} 解不开：{err}", path.display()));
 
     let root = px_ops::cache_root();
-    let compiled = compile(&file, &root).unwrap_or_else(|err| panic!("{} 编译失败：{err}", file.name));
+    let compiled =
+        compile(&file, &root, with_graph).unwrap_or_else(|err| panic!("{} 编译失败：{err}", file.name));
 
     let spec_json = serde_json::to_string(&compiled.document).unwrap_or_else(|err| panic!("{err}"));
     let member_keys = compiled
@@ -760,7 +689,16 @@ fn main() {
         .unwrap_or_else(|err| panic!("{err}"));
 
     println!("{}", compiled.document.audit());
-    println!("产物 scene -> {}（{}）", artifact.display(), px_ops::hex_short(&key));
+    // ⚠ 尾巴上那一格是**内容键**（`scene_key` 算出来的、也嵌在文件名里那个），**不是文件字节的
+    //    sha256** —— 两者是两个量。`art/anchor/hashes.txt` §三 那六格判的是**文件字节**，
+    //    而这一行印的是键：拿这一格去比登记值，六份会**全报 ✗ 而真值其实是对的**（这条踩过一次，
+    //    见 `hashes.txt:39-40`；S8-b 又踩了一次同族的一次）。要文件字节，就自己
+    //    `Get-FileHash <上面的路径> -Algorithm SHA256`。
+    println!(
+        "产物 scene -> {}（内容键 {}，不是文件字节的 sha256）",
+        artifact.display(),
+        px_ops::hex_short(&key)
+    );
 
     let entry = ManifestEntry {
         node: compiled.document.name.clone(),
@@ -794,7 +732,7 @@ fn main() {
     );
 }
 
-fn compile(file: &SceneFile, root: &Path) -> Result<Compiled, String> {
+fn compile(file: &SceneFile, root: &Path, with_graph: bool) -> Result<Compiled, String> {
     let mut generated = Generated2::new();
     let planet = file
         .parts
@@ -1094,6 +1032,69 @@ fn compile(file: &SceneFile, root: &Path) -> Result<Compiled, String> {
 
     generated.finish();
 
+    // ---- 帧图（§128）：**渲染器的形状**烘进文档 ----
+    //
+    // `with_graph = false` 是兼容逃生门：两栏都空，产物因此与没有帧图时**逐字节相同**
+    // （六份冻产物的 sha256 是这条的判据）。它不是"另一种受支持的烘法" ——
+    // 它存在的唯一目的是证明老产物还能逐字节复现；它要是开始长自己的功能，就该删掉它。
+    let frame_name = file
+        .frame
+        .clone()
+        .unwrap_or_else(|| px_graphs::frame::DEFAULT_FRAME.to_string());
+    // ⚠ 逃生门那条路**连帧图配方都不读**：它是"证明老产物还能逐字节复现"的仪器，
+    //    不该因为帧图配方坏了就一起坏掉（那正是它要保的东西）。
+    let (resources, passes, frame_materials, material_instances) = if with_graph {
+        let frame = px_graphs::frame::load(&frame_name)?;
+        // 帧材质的参数写的是**来源**，这里把**内容**那一边的值给它 ——
+        // 帧配方里一个内容值都不许写死（§133），取值的词汇表住在 `px_graphs::frame`。
+        let sources = px_graphs::frame::Sources {
+            ambient: file.ambient,
+            skybox_brightness: SKYBOX_BRIGHTNESS,
+            // 投影的点光有几盏：今天这张场景表就一盏（`sun`，`shadows` 由 planet 那一格给）。
+            // ⚠ 它是**内容**（`lights[].shadows`），所以走 `Sources` 这条通道进烘图。
+            shadow_lights: usize::from(sun.shadows),
+        };
+        let baked = px_graphs::frame::build(&frame, &objects, &sources, true)?;
+        println!(
+            "帧图 {frame_name}：{} 条 pass（{} 前 / {} 后）｜中间目标 {} 个｜帧自有材质 {} 份（{}）",
+            baked.passes.len(),
+            frame.before.len(),
+            frame.after.len(),
+            baked.resources.len(),
+            baked.materials.len(),
+            if baked.materials.is_empty() {
+                "（无）".to_string()
+            } else {
+                baked
+                    .materials
+                    .iter()
+                    .map(|material| format!("{}={} 字节内联 WGSL", material.name, material.shader.len()))
+                    .collect::<Vec<_>>()
+                    .join(" / ")
+            }
+        );
+        if !baked.material_instances.is_empty() {
+            println!(
+                "  生成的材质实例 {} 份（影子六面各一套组，各起一个名字；§148 之后那一套里是**那一面的 PassView**）：{}",
+                baked.material_instances.len(),
+                baked
+                    .material_instances
+                    .iter()
+                    .map(|instance| format!("{}←{}", instance.name, instance.base))
+                    .collect::<Vec<_>>()
+                    .join(" / ")
+            );
+        }
+        (
+            baked.resources,
+            baked.passes,
+            baked.materials,
+            baked.material_instances,
+        )
+    } else {
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new())
+    };
+
     let document = SceneSpec {
         schema: px_protocol::SCENE_SCHEMA,
         name: file.name.clone(),
@@ -1108,8 +1109,12 @@ fn compile(file: &SceneFile, root: &Path) -> Result<Compiled, String> {
         } else {
             Vec::new()
         },
+        resources,
+        passes,
         lights: vec![sun],
         objects,
+        frame_materials,
+        material_instances,
     };
     document.check()?;
     Ok(Compiled { document })
@@ -1131,6 +1136,24 @@ fn ring_shader() -> Result<Member, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use px_protocol::material::{MaterialLayout, ParamKind, ParamSlot};
+
+    /// 测试这一侧照生产那条路调一遍 `merge_named`（它要读 CAS descriptor，所以真正的
+    /// `material_params` 在这里跑不起来）。参数表用**结构键 + 契约**那两档，与生产同形。
+    fn merge_params(
+        part: &PartFile,
+        structural: &[&str],
+        layout: &MaterialLayout,
+        computed: BTreeMap<String, Value>,
+    ) -> Result<BTreeMap<String, Value>, String> {
+        px_graphs::params::merge_named(
+            &format!("part '{}'（kind {}）", part.id, part.kind),
+            &part.params,
+            structural,
+            layout,
+            computed,
+        )
+    }
 
     /// 朝向的合成顺序：`rot_x(TILT) × rot_y(spin)` —— 与迁移前渲染器那个
     /// 「父实体带倾斜 + 子实体带自转」合成出来的世界旋转是同一个四元数。
@@ -1159,7 +1182,7 @@ mod tests {
     }
 
     /// 打错的参数名必须当场报错：配方里看着完全正常，结果是悄悄少一个旋钮。
-    /// ⚠ 判据现在是**这份 shader 的契约**（`merge_params`），不再是写死的白名单（§80 第 2 步）。
+    /// ⚠ 判据现在是**这份 shader 的契约**（`px_graphs::params::merge_named`），不再是写死的白名单（§80 第 2 步）。
     #[test]
     fn an_unknown_parameter_is_rejected() {
         let layout = fixture_layout();

@@ -3,6 +3,23 @@
 改完一个功能之后，怎么证明它真的对了：热重载要不要重启、窗口 review 回路、
 单帧时间怎么量、探针在哪跑。**渲染器本身怎么跑**在 `08-renderer.md`。
 
+> ⚠ **S8-c 标注（2026-09-19）：这一篇里的 `bevy_*` file:line 引用是承重的，不许删。**
+> §55（间接绘制的 2 笔/帧从哪来）、§57（"管线全部就绪"那句话的出处与调度位置）、
+> §58（直读信号的实测清单：管线状态、GPU 时间戳 Bevy 有没有请求/暴露）这些**唯一的证据**
+> 就是那些行号：`bevy_render-0.19.1/src/batching/gpu_preprocessing.rs:1360-1379`、
+> `bevy_pbr-0.19.1/src/render/mesh.rs`、`bevy_pbr-0.19.1/src/cluster/gpu.rs:1071`、
+> `bevy_render/src/render_resource/pipeline_cache.rs:221/46-55/226`。删掉它，这些结论就只剩断言。
+> ⚠ 可查性（本单元实核）：**今天仍可直接打开** —— `bevy_pbr` / `bevy_render` /
+> `bevy_core_pipeline` 的 0.19.1 源码都在 cargo registry 里
+> （`~/.cargo/registry/src/index.crates.io-*/`）。⚠ 与 `px_render/…` 那一类引用**不同**：
+> 后者只能走 git 历史（`git show f121ee3^:px_render/…`）。
+> ⚠ 过时的是**命令行**：本文里的 `px_render --serve/--view/--show/--fps/--novsync` 指的是
+> **已删的 Bevy 宿主**（`f121ee3`，`15-render-wgpu.md` §154）⇒ 今天对应 `px_render_wgpu …`，
+> 而 `--fps` / `--novsync` 在新宿主里**收下但不生效**（§147.5 记了为什么）。**读数一字未删。**
+> ⚠ **§157（2026-09-19）：那一行今天写作 `px_render …`**（wgpu 宿主改名叫 `px_render`）。
+> ⚠ 于是本篇的**命令行那几行要按日期读**：§12/§65 那些 `px_render --serve/--view/…` 是**旧义**
+> （已删的 Bevy 宿主），从这个标注往下是**新义**（今天唯一那支宿主）。
+
 ---
 
 ## §37 / §42 shader 热重载
@@ -21,7 +38,7 @@ ERROR bevy_render::…::pipeline_cache:    failed to process shader error: shade
 | 改了什么 | 要不要重启 |
 |---|---|
 | **只有 `.wgsl`** | **不要** —— 存盘即可，约 1 秒生效 |
-| **uniform 结构**（加一格 / 换布局） | **不要** —— 装载时现反射（`px_render/src/reflect.rs::layout_of`，缓存键 = `(内容版本, 库指纹)`）。⚠ **但产物必须同时给出新增那一格的值**，否则当场拒；而「让产物给得出那个值」今天要改 `px_graphs/src/bin/scene.rs` 的白名单 ⇒ **那是烘图侧的事，与重启无关**。实测八步见 `art/12-step0.md` §79 |
+| **uniform 结构**（加一格 / 换布局） | **不要** —— 装载时现反射（`px_render/src/reflect.rs::layout_of`，缓存键 = `(内容版本, 库指纹)`）。⚠ **但产物必须同时给出新增那一格的值**，否则当场拒；而「让产物给得出那个值」**在 §81（配方按名字透传）之后就是在配方里按名字写**（`px_graphs::params::merge_named`）⇒ **那是烘图侧的事，与重启无关**。实测八步见 `art/12-step0.md` §79 |
 | CLI / 系统 / 插件 | **要** —— 改了 Rust 就得重编，exe 被占用 ⇒ 先停进程 |
 
 > **2026-09-16 更正**：本表原来那一行写的是「`CloudParams` 之类的 **uniform 结构** ⇒ **要** ——

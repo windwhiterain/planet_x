@@ -1,0 +1,194 @@
+# 帧图 `default`（§128）：**这颗渲染器怎么把一帧画出来**。
+#
+# ⚠ 这是**六个场景共用**的一份：帧图不是内容，是渲染器的形状。抄进每个场景，
+# 只会让"它们共用一套帧图"这件事变得看不见，而漂移是必然的。
+# 场景配方写 `frame = "default"` 指过来（不写也是它）。
+#
+# 顺序（与 oracle 实测的结构一致，§110.1）：
+#   prepass（**它清的深度**）→ 不透明 → 天空盒 → 透明 → [内容 pass 插在这里] → blit
+#
+# 清屏色 = `Color::srgb(0.004, 0.005, 0.010)` 的**线性**值：wgpu 的 clear 值不做
+# sRGB 变换，硬件按目标格式自己编码 —— 把 sRGB 数值填进来就是"清屏色偏亮一档"。
+# （0.004/12.92、0.005/12.92、0.010/12.92：三个数都在 0.04045 以下，走线性那一段。）
+
+# 内容链的**乒乓对**（§128 裁决 D）：插进来的 pass 按它轮流读写，
+# 最后 blit 读链尾那一个。恰好两个。
+chain_color = ["scene_color_a", "scene_color_b"]
+
+[[resources]]
+name = "scene_color_a"
+format = "rgba8unorm-srgb"
+size = "view"
+usage = ["render_attachment", "texture_binding"]
+
+[[resources]]
+name = "scene_color_b"
+format = "rgba8unorm-srgb"
+size = "view"
+usage = ["render_attachment", "texture_binding"]
+
+[[resources]]
+name = "scene_depth"
+format = "depth32float"
+size = "view"
+usage = ["render_attachment", "texture_binding", "copy_src"]
+
+# ---- 点光 cube 影图（§109）：**一盏投影的点光一个 cube**（六层）----
+#
+# `layers` 写的是**来源**不是数：烘图侧按这一帧的灯表解出来（§133 同一条口径 ——
+# 配方里一个内容值都不写死），文档里落的是解出来的整数。一盏投影的灯都没有时，
+# **这份资源与写它的那六条 pass 都不烘**（oracle 那边也不渲染影子图）。
+#
+# ⚠ 1024 / `depth32float` 是 oracle 的策略，不是随便挑的：`PointLightShadowMap` 的缺省
+# 边长就是 1024，而 `px_render` 从不插那个资源（全仓 grep 0 命中）⇒ 缺省值就是实况；
+# 格式则来自 `CORE_3D_DEPTH_FORMAT = Depth32Float`。两个数在 group 0 那一侧还有第二处用处：
+# `shadow_normal_bias = 0.6 × (2/边长) × √2`。
+[[resources]]
+name = "point_shadow_textures"
+format = "depth32float"
+size = "1024x1024"
+layers = "shadow_cubes"
+usage = ["render_attachment", "texture_binding"]
+
+# ---- 预通道深度的**快照**（§131）：给"既要拿它做深度测试、又要采样它"的那几方各一份 ----
+[[resources]]
+name = "scene_depth_sample"
+format = "depth32float"
+size = "view"
+usage = ["texture_binding", "copy_dst"]
+
+# ---- prepass：只写深度（颜色附件不挂），它清的深度 ----
+# 它画**不透明**那一档：透明度高的那些在 oracle 里也不进 prepass
+# （`depth_prepass_texture` 因此只含不透明物体的深度，云与大气采样它正是要这个）。
+[[before]]
+label = "prepass"
+kind = "geometry"
+select = "opaque"
+vertex_shader = "art/frame/vertex_mesh.wgsl"
+vertex_entry = "vertex"
+writes = []
+depth_target = "scene_depth"
+render = "color=none|depth=clear(0)|depth_write=true|compare=greater_equal|winding=ccw"
+
+# ---- 点光 cube 影图：**六面各一条单层 pass**（§109.1）----
+#
+# `cube_faces = 6` ⇒ 这一条**展开成**（投影的灯数 × 6）条：每面一条，各自 `cube_face =
+# { light, face, layer }`（层号 = light×6+face，算式只在烘图侧）。
+# 一盏投影的灯都没有 ⇒ 一条都不展开。
+#
+# ⚠ **不许**用 multiview 把它"优化"成一条：那是行为差异，不是等价实现（§109.1）。
+# ⚠ `multiview_mask: None`、每面一个单层视图、`LoadOp::Clear(0.0)`、`depth_compare =
+# GreaterEqual`、每面 `world_from_view = 平移(灯位) × looking_at(CUBE_MAP_FACES[i])`、
+# 投影 `perspective_infinite_reverse_rh(π/2, 1.0, 0.1)` —— 这几样一条都不能少（§109.2）。
+# ⚠ 它画的是**投影的那些物体**（`cast_shadow`），**不是**"不透明的那些"：大气与云
+# 都是透明的，而它们不投影（Bevy 的 `NotShadowCaster`）。
+# ⚠ 剔除仍然来自**材质**（§127）：这条 pass 没有颜色附件 ⇒ 执行器不建片元阶段，
+# 而材质的 cull 照旧生效（材质带着片元 shader，它在 `color=none` 上不会输出颜色）。
+[[before]]
+label = "point_shadow"
+kind = "geometry"
+select = "shadow_casters"
+vertex_shader = "art/frame/vertex_mesh.wgsl"
+vertex_entry = "vertex"
+writes = []
+depth_target = "point_shadow_textures"
+cube_faces = 6
+render = "color=none|depth=clear(0)|depth_write=true|compare=greater_equal|winding=ccw"
+
+# ---- 拷贝：把预通道的深度**搬**一份快照出来（§131）----
+#
+# 为什么必须有这一步：wgpu 不许同一条 pass 里把一张图既当（写的）深度附件、又当资源
+# 绑进绑定组（`DEPTH_STENCIL_WRITE` 是独占用法）。而主 pass 要的是**两件事一起**：
+# ① 对大气的遮挡测试必须打在**真的**预通道深度上；② 大气的着色要采到**当时那份**深度。
+# 少了这次拷贝，就只剩两种错法：主 pass 改挂第二张空深度图（行星挡不住大气 ——
+# 拿一个 wgpu 报错换一张错图），或者让大气读一张全 0 的占位图（像素是错的，还不报错）。
+# 搬一份快照之后两边各得其所：主 pass 照旧挂 `scene_depth`，采样那一方读 `scene_depth_sample`。
+#
+# ⚠ 它叫 **copy**、不叫 blit：blit 是**画**（全屏三角 + 采样 + 混合），
+# "画"会在路上顺手做别的事（采样、缩放、调色）。这一个的语义就是**搬运** ——
+# 名字一旦叫成 blit，迟早有人往里塞一个采样或者"顺手缩个放"。
+[[before]]
+label = "copy_depth"
+kind = "copy"
+reads = ["scene_depth"]
+writes = ["scene_depth_sample"]
+# ⚠ 状态那一栏仍然必填，而 copy 只认"没有附件"这一种（挂附件是当场拒，不是被忽略的字段）。
+render = "color=none|depth=none|depth_write=true|compare=greater_equal|winding=ccw"
+
+# ---- 不透明：清屏色在这里，深度接着 prepass 的 ----
+[[before]]
+label = "opaque"
+kind = "geometry"
+select = "opaque"
+vertex_shader = "art/frame/vertex_mesh.wgsl"
+vertex_entry = "vertex"
+writes = ["scene_color_a"]
+depth_target = "scene_depth"
+render = "color=clear(0.00030959752321981426,0.00038699690402476784,0.0007739938080495357,1)|depth=load|depth_write=true|compare=greater_equal|winding=ccw"
+
+# ---- 天空盒：单独一条 pass ----
+# oracle 把它画在不透明那条 pass 的**末尾**（同一个 render pass，换一条管线）。
+# 这里给它自己的 pass，因为它的状态不一样（不写深度、不剔面），而状态是**每条 pass 一份**。
+# 结果一样：深度测试只让它画到没被盖住的地方；把它摆在不透明之后、透明之前，
+# 顺序也与 oracle 相同。几何是**程序化**的（没有顶点缓冲，三个顶点由 shader 现算）。
+[[before]]
+label = "sky"
+kind = "geometry"
+select = "skybox"
+vertex_shader = "art/frame/vertex_sky.wgsl"
+vertex_entry = "vertex"
+writes = ["scene_color_a"]
+depth_target = "scene_depth"
+render = "color=load|depth=load|depth_write=false|compare=greater_equal|winding=ccw"
+
+# ---- 透明：大气（Add）/ 云（Premultiplied）/ 环（Blend）都在这一条里 ----
+# ⚠ 它们的片元 shader 各不相同，而片元阶段属于**材质**（§129）—— 这正是那条裁决要保的东西。
+# 混合档、剔除、片元都按**材质**走（执行器按每一笔的材质建管线）。
+[[before]]
+label = "transparent"
+kind = "geometry"
+select = "transparent"
+vertex_shader = "art/frame/vertex_mesh.wgsl"
+vertex_entry = "vertex"
+writes = ["scene_color_a"]
+depth_target = "scene_depth"
+render = "color=load|depth=load|depth_write=false|compare=greater_equal|winding=ccw"
+
+# ---- blit：把中间目标搬到最终目标（内建名 `view`）----
+# oracle 的结构就是这样：主纹理画完，最后一个 upscaling 节点搬到输出（§110.1）。
+# ⚠ 它用的是 `blit`（`art/shaders/blit.wgsl`）**自己那支** shader，不是借 `px_grade`
+# 加个 `strength = 0`：借来的话，配方描述的就是"一道调色"，而这一条 pass 的职责是**搬**。
+# 谁在查一个错的像素，应该读六行就能回答"是不是 blit 的问题"。
+[[after]]
+label = "blit"
+kind = "fullscreen"
+fragment_shader = "blit"
+entry = "fs_main"
+reads = ["scene_color_a"]
+writes = ["view"]
+render = "color=load|depth=none|depth_write=true|compare=greater_equal|winding=ccw"
+params = { gain = 1.0 }
+
+# ---- 帧自有材质（§135）：**这颗渲染器自己的一部分**，不是可换的内容 ----
+#
+# 为什么它不写成 CAS 成员、也不由 `--bin shaders` 烘：天空盒那支 WGSL 必须与 oracle
+# 逐位对齐（方向重建走的是 `view_from_clip` / `world_from_view` 两条逆矩阵），它不是
+# "可以换一张图试试"的内容。烘图时它的**全文被内联进产物** ⇒
+# ⚠ **改 `art/frame/*.wgsl` 就要重烘**；而且"图没变"不等于"改动没生效"
+# （文档里的文本变了 ⇒ 产物键就变了，哪怕像素一个都没动）。
+[[materials]]
+name = "skybox"
+shader = "art/frame/skybox.wgsl"
+# ⚠ 入口名是 `fragment`，**不是** `fs_main`：`fs_main` 是全屏 pass 那条约定
+# （`art/shaders/blit.wgsl`），而帧自有材质走的是**材质**那条绑定组构造，
+# 它的入口约定就是 `fragment`（`px_render_wgpu::material::FRAGMENT_ENTRY`）。
+# 这一格原来写错成 `fs_main`，而当时**没有任何一处查过它**（反射只看参数块与贴图格）
+# ⇒ 产物烘得出来、运行期 wgpu 才报"找不到入口"（§136 实测）。
+# 现在烘图时就会拒（`px_graphs::frame::bake_material` 的第 ⑤ 条守卫）。
+entry = "fragment"
+# ⚠ 参数写的是**来源**，不是值：帧图是六个场景共用的一份，写死一个数就等于把内容
+# 焊进帧策略（§133：六份场景的亮度今天恰好都是 900.0，而内容可以不是 —— 第一份设了
+# 别的亮度的场景会得到整幅背景错的图，且不会有人报错）。
+# 认得的来源只有 `environment.ambient` 与 `environment.skybox_brightness`;
+# 名称/类型对不上在**烘图时**当场拒（`px_graphs::frame::bake_material`）。
+params = { brightness = "environment.skybox_brightness" }

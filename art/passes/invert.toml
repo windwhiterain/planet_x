@@ -1,0 +1,16 @@
+# 一条 `view → view` 的原地反相（§86.2 的第 2、3 行）。
+#
+# ⚠ **没有 `reads` / `writes`**：内容配方不点名目标，目标由帧图配（§128 裁决 D）。
+# 这条 pass 在帧图里长这样（`--bin passes` 打出来的接线）：
+#
+#     [4] transparent  写 scene_color_a          ← 绘制段的输出＝链的头
+#     [5] invert       读 scene_color_a 写 scene_color_b
+#     [6] blit         读 scene_color_b          ← 工具把它的输入改成了链尾
+#
+# 于是"一个名字恰好一张纹理"（§85）照旧成立，"原地改画面"由帧图的乒乓对表达 ——
+# `px_pass` 里没有"ping-pong"这个概念，交替是烘图侧按条数算出来的（§140 那条通则）。
+[[passes]]
+kind = "fullscreen"
+label = "invert"
+shader = "px_grade"
+params = { strength = 1.0 }

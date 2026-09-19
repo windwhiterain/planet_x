@@ -1,0 +1,16 @@
+# 两条 `view → view`（§86.2 的第 4 行）：证明**数组顺序就是执行顺序** ——
+# 第二条真的接着第一条的输出跑，而不是两条各看一遍原始画面。
+#
+# 这一档也是"交替"的**偶数**那一格：两条 pass ⇒ 链尾回到 `scene_color_a`，
+# 而 blit 的输入被工具改回 `a`。奇数那一格见 `invert.toml`（一条 ⇒ 链尾是 `b`）。
+[[passes]]
+kind = "fullscreen"
+label = "invert"
+shader = "px_grade"
+params = { strength = 1.0 }
+
+[[passes]]
+kind = "fullscreen"
+label = "vignette"
+shader = "px_vignette"
+params = { strength = 1.0 }

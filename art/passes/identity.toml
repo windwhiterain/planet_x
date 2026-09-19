@@ -1,0 +1,12 @@
+# 图形模式下的内容 pass 例子（§128 裁决 D）：**只描述做什么**，不点名目标。
+#
+# 目标由帧图配：`--bin passes` 把它接在帧图绘制段与 blit 之间，
+# 按乒乓对（`scene_color_a` / `scene_color_b`）轮流读写，并把 blit 的输入改成链尾那一个。
+# 同一份配方因此能在**任何**帧图里用。
+#
+# `px_grade` 的 `strength = 0` 是恒等：这一条只用来验证接线，不改变画面。
+[[passes]]
+kind = "fullscreen"
+label = "identity"
+shader = "px_grade"
+params = { strength = 0.0 }

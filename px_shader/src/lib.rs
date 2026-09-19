@@ -1,7 +1,7 @@
 //! shader include 闭包：模块发现、`#import` 解析、可达闭包与它的指纹（§17.1、§52.3）。
 //!
 //! 为什么要有这个 crate：`art/shaders/*.wgsl`（入口）里的 `#import planet_x::*` 是
-//! **naga_oil 在运行期**按模块名组装的，模块的真本住在 `px_render/assets/shaders/*.wgsl`
+//! **naga_oil 在运行期**按模块名组装的，模块的真本住在 `art/shaders/lib/*.wgsl`
 //! （各带 `#define_import_path`）。于是「这份 shader 到底是什么」不由入口文本一个文件决定。
 //! 而 PCG 那一侧的产物键（§17.1「键 = 内容」）只哈希了入口文本 ⇒ 改一个 include，
 //! 键不动、清单不动、场景键不动、槽版本不动，画面却会变 —— 这是「同一个键、不同内容」。
@@ -9,6 +9,14 @@
 //! 这里把**一份**解析规则交出来，三个用户共用：烘图侧（`px_graphs` 的 `shaders` / `scene` 图
 //! 程序，把闭包指纹算进产物键）、运行期（`px_render::shaders` 的模块表与 `reflect` 的库指纹）、
 //! 以及门与探针。各写一份的实现迟早对不上，而"对不上"正是要消灭的那个故障。
+//! ⚠ 上面那个 `px_render::shaders` 是**已删的 Bevy 宿主**的落点（§154；`git show f121ee3^:…`）。
+//!
+//! ⚠ **S8-c 标注：运行期那半边的落点换了名字**（§154 删了 `px_render`）——
+//! 那时（S8-c）运行期是 `px_render_wgpu::shader` 的模块表 + `px_shader::reflect` 的库指纹。
+//! "三个用户"这条**分法**没变（烘图侧 / 运行期 / 门与探针），改的只是"运行期"是谁。
+//! ⚠ **§157 取代（2026-09-19）：那个 crate 又改名叫 `px_render`** ⇒ 运行期今天是
+//! `px_render::shader` 的模块表 + `px_shader::reflect` 的库指纹。⚠ 同一个名字在 §154–§156
+//! 里指**已删的 Bevy 宿主**，从 §157 那一笔起指**现在的唯一宿主**（裸 wgpu）—— 读旧句按旧义读。
 //!
 //! ⚠ 外部符号（`bevy_pbr::…`）**只记名字**：它们的实现由 Bevy / naga_oil 的版本决定，
 //! 那是 `px_ops::SHADER_VERSION` 手动那一档（§19.1）。这条边界要写进报告，不能装作它不存在。
@@ -16,8 +24,15 @@
 //! 依赖方向：**叶子 crate** —— 除了 `px_protocol`（只有类型，没有实现）不依赖本仓任何 crate，
 //! 也不依赖 bevy / wgpu。`px_ops` / `px_graphs`（烘图侧）与 `px_render`（运行期）都能用它：
 //! 烘图侧要在这里算键、组装、反射，运行期要在同一份规则下装载与对账。
+//! ⚠ 这一句里的"`px_render`（运行期）"在 §157 之前指 Bevy 宿主、之后指 wgpu 宿主 —— 名字换过手，
+//! 而"运行期"这个**角色**没换过（§157）。
+//!
+//! ⚠ **S8-c 标注：运行期那个 crate 当时叫 `px_render_wgpu`**（§154 删了 Bevy 宿主 `px_render`）。
+//! 依赖方向的**约束**（叶子、不拖 bevy / wgpu）反而更强了 —— 今天它也**不拖 wgpu**。
+//! ⚠ **§157（2026-09-19）：它改名叫 `px_render` 了** ⇒ 这一句今天读作"运行期 = `px_render`"。
 
 pub mod assemble;
+pub mod host_stubs;
 pub mod reflect;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -43,23 +58,26 @@ const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 // 根目录 / 文件发现
 // ---------------------------------------------------------------------------
 
-/// 两个根：**库**（`<asset_root>/shaders`，`px_render/assets/shaders`）与**入口**
-/// （`<workspace>/art/shaders`）。顺序不定语义：`module_sources` 按名字收，重名要报错。
+/// **本仓的约定**：库在 `<workspace>/art/shaders/lib`，入口在 `<workspace>/art/shaders`。
+/// 两个根是**同一个契约的两半**，所以只有这一个函数说了算 —— 烘图侧（`px_graphs`）
+/// 与宿主（`px_render`）都从它拿根；谁也不再自己拼一次路径。
 ///
-/// `asset_root` 是渲染器那边可覆盖的资产根（`px_render::asset_root()`，找 `shaders/common.wgsl`
-/// 的那个目录）；烘图侧直接给 `<workspace>/px_render/assets`。
-pub fn roots(workspace: &Path, asset_root: &Path) -> Vec<PathBuf> {
+/// ⚠ 为什么库**搬到 `art/shaders/lib/`**（S8-a）：它原来住 `px_render/assets/shaders`
+/// —— 那是 **bevy 宿主那个 crate 的资产目录**，而库的内容与"谁来渲染"无关：烘图侧要它、
+/// 裸 wgpu 宿主也要它。宿主删掉之后，"库住在某个宿主的资产目录里"就变成一句**没有宿主
+/// 可指的话**。搬到艺术内容自己的根下面 ⇒ 库与入口同属一份内容，与宿主是谁无关。
+///
+/// ⚠ 这次搬家**不许动任何产物键**：闭包指纹哈希的是 `(模块名, 源码)` 对与外部符号名
+/// （见 [`Closure::fingerprint`]），**从不含路径**；模块名来自文件里的 `#define_import_path`。
+/// 所以纯搬家改不了任何键 —— 由回归集（J1/J2/J3 + 逃生门六份文件字节）复测证明，不是推的。
+///
+/// ⚠ 两个根都**只扫一层**（`wgsl_files` 不递归）：`lib/` 是子目录，所以入口根那一遍
+/// 不会把库再收一次（收两次会在 `module_sources` 里撞成"两个真本"而当场报错）。
+pub fn workspace_roots(workspace: &Path) -> Vec<PathBuf> {
     vec![
-        asset_root.join("shaders"),
+        workspace.join("art").join("shaders").join("lib"),
         workspace.join("art").join("shaders"),
     ]
-}
-
-/// **本仓的约定**：库在 `<workspace>/px_render/assets/shaders`，入口在 `<workspace>/art/shaders`。
-/// 烘图侧直接用它；渲染器那边把可覆盖的 `asset_root()` 传进 `roots` ⇒ 同一份约定，两种取法
-/// （烘图侧不知道运行期的资产根在哪，运行期也不该猜工作区在哪）。
-pub fn workspace_roots(workspace: &Path) -> Vec<PathBuf> {
-    roots(workspace, &workspace.join("px_render").join("assets"))
 }
 
 /// `workspace_roots` 那一份约定下的模块表。烘图侧一行拿到：`workspace_modules(&px_ops::workspace_root())`。
@@ -156,6 +174,46 @@ pub fn module_sources(roots: &[PathBuf]) -> Result<ModuleTable, String> {
     Ok(modules)
 }
 
+/// **入口** shader 的真本：在 [`workspace_roots`] 那两个根下按**文件名**找。
+///
+/// 为什么这条规则要住在共享 crate 里：找入口这一件事原先在 `px_render::shaders::shader_source_of`
+/// 与 `px_render::shader::try_source_of` **各写了一遍**，而 `px_probe` 要是再写第三遍，
+/// 「游标那样一份内容 shader 到底是盘上哪个文件」就会有三个答案。规则只有一条：
+/// **按文件名找，找到 0 个或 ≥2 个都算失败** —— 重名不许先到先得，那会让两边各测一份。
+///
+/// 找不到 / 重名都返回 `Err`（不 panic）：装载期那条路要"当场拒"，热重载那条路要
+/// "这一槽不重载，并说清为什么"，两者只差调用方拿到 `Err` 之后干什么（§147 那条口径）。
+pub fn workspace_source_of(workspace: &Path, name: &str) -> Result<(String, PathBuf), String> {
+    let roots = workspace_roots(workspace);
+    let found: Vec<PathBuf> = wgsl_files(&roots)?
+        .into_iter()
+        .filter(|path| path.file_name().and_then(|value| value.to_str()) == Some(name))
+        .collect();
+    let places = |paths: &[PathBuf]| {
+        paths
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>()
+            .join(" / ")
+    };
+    match found.len() {
+        1 => {
+            let path = found.into_iter().next().expect("长度是 1");
+            let text = std::fs::read_to_string(&path)
+                .map_err(|err| format!("读不了 {}：{err}", path.display()))?;
+            Ok((text, path))
+        }
+        0 => Err(format!(
+            "哪里都找不到 shader '{name}'（找过 {}）",
+            places(&roots)
+        )),
+        _ => Err(format!(
+            "shader '{name}' 在两处都有：{} —— 名字必须唯一，否则测的是这一份、用的是那一份",
+            places(&found)
+        )),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // 闭包
 // ---------------------------------------------------------------------------
@@ -224,6 +282,10 @@ impl Closure {
 }
 
 /// 整张模块表的指纹（不区分可达性）：给只想知道"库变没变"的缓存用（`px_render::reflect`）。
+/// ⚠ 那个落点是**已删的 Bevy 宿主**的模块（§154；`git show f121ee3^:px_render/src/reflect.rs`）。
+/// ⚠ S8-c 标注：S8-c 时那个落点叫 `px_render_wgpu`（§154 删了 Bevy 宿主 `px_render`）；
+/// §157（2026-09-19）起那个 crate 又叫 `px_render` —— 但**它没有 `reflect` 模块**（反射在
+/// `px_shader::reflect`），所以这一句里的 `px_render::reflect` **永远**指 Bevy 那支。
 pub fn modules_fingerprint(modules: &ModuleTable) -> u64 {
     let mut hasher = Fnv::new(MODULES_NAMESPACE);
     for (name, source) in modules {
@@ -488,7 +550,7 @@ mod tests {
         let roots = workspace_roots(workspace);
         assert!(
             roots[0].join("common.wgsl").exists(),
-            "库根应当是 px_render/assets/shaders：{}",
+            "库根应当是 art/shaders/lib：{}",
             roots[0].display()
         );
         assert!(
@@ -496,10 +558,32 @@ mod tests {
             "入口根应当是 art/shaders：{}",
             roots[1].display()
         );
+        // ⚠ 库根**不许**在入口根那一遍里再被收一次：两个根都只扫一层，
+        //   否则同一个模块会以"两个真本"的形式当场报错。
+        assert_eq!(
+            wgsl_files(&roots).expect("文件表").len(),
+            10,
+            "库 3 份 + 入口 7 份；多出来的一定是某一个根被子目录又收了一遍"
+        );
         let modules = workspace_modules(workspace).expect("模块表");
         for name in ["planet_x::common", "planet_x::light", "planet_x::noise"] {
             assert!(modules.contains_key(name), "库里应当有 {name}");
         }
+        // 入口查找也走同一份约定（`px_probe` 与宿主共用这一条）。
+        let (text, path) = workspace_source_of(workspace, "clouds.wgsl").expect("入口真本");
+        assert!(
+            path.ends_with("art/shaders/clouds.wgsl"),
+            "找到的应当是入口根下那一份：{}",
+            path.display()
+        );
+        assert!(
+            text.contains("#import planet_x::light::sun_light"),
+            "读到的是入口那一份"
+        );
+        assert!(
+            workspace_source_of(workspace, "nobody.wgsl").is_err(),
+            "找不到就是 Err —— 那正是「这一槽不重载」要说清的事"
+        );
     }
 
     #[test]
@@ -543,5 +627,62 @@ mod tests {
         let duplicate = module_sources(&roots).expect_err("同名两份必须报错");
         assert!(duplicate.contains("两个真本"), "报错要说清是两个真本：{duplicate}");
         std::fs::remove_file(entry.join("noise-again.wgsl")).expect("清不掉夹具");
+    }
+
+    /// 四份**内容入口**在裸 wgpu 宿主那张桩表下组装出来的文本与它的 include 闭包：**钉住的读数**。
+    ///
+    /// ⚠ 为什么这一条是判据而不是"打印一下"：S8-b 要判的是"**改 `#import` 的名字**有没有动到
+    /// 组装出来的字"。而组装器把 `#import` 那几行**整行丢掉**（它们不进产物，见
+    /// [`assemble::render_source`]）⇒「文本不变」与「闭包不变」是两件事，必须**分开量**：
+    ///
+    /// - 字节数 + FNV：组装文本（`#import` 展开后的那一份，就是喂给 `create_shader_module` 的）；
+    /// - 闭包指纹：**外部符号的名字在这里**（`Closure::fingerprint` 哈希的是 import 子句本身）
+    ///   ⇒ 它同时是 `px_ops::shader_key` 的输入之一（`键 = WGSL 字节 ‖ 闭包指纹`）。
+    ///
+    /// ⚠ 这正是 S8-b 那条死结的读数：改一个外部符号的**名字**，组装文本可以一个字节都不动，
+    /// 而闭包指纹**必然**变 ⇒ 产物键变 ⇒ `art/anchor/frozen/*.pxart` 里钉着的 shader 成员键变。
+    /// 谁要动这些名字，这一条会告诉他"动的是哪一半"。
+    ///
+    /// ⚠ `ring.wgsl` 是**负对照**：它一个 `planet_x::` 模块都不引、外部符号只有 `VertexOutput`
+    /// 一个（§154 记过：换桩表时它逐字节不变，就是因为它不引那几个差别符号）。
+    #[test]
+    fn the_four_entry_shaders_assemble_to_these_bytes_under_the_wgpu_host_table() {
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("px_shader 必须住在 workspace 下");
+        let modules = workspace_modules(workspace).expect("模块表");
+        // (入口, 组装文本字节数, 组装文本 FNV-1a, 闭包指纹)
+        let pinned = [
+            ("atmosphere.wgsl", 8311_usize, 0x6b67_21a2_55ce_f009_u64, 0x3388_1b68_faef_8589_u64),
+            ("clouds.wgsl", 52769, 0x7ff2_8567_aa71_6987, 0x7678_2061_a1bd_b006),
+            ("ring.wgsl", 1096, 0x59d8_22d8_f87c_d24c, 0x23d0_283f_680f_89d3),
+            ("surface.wgsl", 25915, 0xfecf_8fee_bd76_8982, 0xabed_b20f_868b_f99c),
+        ];
+        for (name, bytes, fnv, closure_fingerprint) in pinned {
+            let (source, _path) = workspace_source_of(workspace, name).expect("入口真本");
+            assert_eq!(
+                closure(&source, &modules).fingerprint(),
+                closure_fingerprint,
+                "{name} 的 include 闭包变了 —— 外部符号的名字也在指纹里，\
+                 而 `px_ops::shader_key` 拿它算产物键（改了它，冻在 art/anchor/frozen 的产物键就跟着变）"
+            );
+            let mut seen = Vec::new();
+            let assembled = assemble::render_source(
+                &source,
+                &modules,
+                crate::host_stubs::wgpu_host_stub,
+                &mut seen,
+            );
+            assert_eq!(
+                assembled.len(),
+                bytes,
+                "{name} 组装出来的字节数变了（喂给 create_shader_module 的就是这一份）"
+            );
+            let mut plain = Fnv(FNV_OFFSET);
+            for byte in assembled.as_bytes() {
+                plain.byte(*byte);
+            }
+            assert_eq!(plain.finish(), fnv, "{name} 组装出来的字节流变了");
+        }
     }
 }

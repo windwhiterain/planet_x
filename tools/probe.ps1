@@ -11,6 +11,12 @@ param(
 $ErrorActionPreference = "Stop"
 . "$PSScriptRoot/harness.ps1"
 
+# ⚠ S8-a：`$Exe` 的缺省值换成了 `px_render.exe`（bevy 宿主已删）。
+#   这一路**不需要**改形状：它只做"客户端请求 + 拼一张对照图"，而新宿主的客户端语义
+#   与 bevy 宿主**逐字同源**（§147.2：`request_once` 是照搬的）。
+#   ⚠ 与 `frame-probe.ps1` 那两条**退休**的路不同：那两条要的是计时用的帧循环，
+#   新宿主当场拒；这一路出的是图，出图那条路是成立的。
+
 $sceneArtifact = Resolve-Artifact -Graph $Graph -Node $Scene
 Write-Host "对照图的场景：$(Format-Artifact $sceneArtifact)"
 

@@ -3,6 +3,21 @@
 px_render 长什么样：离屏还是常驻、实体分几类、那张图是怎么出来的、空白画面怎么定性，
 以及它怎么记住自己造过的东西。**改完怎么验**在 `09-instruments.md`。
 
+> ⚠ **S8-c 标注（2026-09-19）：这一篇里的 `bevy_*` file:line 引用是承重的，不许删。**
+> 它们解释的是"**为什么这个数是这个数**"：`bevy_pbr-0.19.1/src/material.rs:466-486` 的
+> `descriptor.layout.insert(3, …)` ⇒ 材质绑定组**永远是第 3 组**；`bevy_render-0.19.1/src/
+> render_resource/bind_group.rs:609` 的静态 `bind_group_layout_entries` ⇒ 布局只能**固定超集**
+> （§24 那两条"不能"就是这么来的）。删掉引用，这两条结论就只剩断言。
+> ⚠ 可查性（本单元实核）：那些 crate 的源码**今天仍在盘上**
+> （`~/.cargo/registry/src/index.crates.io-*/bevy_pbr-0.19.1` 等）。
+> ⚠ 过时的两处：① 本文里的 `px_render …` **命令行**（§12 的两段、§65 那一行）指的是**已删的
+> Bevy 宿主**（`f121ee3`，`15-render-wgpu.md` §154）⇒ 今天用 `px_render_wgpu --offline --scene …`；
+> ② `px_render/src/{shaders,passes}.rs` 那几条落点同理，源码在 git 历史里（`git show f121ee3^:…`）。
+> **读数与结论一字未删。**
+> ⚠ **§157（2026-09-19）：①里那条等价命令今天写作 `px_render --offline --scene …`**
+> （wgpu 宿主改名叫 `px_render`）；而①②里的 `px_render` **照旧指已删的 Bevy 宿主** ——
+> 同一段两个名字各指一支，按日期切（`15-render-wgpu.md` §157）。
+
 ---
 
 ## §12 px_render 的形状
@@ -561,7 +576,7 @@ Get-SceneShaderMembers -Path <v1 产物>   # → 当场报错「场景帧不像�
 （产物里的 schema descriptor）。这一步之后 **「加一个参数 = 改 WGSL + 改配方，0 编译」成立**（§79 的 W1 拆掉）。
 提交 **`34c9b3f`**。
 
-### §81.1 三档判据（`px_graphs/src/bin/scene.rs` 的 `merge_params`）
+### §81.1 三档判据（`px_graphs::params::merge_named`）
 
 | 配方里的名字 | 谁说了算 | 结果 |
 |---|---|---|

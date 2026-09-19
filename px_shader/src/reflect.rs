@@ -7,6 +7,12 @@
 //!
 //! 为什么住在这个叶子 crate：烘图侧（`px_graphs` / `px_ops`）也要在**烘图时**反射一次
 //! （schema descriptor 进产物、配方参数在烘图时就校验），而 `px_render` 拖着 bevy 进不去。
+//! ⚠ 那个 `px_render` 是**已删的 Bevy 宿主**（§154）；§157 起同一个名字归 wgpu 宿主，
+//! 而它对今天那支同样成立（拖整棵 wgpu 树）。
+//!
+//! ⚠ **S8-c 标注：那条理由的历史形态已经没了**（§154 把 `px_render` 连 bevy 一起删了）。
+//! 今天这条约束仍然成立、而且更简单：**烘图侧要轻**（§100 的用户口径）⇒ 反射不能住进拖 wgpu
+//! 的宿主 crate。运行期那一侧今天用这份反射的是 `px_render`（§157 起的新义：那支裸 wgpu 宿主）。
 //! `px_protocol` 那边则被依赖门钉死只有 serde（`px_protocol/tests/crate_graph.rs`），
 //! naga 同样进不去 ⇒ 反射只能住这里，契约的**类型**（[`MaterialLayout`] 等）住 `px_protocol::material`。
 
@@ -14,6 +20,39 @@ use px_protocol::material::{
     MATERIAL_BIND_GROUP, MAX_PARAMS_BYTES, MaterialLayout, PARAMS_ALIGN, PARAMS_BINDING, ParamKind,
     ParamSlot, TextureDimension, TextureSlot, texture_bindings, texture_slot_of,
 };
+
+/// 组装好的 WGSL 里**有哪些入口**：`(名字, 阶段)`，阶段取 `"vertex"` / `"fragment"` / `"compute"`。
+///
+/// ⚠ 为什么要有它：配方里的 `entry` 是一个**名字**，而"这个名字指不到东西"这件事
+/// 反射本身**看不见**（它只读参数块与贴图格）。代价付过（§136 实测）：
+/// `art/frame/default.toml` 写的是 `entry = "fs_main"`（全屏 pass 那条约定），
+/// 而它自己的 WGSL 里那个函数叫 `fragment` —— 那份产物一路烘到运行期，
+/// wgpu 才报"找不到入口"，而报错离病因（配方里一个词）已经很远。
+///
+/// ⇒ 这一条让烘图侧能**在烘的时候**问一句"这个入口在不在"，并把**实际的入口列出来**。
+/// 名字 → 阶段那一格用字符串而不是 `naga::ShaderStage`：naga 是这一层的私事，
+/// 烘图侧（`px_graphs`）不该为了问一句"有没有这个入口"而拖进 naga 的类型。
+pub fn entry_points(assembled: &str, name: &str) -> Result<Vec<(String, &'static str)>, String> {
+    let module = naga::front::wgsl::parse_str(assembled)
+        .map_err(|error| format!("{name} 解析失败：{}", error.emit_to_string(assembled)))?;
+    Ok(module
+        .entry_points
+        .iter()
+        .map(|point| {
+            let stage = match point.stage {
+                naga::ShaderStage::Vertex => "vertex",
+                naga::ShaderStage::Fragment => "fragment",
+                naga::ShaderStage::Compute => "compute",
+                // ⚠ `ShaderStage` 是 `#[non_exhaustive]`（naga 29 里后面还有 Task / Mesh /
+                // 光追那几档，WGSL 前端解不出来）。这一格不该出现 —— 但它**不许 panic、
+                // 也不许被悄悄咽掉**：真出现了，"这一份 WGSL 有哪几个入口"这条读数必须
+                // 仍然说得清（§104 第 12 条那条口径：不可用就降级，不做替代读数）。
+                _ => "其它（这一版不认识的阶段）",
+            };
+            (point.name.clone(), stage)
+        })
+        .collect())
+}
 
 /// 反射：从组装好的 WGSL 里读出材质契约。
 ///
@@ -199,7 +238,7 @@ mod tests {
         )
         .unwrap_or_else(|err| panic!("读不了 {name}：{err}"));
         let mut seen = Vec::new();
-        let assembled = crate::assemble::render_source(&source, &modules, &mut seen);
+        let assembled = crate::assemble::render_source(&source, &modules, crate::assemble::bevy_stub, &mut seen);
         reflect_assembled(&assembled, name).unwrap_or_else(|err| panic!("{err}"))
     }
 
@@ -211,7 +250,7 @@ mod tests {
         )
         .expect("模块表");
         let mut seen = Vec::new();
-        crate::assemble::render_source(source, &modules, &mut seen)
+        crate::assemble::render_source(source, &modules, crate::assemble::bevy_stub, &mut seen)
     }
 
     /// 契约的**形状**由 shader 自己的结构体说了算（不是 Rust 侧那张老表）。
@@ -267,6 +306,32 @@ mod tests {
                       @fragment fn fragment(in: VertexOutput) -> @location(0) vec4<f32> { return params; }\n";
         let err = reflect_assembled(&assembled(source), "夹具").expect_err("必须是结构体");
         assert!(err.contains("结构体"), "报错要说清要什么：{err}");
+    }
+
+    /// 入口清单：**阶段与名字都要有**，而且只列真的声明了的。
+    ///
+    /// ⚠ 这一条存在的理由是一个付过代价的坑（§136）：配方里那个 `entry` 名字指不到东西时，
+    /// 以前**没有任何一处**查得出来 —— 反射只看参数块与贴图格。烘图侧现在靠这个函数
+    /// 在**烘的时候**就问一句"这个入口在不在"，并把它实际的入口列进报错里。
+    #[test]
+    fn the_entry_points_are_listed_with_their_stage() {
+        let source = "struct P { x: f32 };\n\
+                      @group(#{MATERIAL_BIND_GROUP}) @binding(0) var<uniform> params: P;\n\
+                      struct Out { @builtin(position) position: vec4<f32> };\n\
+                      @vertex fn vs_main() -> Out { return Out(vec4<f32>(0.0)); }\n\
+                      @fragment fn fragment() -> @location(0) vec4<f32> { return vec4<f32>(params.x); }\n";
+        let text = assembled(source);
+        let entries = entry_points(&text, "夹具").expect("枚举入口");
+        assert_eq!(
+            entries,
+            vec![
+                ("vs_main".to_string(), "vertex"),
+                ("fragment".to_string(), "fragment")
+            ],
+            "名字与阶段都要报（次序是声明次序）"
+        );
+        // 指不到的名字**不在**这张表里 —— 这正是调用方要问的那一句。
+        assert!(!entries.iter().any(|(name, _)| name == "fs_main"));
     }
 
     #[test]

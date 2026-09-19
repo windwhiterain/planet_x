@@ -1,0 +1,14 @@
+[package]
+name = "px_pass"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+wgpu = { version = "29", default-features = false, features = ["wgsl"] }
+
+[dev-dependencies]
+# 几何判据要**真设备**（§121 第 2 件：一条 geometry pass 画进离屏纹理再读回来）。
+# 库本身不建设备（那是宿主的策略，见 `px_render::gpu`），但判据得自己有一台，
+# 所以后端只在这里开、且只有 Vulkan —— 与产品同一条约束（§104 第 9 条：后端不是可选项）。
+wgpu = { version = "29", default-features = false, features = ["vulkan", "wgsl"] }
+pollster = "0.4"

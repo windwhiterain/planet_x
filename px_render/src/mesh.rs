@@ -1,36 +1,130 @@
-//! 网格产物 → 渲染就绪的网格。这是渲染器里**唯一**碰几何的地方。
+//! 网格产物 → 可以上传的顶点 / 索引。这是渲染器里**唯一**碰几何的地方。
 //!
-//! 它不认识行星、不认识云：给一份 `kind = Mesh` 的产物，还一个 `Handle<Mesh>`。
-//! 顶点位置的位移、球壳镶嵌这些"形状从哪来"的事全在烘图侧（§65）。
+//! 从 `px_render::mesh` 搬来（§102：耦合度 6，全在 Bevy 的 `Mesh` 上）—— ⚠ 那个
+//! `px_render::mesh` 是**已删的 Bevy 宿主**的模块（§154；`git show f121ee3^:px_render/src/mesh.rs`），
+//! **不是本 crate 的 [`crate::mesh`]**（本 crate 从 §157 起也叫 `px_render`，两个 `mesh` 不是一份东西）。
+//! 它不认识行星、
+//! 不认识云：给一份 `kind = Mesh` 的产物，还一份顶点/索引。位移、球壳镶嵌这些
+//! "形状从哪来"的事全在烘图侧（§65）。
+//!
+//! ⚠ 两次"搬运"的算式一个括号都没动 —— 它们**改的是像素**：
+//!
+//! - [`weld_normals`]：按位置量化（×65536 取整）分组、组内求和的**顺序**决定法线；
+//! - [`outward_winding`]：等值面算子出来的代理缠绕朝里（实测有向体积 −0.47），
+//!   不翻的话被剔除的是**近**面，云会整片消失（§102 记的那条）。
+//!
+//! 审计文本也逐字照抄：它进的是报告与服务日志，是 §51 那套历史读数的一部分。
 
 use std::collections::HashMap;
 
-use bevy::asset::RenderAssetUsages;
-use bevy::mesh::{Indices, Mesh, PrimitiveTopology, VertexAttributeValues};
-use bevy::prelude::*;
 use px_protocol::art::{AssetKind, MeshData};
 use px_protocol::stream::{self, Frame};
 
-use crate::art_cache::ReadyMesh;
+use crate::vec::Vec3;
+
+/// 平面表示的网格。没有 Bevy 的 `Mesh`、没有顶点布局的泛型 —— 布局是**运行期的一张表**
+/// （`wgpu::VertexBufferLayout`），不必为每种顶点生成一份代码。
+#[derive(Clone, Debug, Default)]
+pub struct Mesh {
+    pub positions: Vec<[f32; 3]>,
+    pub normals: Vec<[f32; 3]>,
+    pub uvs: Vec<[f32; 2]>,
+    pub indices: Vec<u32>,
+}
+
+impl Mesh {
+    pub fn vertex_count(&self) -> usize {
+        self.positions.len()
+    }
+
+    pub fn triangle_count(&self) -> usize {
+        self.indices.len() / 3
+    }
+
+    /// 顶点属性表：`(shader_location, 格式, 从哪个属性来)`。
+    ///
+    /// ⚠ **真本是产物自己带的那四个属性**（[`px_protocol::art::MESH_ATTRIBUTES`]）：
+    /// 位置 / 法线 / uv 三样在网格里就是三块 `f32` 数组，所以**位置天然就是**
+    /// location 0 的 `Float32x3`、法线 1、uv 2 —— 这个次序不是我挑的，是产物的形状定的
+    /// （与 Bevy 那份 `Mesh` 的 `POSITION` / `NORMAL` / `UV_0` 同一个次序，oracle 也是它）。
+    /// 在宿主里另写一张"我猜的布局"就是 §66.1：漂开的那天顶点属性会静默错位。
+    ///
+    /// ⚠ 交错只发生在**上传**这一步：产物是**非交错**的三块数组（每块自己一段），
+    /// 而 `px_pass` 的一笔 draw 只接受一个顶点缓冲 ⇒ 上传前必须拼成一条 `stride = 32` 的流。
+    /// 拼的次序就是这张表（0/1/2 依次排下去）。
+    pub fn attributes() -> Vec<(u32, wgpu::VertexFormat, &'static str)> {
+        vec![
+            (0, wgpu::VertexFormat::Float32x3, "positions"),
+            (1, wgpu::VertexFormat::Float32x3, "normals"),
+            (2, wgpu::VertexFormat::Float32x2, "uvs"),
+        ]
+    }
+
+    /// 交错后的顶点流（`positions → normals → uvs`，每条 `stride` 字节）。
+    ///
+    /// ⚠ 三块属性长度不一致就**当场拒**，不许按下标硬取：那会在上传时 panic 在
+    /// 一个看不出所以然的位置，而真正的原因是产物本身不完整。
+    pub fn interleaved(&self) -> Result<Vec<u8>, String> {
+        let count = self.positions.len();
+        if self.normals.len() != count || self.uvs.len() != count {
+            return Err(format!(
+                "网格的三块属性对不上：位置 {count} 条 / 法线 {} 条 / uv {} 条 ⇒ 拼不出交错顶点流",
+                self.normals.len(),
+                self.uvs.len()
+            ));
+        }
+        let stride = Self::stride() as usize;
+        let mut bytes = Vec::with_capacity(count * stride);
+        for index in 0..count {
+            for value in self.positions[index] {
+                bytes.extend_from_slice(&value.to_le_bytes());
+            }
+            for value in self.normals[index] {
+                bytes.extend_from_slice(&value.to_le_bytes());
+            }
+            for value in self.uvs[index] {
+                bytes.extend_from_slice(&value.to_le_bytes());
+            }
+        }
+        Ok(bytes)
+    }
+
+    /// 一条顶点的字节数 = 三个属性的宽度之和（12 + 12 + 8 = 32）。
+    pub fn stride() -> u32 {
+        Self::attributes()
+            .iter()
+            .map(|(_, format, _)| format.size() as u32)
+            .sum()
+    }
+
+    /// `stride` / 每一格的偏移与格式。偏移是**表里累加出来的**（不是手抄的 0/12/24）。
+    pub fn vertex_attributes() -> Vec<wgpu::VertexAttribute> {
+        let mut offset = 0_u64;
+        let mut attributes = Vec::new();
+        for (shader_location, format, _) in Self::attributes() {
+            attributes.push(wgpu::VertexAttribute {
+                format,
+                offset,
+                shader_location,
+            });
+            offset += format.size();
+        }
+        attributes
+    }
+}
 
 /// 闭合网格按**有向体积**判缠绕朝向：朝里就翻成朝外。返回翻之前的体积（`None` = 没动）。
 ///
-/// 为什么渲染侧要管这件事：材质走 Bevy 的通用 `Material` 管线，而那条管线默认把背面剔掉
-/// （`cull_mode = Some(Face::Back)`，`bevy_pbr/src/render/mesh.rs`—— 除非产物在材质里
-/// 声明了别的剔除档）。等值面算子出来的代理缠绕朝里（实测有向体积 −0.47）⇒ 被剔掉的是**近**面，
-/// 云会整片消失。顺着缠绕翻，法线属性得跟着翻，否则顶点法与三角形绕向说的不是一件事。
-fn outward_winding(mesh: &mut Mesh) -> Option<f64> {
-    let Some(VertexAttributeValues::Float32x3(positions)) =
-        mesh.attribute(Mesh::ATTRIBUTE_POSITION).cloned()
-    else {
+/// 为什么渲染侧要管这件事：材质那条管线默认把背面剔掉（`cull = Back`），
+/// 而等值面算子出来的代理缠绕朝里 ⇒ 被剔掉的是**近**面。顺着缠绕翻，法线属性得跟着翻，
+/// 否则顶点法与三角形绕向说的不是一件事。
+pub fn outward_winding(mesh: &mut Mesh) -> Option<f64> {
+    if mesh.positions.is_empty() || mesh.indices.is_empty() {
         return None;
-    };
-    let Some(Indices::U32(indices)) = mesh.indices().cloned() else {
-        return None;
-    };
-    let at = |index: u32| Vec3::from(positions[index as usize]);
+    }
+    let at = |index: u32| Vec3::from_array(mesh.positions[index as usize]);
     let mut volume = 0.0_f64;
-    for triangle in indices.chunks_exact(3) {
+    for triangle in mesh.indices.chunks_exact(3) {
         let (a, b, c) = (at(triangle[0]), at(triangle[1]), at(triangle[2]));
         volume += f64::from(a.dot(b.cross(c)));
     }
@@ -38,37 +132,28 @@ fn outward_winding(mesh: &mut Mesh) -> Option<f64> {
         return None;
     }
 
-    let mut flipped = indices;
-    for triangle in flipped.chunks_exact_mut(3) {
+    for triangle in mesh.indices.chunks_exact_mut(3) {
         triangle.swap(1, 2);
     }
-    mesh.insert_indices(Indices::U32(flipped));
-    if let Some(VertexAttributeValues::Float32x3(normals)) =
-        mesh.attribute_mut(Mesh::ATTRIBUTE_NORMAL)
-    {
-        for normal in normals.iter_mut() {
-            for value in normal.iter_mut() {
-                *value = -*value;
-            }
+    for normal in mesh.normals.iter_mut() {
+        for value in normal.iter_mut() {
+            *value = -*value;
         }
     }
     Some(volume / 6.0)
 }
 
-fn weld_normals(mesh: &mut Mesh) {
-    let Some(VertexAttributeValues::Float32x3(positions)) =
-        mesh.attribute(Mesh::ATTRIBUTE_POSITION).cloned()
-    else {
+/// 同一个位置上的顶点把法线焊成一条（平均后归一）。
+///
+/// ⚠ 分组键是**量化过的位置**（×65536 四舍五入成 i32），顺序是位置下标的升序 ——
+/// 求和次序换了，法线最后一位就换，逐字节判据当场红。
+pub fn weld_normals(mesh: &mut Mesh) {
+    if mesh.positions.is_empty() || mesh.normals.len() != mesh.positions.len() {
         return;
-    };
-    let Some(VertexAttributeValues::Float32x3(normals)) =
-        mesh.attribute(Mesh::ATTRIBUTE_NORMAL).cloned()
-    else {
-        return;
-    };
+    }
 
     let mut groups: HashMap<[i32; 3], Vec<usize>> = HashMap::new();
-    for (index, position) in positions.iter().enumerate() {
+    for (index, position) in mesh.positions.iter().enumerate() {
         let key = [
             (position[0] * 65_536.0).round() as i32,
             (position[1] * 65_536.0).round() as i32,
@@ -77,25 +162,24 @@ fn weld_normals(mesh: &mut Mesh) {
         groups.entry(key).or_default().push(index);
     }
 
-    let mut welded = normals.clone();
+    let mut welded = mesh.normals.clone();
     for indices in groups.values() {
         if indices.len() < 2 {
             continue;
         }
         let mut sum = Vec3::ZERO;
         for &index in indices {
-            sum += Vec3::from(normals[index]);
+            sum += Vec3::from_array(mesh.normals[index]);
         }
         let average = sum.normalize_or_zero().to_array();
         for &index in indices {
             welded[index] = average;
         }
     }
-
-    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, welded);
+    mesh.normals = welded;
 }
 
-/// 网格产物 → 网格。返回的审计文本同上：它是**值**，要被缓存原样重放。
+/// 网格产物 → 网格。返回的审计文本是**值**，要被缓存原样重放。
 pub fn load_mesh(path: &str) -> Result<(Mesh, String), String> {
     let bytes = std::fs::read(path).map_err(|err| format!("读不到 {path}：{err}"))?;
     let frames = stream::read_stream(&mut bytes.as_slice()).map_err(|err| err.to_string())?;
@@ -115,21 +199,24 @@ pub fn load_mesh(path: &str) -> Result<(Mesh, String), String> {
         .collect();
     let data = MeshData::from_blobs(&blobs).map_err(|err| err.to_string())?;
 
-    let positions: Vec<[f32; 3]> = data
-        .positions
-        .chunks_exact(3)
-        .map(|chunk| [chunk[0], chunk[1], chunk[2]])
-        .collect();
-    let normals: Vec<[f32; 3]> = data
-        .normals
-        .chunks_exact(3)
-        .map(|chunk| [chunk[0], chunk[1], chunk[2]])
-        .collect();
-    let uvs: Vec<[f32; 2]> = data
-        .uvs
-        .chunks_exact(2)
-        .map(|chunk| [chunk[0], chunk[1]])
-        .collect();
+    let mut mesh = Mesh {
+        positions: data
+            .positions
+            .chunks_exact(3)
+            .map(|chunk| [chunk[0], chunk[1], chunk[2]])
+            .collect(),
+        normals: data
+            .normals
+            .chunks_exact(3)
+            .map(|chunk| [chunk[0], chunk[1], chunk[2]])
+            .collect(),
+        uvs: data
+            .uvs
+            .chunks_exact(2)
+            .map(|chunk| [chunk[0], chunk[1]])
+            .collect(),
+        indices: data.indices.clone(),
+    };
 
     let mut audit = String::new();
     {
@@ -149,14 +236,6 @@ pub fn load_mesh(path: &str) -> Result<(Mesh, String), String> {
         ));
     }
 
-    let mut mesh = Mesh::new(
-        PrimitiveTopology::TriangleList,
-        RenderAssetUsages::default(),
-    )
-    .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
-    .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
-    .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uvs)
-    .with_inserted_indices(Indices::U32(data.indices));
     weld_normals(&mut mesh);
 
     match outward_winding(&mut mesh) {
@@ -166,115 +245,57 @@ pub fn load_mesh(path: &str) -> Result<(Mesh, String), String> {
         None => audit.push_str("缠绕审计：有向体积为正（朝外），不动\n"),
     }
 
-    if let (
-        Some(VertexAttributeValues::Float32x3(normals)),
-        Some(VertexAttributeValues::Float32x3(positions)),
-    ) = (
-        mesh.attribute(Mesh::ATTRIBUTE_NORMAL),
-        mesh.attribute(Mesh::ATTRIBUTE_POSITION),
-    ) {
+    if mesh.normals.len() == mesh.positions.len() {
         let mut worst = 1.0_f32;
-        for (normal, position) in normals.iter().zip(positions.iter()) {
+        for (normal, position) in mesh.normals.iter().zip(mesh.positions.iter()) {
             let radial = Vec3::new(position[0], position[1], position[2]).normalize_or_zero();
-            worst = worst.min(Vec3::from(*normal).dot(radial));
+            worst = worst.min(Vec3::from_array(*normal).dot(radial));
         }
         audit.push_str(&format!("载入网格法线审计：最小点积 {worst:.3}\n"));
     }
     Ok((mesh, audit))
 }
 
-/// 网格产物 → 渲染就绪的网格资产：载入、焊法线、审计。
-pub fn build_artifact_mesh(path: &str, meshes: &mut Assets<Mesh>) -> Result<ReadyMesh, String> {
-    let (mesh, audit) = load_mesh(path)?;
-    Ok(ReadyMesh {
-        handle: meshes.add(mesh),
-        audit,
-    })
-}
-
-/// 顶点数 / 三角形数（从资产里数，不走缓存也便宜）。
-pub fn mesh_counts(
-    meshes: &Assets<Mesh>,
-    handle: &Handle<Mesh>,
-) -> Result<(usize, usize), String> {
-    let mesh = meshes
-        .get(handle)
-        .ok_or_else(|| "拿不到刚插进去的网格资产".to_string())?;
-    Ok((
-        mesh.count_vertices(),
-        mesh.indices().map(|indices| indices.len() / 3).unwrap_or(0),
-    ))
-}
-
-/// 内建图元。球 / 细分球是任何渲染器都有的东西，不是"行星知识"：
-/// 场景产物可以只要一个球壳（消融档 `orbit-soft-shell` 就是 `icosphere` + 半径），
-/// 不必每次烘一份一模一样的网格产物。
-pub fn primitive(name: &str, params: &std::collections::BTreeMap<String, px_protocol::Value>) -> Result<Mesh, String> {
-    use px_protocol::Value;
-    let number = |key: &str| -> Result<f32, String> {
-        match params.get(key) {
-            Some(Value::Num(value)) => Ok(*value as f32),
-            Some(other) => Err(format!("图元 '{name}' 的参数 '{key}' 要一个数，实际是 {other:?}")),
-            None => Err(format!(
-                "图元 '{name}' 缺参数 '{key}'；它有的参数：{}",
-                if params.is_empty() {
-                    "（空）".to_string()
-                } else {
-                    params.keys().cloned().collect::<Vec<_>>().join(" / ")
-                }
-            )),
-        }
-    };
-    match name {
-        "icosphere" => {
-            let radius = number("radius")?;
-            let subdivisions = number("subdivisions")?;
-            if !(subdivisions.fract() == 0.0 && (1.0..=64.0).contains(&subdivisions)) {
-                return Err(format!(
-                    "图元 'icosphere' 的 'subdivisions' 是 {subdivisions}：要 1..=64 的整数"
-                ));
-            }
-            Sphere::new(radius)
-                .mesh()
-                .ico(subdivisions as u32)
-                .map_err(|err| format!("细分球造不出来：{err}"))
-        }
-        "uv_sphere" => {
-            let radius = number("radius")?;
-            let sectors = number("sectors")? as u32;
-            let stacks = number("stacks")? as u32;
-            Ok(Sphere::new(radius).mesh().uv(sectors, stacks))
-        }
-        other => Err(format!(
-            "不认识的图元 '{other}'；这份渲染器认：icosphere / uv_sphere"
-        )),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// 朝里的缠绕必须被翻过来，而且**法线跟着翻**（顶点法与绕向说的得是一件事）。
     #[test]
-    fn the_icosphere_is_the_same_shape_the_cloud_shell_used() {
-        let params = std::collections::BTreeMap::from([
-            ("radius".to_string(), px_protocol::Value::Num(1.06)),
-            ("subdivisions".to_string(), px_protocol::Value::Num(64.0)),
-        ]);
-        let now = primitive("icosphere", &params).expect("造不出来");
-        let before = Sphere::new(1.06).mesh().ico(64).expect("Bevy 也造不出来");
-        assert_eq!(now.count_vertices(), before.count_vertices());
-        assert_eq!(now.indices().map(|i| i.len()), before.indices().map(|i| i.len()));
+    fn an_inward_winding_is_flipped_with_its_normals() {
+        let mut mesh = Mesh {
+            // 一个朝里的四面体（每个面的绕向都反着）。
+            positions: vec![
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+            ],
+            normals: vec![[0.0, 0.0, 1.0]; 4],
+            uvs: vec![[0.0, 0.0]; 4],
+            // 一个有向体积为负的四面体（绕向整体反着来 ⇒ 法线朝里）。
+            indices: vec![1, 2, 0, 3, 1, 0, 2, 3, 0, 3, 2, 1],
+        };
+        let before = mesh.indices.clone();
+        let volume = outward_winding(&mut mesh).expect("朝里就该翻");
+        assert!(volume < 0.0, "返回的是翻之前的体积：{volume}");
+        assert_ne!(mesh.indices, before, "索引换了");
+        assert_eq!(mesh.normals[0], [0.0, 0.0, -1.0], "法线也跟着翻了");
+        // 翻完再判一次：这次是朝外，不许再动。
+        assert!(outward_winding(&mut mesh).is_none());
     }
 
+    /// 同一位置的顶点法线焊成一条：两个相反的法线应当互相抵消 ⇒ 归一化兜底成零。
     #[test]
-    fn an_unknown_primitive_or_a_bad_parameter_is_an_error() {
-        let empty = std::collections::BTreeMap::new();
-        assert!(primitive("torus", &empty).unwrap_err().contains("torus"));
-        let params = std::collections::BTreeMap::from([
-            ("radius".to_string(), px_protocol::Value::Num(1.0)),
-            ("subdivisions".to_string(), px_protocol::Value::Num(2.5)),
-        ]);
-        assert!(primitive("icosphere", &params).is_err());
+    fn welding_averages_the_normals_of_one_position() {
+        let mut mesh = Mesh {
+            positions: vec![[0.5, 0.0, 0.0], [0.5, 0.0, 0.0]],
+            normals: vec![[1.0, 0.0, 0.0], [-1.0, 0.0, 0.0]],
+            uvs: vec![[0.0, 0.0]; 2],
+            indices: vec![0, 1, 0],
+        };
+        weld_normals(&mut mesh);
+        assert_eq!(mesh.normals[0], [0.0, 0.0, 0.0]);
+        assert_eq!(mesh.normals[1], [0.0, 0.0, 0.0]);
     }
 }

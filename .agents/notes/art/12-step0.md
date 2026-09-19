@@ -11,6 +11,21 @@
 >
 > § 号接 `11-graph.md`（那边是调研 / 裁决 / 路线；这一篇是它 §76 第 0 步的实测结果）。
 
+> ⚠ **S8-c 标注（2026-09-19）：这是一份日期化记录（2026-09-16），读法与边界如下。**
+> **读数一字未删**：E1–E8 八步、四道墙（W1–W4）、判据 P/R/D 的现状**全部仍然有效** ——
+> 它们是"改 schema 今天能走到哪儿"那一次实测的原始记录，后来第 1/2 步就是照它做的。
+> ⚠ 会读错的三处：
+> 1. 命令与仪器（`target/step0/serve.ps1` / `req.ps1` / `forge-param.py`）**在 `target/` 下、不入 git**
+>    ⇒ 那些文件今天多半不在了；`target/` 也被清过（`art/anchor/README.md` 记了那场丢失）。
+> 2. `px_render.exe`（那一轮用的宿主）**已删**（`f121ee3`，`15-render-wgpu.md` §154）⇒ 复跑这一篇
+>    要走 `px_render_wgpu`，而它**只吃 `.pxart` 场景文档**（`.pxstream` 那条路随宿主没了）。
+> 3. §79.4 W4 那条 `px_render/src/reflect.rs:499-527` 的引用：源码在 git 历史里
+>    （`git show f121ee3^:px_render/src/reflect.rs`），不在工作树。
+>
+> ⚠ **§157（2026-09-19）：第 2 条里那个 `px_render_wgpu` 今天叫 `px_render`**（wgpu 宿主改名，
+> `15-render-wgpu.md` §157）⇒ 复跑这一篇走 `px_render`，而它**只吃 `.pxart`**。
+> ⚠ 第 2、3 条里指**已删的 Bevy 宿主**的那个 `px_render` 按旧义读（第 3 条带路径，取法不变）。
+
 ---
 
 ## §79 八步读数与墙的清单

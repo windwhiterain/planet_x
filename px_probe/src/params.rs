@@ -144,7 +144,7 @@ impl CloudParams {
 pub fn layout() -> &'static MaterialLayout {
     static LAYOUT: OnceLock<MaterialLayout> = OnceLock::new();
     LAYOUT.get_or_init(|| {
-        let assembled = px_render::shaders::assemble("clouds.wgsl");
+        let assembled = crate::common::assemble("clouds.wgsl");
         px_shader::reflect::reflect_assembled(&assembled, "clouds.wgsl")
             .unwrap_or_else(|err| panic!("云的材质契约反射不出来：{err}"))
     })

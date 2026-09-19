@@ -243,6 +243,8 @@ fn canonical() -> String {
         },
         cameras: vec![Camera::new([0.0, 1.0, 0.0], 3.15, "review")],
         expects: vec!["clouds".to_string()],
+        resources: Vec::new(),
+        passes: Vec::new(),
         lights: vec![
             px_protocol::Light::point("sun", [-4.2, 1.15, 2.35], [1.0, 1.0, 1.0], 7.6e5)
                 .with_shadows(true),
@@ -302,6 +304,11 @@ fn canonical() -> String {
                 cast_shadow: false,
             },
         ],
+        // 帧自有材质（§135）：这一条夹具**故意留空** —— 空表不落盘，所以快照里
+        // 一个字节都不该因为它变（"加字段是纯加法"这件事在快照里也是看得见的）。
+        // 有内容的那一形状在 `px_protocol` 自己的单测里（`a_frame_material_is_expressible_and_round_trips`）。
+        frame_materials: Vec::new(),
+        material_instances: Vec::new(),
     };
     let lease = Lease {
         pid: 0,
@@ -309,6 +316,55 @@ fn canonical() -> String {
         protocol_hash: 0,
         git_rev: "<rev>".to_string(),
         exe: "<exe>".to_string(),
+    };
+
+    // ---- pass 表的两种形状（§125）--------------------------------------------
+    //
+    // ⚠ 这两条进快照是**故意的**：`PassSpec` 长了新字段，协议形状就变了 ——
+    // 快照变、`protocol_hash` 变、旧对端在握手处被拒。那正是要人看一眼的那一刻。
+    // 注意 `scene::SceneSpec` 那一条**一个字都没动**（它的 `passes` 还是空的）：
+    // "加字段是纯加法"这件事在快照里也是看得见的。
+    let pass_fullscreen = px_protocol::scene::PassSpec {
+        kind: "fullscreen".to_string(),
+        shader: Some(px_protocol::Member::new("shaders", "grade", &"2".repeat(64))),
+        label: "grade".to_string(),
+        entry: "fs_main".to_string(),
+        reads: vec!["scene_color".to_string()],
+        writes: vec!["view".to_string()],
+        params: BTreeMap::from([("gain".to_string(), px_protocol::Value::Num(1.05))]),
+        draws: Vec::new(),
+        vertex_shader: String::new(),
+        vertex_entry: String::new(),
+        render: String::new(),
+        depth_target: None,
+        cube_face: None,
+    };
+    let pass_geometry = px_protocol::scene::PassSpec {
+        kind: "geometry".to_string(),
+        // 几何 pass：片元阶段属于材质（§129）⇒ 这一栏必须是 None。
+        shader: None,
+        label: "planet".to_string(),
+        entry: "fragment".to_string(),
+        reads: Vec::new(),
+        writes: vec!["scene_color".to_string()],
+        params: BTreeMap::from([("gain".to_string(), px_protocol::Value::Num(1.0))]),
+        draws: vec![
+            px_protocol::scene::DrawSpec {
+                geometry: "planet".to_string(),
+                material: "surface".to_string(),
+            },
+            // 空材质 = 这一笔没有片元阶段（深度-only 那一笔）。
+            px_protocol::scene::DrawSpec {
+                geometry: "stars".to_string(),
+                material: String::new(),
+            },
+        ],
+        vertex_shader: "struct Out { @builtin(position) position: vec4<f32> }\n".to_string(),
+        vertex_entry: "vertex".to_string(),
+        // 状态是**文本**：解析器只有一份，住在 `px_pass::RenderState::parse`。
+        render: "color=clear(0,0,0,0)|depth=clear(0)|depth_write=true|compare=greater_equal|winding=ccw".to_string(),
+        depth_target: Some("depth".to_string()),
+        cube_face: None,
     };
 
     let asset_kinds: Vec<&'static str> = [
@@ -365,6 +421,8 @@ fn canonical() -> String {
             "render::Scene.artifact": artifact_scene,
             "render::Scene.sequence": sequence_scene,
             "scene::SceneSpec": scene_spec,
+            "scene::PassSpec.fullscreen": pass_fullscreen,
+            "scene::PassSpec.geometry": pass_geometry,
             "render::Lease": lease,
             "wire::BlobHeader": header,
             "wire::Blob.payload_bytes": blob.bytes.len(),

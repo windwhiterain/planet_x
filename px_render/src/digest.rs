@@ -3,6 +3,11 @@
 //! 为什么自己写：这个指纹只用来给"这张图是哪一张"一个稳定、可与别人对账的名字（报告里的
 //! `sha256` 字段），**不是安全边界**；而为了它引一个 crate 就要动 `Cargo.lock`、还要赌
 //! 离线环境里能拉到包 —— 代价比收益大。正确性由下面三条已知向量钉住。
+//!
+//! ⚠ 从 `px_render::digest` **逐字搬来**（§102：那份的 bevy 耦合度是 0）—— 那是
+//! **已删的 Bevy 宿主**的模块（§154），**不是本 crate 的 [`crate::digest`]**（同名，两份东西）。
+//! **口径必须一模一样**：§86 那批读数（`63184151909371A5` …）是 `Get-FileHash -Algorithm
+//! SHA256` 取前 16 位，换一个摘要算法就等于把历史读数全作废。
 
 const K: [u32; 64] = [
     0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
@@ -75,6 +80,15 @@ pub fn sha256_hex(data: &[u8]) -> String {
 pub fn sha256_file(path: &std::path::Path) -> Result<String, String> {
     let bytes = std::fs::read(path).map_err(|err| format!("读 {} 失败：{err}", path.display()))?;
     Ok(sha256_hex(&bytes))
+}
+
+/// 前 16 位十六进制 —— 与 `passdoc/run.ps1`、§86 那批读数**同一个口径**
+/// （整串 sha256 截前 16 位）。口径换一格，历史读数就不可比。
+pub fn short(path: &std::path::Path) -> String {
+    match sha256_file(path) {
+        Ok(hex) => hex[..16].to_uppercase(),
+        Err(_) => "（没有出图）".to_string(),
+    }
 }
 
 #[cfg(test)]

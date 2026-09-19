@@ -18,6 +18,12 @@
   .\tools\px.ps1 -Target planet -Level opt       # 烘星球图（PCG）
   .\tools\px.ps1 -Target test                    # 快速测试链（默认 members，不碰 bevy）
   .\tools\px.ps1 -Target test-all                # 全量（含 px_render / px_probe，慢）
+                                                 # ⚠ S8-c 标注：`px_render` 已删（§154）⇒ 今天
+                                                 # 就是 `cargo test --workspace`（九个 crate）。
+                                                 # 原文留着：它是这条命令当时的形状。
+                                                 # ⚠ §157（2026-09-19）：wgpu 宿主改名叫 `px_render`
+                                                 # ⇒ 上面"含 px_render / px_probe"**字面又成立**，
+                                                 # 只是对象换了（旧义 = 已删的 Bevy 宿主）。
 #>
 param(
     [ValidateSet(
@@ -52,13 +58,18 @@ try {
         'release' { $extra += '--release' }
     }
 
-    $cargoArgs = switch ($Target) {
+    # ⚠ `@(...)` 不是多余的：PowerShell 的 `switch` 只有**一个**匹配分支且它输出**一个**元素时，
+    # 会把数组**拆成标量**（`@('test') + @()` ⇒ 字符串 `"test"`），而 `@cargoArgs` 对字符串
+    # 是**按字符**摊开的 ⇒ cargo 实际收到 `test t e s t`，报「unexpected argument 's' found」。
+    # 只有 `-Target test`（`$extra` 为空、结果恰好一个元素）踩得到，
+    # 也就是 §106 与 J6 里写的那条命令 —— 加了 `@()` 才真的是"一条命令"。§108.3 记了这次。
+    $cargoArgs = @(switch ($Target) {
         { $_ -in 'field_dual', 'gradient', 'device', 'dual', 'dual_field', 'dual_noise' } { @('run', '-p', 'px_probe', '--bin', $Target) + $extra }
         { $_ -in 'planet', 'desert', 'clouds' } { @('run', '-p', 'px_graphs', '--bin', $Target) + $extra }
         'test' { @('test') + $extra }
         'test-all' { @('test', '--workspace') + $extra }
         'check' { @('check', '-p', 'px_ops', '-p', 'px_verify', '-p', 'px_protocol') + $extra }
-    }
+    })
 
     Write-Host ("cargo " + ($cargoArgs -join ' ')) -ForegroundColor DarkGray
     & cargo @cargoArgs @Rest
