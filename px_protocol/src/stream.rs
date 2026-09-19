@@ -3,8 +3,8 @@ use std::io::{self, Read, Write};
 use serde::{Deserialize, Serialize};
 
 use crate::scene::SceneSpec;
-use crate::wire::{self, WireError};
-use crate::{ArtBundle, Blob, ProtocolId};
+use crate::wire::{self, Blob, WireError};
+use crate::{ArtBundle, ProtocolId};
 
 pub const MAGIC: [u8; 4] = *b"PXST";
 pub const STREAM_VERSION: u32 = 1;

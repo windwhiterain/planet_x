@@ -1,0 +1,12 @@
+[package]
+name = "px-handshake"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+# ⚠ `float_roundtrip` **必须开**：默认的浮点解析不是正确舍入的，于是
+# "读进来再写回去"不是恒等（实测 `0.11999999731779099` 会读成 +1 ulp 的值）。
+# 本仓库的判据是逐字节的，读不出写进去的东西就是缺陷 —— 代价是浮点解析约 2×，
+# 而文档只有几 KB。五个 crate 都写一遍：别靠特性合并的偶然。
+serde_json = { version = "1", features = ["float_roundtrip"] }

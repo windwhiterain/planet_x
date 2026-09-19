@@ -1,0 +1,671 @@
+{
+  "schema_version": 12,
+  "surfaces": {
+    "Handshake": {
+      "exe": "<exe>",
+      "id": {
+        "git_rev": "<rev>",
+        "protocol_hash": 0,
+        "schema_version": 12
+      },
+      "pid": 0
+    },
+    "ProtocolId": {
+      "git_rev": "<rev>",
+      "protocol_hash": 0,
+      "schema_version": 12
+    },
+    "art::ArtBundle": {
+      "assets": [
+        {
+          "blobs": [
+            {
+              "dtype": "F32",
+              "shape": [
+                2,
+                2
+              ]
+            }
+          ],
+          "cameras": [
+            {
+              "direction": [
+                0.0,
+                0.0,
+                1.0
+              ],
+              "distance": 3.1500000953674316,
+              "tag": "front"
+            }
+          ],
+          "fingerprint": 81985529216486895,
+          "id": "planet/terran",
+          "kind": "Field2D",
+          "params": {
+            "relief": 0.34
+          }
+        }
+      ]
+    },
+    "art::AssetKind.kinds": [
+      "field2d",
+      "octahedral_field",
+      "cube_field",
+      "cube_map",
+      "mesh",
+      "instances",
+      "volume",
+      "scene",
+      "shader",
+      "texture"
+    ],
+    "art::VolumeData.shape": {
+      "bytes": 6591000,
+      "dtype": "F32",
+      "shape": [
+        6,
+        65,
+        65,
+        65
+      ]
+    },
+    "client::LEASE_PATH": "target/render-server.json",
+    "render::Job.perf": {
+      "drop": 1,
+      "kind": "perf",
+      "windows": 4
+    },
+    "render::Job.shots": {
+      "kind": "shots"
+    },
+    "render::Job.stable": {
+      "frames": 60,
+      "kind": "stable"
+    },
+    "render::Lease": {
+      "exe": "<exe>",
+      "git_rev": "<rev>",
+      "pid": 0,
+      "port": 0,
+      "protocol_hash": 0
+    },
+    "render::Pair": {
+      "app_delta_ms": 27.5,
+      "app_mean_delta_ms": 30.1,
+      "gpu_delta_ms": 24.1,
+      "measured": "?? orbit-surface?planet",
+      "reference": "?? orbit-bare?planet",
+      "rule": "??? = perf[0] ? perf[1]???? ? ????"
+    },
+    "render::PerfReport": {
+      "compare": {
+        "app_mean_ms": 43.8,
+        "app_p50_ms": 63.25,
+        "gpu_p50_ms": 49.8,
+        "note": "??? app ????? GPU ??????",
+        "ratio": 0.787,
+        "ratio_mean": 1.137
+      },
+      "dropped": [
+        45.7
+      ],
+      "error_bar": {
+        "rule": "?????????????? (max?min)/2",
+        "value_ms": 0.3
+      },
+      "frames": [
+        62.9,
+        63.1,
+        63.5,
+        63.4
+      ],
+      "gpu": [
+        {
+          "power_w": [
+            92.0,
+            112.0
+          ],
+          "samples": 3,
+          "sm_mhz": [
+            1245.0,
+            1942.0
+          ],
+          "temp_c_max": 80.0,
+          "util_pct": [
+            98.0,
+            100.0
+          ],
+          "vram_mib_max": 481.0,
+          "window": 0
+        }
+      ],
+      "gpu_ms": {
+        "frames": [
+          44.2,
+          49.4,
+          49.8,
+          52.1
+        ],
+        "lag_frames": 3,
+        "max": 58.0,
+        "min": 44.2,
+        "n": 4,
+        "p50": 49.8,
+        "p90": 52.4,
+        "p99": 58.0,
+        "poll_us": 6.5,
+        "source": "render/main_opaque_pass_3d/elapsed_gpu=18.100 + render/main_transparent_pass_3d/elapsed_gpu=31.700"
+      },
+      "key": "bee2a7ec00000000",
+      "label": "?? orbit?rocky",
+      "max": 63.5,
+      "median": 63.25,
+      "min": 62.9,
+      "n": 4,
+      "p50": 63.25,
+      "p90": 63.5,
+      "p99": 63.5,
+      "scene": "target/pcg/ab/yy/orbit.pxart",
+      "waits": {
+        "assets_ms": 0.4,
+        "pipelines_ms": 412.0,
+        "sample_ms": 3810.0,
+        "settle_ms": 96.0,
+        "total_ms": 4318.4
+      },
+      "windows": [
+        63.5,
+        63.1,
+        62.9,
+        63.4
+      ]
+    },
+    "render::Report": {
+      "height": 1400,
+      "job": "stable",
+      "millis": 91234,
+      "pair": {
+        "app_delta_ms": 27.5,
+        "app_mean_delta_ms": 30.1,
+        "gpu_delta_ms": 24.1,
+        "measured": "?? orbit-surface?planet",
+        "reference": "?? orbit-bare?planet",
+        "rule": "??? = perf[0] ? perf[1]???? ? ????"
+      },
+      "perf": [
+        {
+          "compare": {
+            "app_mean_ms": 43.8,
+            "app_p50_ms": 63.25,
+            "gpu_p50_ms": 49.8,
+            "note": "??? app ????? GPU ??????",
+            "ratio": 0.787,
+            "ratio_mean": 1.137
+          },
+          "dropped": [
+            45.7
+          ],
+          "error_bar": {
+            "rule": "?????????????? (max?min)/2",
+            "value_ms": 0.3
+          },
+          "frames": [
+            62.9,
+            63.1,
+            63.5,
+            63.4
+          ],
+          "gpu": [
+            {
+              "power_w": [
+                92.0,
+                112.0
+              ],
+              "samples": 3,
+              "sm_mhz": [
+                1245.0,
+                1942.0
+              ],
+              "temp_c_max": 80.0,
+              "util_pct": [
+                98.0,
+                100.0
+              ],
+              "vram_mib_max": 481.0,
+              "window": 0
+            }
+          ],
+          "gpu_ms": {
+            "frames": [
+              44.2,
+              49.4,
+              49.8,
+              52.1
+            ],
+            "lag_frames": 3,
+            "max": 58.0,
+            "min": 44.2,
+            "n": 4,
+            "p50": 49.8,
+            "p90": 52.4,
+            "p99": 58.0,
+            "poll_us": 6.5,
+            "source": "render/main_opaque_pass_3d/elapsed_gpu=18.100 + render/main_transparent_pass_3d/elapsed_gpu=31.700"
+          },
+          "key": "bee2a7ec00000000",
+          "label": "?? orbit?rocky",
+          "max": 63.5,
+          "median": 63.25,
+          "min": 62.9,
+          "n": 4,
+          "p50": 63.25,
+          "p90": 63.5,
+          "p99": 63.5,
+          "scene": "target/pcg/ab/yy/orbit.pxart",
+          "waits": {
+            "assets_ms": 0.4,
+            "pipelines_ms": 412.0,
+            "sample_ms": 3810.0,
+            "settle_ms": 96.0,
+            "total_ms": 4318.4
+          },
+          "windows": [
+            63.5,
+            63.1,
+            62.9,
+            63.4
+          ]
+        }
+      ],
+      "protocol_hash": "0000000000000000",
+      "schema_version": 12,
+      "shots": [
+        {
+          "bright_px": 900000,
+          "bytes": 1622592,
+          "declared_clouds": true,
+          "diff_vs_ref_grid": 41234,
+          "has_cloud": true,
+          "height": 1400,
+          "label": "?? orbit?rocky",
+          "out": "target/orbit.png",
+          "placeholder_px": 0,
+          "scene": "target/pcg/ab/yy/orbit.pxart",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+          "verdict": "??",
+          "width": 2240
+        }
+      ],
+      "width": 2240
+    },
+    "render::Request": {
+      "height": 640,
+      "job": {
+        "drop": 1,
+        "kind": "perf",
+        "windows": 4
+      },
+      "out": "target/orbit.png",
+      "report": "target/report.json",
+      "scene": {
+        "kind": "sequence",
+        "shots": [
+          {
+            "cam": null,
+            "out": "target/bare.png",
+            "scene": "target/pcg/ab/xx/bare.pxart"
+          },
+          {
+            "cam": [
+              0.0,
+              8.0,
+              3.299999952316284
+            ],
+            "out": "target/orbit.png",
+            "scene": "target/pcg/ab/yy/orbit.pxart"
+          }
+        ]
+      },
+      "view": {
+        "cam": [
+          30.0,
+          15.0,
+          3.200000047683716
+        ],
+        "columns": 4,
+        "sheet": true
+      },
+      "width": 960
+    },
+    "render::Response": {
+      "bytes": 326452,
+      "height": 640,
+      "millis": 812,
+      "out": "target/orbit.png",
+      "report": "{\"job\":\"perf\"}",
+      "report_path": "target/report.json",
+      "scene": "?? orbit?planet",
+      "shots": [
+        "target/bare.png",
+        "target/orbit.png"
+      ],
+      "warm": true,
+      "width": 960
+    },
+    "render::Scene.artifact": {
+      "kind": "artifact",
+      "scene": "target/pcg/ab/7f/scene.pxart"
+    },
+    "render::Scene.sequence": {
+      "kind": "sequence",
+      "shots": [
+        {
+          "cam": [
+            0.0,
+            12.0,
+            3.1500000953674316
+          ],
+          "out": "target/shot.png",
+          "scene": "target/pcg/ab/7f/scene.pxart"
+        }
+      ]
+    },
+    "render::Scene.world": {
+      "kind": "world",
+      "round": 200,
+      "stream": "target/world.pxstream"
+    },
+    "render::ShotReport": {
+      "bright_px": 900000,
+      "bytes": 1622592,
+      "declared_clouds": true,
+      "diff_vs_ref_grid": 41234,
+      "has_cloud": true,
+      "height": 1400,
+      "label": "?? orbit?rocky",
+      "out": "target/orbit.png",
+      "placeholder_px": 0,
+      "scene": "target/pcg/ab/yy/orbit.pxart",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "verdict": "??",
+      "width": 2240
+    },
+    "scene::PassSpec.fullscreen": {
+      "entry": "fs_main",
+      "kind": "fullscreen",
+      "label": "grade",
+      "params": {
+        "gain": 1.05
+      },
+      "reads": [
+        "scene_color"
+      ],
+      "shader": {
+        "graph": "shaders",
+        "key": "2222222222222222222222222222222222222222222222222222222222222222",
+        "node": "grade"
+      },
+      "writes": [
+        "view"
+      ]
+    },
+    "scene::PassSpec.geometry": {
+      "depth_target": "depth",
+      "draws": [
+        {
+          "geometry": "planet",
+          "material": "surface"
+        },
+        {
+          "geometry": "stars"
+        }
+      ],
+      "entry": "fragment",
+      "kind": "geometry",
+      "label": "planet",
+      "params": {
+        "gain": 1.0
+      },
+      "reads": [],
+      "render": "color=clear(0,0,0,0)|depth=clear(0)|depth_write=true|compare=greater_equal|winding=ccw",
+      "vertex_entry": "vertex",
+      "vertex_shader": "struct Out { @builtin(position) position: vec4<f32> }\n",
+      "writes": [
+        "scene_color"
+      ]
+    },
+    "scene::SceneSpec": {
+      "cameras": [
+        {
+          "direction": [
+            0.0,
+            1.0,
+            0.0
+          ],
+          "distance": 3.1500000953674316,
+          "tag": "review"
+        }
+      ],
+      "environment": {
+        "ambient": 80.0,
+        "skybox": {
+          "graph": "generated",
+          "key": "7777777777777777777777777777777777777777777777777777777777777777",
+          "node": "stars"
+        },
+        "skybox_brightness": 900.0
+      },
+      "expects": [
+        "clouds"
+      ],
+      "lights": [
+        {
+          "color": [
+            1.0,
+            1.0,
+            1.0
+          ],
+          "direction": [
+            0.0,
+            0.0,
+            -1.0
+          ],
+          "id": "sun",
+          "inner_angle": 0.0,
+          "intensity": 760000.0,
+          "kind": "point",
+          "outer_angle": 0.0,
+          "position": [
+            -4.199999809265137,
+            1.149999976158142,
+            2.3499999046325684
+          ],
+          "range": null,
+          "shadows": true
+        }
+      ],
+      "name": "orbit",
+      "objects": [
+        {
+          "cast_shadow": true,
+          "geometry": {
+            "member": {
+              "graph": "planet",
+              "key": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "node": "surface"
+            },
+            "source": "mesh"
+          },
+          "id": "planet",
+          "material": {
+            "alpha": "opaque",
+            "cull": "back",
+            "depth_bias": 0.0,
+            "params": {
+              "emissive": [
+                0.0,
+                0.0,
+                0.0,
+                0.0
+              ],
+              "inner": 1.01,
+              "tint": [
+                0.4399999976158142,
+                0.6399999856948853,
+                0.9800000190734863
+              ]
+            },
+            "shader": {
+              "graph": "shaders",
+              "key": "9999999999999999999999999999999999999999999999999999999999999999",
+              "node": "surface"
+            },
+            "textures": {
+              "albedo": {
+                "binding": 1,
+                "member": {
+                  "graph": "generated",
+                  "key": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                  "node": "surface_color"
+                },
+                "sampler": {
+                  "address_u": "repeat",
+                  "address_v": "clamp_to_edge",
+                  "anisotropy": 8,
+                  "filter": "linear"
+                }
+              }
+            }
+          },
+          "transform": {
+            "rotation": [
+              0.0,
+              0.0,
+              0.0,
+              1.0
+            ],
+            "scale": [
+              1.0,
+              1.0,
+              1.0
+            ],
+            "translation": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          }
+        },
+        {
+          "cast_shadow": false,
+          "geometry": {
+            "name": "icosphere",
+            "params": {
+              "radius": 1.06,
+              "subdivisions": 64.0
+            },
+            "source": "primitive"
+          },
+          "id": "clouds",
+          "material": {
+            "alpha": "opaque",
+            "cull": "back",
+            "depth_bias": 0.0,
+            "params": {},
+            "shader": {
+              "graph": "shaders",
+              "key": "8888888888888888888888888888888888888888888888888888888888888888",
+              "node": "clouds"
+            },
+            "textures": {
+              "coverage": {
+                "binding": 5,
+                "member": {
+                  "graph": "generated",
+                  "key": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                  "node": "cloud_coverage"
+                },
+                "sampler": {
+                  "address_u": "clamp_to_edge",
+                  "address_v": "clamp_to_edge",
+                  "anisotropy": 0,
+                  "filter": "linear"
+                }
+              }
+            }
+          },
+          "transform": {
+            "rotation": [
+              0.0,
+              0.0,
+              0.0,
+              1.0
+            ],
+            "scale": [
+              1.0,
+              1.0,
+              1.0
+            ],
+            "translation": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          }
+        }
+      ],
+      "schema": 2
+    },
+    "sim::WorldView": {
+      "departments": [
+        {
+          "execution": 0.0,
+          "holdings": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "name": "?(??)",
+          "payment": 0.0,
+          "revenue": 0.0
+        }
+      ],
+      "goods": [
+        {
+          "name": "??",
+          "price": 1.0
+        }
+      ],
+      "round": 0,
+      "schema_version": 12,
+      "totals": {
+        "consumption": 0.0,
+        "cpi": 100.0,
+        "granted": 0.0,
+        "output": 0.0,
+        "treasury": 0.0,
+        "turnover": 0.0
+      }
+    },
+    "stream::Frame.kinds": [
+      "protocol",
+      "world",
+      "art",
+      "scene",
+      "blob",
+      "request",
+      "response",
+      "refused"
+    ],
+    "stream::MAGIC": "PXST",
+    "stream::STREAM_VERSION": 1,
+    "wire::Blob.payload_bytes": 16,
+    "wire::BlobHeader": {
+      "dtype": "F32",
+      "shape": [
+        2,
+        2
+      ]
+    }
+  }
+}

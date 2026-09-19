@@ -1,7 +1,12 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-const PROTOCOL_WHITELIST: [&str; 2] = ["serde", "serde_json"];
+const PROTOCOL_WHITELIST: [&str; 3] = ["serde", "serde_json", "px-handshake"];
+// ⚠ `px-handshake` 为什么在白名单里，而不是"协议又变胖了"：握手身份（`ProtocolId` /
+// `SCHEMA_VERSION`）与线格式（`wire`）**宿主也要**，而宿主本来就依赖协议 ⇒ 它们留在这里
+// 就是 `px_protocol ⇄ px_host_protocol` 的环。放进叶子 crate 之后依赖图是**无环**的。
+// ⚠ 让步的那一格由**另一条断言**补上（本测试末尾）：`px-handshake` 自己的运行时依赖
+// 只许 serde / serde_json —— 否则"极小"这条要求会从这一格偷偷漏出去。
 // ⚠ S8-c 标注（当时）：`px_render` 已在 §154 删掉 ⇒ 第一条禁止边**当时没有主体**（扫不到那个包名）。
 // 它守的是"**渲染宿主不许拖 sim**"，而那时宿主叫 `px_render_wgpu` —— 那个名字**不在这张表里**
 // ⇒ 那一格当时**没人在守**。原句留着是因为它是契约的记录。
@@ -62,7 +67,7 @@ fn package_name(doc: &toml::Value, fallback: &str) -> String {
         .unwrap_or_else(|| fallback.to_string())
 }
 
-/// 运行时那一格只许 serde / serde_json（协议是冻结且极小的）。
+/// 运行时那一格只许 serde / serde_json / px-handshake（协议是冻结且极小的）。
 ///
 /// ⚠ **dev 那一格不许有 `px_render`**：宿主是 wgpu 栈，而 `px_protocol` 的测试要按**真类型**
 /// 构造快照里那几份形状 —— 图省事把宿主挂到 dev（曾经就是这么写的）会把 wgpu / naga / winit
@@ -84,6 +89,32 @@ fn protocol_dependencies_are_whitelisted_and_never_pull_the_host() {
         "px_protocol 的 dev 依赖里不许有 px_render：那会把 wgpu / naga / winit 编进协议测试，\
          并且把依赖方向反过来（px_protocol → px_render → px_protocol）。\
          要按真类型构造宿主形状就用不带 GPU 栈的 px_host_protocol。今天的 dev 依赖：{dev:?}"
+    );
+}
+
+/// 白名单放宽给 `px-handshake` 之后，**"极小"这条要求要跟着往下走一格**：
+/// 那个叶子 crate 自己的运行时依赖只许 serde / serde_json。
+///
+/// ⚠ 少了这条，白名单就等于把"协议可以依赖任何东西"从旁门放了进来 —— 叶子只是**搬了一格**，
+/// 不是免检。而它必须依赖图**无环**：`px-host-handshake` 不许反向依赖本仓任何 crate。
+#[test]
+fn the_handshake_leaf_stays_minimal_and_acyclic() {
+    let root = root();
+    let doc = manifest(&root.join("px_handshake/Cargo.toml"));
+    let names = dep_names(&doc, "dependencies");
+    let allowed: BTreeSet<String> = ["serde", "serde_json"]
+        .iter()
+        .map(|name| name.to_string())
+        .collect();
+    assert_eq!(
+        names, allowed,
+        "px-handshake 的运行时依赖只许 serde / serde_json：它是握手身份与线格式的叶子，\
+         多一条边就等于协议那一格又从旁门长回来了"
+    );
+    assert_eq!(
+        package_name(&doc, "px_handshake"),
+        "px-handshake",
+        "包名（连字符）与依赖键要对得上，否则上面那格查的是另一份 manifest"
     );
 }
 

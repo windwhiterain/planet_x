@@ -30,7 +30,7 @@ use std::time::{Duration, Instant};
 use px_host_protocol::client as client;
 use px_host_protocol::frame::{self, Frame};
 use px_host_protocol::render::{Job, Lease, Report, Request, Response, Scene, ShotReport};
-use px_protocol::ProtocolId;
+use px_handshake::ProtocolId;
 
 use crate::digest;
 use crate::gpu::Gpu;

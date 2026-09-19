@@ -309,7 +309,7 @@ pub struct Lease {
 }
 
 impl Lease {
-    pub fn matches(&self, id: &px_protocol::ProtocolId) -> bool {
+    pub fn matches(&self, id: &px_handshake::ProtocolId) -> bool {
         self.protocol_hash == id.protocol_hash && self.git_rev == id.git_rev
     }
 }

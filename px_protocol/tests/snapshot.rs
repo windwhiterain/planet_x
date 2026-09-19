@@ -447,7 +447,11 @@ fn canonical() -> String {
 
 #[test]
 fn protocol_snapshot_is_current() {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("snapshots/protocol.snapshot.json");
+    // ⚠ 快照住在**叶子 crate `px_handshake`** 里（它是握手身份的一部分：宿主侧构造
+    // `ProtocolId` 也要它），而这条判据留在 `px_protocol`（它要按这一侧的真类型算形状）。
+    // ⇒ 路径按 `px_handshake` 那一份找，找不到就**红**（不是跳过）。
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../px_handshake/snapshots/protocol.snapshot.json");
     let current = canonical();
     if std::env::var("PX_UPDATE_SNAPSHOT").as_deref() == Ok("1") {
         std::fs::write(&path, &current).expect("写快照失败");

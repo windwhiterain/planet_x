@@ -5,6 +5,8 @@ edition = "2024"
 
 [dependencies]
 px_protocol = { path = "../px_protocol" }
+# ⚠ 握手身份与线格式在叶子 crate 里：`ProtocolId::local()` 从那里来（它要 `protocol_hash()`）。
+px-handshake = { path = "../px_handshake" }
 px_shader = { path = "../px_shader" }
 px_pass = { path = "../px_pass" }
 # ⚠ 宿主协议面（作业形状 / 四种帧与信封 / 租约 + 客户端那半）住在只依赖 serde / serde_json /

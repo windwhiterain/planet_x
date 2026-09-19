@@ -10,17 +10,19 @@ serde = { version = "1", features = ["derive"] }
 # 本仓库的判据是逐字节的，读不出写进去的东西就是缺陷 —— 代价是浮点解析约 2×，
 # 而文档只有几 KB。五个 crate 都写一遍：别靠特性合并的偶然。
 serde_json = { version = "1", features = ["float_roundtrip"] }
+# ⚠ 握手身份与线格式（`ProtocolId` / `SCHEMA_VERSION` / `wire`）住在叶子 crate 里：
+# 它们**宿主也要**，留在这里就是 `px_protocol ⇄ px_host_protocol` 的环。
+px-handshake = { path = "../px_handshake" }
 
 [dev-dependencies]
 toml = "0.8"
 # ⚠ 快照测试必须按**真类型**构造那几份搬走的形状（`render::*` / `sim::*` / `client::LEASE_PATH`）：
 # 快照逐字节钉着它们，而 `protocol_hash()` 就是这个文件的哈希 —— 抄一份"假的夹具"进测试，
 # 等于把"形状变了 ⇒ 指纹变 ⇒ 握手续拒旧对端"这条门悄悄拆掉。
-# 只在 **dev** 这一侧把它们拉回来，运行时依赖仍然只有 serde / serde_json（`tests/crate_graph.rs` 钉着）。
-# ⚠ 拉回来的是**不带 GPU 栈**的那两个 crate，各有一条不许越的线：
-#   - `game`：只依赖 serde ⇒ 它是一条叶子边，`px_protocol` ⇄ 它不可能成环；
-#   - `px_host_protocol`：依赖闭包是 serde / serde_json / `px_protocol` ⇒ 这里是 cargo 允许的
-#     一条 **dev 环**（dev 依赖不进产物，运行时那一侧不环），而它**不带 GPU 栈**。
+# ⚠ 拉回来的两个 crate 都**不带 GPU 栈**，各有一条不许越的线：
+#   - `game`：只依赖 serde ⇒ 叶子边，不可能成环；
+#   - `px_host_protocol`：闭包是 serde / serde_json / px_handshake ⇒ **与本 crate 无环**
+#     （`px_host_protocol` 不再依赖 `px_protocol`）。
 # ⚠ 曾经的写法是 `px_render`（宿主）：那条 dev 边把 wgpu / naga / winit 整栈拉进协议测试，
 # 依赖方向也整个反过来。`tests/crate_graph.rs` 现在钉着"dev 依赖里不许再有 px_render"。
 game = { path = "../game" }
