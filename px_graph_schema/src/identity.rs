@@ -20,6 +20,28 @@ pub const fn fnv1a(text: &str) -> u64 {
     fnv1a_bytes(text.as_bytes())
 }
 
+/// 单段：`(长度前缀, 内容)` 折进去 —— `const` 上下文可用。
+///
+/// ⚠ 常量里不能调用 `blake3` 那一套（`Hasher` 不是 const），所以源码哈希走 FNV。
+pub const fn fnv1a_stage(mut hash: u64, text: &str) -> u64 {
+    let bytes = text.as_bytes();
+    let mut length = bytes.len() as u64;
+    let mut written = 0;
+    while written < 8 {
+        hash ^= (length & 0xff) as u64;
+        hash = hash.wrapping_mul(FNV_PRIME);
+        length >>= 8;
+        written += 1;
+    }
+    let mut at = 0;
+    while at < bytes.len() {
+        hash ^= bytes[at] as u64;
+        hash = hash.wrapping_mul(FNV_PRIME);
+        at += 1;
+    }
+    hash
+}
+
 /// 多段源码的 FNV-1a：算子的 `SOURCE_HASH` 要覆盖它的**共享依赖**（§28.2）。
 ///
 /// 每段带 8 字节长度前缀 ⇒ `["ab","c"]` 与 `["a","bc"]` 不会撞；顺序由调用点写死

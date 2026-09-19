@@ -21,27 +21,6 @@ use px_volume_schema::payload as volume_payload;
 use px_volume_schema::{PATCHES, VolumeData, direction_of};
 use px_verify::proxy;
 
-pub const VERSION: u32 = 1;
-pub const SOURCE_HASH: u64 = fnv1a_sources(&[
-    include_str!("lib.rs"),
-    include_str!("../../px_volume_schema/src/volume.rs"),
-    include_str!("../../px_volume_schema/src/params.rs"),
-    include_str!("../../px_volume_schema/src/payload.rs"),
-    include_str!("../../px_field_schema/src/field.rs"),
-    include_str!("../../px_verify/src/cloud_field.rs"),
-    include_str!("../../px_verify/src/noise.rs"),
-    include_str!("../../px_verify/src/dual.rs"),
-    include_str!("../../px_verify/src/proxy.rs"),
-]);
-pub const INPUTS: &[&str] = &["coverage"];
-pub const DESCRIPTOR: OpDescriptor = OpDescriptor {
-    id: params::CLOUD_COARSE,
-    version: VERSION,
-    source_hash: SOURCE_HASH,
-    inputs: INPUTS,
-    kind: OpKind::Volume,
-};
-
 fn normalize(vector: [f32; 3]) -> [f32; 3] {
     let length = (vector[0] * vector[0] + vector[1] * vector[1] + vector[2] * vector[2]).sqrt();
     if length <= f32::EPSILON {
@@ -169,16 +148,6 @@ pub fn bake<F: FieldFn>(params: &params::Params, cover: &F) -> VolumeData {
     }
 }
 
-#[unsafe(no_mangle)]
-pub extern "Rust" fn px_volume_op_table() -> &'static OpTable {
-    static TABLE: OpTable = OpTable {
-        ops: &[DESCRIPTOR],
-        canonical_params: params::canonical as ParamsCanonical,
-        call: call as OpCall,
-    };
-    &TABLE
-}
-
 /// 老路径的入口：上游那张**采样好的场**。
 ///
 /// ⚠ 它就是 `bake<SampleField>`，单独留一个名字是因为它是 dylib 那一半与图脚本
@@ -192,21 +161,9 @@ pub fn eval_closed<F: FieldFn>(params: &params::Params, field: &F) -> VolumeData
     bake(params, field)
 }
 
-extern "Rust" fn call(
-    op_id: &str,
-    params_json: &str,
-    grid: Grid,
-    inputs: &[&[u8]],
-) -> Result<Vec<u8>, String> {
-    match op_id {
-        params::CLOUD_COARSE => {
-            let params: params::Params = serde_json::from_str(params_json)
-                .map_err(|err| format!("参数 JSON 解不开：{err}"))?;
-            let coverage = field_payload::decode(inputs[0], grid.projection)?;
-            let volume: VolumeData = eval_sampled(&params, &coverage);
-            let bundle: PayloadBundle = volume_payload::encode(&volume);
-            bundle.placeholder()
-        }
-        other => Err(format!("px_volume_op 不认识算子 {other}")),
-    }
-}
+// ── dylib 那一侧的全部管道（见 px_field_op/src/lib.rs 的同一段注释）──────────────
+px_cook::px_canonical_params!(typed::CloudCoarse);
+px_cook::px_dylib_call!(typed::CloudCoarse);
+
+// ⚠ 第一个参数必须与 crate 名（dll 名）一致：驱动按文件名词干算入口符号。
+px_cook::px_op_table!("px_volume_op", typed::CloudCoarse);

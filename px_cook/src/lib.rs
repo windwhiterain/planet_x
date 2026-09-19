@@ -30,6 +30,8 @@ use px_mesh_schema::MeshData;
 use px_volume_schema::VolumeData;
 
 pub use px_graph::{Cache, Report};
+/// 宏生成出来的代码按 `$crate::px_graph_schema::…` 走 —— 于是用宏的人不必自己依赖它。
+pub use px_graph_schema;
 pub use px_graph_schema::{Grid, PxKeyed};
 
 /// 算子在缓存里的**身份**。
@@ -43,7 +45,7 @@ pub struct Identity {
 /// **图参数**：包着上游节点，键由上游的键聚合而成。
 ///
 /// 它就是图脚本里那个 struct —— 字段是具名的，漏一个、接错域都是编译错。
-pub trait PxInputs {
+pub trait PxInputs: input_bytes::FromPayloads {
     fn collect(&self, hasher: &mut blake3::Hasher);
 }
 
@@ -145,11 +147,18 @@ impl Cooked<MeshData> {
 pub trait PxOp {
     const ID: &'static str;
     const VERSION: u32;
+    /// 描述符里的输入**名**（老路径的接口形状：`["coverage"]` 那种字节边界上的名字）。
+    /// ⚠ 它只给 dylib 那一侧的描述符用；图侧的真实检查在 `Inputs` 上。
+    const INPUTS: &'static [&'static str];
+    /// 产物档：决定键里要不要掺评审相机。
+    const KIND: px_graph_schema::OpKind;
     /// 算子源码（含共享依赖）的 FNV-1a —— 改实现必然重算那一格。
-    fn source_hash() -> u64;
+    ///
+    /// ⚠ 它是 `const`（描述符是 `static`），且图侧（键里）与 dylib 侧（描述符）**同一个数**。
+    const SOURCE_HASH: u64;
 
     /// 超参数的类型：从 `art/<图>/<节点名>.toml` 解出来的那一份。
-    type Params: Serialize + DeserializeOwned + PxKeyed;
+    type Params: Serialize + DeserializeOwned + Default + PxKeyed;
     /// 输出域（`Field` / `VolumeData` / `MeshData`）—— 域、相机口径、编解码全从它推。
     type Payload: PayloadKind + payload::Build;
     /// **图参数**的类型：这个算子被接的那个输入 struct。
@@ -238,12 +247,14 @@ pub mod params {
 
     pub struct Kind<P>(pub std::marker::PhantomData<P>);
 
-    impl<P: Serialize + DeserializeOwned> Kind<P> {
+    impl<P: Serialize + DeserializeOwned + Default> Kind<P> {
         /// ⚠ 与 dylib 那边 `OpDescriptor` 用的**同一份规范化**，否则两侧键对不上。
         pub fn canonical(&self, toml_text: Option<&str>) -> Result<(P, String), String> {
+            // ⚠ `None`（参数文件不存在）走 `Default`，**不是**解一个空串 ——
+            //   与老路径的 `params::parse` 逐字一致，否则两侧的键对不上。
             let parsed: P = match toml_text {
                 Some(text) => toml::from_str(text).map_err(|err| format!("参数解不开：{err}"))?,
-                None => toml::from_str("").map_err(|err| format!("默认参数解不开：{err}"))?,
+                None => P::default(),
             };
             let json = px_graph_schema::canonical_params(&parsed);
             Ok((parsed, json))
@@ -271,7 +282,7 @@ where
     hasher.update(b"px_cook/v1");
     hasher.update(O::ID.as_bytes());
     hasher.update(&O::VERSION.to_le_bytes());
-    hasher.update(&O::source_hash().to_le_bytes());
+    hasher.update(&O::SOURCE_HASH.to_le_bytes());
     hasher.update(&cache.graph_version().to_le_bytes());
     let (width, height) = cache.canvas();
     hasher.update(&width.to_le_bytes());
@@ -339,18 +350,21 @@ where
 /// ```
 #[macro_export]
 macro_rules! px_op {
-    ($name:ident = $id:expr, $params:ty, $inputs:ty, $payload:ty, |$p:ident, $i:ident, $g:ident| $body:expr) => {
+    ($name:ident = $id:expr, $version:literal, $params:ty, $inputs:ty, $payload:ty,
+     $kind:expr, $arity:expr, $sources:expr,
+     |$p:ident, $i:ident, $g:ident| $body:expr) => {
         impl $crate::PxOp for $name {
             const ID: &'static str = $id;
-            const VERSION: u32 = 1;
+            const VERSION: u32 = $version;
+            const INPUTS: &'static [&'static str] = $arity;
+            const KIND: $crate::px_graph_schema::OpKind = $kind;
 
             type Params = $params;
             type Inputs = $inputs;
             type Payload = $payload;
 
-            fn source_hash() -> u64 {
-                $crate::source_hash_of(&[$id])
-            }
+            /// 常数上下文可用（描述符是 `static`）；图侧与 dylib 侧同一个数。
+            const SOURCE_HASH: u64 = $crate::source_hash_of(&$sources);
 
             fn params() -> $crate::params::Kind<$params> {
                 $crate::params::Kind(std::marker::PhantomData)
@@ -370,20 +384,23 @@ macro_rules! px_op {
                 $i: &$inputs,
                 $g: $crate::Grid,
             ) -> Result<$payload, String> {
-                // ⚠ 不用任何 downcast：`cook<O, I>` 要求 `O::Inputs = I`，
-                //    "图参数 struct 接错算子"是**编译错**（见 `px_graphs/tests`）。
                 Ok($body)
             }
         }
     };
 }
 
-/// 算子源码清单的哈希（`SOURCE_HASH` 的算法）。
+/// 算子源码清单的哈希（`SOURCE_HASH` 的算法）——**const fn**，因为描述符是 `static`。
 ///
-/// ⚠ 真正的清单由 `#[derive(PxOp)]` 从 `include_str!` 收集；这一版先按 id 占位，
-/// 等宏生成时换成「本 crate 的 .rs + schema」那段清单。
-pub fn source_hash_of(parts: &[&str]) -> u64 {
-    px_graph_schema::fnv1a_sources(parts)
+/// ⚠ 图侧（键里）与 dylib 侧（描述符）都用它，同一个数。
+pub const fn source_hash_of(parts: &[&str]) -> u64 {
+    let mut hash = px_graph_schema::FNV_OFFSET;
+    let mut index = 0;
+    while index < parts.len() {
+        hash = px_graph_schema::identity::fnv1a_stage(hash, parts[index]);
+        index += 1;
+    }
+    hash
 }
 
 /// **图参数的形状**：`N` 个上游。图脚本就用这几个（`Unary1<Field>` / `Unary3<Field>` …）
@@ -430,4 +447,174 @@ impl<T: PayloadKind + payload::Build> PxInputs for Unary3<Cooked<T>> {
         hasher.update(&self.b.key);
         hasher.update(&self.c.key);
     }
+}
+
+// ── dylib 那一侧的管道（全部由宏生成，算子作者看不到）─────────────────────────
+
+/// `canonical_params` 的通用实现：TOML 原文 → 键用的规范 JSON。
+pub fn canonical_params<P>(toml_text: Option<&str>) -> Result<String, String>
+where
+    P: Serialize + DeserializeOwned + Default,
+{
+    let parsed: P = match toml_text {
+        Some(text) => toml::from_str(text).map_err(|err| err.to_string())?,
+        None => P::default(),
+    };
+    Ok(px_graph_schema::canonical_params(&parsed))
+}
+
+/// 把**规范参数 JSON + 上游载荷字节**渲染成产物的字节。
+///
+/// ⚠ 这就是 dylib `call` 的全部内容：它不认识具体算子，只认 `PxOp` 的关联类型 ——
+///   上游怎么解、算子的 `render` 怎么调、产物怎么编码，全从 `O::Inputs` / `O::Payload` 推。
+pub fn call_dylib<O>(params_json: &str, grid: Grid, inputs: &[&[u8]]) -> Result<Vec<u8>, String>
+where
+    O: PxOp,
+{
+    let params: O::Params = serde_json::from_str(params_json)
+        .map_err(|err| format!("参数 JSON 解不开：{err}"))?;
+    let typed = O::Inputs::from_payloads(inputs, grid)?;
+    let value = O::payload().encode(&O::new().render(&params, &typed, grid)?)?;
+    Ok(value)
+}
+
+/// `PxInputs::from_payloads` 要的那个 trait —— 与 `PxInputs` 同一份实现。
+pub use input_bytes::FromPayloads;
+
+mod input_bytes {
+    use crate::{Cooked, Grid, PayloadKind, PxInputs, payload};
+
+    /// 本 crate 内部用：把上游的**字节**解成图参数 struct。
+    pub trait FromPayloads: Sized {
+        fn from_payloads(inputs: &[&[u8]], grid: Grid) -> Result<Self, String>;
+    }
+
+    impl FromPayloads for () {
+        fn from_payloads(inputs: &[&[u8]], _grid: Grid) -> Result<Self, String> {
+            if inputs.is_empty() {
+                Ok(())
+            } else {
+                Err(format!("这个算子不吃上游，却收到 {} 个", inputs.len()))
+            }
+        }
+    }
+
+    impl<T: PayloadKind + payload::Build> FromPayloads for crate::Unary1<Cooked<T>> {
+        fn from_payloads(inputs: &[&[u8]], grid: Grid) -> Result<Self, String> {
+            let [a] = inputs else {
+                return Err(format!("这个算子吃 1 个上游，却收到 {}", inputs.len()));
+            };
+            Ok(Self {
+                a: Cooked::from_payload(a, grid)?,
+            })
+        }
+    }
+
+    impl<T: PayloadKind + payload::Build> FromPayloads for crate::Unary2<Cooked<T>> {
+        fn from_payloads(inputs: &[&[u8]], grid: Grid) -> Result<Self, String> {
+            let [a, b] = inputs else {
+                return Err(format!("这个算子吃 2 个上游，却收到 {}", inputs.len()));
+            };
+            Ok(Self {
+                a: Cooked::from_payload(a, grid)?,
+                b: Cooked::from_payload(b, grid)?,
+            })
+        }
+    }
+
+    impl<T: PayloadKind + payload::Build> FromPayloads for crate::Unary3<Cooked<T>> {
+        fn from_payloads(inputs: &[&[u8]], grid: Grid) -> Result<Self, String> {
+            let [a, b, c] = inputs else {
+                return Err(format!("这个算子吃 3 个上游，却收到 {}", inputs.len()));
+            };
+            Ok(Self {
+                a: Cooked::from_payload(a, grid)?,
+                b: Cooked::from_payload(b, grid)?,
+                c: Cooked::from_payload(c, grid)?,
+            })
+        }
+    }
+}
+
+impl<P: PayloadKind + payload::Build> Cooked<P> {
+    /// 从上游字节解出一个"已经拿到手"的节点（dylib 那一侧用；键不在这儿，用空键占位）。
+    fn from_payload(bytes: &[u8], grid: Grid) -> Result<Self, String> {
+        Ok(Self::make(
+            [0; 32],
+            P::decode(bytes, grid.projection, "")?,
+            true,
+            0,
+            0,
+        ))
+    }
+}
+
+// ── 导出宏：dylib 那一侧的四样样板（描述符 / 规范化 / 分派 / 入口符号）──────────
+
+/// 生成 `canonical_params`：按 `op_id` 找到算子的参数类型，把 TOML 规范化成 JSON。
+#[macro_export]
+macro_rules! px_canonical_params {
+    ($($op:ty),+ $(,)?) => {
+        extern "Rust" fn canonical_params(
+            op_id: &str,
+            toml_text: Option<&str>,
+        ) -> Result<String, String> {
+            $(
+                if op_id == <$op as $crate::PxOp>::ID {
+                    return $crate::canonical_params::<<$op as $crate::PxOp>::Params>(toml_text);
+                }
+            )+
+            Err(format!("这个算子库不认识算子 {op_id}"))
+        }
+    };
+}
+
+/// 生成 `call`：按 `op_id` 找到算子，把**字节**渲染成**字节**。
+#[macro_export]
+macro_rules! px_dylib_call {
+    ($($op:ty),+ $(,)?) => {
+        extern "Rust" fn call(
+            op_id: &str,
+            params_json: &str,
+            grid: $crate::Grid,
+            inputs: &[&[u8]],
+        ) -> Result<Vec<u8>, String> {
+            $(
+                if op_id == <$op as $crate::PxOp>::ID {
+                    return $crate::call_dylib::<$op>(params_json, grid, inputs);
+                }
+            )+
+            Err(format!("这个算子库不认识算子 {op_id}"))
+        }
+    };
+}
+
+/// 生成入口符号 `<库名>_table` —— 驱动按**文件名词干**找它（`px_graph_schema::op::table_symbol`）。
+///
+/// ⚠ `$lib` 必须与 crate 名（也就是产出的 dll 名）一致，否则运行期 `GetProcAddress failed`，
+///   编译期毫无提示。
+#[macro_export]
+macro_rules! px_op_table {
+    ($lib:literal, $($op:ty),+ $(,)?) => {
+        #[unsafe(export_name = concat!($lib, "_table"))]
+        pub extern "Rust" fn table() -> &'static $crate::px_graph_schema::OpTable {
+            static OPS: &[$crate::px_graph_schema::OpDescriptor] = &[
+                $($crate::px_graph_schema::OpDescriptor {
+                    id: <$op as $crate::PxOp>::ID,
+                    version: <$op as $crate::PxOp>::VERSION,
+                    source_hash: <$op as $crate::PxOp>::SOURCE_HASH,
+                    inputs: <$op as $crate::PxOp>::INPUTS,
+                    kind: <$op as $crate::PxOp>::KIND,
+                }),+
+            ];
+            static TABLE: $crate::px_graph_schema::OpTable =
+                $crate::px_graph_schema::OpTable {
+                    ops: OPS,
+                    canonical_params: canonical_params
+                        as $crate::px_graph_schema::ParamsCanonical,
+                    call: call as $crate::px_graph_schema::OpCall,
+                };
+            &TABLE
+        }
+    };
 }

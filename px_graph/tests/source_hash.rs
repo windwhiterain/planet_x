@@ -7,8 +7,9 @@
 //! 算子拆成 `px_*_op`（dylib）之后这条更硬：共享依赖现在住在 `px_*_schema` 里，
 //! 它们不在 dll 的源码集合里，只有 `SOURCE_HASH` 点得到它们。
 //!
-//! 语言管不住这件事（单文件版照样编译、照样跑），所以用门看住。门只查**形状**：
-//! 用了 `fnv1a_sources`、至少两段、点到了这几份文件。
+//! ⚠ 立场变过一次：清单现在**每张图/每个算子各写一份**（`typed.rs` 里那一段），
+//! 由 `px_op!` 收进去生成 `const SOURCE_HASH`。于是门扫的是**那段清单**，而不是
+//! 某一行 `const`。语言管不住这件事（漏一份照样编译、照样跑），所以用门看住。
 
 use std::path::{Path, PathBuf};
 
@@ -19,62 +20,111 @@ fn workspace() -> PathBuf {
         .to_path_buf()
 }
 
-/// 每个算子：它的文件 → 那一行 `SOURCE_HASH` 里必须出现的 `include_str!` 路径。
-fn operators() -> Vec<(String, Vec<&'static str>)> {
-    let field_shared = vec![
-        "\"../noise.rs\"",
-        "\"../../../px_field_schema/src/field.rs\"",
-        "\"../../../px_field_schema/src/noise.rs\"",
-        "\"../../../px_field_schema/src/params.rs\"",
-        "\"../../../px_field_schema/src/payload.rs\"",
+/// 一条规则：哪一段代码里，必须点到哪些共享件。
+///
+/// `must` 是**子串**（含行内换行由 `\` 接起来的那些也照查），逐个必须命中。
+struct Rule {
+    file: &'static str,
+    /// 在这份文件里找哪一段（`after` 之后的第一个 `until`）。
+    after: &'static str,
+    until: &'static str,
+    /// 这一段里的"一段源码"是怎么写的：
+    ///
+    /// * `true` —— 直接写 `include_str!`，一个顶一份（网格/体积域）。
+    /// * `false` —— 写 `sources!(a, b, c)`，一个顶三份 ⇒ 要**数逗号**（场域；路径相对算子自己的文件）。
+    count_parts: bool,
+    must: Vec<&'static str>,
+}
+
+fn rules() -> Vec<Rule> {
+    let mut rules = Vec::new();
+    // 场域：每个算子一段 `sources!(...)`，路径相对 `px_field_op/src/`
+    let field = [
+        ("Constant", vec!["px_field_schema/src/field.rs", "px_field_schema/src/params.rs"]),
+        (
+            "Fbm",
+            vec![
+                "px_field_op/src/noise.rs",
+                "px_field_schema/src/field.rs",
+                "px_field_schema/src/noise.rs",
+                "px_field_schema/src/params.rs",
+            ],
+        ),
+        (
+            "Ridged",
+            vec![
+                "px_field_op/src/noise.rs",
+                "px_field_schema/src/field.rs",
+                "px_field_schema/src/noise.rs",
+                "px_field_schema/src/params.rs",
+            ],
+        ),
+        ("Remap", vec!["px_field_schema/src/field.rs", "px_field_schema/src/params.rs"]),
+        ("Gradient", vec!["px_field_schema/src/field.rs", "px_field_schema/src/params.rs"]),
+        ("Mix", vec!["px_field_schema/src/field.rs", "px_field_schema/src/params.rs"]),
+        (
+            "Warp",
+            vec![
+                "px_field_schema/src/field.rs",
+                "px_field_schema/src/params.rs",
+                "px_verify/src/noise.rs",
+            ],
+        ),
     ];
-    let mut operators = Vec::new();
-    for name in [
-        "constant",
-        "fbm",
-        "gradient",
-        "mix",
-        "remap",
-        "ridged",
-        "warp",
-    ] {
-        operators.push((
-            format!("px_field_op/src/ops/{name}.rs"),
-            field_shared.clone(),
-        ));
+    for (name, must) in field {
+        let after: &'static str = Box::leak(format!("{name},").into_boxed_str());
+        rules.push(Rule {
+            file: "px_field_op/src/typed.rs",
+            after,
+            // 结束标记用块尾那两行（`field_op!` 本身会被子串命中，区间就空了）。
+            until: "\n}",
+            count_parts: false,
+            must,
+        });
     }
-    operators.push((
-        "px_mesh_op/src/cubesphere.rs".to_string(),
-        vec![
-            "\"../../px_mesh_schema/src/params.rs\"",
-            "\"../../px_mesh_schema/src/payload.rs\"",
-            "\"../../px_field_schema/src/field.rs\"",
+    // 网格域：每个算子一段 `px_op!`（`include_str!` 数组写在参数里）
+    rules.push(Rule {
+        file: "px_mesh_op/src/typed.rs",
+        after: "CubeSphere =",
+        until: "pub struct Proxy",
+        count_parts: true,
+        must: vec![
+            "px_mesh_schema/src/params.rs",
+            "px_mesh_schema/src/payload.rs",
+            "px_field_schema/src/field.rs",
         ],
-    ));
-    operators.push((
-        "px_mesh_op/src/proxy.rs".to_string(),
-        vec![
-            "\"../../px_volume_schema/src/volume.rs\"",
-            "\"../../px_volume_schema/src/params.rs\"",
-            "\"../../px_volume_schema/src/payload.rs\"",
-            "\"../../px_mesh_schema/src/params.rs\"",
-            "\"../../px_mesh_schema/src/payload.rs\"",
+    });
+    rules.push(Rule {
+        file: "px_mesh_op/src/typed.rs",
+        after: "Proxy =",
+        until: "|p, i, _g|",
+        count_parts: true,
+        must: vec![
+            "px_volume_schema/src/volume.rs",
+            "px_volume_schema/src/params.rs",
+            "px_volume_schema/src/payload.rs",
+            "px_mesh_schema/src/params.rs",
+            "px_mesh_schema/src/payload.rs",
         ],
-    ));
-    operators.push((
-        "px_volume_op/src/lib.rs".to_string(),
-        vec![
-            "\"../../px_volume_schema/src/volume.rs\"",
-            "\"../../px_volume_schema/src/params.rs\"",
-            "\"../../px_volume_schema/src/payload.rs\"",
-            "\"../../px_field_schema/src/field.rs\"",
-            "\"../../px_verify/src/cloud_field.rs\"",
-            "\"../../px_verify/src/noise.rs\"",
-            "\"../../px_verify/src/dual.rs\"",
-            "\"../../px_verify/src/proxy.rs\"",
+    });
+    // 体积域
+    rules.push(Rule {
+        file: "px_volume_op/src/typed.rs",
+        after: "CloudCoarse =",
+        until: "|p, i, _g|",
+        count_parts: true,
+        must: vec![
+            "px_volume_schema/src/volume.rs",
+            "px_volume_schema/src/params.rs",
+            "px_volume_schema/src/payload.rs",
+            "px_field_schema/src/field.rs",
+            "px_verify/src/cloud_field.rs",
+            "px_verify/src/noise.rs",
+            "px_verify/src/dual.rs",
+            "px_verify/src/proxy.rs",
         ],
-    ));
-    operators
+    });
+    rules
 }
 
 #[test]
@@ -82,45 +132,46 @@ fn every_operator_source_hash_covers_its_shared_dependencies() {
     let root = workspace();
     let mut checked = 0_usize;
 
-    for (relative, deps) in operators() {
-        let path = root.join(&relative);
-        let label = relative.replace('\\', "/");
-        assert_operator_hash(&path, &deps, &label);
+    for rule in rules() {
+        let path = root.join(rule.file);
+        let label = rule.file.replace('\\', "/");
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|err| panic!("读不了 {}：{err}", path.display()));
+        let start = text
+            .find(rule.after)
+            .unwrap_or_else(|| panic!("{label} 里找不到算子 `{}`", rule.after));
+        let rest = &text[start..];
+        let end = rest
+            .find(rule.until)
+            .unwrap_or_else(|| panic!("{label} 里 `{}` 之后找不到结束标记", rule.after));
+        let section = &rest[..end];
+
+        // 形状：至少两段（自己 + 一个共享件）。漏成单文件版就在这里炸。
+        let parts = if rule.count_parts {
+            section.matches("include_str!(").count()
+        } else {
+            // `sources!(a, b, c)` 的参数个数 = 逗号数 + 1
+            let args = &section[section.find("sources!(").expect("刚查过")..];
+            let args = &args[..args.find(')').expect("sources! 没有收尾")];
+            args.matches(',').count() + 1
+        };
+        assert!(
+            parts >= 2,
+            "{label} 的 `{}` 只哈希了 {parts} 份源码（§28.2）：{section}",
+            rule.after
+        );
+        for dep in &rule.must {
+            assert!(
+                section.contains(dep),
+                "{label} 的 `{}` 没点到共享依赖 {dep}：{section}",
+                rule.after
+            );
+        }
         checked += 1;
     }
 
     assert!(checked > 0, "一个算子都没检查到");
     println!("SOURCE_HASH 覆盖共享依赖：检查了 {checked} 个算子");
-}
-
-fn assert_operator_hash(path: &Path, deps: &[&str], label: &str) {
-    let text = std::fs::read_to_string(path)
-        .unwrap_or_else(|err| panic!("读不了 {}：{err}", path.display()));
-    // 取**整条语句**（到 `;` 为止），不是一行：共享依赖多的时候那一行会折行。
-    let start = text
-        .find("const SOURCE_HASH")
-        .or_else(|| text.find("pub const SOURCE_HASH"))
-        .unwrap_or_else(|| panic!("{label} 里没有 const SOURCE_HASH"));
-    let statement = &text[start..];
-    let end = statement
-        .find(';')
-        .unwrap_or_else(|| panic!("{label} 的 SOURCE_HASH 没有以 `;` 收尾"));
-    let statement = &statement[..end];
-    assert!(
-        statement.contains("fnv1a_sources(&["),
-        "{label} 的 SOURCE_HASH 还是单文件版（§28.2）：{statement}"
-    );
-    let parts = statement.matches("include_str!").count();
-    assert!(
-        parts >= 2,
-        "{label} 的 SOURCE_HASH 只哈希了 {parts} 份源码：{statement}"
-    );
-    for dep in deps {
-        assert!(
-            statement.contains(dep),
-            "{label} 的 SOURCE_HASH 没点到共享依赖 {dep}：{statement}"
-        );
-    }
 }
 
 /// 多段哈希本身：长度前缀挡住「拼起来一样」的两种切法。
