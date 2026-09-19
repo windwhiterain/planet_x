@@ -19,10 +19,10 @@
 //! 里指**已删的 Bevy 宿主**，从 §157 那一笔起指**现在的唯一宿主**（裸 wgpu）—— 读旧句按旧义读。
 //!
 //! ⚠ 外部符号（`bevy_pbr::…`）**只记名字**：它们的实现由 Bevy / naga_oil 的版本决定，
-//! 那是 `px_ops::SHADER_VERSION` 手动那一档（§19.1）。这条边界要写进报告，不能装作它不存在。
+//! 那是 `px_graph::SHADER_VERSION` 手动那一档（§19.1）。这条边界要写进报告，不能装作它不存在。
 //!
 //! 依赖方向：**叶子 crate** —— 除了 `px_protocol`（只有类型，没有实现）不依赖本仓任何 crate，
-//! 也不依赖 bevy / wgpu。`px_ops` / `px_graphs`（烘图侧）与 `px_render`（运行期）都能用它：
+//! 也不依赖 bevy / wgpu。`px_graph` / `px_graphs`（烘图侧）与 `px_render`（运行期）都能用它：
 //! 烘图侧要在这里算键、组装、反射，运行期要在同一份规则下装载与对账。
 //! ⚠ 这一句里的"`px_render`（运行期）"在 §157 之前指 Bevy 宿主、之后指 wgpu 宿主 —— 名字换过手，
 //! 而"运行期"这个**角色**没换过（§157）。
@@ -80,7 +80,7 @@ pub fn workspace_roots(workspace: &Path) -> Vec<PathBuf> {
     ]
 }
 
-/// `workspace_roots` 那一份约定下的模块表。烘图侧一行拿到：`workspace_modules(&px_ops::workspace_root())`。
+/// `workspace_roots` 那一份约定下的模块表。烘图侧一行拿到：`workspace_modules(&px_graph::workspace_root())`。
 pub fn workspace_modules(workspace: &Path) -> Result<ModuleTable, String> {
     module_sources(&workspace_roots(workspace))
 }
@@ -338,7 +338,7 @@ pub fn closure_from_params(params: &BTreeMap<String, f64>) -> Option<u64> {
 }
 
 // ---------------------------------------------------------------------------
-// FNV-1a（只做变更检测，不做安全：与 `px_ops::noise::fnv1a` 同一套常数）
+// FNV-1a（只做变更检测，不做安全：与 `px_graph::noise::fnv1a` 同一套常数）
 // ---------------------------------------------------------------------------
 
 struct Fnv(u64);
@@ -637,7 +637,7 @@ mod tests {
     ///
     /// - 字节数 + FNV：组装文本（`#import` 展开后的那一份，就是喂给 `create_shader_module` 的）；
     /// - 闭包指纹：**外部符号的名字在这里**（`Closure::fingerprint` 哈希的是 import 子句本身）
-    ///   ⇒ 它同时是 `px_ops::shader_key` 的输入之一（`键 = WGSL 字节 ‖ 闭包指纹`）。
+    ///   ⇒ 它同时是 `px_graph::shader_key` 的输入之一（`键 = WGSL 字节 ‖ 闭包指纹`）。
     ///
     /// ⚠ 这正是 S8-b 那条死结的读数：改一个外部符号的**名字**，组装文本可以一个字节都不动，
     /// 而闭包指纹**必然**变 ⇒ 产物键变 ⇒ `art/anchor/frozen/*.pxart` 里钉着的 shader 成员键变。
@@ -664,7 +664,7 @@ mod tests {
                 closure(&source, &modules).fingerprint(),
                 closure_fingerprint,
                 "{name} 的 include 闭包变了 —— 外部符号的名字也在指纹里，\
-                 而 `px_ops::shader_key` 拿它算产物键（改了它，冻在 art/anchor/frozen 的产物键就跟着变）"
+                 而 `px_graph::shader_key` 拿它算产物键（改了它，冻在 art/anchor/frozen 的产物键就跟着变）"
             );
             let mut seen = Vec::new();
             let assembled = assemble::render_source(

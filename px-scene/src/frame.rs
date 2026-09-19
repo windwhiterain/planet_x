@@ -40,7 +40,7 @@ pub const DEFAULT_FRAME: &str = "default";
 /// 工作目录是**包目录**（`px_graphs/`），而 `cargo run` 是调用它的那个目录 ——
 /// 相对路径会让"同一个配方在两个入口下指向两个地方"。
 pub fn recipe_path(name: &str) -> PathBuf {
-    px_ops::workspace_root()
+    px_graph::workspace_root()
         .join("art")
         .join("frame")
         .join(format!("{name}.toml"))
@@ -333,7 +333,7 @@ impl FrameFile {
             if material.entry.trim().is_empty() {
                 return Err(format!("{at} 没给 entry（@fragment 那个函数叫什么）"));
             }
-            let full = px_ops::workspace_root().join(&material.shader);
+            let full = px_graph::workspace_root().join(&material.shader);
             if !full.is_file() {
                 return Err(format!(
                     "{at} 的 shader '{}' 不是一份文件（{}）：它会被**内联**进产物，\
@@ -532,7 +532,7 @@ pub fn build(
 
     let mut materials = Vec::with_capacity(frame.materials.len());
     if !frame.materials.is_empty() {
-        let modules = px_shader::workspace_modules(&px_ops::workspace_root())?;
+        let modules = px_shader::workspace_modules(&px_graph::workspace_root())?;
         for material in &frame.materials {
             materials.push(bake_material(material, sources, &modules)?);
         }
@@ -558,7 +558,7 @@ pub fn build(
         let (vertex_shader, vertex_entry) = match &entry.vertex_shader {
             Some(path) => {
                 // 配方里写的是**仓库内**的相对路径；同样不靠当前目录（见 `recipe_path`）。
-                let full = px_ops::workspace_root().join(path);
+                let full = px_graph::workspace_root().join(path);
                 let text = std::fs::read_to_string(&full)
                     .map_err(|err| format!("{at} 读不了顶点阶段 {}：{err}", full.display()))?;
                 (text, entry.vertex_entry.clone())
@@ -568,13 +568,13 @@ pub fn build(
         let mut params: BTreeMap<String, px_protocol::scene::Value> = BTreeMap::new();
         let shader = match &entry.fragment_shader {
             Some(node) => {
-                let key = px_ops::manifest_key_of("shaders", node).map_err(|err| {
+                let key = px_graph::manifest_key_of("shaders", node).map_err(|err| {
                     format!("{at} 的片元 shader '{node}'：{err}（先跑 --bin shaders 烘）")
                 })?;
                 let member = Member::new("shaders", node, &key);
                 // 参数按**这份 shader 自己的契约**打包：烘图时就把三档
                 // （名字不认识 / 声明了没人给 / 类型不符）全拦下来，不等装载时才拒。
-                let layout = crate::contract::schema_of(&member, &px_ops::cache_root())
+                let layout = crate::contract::schema_of(&member, &px_graph::cache_root())
                     .map_err(|err| format!("{at}：{err}"))?;
                 params = crate::contract::merge_named(
                     &format!("帧图 pass '{}'", entry.label),
@@ -696,7 +696,7 @@ fn instance_name(base: &str, light: u32, face_name: &str) -> String {
 /// 没有（Bevy 真正的 `View` 有七十多个字段，那张表只有五格）。所以这一格必须换成宿主那一份，
 /// 而它的文本**只有一处**（`px_shader::assemble::HOST_VIEW_STUB`，宿主与这里共用）。
 ///
-/// ⚠ 内容 shader 的烘图侧走的是 Bevy 那张（`px_ops::shader_schema` 那段注释写了为什么）——
+/// ⚠ 内容 shader 的烘图侧走的是 Bevy 那张（`px_graph::shader_schema` 那段注释写了为什么）——
 /// 两张表的区别正是"这份 WGSL 是谁的"：内容是 Bevy 宿主与 wgpu 宿主**都要**兑现的，
 /// 帧自有材质只由 wgpu 宿主兑现。
 fn frame_stubs(symbol: &str) -> Option<&'static str> {
@@ -721,7 +721,7 @@ fn bake_material(
     modules: &px_shader::ModuleTable,
 ) -> Result<FrameMaterial, String> {
     let at = format!("帧材质 '{}'", material.name);
-    let full = px_ops::workspace_root().join(&material.shader);
+    let full = px_graph::workspace_root().join(&material.shader);
     let text = std::fs::read_to_string(&full)
         .map_err(|err| format!("{at} 读不了 {}：{err}", full.display()))?;
     let mut seen = Vec::new();
@@ -955,19 +955,19 @@ mod tests {
     use super::*;
     use px_protocol::scene::{CullMode, Geometry, Material, Transform};
 
-    /// 这些判据要**读真的配方**（`art/frame/default.toml`），而 `px_ops::workspace_root()`
+    /// 这些判据要**读真的配方**（`art/frame/default.toml`），而 `px_graph::workspace_root()`
     /// 要上下文先开过 —— 生产里由两个 bin 的 main 开，测试里在这里开一次。
     fn begin() {
         use std::sync::Once;
         static ONCE: Once = Once::new();
         ONCE.call_once(|| {
-            px_ops::begin(px_ops::GraphSpec {
+            px_graph::begin(px_graph::GraphSpec {
                 name: "frame-tests".to_string(),
                 version: 1,
                 source_hash: 1,
                 width: 0,
                 height: 0,
-                projection: px_ops::field::Projection::Cube,
+                projection: px_protocol::art::Domain::Cube,
                 cameras: Vec::new(),
             });
         });
@@ -1133,7 +1133,7 @@ mod tests {
     #[test]
     fn a_broken_frame_material_is_refused_at_bake_time() {
         begin();
-        let modules = px_shader::workspace_modules(&px_ops::workspace_root()).expect("模块表");
+        let modules = px_shader::workspace_modules(&px_graph::workspace_root()).expect("模块表");
         let material = |params: &str| -> MaterialFile {
             toml::from_str(&format!(
                 "name = \"skybox\"\nshader = \"art/frame/skybox.wgsl\"\nentry = \"fragment\"\nparams = {{ {params} }}\n"
@@ -1168,7 +1168,7 @@ mod tests {
         // ③ 类型不符：`brightness` 在 WGSL 里是 `f32`，而 `environment.ambient` 也是 f32
         //    ⇒ 这一档得换个法子造：把参数名换成一个不存在的（那就变成 ④ 了）。
         //    真正的类型不符要一份声明了别的类型的 WGSL —— 用一个临时夹具文本。
-        let dir = px_ops::workspace_root().join("target").join("frame-material-fixture");
+        let dir = px_graph::workspace_root().join("target").join("frame-material-fixture");
         std::fs::create_dir_all(&dir).expect("建夹具目录");
         let fixture = dir.join("vec3_param.wgsl");
         std::fs::write(

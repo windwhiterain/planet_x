@@ -1,9 +1,9 @@
 use std::path::{Path, PathBuf};
 
-use px_ops::{GraphSpec, ManifestEntry};
+use px_graph::{GraphSpec, ManifestEntry};
 
 const GRAPH_VERSION: u32 = 1;
-const SOURCE_HASH: u64 = px_ops::noise::fnv1a(include_str!("shaders.rs"));
+const SOURCE_HASH: u64 = px_graph::fnv1a(include_str!("shaders.rs"));
 
 /// 要烘的槽 = `art/shaders/*.wgsl` 里**每一个入口 shader**（§80 第 2 步）。
 ///
@@ -45,18 +45,18 @@ fn entry_slots() -> Result<Vec<String>, String> {
 }
 
 fn main() {
-    px_ops::begin(GraphSpec {
+    px_graph::begin(GraphSpec {
         name: "shaders".to_string(),
         version: GRAPH_VERSION,
         source_hash: SOURCE_HASH,
         width: 0,
         height: 0,
-        projection: px_ops::field::Projection::Cube,
+        projection: px_protocol::art::Domain::Cube,
         cameras: Vec::new(),
     });
 
     // 模块表读一次就够：所有入口共用同一批库（`planet_x::common / light / noise`）。
-    let modules = px_shader::workspace_modules(&px_ops::workspace_root())
+    let modules = px_shader::workspace_modules(&px_graph::workspace_root())
         .unwrap_or_else(|err| panic!("{err}"));
 
     let slots = entry_slots().unwrap_or_else(|err| panic!("{err}"));
@@ -71,19 +71,19 @@ fn main() {
         // 键不动、场景键不动、槽版本不动，而画出来的东西变了。
         let closure = px_shader::closure(&text, &modules);
         let (key, artifact, bytes) =
-            px_ops::write_shader(slot, &text, &closure, &modules).unwrap_or_else(|err| panic!("{err}"));
+            px_graph::write_shader(slot, &text, &closure, &modules).unwrap_or_else(|err| panic!("{err}"));
         println!(
             "产物 {slot} -> {}（{}，{} 字节 WGSL）",
             artifact.display(),
-            px_ops::hex_short(&key),
+            px_graph::hex_short(&key),
             text.len()
         );
         println!("  {}", closure.summary());
         entries.push(ManifestEntry {
             node: slot.to_string(),
             op: "shader.wgsl".to_string(),
-            op_version: px_ops::SHADER_VERSION,
-            key: px_ops::hex(&key),
+            op_version: px_graph::SHADER_VERSION,
+            key: px_graph::hex(&key),
             hit: false,
             millis: 0,
             bytes,
@@ -93,7 +93,7 @@ fn main() {
         });
     }
 
-    let manifest = px_ops::write_graph_manifest("shaders", &entries)
+    let manifest = px_graph::write_graph_manifest("shaders", &entries)
         .unwrap_or_else(|err| panic!("写清单失败：{err}"));
     println!(
         "共 {} 份 shader：{}；清单 {}",

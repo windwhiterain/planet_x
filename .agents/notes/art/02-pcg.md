@@ -6,6 +6,11 @@
 - **分工**（§16.1/§16.2）：拓扑写在 Rust（`px_graphs/src/bin/<图名>.rs`，手写、入库），算子写在 `px_ops`（有类型的纯函数 + `const VERSION` + `cook`/CAS），参数落在 `art/<图名>/<节点名>.toml`。**美术迭代的热路径是参数、不是拓扑**：改参数 **0** 编译，改拓扑 / 加节点 ~0.5 s 重编，加算子 ~0.5 s 重编。`px_ops` 与 `px_graphs` 分开（算子稳定、图多变）；**加一张图 = 多一个文件，不动 `Cargo.toml`**（`src/bin/*.rs` 由 cargo 自动发现），所有 bin 共享 workspace 的 target 目录（增量缓存全部复用）。
 - **不引入通用脚本语言**（§14.1/§15.4）：图是数据、算子是 Rust、参数是数据。「参数表达式」（`ch("../ridge/scale")*2` 那类）只需要一个**极小的带类型 AST 求值器**（约 200 行），**不是一门语言**；逐元素片段先用算子组合覆盖（map / remap / blur / scatter / warp）。⚠️ 真要片段，**必须是纯函数**（不碰 IO、时间、全局），否则缓存与确定性会崩。
 - **结构灵活性靠参数驱动的循环**（§16.4）：`for layer in 0..params.layers { … }` ⇒ 参数文件里改一个整数就改「拓扑」，零重编。真正需要改 Rust 的是出现了代码里没有的新算子组合 —— 那是结构设计，本来就该付一次 0.5 s。
+  > ⚠ **§159 取代（2026-09-19，`16-graph-split.md`）**：cdylib **做了**，理由不是「不重启图程序」——
+  > 是**改一个算子不必重编图程序**，以及用户点名的另一条：**场函数过不去类型擦除的边界**
+  > （要拿场函数当参数的算子只能在图脚本那一侧单态化）。形态是每域一个 `px_*_op` dylib
+  > + 描述符表 + `extern "Rust"` 入口，**入口名按库名派生**（避开 `LNK2005`，也让图自建的
+  > op crate 自动被接上）。读数是 46/46 份产物逐字节不变、六份冻产物逐格不变。
 - **子图去重是免费的**（§16.5）：两个节点只要 `op_id + 参数 + 输入` 相同就**共享同一份产物**，公共子表达式自动只算一次，不需要 CSE 优化器 —— 这是键设计的副产品。
 - **放弃了什么（要认）**（§16.6）：**图不再是可读数据** —— 没有图编辑器、没有「列出所有节点」、没有 DAG 可视化，工具只能 grep Rust；**「美术自己拖节点」不在路线图上**。结构的复现性 = 二进制 + 参数 + 输入 ⇒ 产物里要记 **git rev + 协议指纹**。
 - **缓存骨架与语言无关，全部保留**（§14.2）：① 币种就是协议里的 `ArtBundle`（节点输出 = `AssetKind` + params + `Blob`，**缓存里存的就是渲染器要吃的东西**，中间不需要转换层）；② key 是纯函数，**不含路径 / 时间 / pid / 主机名**，文件只贡献内容哈希、不贡献路径（挪文件不失效）；③ **「脏」不是一个状态，而是「key 不在 CAS 里」**（没有要维护的脏标记、不怕重启、缓存可共享）；④ 两遍走：先 key 后 cook，算 key 不需要求值 ⇒ 改一个叶子参数 = O(深度) 次哈希、上游命中是自动的；⑤ 磁盘 CAS 分片 `target/pcg/<key 前两位>/<key>.pxart`；⑥ 确定性：单线程 cook 起步，将来并行必须保证「并行不改变结果」（纯算子 + 确定性归约），不引时间戳。
@@ -34,6 +39,12 @@ node_key = blake3("px_pcg/v1" ‖ op_id ‖ op_version ‖ graph_version
   naga_oil 的版本决定，归 `SHADER_VERSION` 手动那一档（§19.1 的口径）。
 - **引擎指纹不是「运行时哈希正在跑的 exe」**（那条口径已由 §19 作废）：任何一次重链接都会让整个缓存失效。现在是每算子 `const SOURCE_HASH: u64 = fnv1a_sources(&[include_str!("<算子>.rs"), include_str!("../field.rs"), include_str!("../noise.rs")])` + 手动 `op_version`（依赖也进哈希，见 §28.2）。
 - ⚠️ 已知盲区：**若将来启用 cdylib，dll 不在 exe 里**，那时要把 dll 文件一并纳入哈希。
+  > ⚠ **§159.4 取代（2026-09-19）**：cdylib 启用了，但 dll 指纹**不进键**（用户裁决）——
+  > 整包进键就是 §19 当年否掉的「一动全废」（改任一算子 ⇒ 所有图的全部节点换键）。
+  > 落点改成：**每个算子的 `SOURCE_HASH`（编译期常量，随 dll 过来）+ `VERSION` + dll 文件
+  > blake3 前 8 字节**一起进 `index.json`，命中时三条对账、不一致就按 §19.1 那套喊。
+  > 实测：拆分 + 全量重算后 46/46 份产物**逐字节不变**、六份冻产物文件字节逐格不变
+  > ⇒ 键一个都没动，anchor 不用重登记。
 
 ### §17.2 参数：一节点一文件
 ```
@@ -76,6 +87,11 @@ pub const SOURCE_HASH: u64 = fnv1a(include_str!("fbm.rs"));   // 编译期算好
 - ⏳ **告警要不要升级成门**（把「源码变了但版本没升」做成 `check-pcg-versions` 失败）：倾向**先只告警** —— 门在纯重构时会误报，而误报的门最后会被人绕过去。
 
 ## §20 P2a 落地：PCG 层的最终形状
+> ⚠ **§159 取代（2026-09-19，`16-graph-split.md`）**：`px_ops` / `px_mc` 两个 crate **已解散**，
+> 按领域拆成 `px_graph_schema`（契约与装载）、`px_graph`（库本体：驱动/CAS/参数/清单/cameras/generate、
+> **静态**）、`px_{field,volume,mesh}_schema`（各域数据）+ `px_{field,volume,mesh}_op`（各域算子，**dylib**）。
+> 图脚本从 `node::<ops::fbm::Fbm>("clusters", &[])`（泛型、每个算子在图程序里单态化一份）
+> 改成 `node("field.fbm", "clusters", &[])`（按 **id** 取，不按类型取）。下面这一段是**当时的形状**，读数一字不删。
 - `px_ops`：`FieldOp` trait / `Field` / 值噪声 + fbm + ridged / `node::<Op>(名字, 输入)` / blake3 CAS / `index.json` + `manifest.json` / 版本不匹配告警。`node::<Op>(名字, 输入)` 是**泛型函数、不是宏** —— 算子把 `ID / VERSION / SOURCE_HASH / INPUTS / eval` 放进一个 `impl FieldOp for X`，「算子表」就是 trait 实现、编译期解析 ⇒ **框架语法为零**，图程序读起来就是普通 Rust。
 - 算子 5 个、**一算子一文件**、各带自己的 ID / VERSION / SOURCE_HASH：`field.constant`、`field.fbm`、`field.ridged`、`field.mix`（3 输入 a/b/mask）、`field.remap`。
 - 图：`px_graphs/src/bin/planet.rs`（手写、带 `GRAPH_VERSION`），节点 continents / mountains / weight → terrain → height。参数：`art/planet/<节点>.toml`（一节点一文件，文件缺失即用默认值）。用法：`cargo run -p px_graphs --bin planet`。

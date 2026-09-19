@@ -2,13 +2,20 @@
 //!
 //! 覆盖图是**造**出来的一张小 cube map（不是 `mixed` 那句真场），这样测试不依赖 CAS 里
 //! 有没有烘过 `clouds` 图；真数据上的同一条断言在 `px_graphs --bin clouds` 的 `check` 里跑。
+//!
+//! ⚠ 这里**静态**调算子的函数体（`px_volume_op` / `px_mesh_op` 是 dev-dependency）：判的是数值。
+//! 「算子真的从 dylib 里被装载、被调用」由 `px_graphs/src/bin/*` 那一趟端到端走 —— 它的
+//! 产物键就是判据（键相同 ⇒ 走的是同一条路）。
 
 use std::collections::HashMap;
 
-use px_graphs::cloud_proxy::{self, CoarseVolume, Params};
-use px_ops::field::{Field, Projection};
-use px_ops::noise::{FbmSettings, fbm_3};
-use px_ops::{IsosurfaceOp, VolumeGrid};
+use px_field_schema::field::{Field, Projection};
+use px_field_schema::noise::FbmSettings;
+use px_field_op::noise::fbm_3;
+use px_mesh_schema::params as mesh_params;
+use px_graphs::cloud_proxy;
+use px_volume_schema::VolumeGrid;
+use px_volume_schema::params::{self as volume_params, Params};
 use px_verify::cloud_field::CloudFieldParams;
 
 const FACE: u32 = 64;
@@ -44,21 +51,26 @@ fn params() -> Params {
     }
 }
 
-fn mesh_params() -> px_mc::Params {
+fn surface_params() -> mesh_params::proxy::Params {
     // `offset`（P20 待删的死码）没写在这里 ⇒ 走它的默认 0.0：老路径逐位不变。
-    px_mc::Params {
+    mesh_params::proxy::Params {
         level: 0.0,
         depth: 4,
         weld: 1e-4,
-        ..px_mc::Params::default()
+        ..mesh_params::proxy::Params::default()
     }
 }
 
-fn bake(params: &Params, coverage: &Field) -> px_ops::VolumeData {
-    <CoarseVolume as px_ops::VolumeOp>::bake(params, &[coverage])
+fn bake(params: &Params, coverage: &Field) -> px_volume_schema::VolumeData {
+    px_volume_op::bake(params, coverage)
 }
 
-fn audit(mesh: &px_ops::MeshData) -> (usize, usize) {
+fn surface(params: &mesh_params::proxy::Params, volume: &px_volume_schema::VolumeData) -> px_mesh_schema::MeshData {
+    let grid = VolumeGrid::new(volume);
+    px_mesh_op::proxy::surface(params, &grid).expect("出等值面失败")
+}
+
+fn audit(mesh: &px_mesh_schema::MeshData) -> (usize, usize) {
     let mut edges: HashMap<(u32, u32), u32> = HashMap::new();
     for triangle in mesh.indices.chunks_exact(3) {
         for pair in 0..3 {
@@ -78,8 +90,7 @@ fn the_proxy_is_closed() {
     let coverage = coverage();
     let params = params();
     let volume = bake(&params, &coverage);
-    let grid = VolumeGrid::new(&volume);
-    let mesh = <px_mc::ProxySurface as IsosurfaceOp>::surface(&mesh_params(), &grid).expect("出等值面失败");
+    let mesh = surface(&surface_params(), &volume);
 
     let (open, nonmanifold) = audit(&mesh);
     println!(
@@ -101,9 +112,8 @@ fn the_mesh_op_is_reproducible() {
     let coverage = coverage();
     let params = params();
     let volume = bake(&params, &coverage);
-    let grid = VolumeGrid::new(&volume);
-    let first = <px_mc::ProxySurface as IsosurfaceOp>::surface(&mesh_params(), &grid).expect("第一次失败");
-    let second = <px_mc::ProxySurface as IsosurfaceOp>::surface(&mesh_params(), &grid).expect("第二次失败");
+    let first = surface(&surface_params(), &volume);
+    let second = surface(&surface_params(), &volume);
     assert_eq!(first.positions, second.positions, "顶点位置不可复现");
     assert_eq!(first.normals, second.normals, "法线不可复现");
     assert_eq!(first.uvs, second.uvs);
@@ -115,10 +125,9 @@ fn the_proxy_encloses_the_coarse_field() {
     let coverage = coverage();
     let params = params();
     let volume = bake(&params, &coverage);
-    let grid = VolumeGrid::new(&volume);
-    let mesh = <px_mc::ProxySurface as IsosurfaceOp>::surface(&mesh_params(), &grid).expect("出等值面失败");
+    let mesh = surface(&surface_params(), &volume);
 
-    let cloud: CloudFieldParams = params.cloud();
+    let cloud: CloudFieldParams = px_verify::proxy::from_volume(&params);
     let report = cloud_proxy::containment(&mesh, &cloud, &coverage, &params, 96, 2048);
     cloud_proxy::print_containment(&report, &params);
     assert!(report.rays_with_surface > 20, "粗场有交点的方向太少，这个测试没在测东西");
@@ -138,7 +147,7 @@ fn the_final_field_makes_a_tighter_proxy() {
     let coverage = coverage();
     let coarse_params = params();
     let mut final_params = params();
-    final_params.field = cloud_proxy::FieldKind::Final;
+    final_params.field = volume_params::FieldKind::Final;
 
     let coarse = bake(&coarse_params, &coverage);
     let final_volume = bake(&final_params, &coverage);
@@ -177,11 +186,7 @@ fn the_final_field_makes_a_tighter_proxy() {
     );
 
     // 网格也必须照样闭合：缺几何是硬失败。
-    let mesh = <px_mc::ProxySurface as IsosurfaceOp>::surface(
-        &mesh_params(),
-        &VolumeGrid::new(&final_volume),
-    )
-    .expect("出等值面失败");
+    let mesh = surface(&surface_params(), &final_volume);
     let (open, nonmanifold) = audit(&mesh);
     println!(
         "真场代理：{} 顶点 / {} 三角形｜开口边 {open}、非流形边 {nonmanifold}",
@@ -197,7 +202,7 @@ fn the_gradient_bound_is_above_the_measured_gradient() {
     // 量的是一张稀疏网格（几分钟内跑完），真数据上的同一断言在 bin 里（--bound 更密）。
     let coverage = coverage();
     let params = params();
-    let cloud = params.cloud();
+    let cloud = px_verify::proxy::from_volume(&params);
     let bound = cloud_proxy::measure_gradient_bound(&cloud, &coverage, &params, 6, 24, 16);
     println!(
         "|∇粗场| ≤ {:.3}（三轴 {:.1} / {:.1} / {:.1}，在面 {} 参数 {:?}）；参数里的 scale = {:.3}",

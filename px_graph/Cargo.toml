@@ -1,0 +1,28 @@
+[package]
+name = "px_graph"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# 图库本体：契约（`px_graph_schema`）+ 三个领域的数据（`px_*_schema`）
+# + shader 写入（`px_shader`）。
+# ⚠ **一个算子都不依赖**：算子在 dylib 里，运行时按描述符表装载
+# （这也是「改算子不必重编图程序」的全部机关）。
+px_protocol = { path = "../px_protocol" }
+px_graph_schema = { path = "../px_graph_schema" }
+px_field_schema = { path = "../px_field_schema" }
+px_volume_schema = { path = "../px_volume_schema" }
+px_mesh_schema = { path = "../px_mesh_schema" }
+px_shader = { path = "../px_shader" }
+# ⚠ `float_roundtrip` **必须开**：默认的浮点解析不是正确舍入的，于是
+# "读进来再写回去"不是恒等（实测 `0.11999999731779099` 会读成 +1 ulp 的值）。
+# 本仓库的判据是逐字节的，读不出写进去的东西就是缺陷 —— 代价是浮点解析约 2×，
+# 而文档只有几 KB。五个 crate 都写一遍：别靠特性合并的偶然。
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["float_roundtrip"] }
+blake3 = "1"
+
+[dev-dependencies]
+# 判据要拿 TOML 当夹具（`tests/keys.rs` 直接构造 toml 文本）。
+# ⚠ 它**不是**驱动的依赖：读 TOML 是算子那一侧的事（`px_*_schema::params`）。
+toml = "0.8"

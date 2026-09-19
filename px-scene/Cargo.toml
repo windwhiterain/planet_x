@@ -4,10 +4,10 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-# 底层三件：契约（类型 + serde）、算子与 CAS（`px_ops`）、shader 反射与组装（`px_shader`）。
+# 底层三件：契约（类型 + serde）、算子与 CAS（`px_graph`）、shader 反射与组装（`px_shader`）。
 # ⚠ **不依赖 `px_graphs`**：方向是 pcg 的图程序依赖这一层，反过来就是环。
 px_protocol = { path = "../px_protocol" }
-px_ops = { path = "../px_ops" }
+px_graph = { path = "../px_graph" }
 px_shader = { path = "../px_shader" }
 # 等值面那一条（`px_mc`）只为体积/代理那一支，今天这里还没有消费者 ⇒ 先不加。
 serde = { version = "1", features = ["derive"] }

@@ -1,0 +1,16 @@
+[package]
+name = "px_mesh_op"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["dylib", "rlib"]
+
+[dependencies]
+px_protocol = { path = "../px_protocol" }
+px_graph_schema = { path = "../px_graph_schema" }
+px_field_schema = { path = "../px_field_schema" }
+px_volume_schema = { path = "../px_volume_schema" }
+px_mesh_schema = { path = "../px_mesh_schema" }
+isosurface = "=0.1.0-alpha.0"
+serde_json = { version = "1", features = ["float_roundtrip"] }

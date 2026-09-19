@@ -10,8 +10,8 @@
 
 use std::collections::BTreeMap;
 
-use px_ops::generate::{self, Generated};
-use px_ops::ManifestEntry;
+use px_graph::generate::{self, Generated};
+use px_graph::ManifestEntry;
 use px_protocol::art::{MeshData, TextureFormat};
 use px_protocol::wire::DType;
 
@@ -47,7 +47,7 @@ impl Baked {
         Ok(px_protocol::scene::Member::new(
             GENERATED,
             node,
-            &px_ops::hex(&written.key),
+            &px_graph::hex(&written.key),
         ))
     }
 
@@ -64,7 +64,7 @@ impl Baked {
         Ok(px_protocol::scene::Member::new(
             GENERATED,
             node,
-            &px_ops::hex(&written.key),
+            &px_graph::hex(&written.key),
         ))
     }
 
@@ -72,7 +72,7 @@ impl Baked {
         println!(
             "{} {node:<16} {op:<20} {}  {:>9} B{}",
             if written.hit { "命中" } else { "重算" },
-            px_ops::hex_short(&written.key),
+            px_graph::hex_short(&written.key),
             written.bytes,
             if written.hit { "（CAS 里已有）" } else { "" },
         );
@@ -80,7 +80,7 @@ impl Baked {
             node: node.to_string(),
             op: op.to_string(),
             op_version: 1,
-            key: px_ops::hex(&written.key),
+            key: px_graph::hex(&written.key),
             hit: written.hit,
             millis: written.millis,
             bytes: written.bytes,
@@ -92,13 +92,13 @@ impl Baked {
 
     /// 把这一次写的那些**合并**进 `generated` 的清单（老的保住，同名的换掉）。
     pub fn finish(&self) -> Result<std::path::PathBuf, String> {
-        let mut entries = px_ops::graph_manifest(GENERATED).unwrap_or_default();
+        let mut entries = px_graph::graph_manifest(GENERATED).unwrap_or_default();
         for entry in &self.generated {
             entries.retain(|old| old.node != entry.node);
             entries.push(entry.clone());
         }
         entries.sort_by(|one, two| one.node.cmp(&two.node));
-        let path = px_ops::write_graph_manifest(GENERATED, &entries)?;
+        let path = px_graph::write_graph_manifest(GENERATED, &entries)?;
         println!("清单 {}｜共 {} 份生成物", path.display(), entries.len());
         Ok(path)
     }

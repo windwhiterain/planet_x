@@ -6,7 +6,7 @@ use px_protocol::scene::{Member, PassResource, PassSpec, SceneSpec};
 use serde::Deserialize;
 
 const GRAPH_VERSION: u32 = 1;
-const SOURCE_HASH: u64 = px_ops::noise::fnv1a(include_str!("passes.rs"));
+const SOURCE_HASH: u64 = px_graph::fnv1a(include_str!("passes.rs"));
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -113,13 +113,13 @@ fn usage() -> String {
 }
 
 fn main() {
-    px_ops::begin(px_ops::GraphSpec {
+    px_graph::begin(px_graph::GraphSpec {
         name: "passdoc".to_string(),
         version: GRAPH_VERSION,
         source_hash: SOURCE_HASH,
         width: 0,
         height: 0,
-        projection: px_ops::field::Projection::Cube,
+        projection: px_protocol::art::Domain::Cube,
         cameras: Vec::new(),
     });
 
@@ -203,12 +203,12 @@ fn main() {
     // 组装用的模块表：入口那一条守卫要拿**组装后**的 WGSL 去问 naga，而配方里那份文本
     // 还带着 `#{MATERIAL_BIND_GROUP}` 占位符（`px_shader::assemble` 才替它）——
     // 直接拿原文去解析，报的是 `expected expression, found "#"`，离病因很远。
-    // 桩表用 **Bevy 那一张**：与 `px_ops::shader_schema`（烘这份产物时用的）同一张，
+    // 桩表用 **Bevy 那一张**：与 `px_graph::shader_schema`（烘这份产物时用的）同一张，
     // 所以"烘图侧看到的那份文本"与"运行期拿到的那份"是同一份。
-    let modules = px_shader::workspace_modules(&px_ops::workspace_root())
+    let modules = px_shader::workspace_modules(&px_graph::workspace_root())
         .unwrap_or_else(|err| panic!("读不了 shader 模块表：{err}"));
     for entry in &file.passes {
-        let key = px_ops::manifest_key_of("shaders", &entry.shader).unwrap_or_else(|err| {
+        let key = px_graph::manifest_key_of("shaders", &entry.shader).unwrap_or_else(|err| {
             panic!(
                 "pass 要的 shader '{}' 不在 shaders 清单里：{err}\n\
                  先跑 cargo run -p px_graphs --bin shaders",
@@ -236,7 +236,7 @@ fn main() {
             );
         }
         if entry.kind == "fullscreen" {
-            let (shader_source, _) = shader_parts_of(&member, &px_ops::cache_root())
+            let (shader_source, _) = shader_parts_of(&member, &px_graph::cache_root())
                 .unwrap_or_else(|err| panic!("pass '{label}'：{err}"));
             // 组装一遍再问入口：替掉 `#{MATERIAL_BIND_GROUP}`、展开 `#import`（如果这份 shader
             // 有的话 —— 执行器会因为 `#import` 拒它，但那是**另一条**理由，不能在这里报成
@@ -279,7 +279,7 @@ fn main() {
             //    一份将来的材质类 shader 带 `#{MATERIAL_BIND_GROUP}`，直接解析会报
             //    "解析不过" —— 而那份文档真正的问题是"kind 这一版不兑现"（装载期拒）。
             //    两条理由都对，但先说能力那条。
-            let (_, layout) = shader_parts_of(&member, &px_ops::cache_root())
+            let (_, layout) = shader_parts_of(&member, &px_graph::cache_root())
                 .unwrap_or_else(|err| panic!("pass '{label}'：{err}"));
             let params = merge_named(
                 &format!("pass '{label}'"),
@@ -294,7 +294,7 @@ fn main() {
         }
         // 参数按**这份 shader 自己的契约**透传：烘图时就把三档（名字不认识 / 声明了没人给 /
         // 类型不符）全拦下来，不等装载时才拒 —— 那时候报的是渲染器的错，离改配方已经很远。
-        let (_, layout) = shader_parts_of(&member, &px_ops::cache_root())
+        let (_, layout) = shader_parts_of(&member, &px_graph::cache_root())
             .unwrap_or_else(|err| panic!("pass '{label}'：{err}"));
         let params = merge_named(
             &format!("pass '{label}'"),
@@ -525,14 +525,14 @@ fn main() {
         .iter()
         .map(|member| member.key.clone())
         .collect::<Vec<_>>();
-    let key = px_ops::scene_key(&spec_json, &member_keys);
+    let key = px_graph::scene_key(&spec_json, &member_keys);
     let artifact = match out {
         Some(path) => PathBuf::from(path),
-        None => px_protocol::scene::cas_path(&px_ops::cache_root(), &px_ops::hex(&key))
+        None => px_protocol::scene::cas_path(&px_graph::cache_root(), &px_graph::hex(&key))
             .unwrap_or_else(|err| panic!("{err}")),
     };
     let bytes =
-        px_protocol::scene::write_scene(&artifact, &spec, px_ops::noise::fnv1a(&spec_json))
+        px_protocol::scene::write_scene(&artifact, &spec, px_graph::fnv1a(&spec_json))
             .unwrap_or_else(|err| panic!("{err}"));
 
     println!("{}", spec.audit());
@@ -541,7 +541,7 @@ fn main() {
     println!(
         "产物 passdoc -> {}（内容键 {}｜{} 字节）",
         artifact.display(),
-        px_ops::hex_short(&key),
+        px_graph::hex_short(&key),
         bytes
     );
     // ⚠ S8-a：`px_render`（bevy 宿主）已删，这条提示改指**新宿主**，

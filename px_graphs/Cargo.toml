@@ -7,11 +7,18 @@ edition = "2024"
 # ⚠ 依赖方向：**pcg 的图程序依赖 `px_scene`**（高层场景语义 + 帧图编译器），
 # 反过来就是环。`frame` / `params` 两个模块已经从本 crate 搬进 `px_scene`（§px-scene）。
 px-scene = { path = "../px-scene" }
-px_ops = { path = "../px_ops" }
+# 图库本体（驱动 / 键 / 清单 / CAS / 参数）。
+px_graph = { path = "../px_graph" }
+# 契约与动态装载（`OpLibrary` 住在这里）。
+px_graph_schema = { path = "../px_graph_schema" }
+# 三个领域的数据：图脚本读写产物要用它们的解出来的类型。
+px_field_schema = { path = "../px_field_schema" }
+px_volume_schema = { path = "../px_volume_schema" }
+px_mesh_schema = { path = "../px_mesh_schema" }
+# 参照场（判据仪器与体积算子共用同一份）。
+px_verify = { path = "../px_verify" }
 px_shader = { path = "../px_shader" }
 px_protocol = { path = "../px_protocol" }
-px_verify = { path = "../px_verify" }
-px_mc = { path = "../px_mc" }
 serde = { version = "1", features = ["derive"] }
 # ⚠ `float_roundtrip` **必须开**：默认的浮点解析不是正确舍入的，于是
 # "读进来再写回去"不是恒等（实测 `0.11999999731779099` 会读成 +1 ulp 的值）。
@@ -19,3 +26,11 @@ serde = { version = "1", features = ["derive"] }
 # 而文档只有几 KB。五个 crate 都写一遍：别靠特性合并的偶然。
 serde_json = { version = "1", features = ["float_roundtrip"] }
 toml = "0.8"
+
+[dev-dependencies]
+# ⚠ 这两条**不是**「图脚本依赖算子」：它们只在测试里把算子库编出来（dylib 落在
+# `target/debug/`，驱动运行时按描述符表装载）。产品 exe 里一个算子的代码都没有 ——
+# 判据是 `tests/crate_graph.rs` 那道门。
+px_field_op = { path = "../px_field_op" }
+px_volume_op = { path = "../px_volume_op" }
+px_mesh_op = { path = "../px_mesh_op" }

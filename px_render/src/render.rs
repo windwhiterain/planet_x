@@ -526,7 +526,7 @@ fn placements(
                 // 与 Bevy 同一句话：它说的是"这一步没带相机表"，不是"这一版没做"。
                 return Err(
                     "--sheet 用的是产物自带的相机表：这一步没带（烘场景时用 \
-                     px_ops::cameras::review() 灌进 .pxart）"
+                     px_graph::cameras::review() 灌进 .pxart）"
                         .to_string(),
                 );
             }
@@ -3286,7 +3286,7 @@ mod tests {
             panic!("没有相机表时 --sheet 必须当场拒");
         };
         assert!(why.contains("产物自带的相机表"), "{why}");
-        assert!(why.contains("px_ops::cameras::review()"), "要指路：{why}");
+        assert!(why.contains("px_graph::cameras::review()"), "要指路：{why}");
     }
 
     /// 列数 = 0 兜成 1（协议那一栏的缺省就是 0）：12 台相机 ⇒ 1 列 12 行，

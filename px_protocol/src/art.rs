@@ -294,7 +294,7 @@ impl VolumeData {
         )]
     }
 
-    /// 只从载荷里还原数据与形状：`inner`/`outer` 住在清单参数里（`px_ops` 负责补）。
+    /// 只从载荷里还原数据与形状：`inner`/`outer` 住在清单参数里（`px_graph` 负责补）。
     pub fn from_blob(blob: &Blob) -> Result<Self, WireError> {
         let shape = &blob.header.shape;
         if shape.len() != VOLUME_SHAPE.len() {
@@ -884,7 +884,7 @@ pub const MANIFEST_PREFIX: usize = 64 * 1024;
 /// 只读**清单帧**，不碰载荷。
 ///
 /// 服务端每次请求都要先问「这份产物跟上次那份是不是同一份」（缓存键 = 路径 + 载荷指纹），
-/// 而清单帧**写在流的最前面**（`px_ops::write_artifact` 如此）⇒ 读一个前缀就够，
+/// 而清单帧**写在流的最前面**（`px_graph::write_artifact` 如此）⇒ 读一个前缀就够，
 /// 不必把 8 MB 的场整个读进来。前缀里没解出清单帧（文件不是那么写的）⇒ 回落到整读。
 pub fn read_manifest(path: &std::path::Path) -> Result<ArtBundle, String> {
     let mut file = std::fs::File::open(path)
