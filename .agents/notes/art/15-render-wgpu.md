@@ -4318,3 +4318,84 @@ target\debug\px_render.exe --scene <③的产物> --out x.png --width 960 --heig
 ⚠ 各处**新增**的 §157 标注（`art/anchor/README.md`、`hashes.txt`、`tools/{harness,frame-probe,px}.ps1`、
 `px_graphs/src/frame.rs`、以及 `06-clouds` / `08-renderer` / `09-instruments` / `12-step0` /
 `13-passtable` / 本篇顶上那条横幅与 §147.3 的脚注）都是**加行**，没有替换任何原文。
+---
+
+## §158 另立 `px-scene`：高层场景语义 + 帧图编译器，`scene` 变回普通 pcg 图程序（本单元；提交见 `ec27c97`…`fb8d68d`）
+
+### 用户口径（三条，逐字要认）
+
+1. **`.pxart` 是底层协议**（§140 那条的延续：它是**生成的**指令流）。
+2. **`px-scene` 是被 pcg 图程序使用的库**，用来把 pcg 里的 data **编译成低层的 frame graph**。
+3. **不存在单独的 CLI** —— `scene` 就是 pcg 的一张普通图（与 `planet` / `clouds` / `desert` 同形）。
+
+### 依赖方向（硬的）
+
+```
+px_protocol ─> px_ops ─> px_scene ─> px_graphs（图程序）─> pcg
+                  ↑          ↑
+            px_shader   （px_scene **不依赖** px_graphs）
+```
+
+- `frame.rs`（1347 行，帧图编译器）与 `params.rs`（→ `px_scene::contract`）**搬进 `px_scene`**；
+  `px_graphs` 反过来依赖它。`cloud_proxy.rs` **留下**（pcg 的 VolumeOp，不是帧图层）。
+- 场景语义（原来 1289 行的 `bin/scene.rs`）拆成库：`math` / `baked` / `members` / `vocab` /
+  `recipe`，加上新写的 `builder` 与 `stage`。
+- `px_graphs/src/lib.rs` 留 `pub use px_scene::contract as params;` 兼容别名。
+
+### stage 与 per-pass 参数（用户口径：**只要求 material 中 per pass 参数的类型**）
+
+- **一个物体可以注册多个 stage 的材质**（`Registration`）；寻常那一路是
+  `Registration::single`（一份材质、几档共用）——"用起来就像寻常 game engine"。
+- **每个 stage 只声明它读的那几个格**，手写在图脚本里（`StageParams`），**不从 WGSL 反推**
+  （反推等于没有格式）；判据是**子集 + 类型相等**：多给不算错，缺格/类型不符**烘图时**红。
+- 表按 **(stage, 内容)** 两条轴查 —— 一个 stage 里住着云/大气/环三份不同内容，
+  按 stage 合并是错的（第一版踩过，单测钉住）。
+- **多档状态只在内存里**：产物仍是「一个物体一份材质」，`SCENE_SCHEMA = 2` 不变。
+
+### 后来的两条加固（同一单元内，用户追加）
+
+- **不要类型擦除**：`stage.rs` 重写成类型级 —— `Stage` / `Content{type Stages}` /
+  `StageParams<S, M>` / `Registration<S, M>`。拿掉了字符串身份的 `StageParamsTable`、
+  `StageMaterial{of: String}`、`Registration{stages: Vec<(String, …)>}` 与
+  `stage(id, "opaque", …)`；这一层没有 `dyn`。**多种 pipeline** 也由此成立：另一条 pipeline
+  自带一套 stage 类型。⚠ 唯一保留的运行期入口是 TOML 配方的适配器（`stage::runtime`），
+  它只做分派，表与判据仍是类型级那两份。
+- **通用装配器**：`SceneBuilder` 不认识行星/云/大气、不认识 `art/` 路径；它只有物体表
+  （几何 + 材质 + 变换 + 投不投影）与灯/相机/环境。⚠ 它**不保存** stage 登记
+  （`Vec<Registration>` 正是擦除入口）：登记在 `add` 那一刻**先对账、再 `freeze`**。
+  两条老规矩照旧：**插入次序 = 文档次序**（透明物体绘制次序由 `frame::draws_of` 算出来）、
+  **id 唯一且非空**在作者这一层就拒。
+
+### 判据（都在本单元实跑）
+
+- **逃生门六档**（`hashes.txt` §三，**文件字节** sha256 前 16）逐格与登记值相同：
+  `2795F948E6987E11` / `F60B19B0AE7E229F` / `1A27679882A10D6B` / `ACB824E9EC0BA893` /
+  `CB363DA74A90F63E` / `2C6C8592AD45214B`（4126 / 4136 / 4138 / 5749 / 4890 / 5721 B）。
+  ⚠ 交叉核对过一次：`art/anchor/frozen/*.pxart` 那六份在 git 里的文件字节就是这六个值。
+- **22 份配方**逐个比对：内容键 / 文件 sha256 / 字节数全同（`22 相同 / 0 不同`）。
+  ⚠ 类型系统重做**之后**又重跑了一遍，仍全同 ⇒ 那一轮是**产物中性**的。
+- `px_scene` 38 个单测 + `px_host_protocol` 7 个 + 各 crate 全绿；
+  `cargo check --workspace --all-targets` exit 0。
+
+### 边界收窄（用户口径：`px_protocol` 只管 `px-scene` ⇄ `px-pass`）
+
+- `sim` → `game::sim`；`render` / `client` / 作业信封 → 新的 **`px_host_protocol`**
+  （纯数据：serde / serde_json / `px_protocol`，**不带 GPU 栈**）；`px_render` 回到 bin-only。
+- ⚠ **快照一个字节没动**（`protocol_hash()` 是它的哈希，而它闸着跨进程握手）。
+- ⚠ `px_protocol`(dev) → `px_host_protocol` → `px_protocol` 是一条 **cargo 允许的 dev 环**
+  （dev 依赖不进产物）。要完全无环只能把 `ProtocolId` / `wire` 再下沉一个 crate —— 没做。
+- `tests/crate_graph.rs` 原来只查 `[dependencies]`、**看不见 dev 边** ⇒ 加宽成
+  "dev 依赖里不许有 `px_render`"（负对照实测会红）。
+
+### 一处要认的取舍
+
+`SceneFile.formats`（缺省 `false`）：per-pass 表**晚于内容** —— `surface.wgsl` 的结构体里
+还住着云影那几个格（`inner`/`outer`/`coverage`/`shadow`/`height`/`gain`），而 `opaque`
+那一档**故意**不列它们 ⇒ 给既有配方打开会把 `orbit-soft` 一族当场判红。
+**新内容请写 `formats = true`**；等 `surface` 腾出那几个格之后这一栏就该删掉（那时恒真）。
+
+### 还没做
+
+- `scene` 的**帧图配方**（`art/frame/*.toml` → `FrameFile`）仍是数据：多条 pipeline =
+  多份帧图配方，这一点没变；但"另一条 pipeline 的 stage 类型"目前**只有 `default` 那一套**，
+  换个 pipeline 要真跑起来还得写它自己的档位类型（机制在，第二个实例还没出现）。
