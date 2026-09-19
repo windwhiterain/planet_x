@@ -24,7 +24,7 @@
 //! 3. **相机只从 `camera.rs` 来**（逐位对齐 oracle），`--width/--height` 只驱动视口与长宽比。
 //!    这里不许再算一次投影：两条宿主在两套矩阵算法上分岔是逐字节判据最怕的漂移（§110.1.1）。
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use px_pass::{
     Attachment, Cull, External, Frame, PassKind, Plan, ResolvedGeometry, ResolvedGroup,
@@ -650,6 +650,14 @@ pub struct Session {
     /// （见 [`Session::draw`] 里那条判断）。
     scene_path: std::path::PathBuf,
     pcg_root: std::path::PathBuf,
+    /// **文档里的文本 ← 盘上的文件**：这张表在 [`Session::open`] 末尾算**一次**
+    /// （那一刻盘上还没被人改过，"这一槽的来源是哪个文件"判得出来），热重载拿它落改动。
+    ///
+    /// ⚠ 表里每一槽都带着装载时验过的 `proven`（盘上那份 == 文档记的那份）。
+    ///    装载之后有人改了盘上那份**不改变**这件事：来源是装载时的事实，不是每帧重问的问题。
+    shader_slots: Vec<ShaderSlot>,
+    /// 表本身要说的话（进不了表的槽、顶点阶段那一栏）。进读数，不静默。
+    shader_notes: Vec<String>,
     /// 审计：`head` 是"怎么看"**之前**那几行（文档 / 计划），`rest` 是之后的一切
     /// （灯 / 影图 / 深度图 / 几何 / 材质 / 帧材质 …）。
     ///
@@ -730,6 +738,280 @@ impl Cell {
         line
     }
 }
+
+/// **一份可热重载的 shader 槽**：文档里的哪一处文本 ← 盘上的哪一个文件。
+///
+/// ⚠ 这张表是"哪一层作废"能成立的**前提**：改动只有先落回一个槽，才谈得上作废谁。
+/// 而"文件"这一栏是**推**出来的（文档里记的是成员名与内联全文，不是路径），
+/// 所以每一槽都必须**在装载时验过**（[`ShaderSlot::proven`]）—— 推错一次，
+/// "改了盘上那份"与"盘上那份根本不是这一份"在字节上就分不开了。
+#[derive(Debug, Clone)]
+pub struct ShaderSlot {
+    /// 给人看的名字：「材质 'planet'」/「pass 'blit' 的片元」/「帧自有材质 'skybox'」。
+    pub what: String,
+    /// 盘上的入口文件。
+    pub path: PathBuf,
+    place: SlotPlace,
+    /// 现在跑的**组装后全文**的内容键（与宿主自己那条尺子同一个函数：
+    /// `material::version_of(sha256(assembled))` —— 内容材质的管线键里那一格就是它）。
+    pub version: u64,
+    /// 文档指的那个成员（内容材质与全屏 pass 有；帧自有材质没有 —— 它没有产物）。
+    pub member: Option<String>,
+    /// 盘上那份**就是这一槽的来源**吗：装载时把"产物/文档里记的原文"与"盘上那份"
+    /// 逐字比过一次（行尾归一，别的逐字节）。
+    ///
+    /// ⚠ 没证实过 ⇒ **不重载**。理由：一个同名的别的 shader 改起来看着像生效了、
+    /// 其实不是；而"改了"与"根本不是它"在字节上分不开的时候，唯一正确的动作是拒绝 + 让人重烘。
+    pub proven: bool,
+    /// 盘上那份原文的 sha16（装载时）与文档记的那份原文的 sha16 —— 读数里要看得见
+    /// "对不上的时候，是哪两个东西对不上"。
+    pub disk: String,
+    pub source_hash: String,
+    /// 对不上时的那一处差异（第一处不同：行号 + 两边原文）。
+    pub difference: String,
+    /// **现在跑的那一份入口原文**的 sha16（每成功重载一次就跟着走）。
+    pub text_hash: String,
+    /// 现在跑的那一份的 **include 闭包指纹**（`px_shader::Closure::fingerprint`）。
+    ///
+    /// ⚠ 它是"这一槽要不要重组装"的**判据**，而不是优化的小聪明：组装结果是
+    /// （入口原文、可达模块的源码、桩表）三样的纯函数，而闭包指纹把前两样都含进去了
+    /// （桩表是编译期常量）。⇒ 两样都没变 ⇒ 组装结果**不可能**变 ⇒ 不必重组装、不必再校验。
+    /// 少了它，一次改动会把**每一槽**都重新组装一遍（实测：5 槽 ≈ 200–370 ms，
+    /// 而判据只有 1 秒的预算）。
+    pub closure: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SlotPlace {
+    Object(usize),
+    Pass(usize),
+    FrameMaterial(usize),
+}
+
+impl ShaderSlot {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        what: String,
+        path: PathBuf,
+        place: SlotPlace,
+        assembled: &str,
+        member: Option<String>,
+        source: &str,
+        disk: &str,
+        modules: &px_shader::ModuleTable,
+    ) -> ShaderSlot {
+        // ⚠ 行尾归一之后再比：`.wgsl` 在盘上是 CRLF 还是 LF 与"这是不是同一份 shader"
+        //    无关，而把行尾算进去会让一次 `git checkout` 就把热重载关掉（假阴性）。
+        //    别的字符一个都不许省 —— 那条比的是"是不是同一份"。
+        let proven = source.replace("\r\n", "\n") == disk.replace("\r\n", "\n");
+        ShaderSlot {
+            what,
+            path,
+            place,
+            version: text_version(assembled),
+            member,
+            proven,
+            disk: sha16(disk),
+            source_hash: sha16(source),
+            difference: if proven {
+                String::new()
+            } else {
+                first_difference(source, disk)
+            },
+            // 装载那一刻，跑的就是产物/文档里那一份 ⇒ 这两个"现在跑的"读数从它起算。
+            text_hash: sha16(source),
+            closure: px_shader::closure(source, modules).fingerprint(),
+        }
+    }
+}
+
+/// 组装后全文的**内容键**（宿主的尺子，与 `material::version_of(sha256(...))` 同一把）。
+fn text_version(assembled: &str) -> u64 {
+    material::version_of(&crate::digest::sha256_hex(assembled.as_bytes()))
+        .expect("sha256 的输出一定是 64 位十六进制")
+}
+
+fn sha16(text: &str) -> String {
+    crate::digest::sha256_hex(text.as_bytes())[..16].to_string()
+}
+
+/// 两份文本**第一处不同**在哪（行号 + 两边的原文）。
+///
+/// ⚠ 拒的时候必须说清"哪儿不一样"：只说"对不上"会让人对着两个 sha256 猜
+/// （与 `art::fragment_entry` 那条"要把实际的入口列出来"是同一条纪律）。
+/// 行尾在比较前已经归一，所以这里看到的差异一定是**内容**上的。
+fn first_difference(left: &str, right: &str) -> String {
+    let left = left.replace("\r\n", "\n");
+    let right = right.replace("\r\n", "\n");
+    let left_lines: Vec<&str> = left.lines().collect();
+    let right_lines: Vec<&str> = right.lines().collect();
+    for index in 0..left_lines.len().max(right_lines.len()) {
+        let a = left_lines.get(index).copied().unwrap_or("（没有这一行）");
+        let b = right_lines.get(index).copied().unwrap_or("（没有这一行）");
+        if a != b {
+            let clip = |text: &str| -> String {
+                let mut out: String = text.chars().take(120).collect();
+                if text.chars().count() > 120 {
+                    out.push('…');
+                }
+                out
+            };
+            return format!(
+                "第 {} 行起不同：\n    文档那份：{}\n    盘上那份：{}",
+                index + 1,
+                clip(a),
+                clip(b)
+            );
+        }
+    }
+    "逐行相同（只差行尾：那一栏已经被归一过了）".to_string()
+}
+
+/// 文档给某个物体的**按名字的参数值**（`objects[].material.params`）。
+///
+/// ⚠ 热重载要拿它按**新的**布局重打一遍，与手里那份逐字节比 —— 那是"契约没变"的判据。
+/// 找不到物体 ⇒ 空表：那会让打包当场报"缺参"（而不是悄悄打出一份长度对得上的东西）。
+fn object_params(
+    spec: &px_protocol::scene::SceneSpec,
+    id: &str,
+) -> std::collections::BTreeMap<String, px_protocol::Value> {
+    spec.objects
+        .iter()
+        .find(|object| object.id == id)
+        .map(|object| object.material.params.clone())
+        .unwrap_or_default()
+}
+
+/// 一次热重载的**读数**。判据要的三件事都在这里：**被作废的是哪些**（`reloaded`）、
+/// **被拒的是哪些**（`refused`）、**没动的是哪些**（`untouched`，带计数）。
+#[derive(Debug, Default)]
+pub struct ReloadReport {
+    /// 盘上**字节真的变了**的文件（watcher 给的；mtime 变了而字节没变的不算）。
+    pub changed_files: Vec<PathBuf>,
+    /// 文本跟着变了的槽（含宿主侧管线键的 old → new）。
+    pub reloaded: Vec<SlotChange>,
+    /// 被拒的槽与拒绝的理由（写坏了 / 契约变了 / 来源没证实 …）。
+    pub refused: Vec<String>,
+    /// 表本身要说的话（进不了表的槽、顶点阶段那一栏）。
+    pub notes: Vec<String>,
+    /// **跳过**的槽数：入口原文与 include 闭包都没变（⇒ 组装结果不可能变）。
+    /// 它是"作废了哪些"的补集，也是那 1 秒预算里最值钱的一步的读数。
+    pub skipped: usize,
+    /// 没动的层（计数）。
+    pub untouched: Untouched,
+    /// 这一次重载本身花了多久（重读库 + 组装 + 校验 + 反射 + 对账 + `Plan::check`）。
+    pub millis: f64,
+}
+
+/// 一个槽的文本换了：old → new（内容键），外加**宿主侧管线键那一格**的 old → new。
+#[derive(Debug, Clone)]
+pub struct SlotChange {
+    pub what: String,
+    pub path: PathBuf,
+    /// 盘上那份原文的 sha16（改的是哪一版的原文，看得见）。
+    pub text_hash: String,
+    pub old: u64,
+    pub new: u64,
+    /// `material::key_of(...).shader` 的 old → new（只有内容材质有）。
+    pub key: Option<(u64, u64)>,
+    pub member: Option<String>,
+}
+
+/// 没动的层（计数）：**"只作废了 WGSL 那一层"要数得出来**，不能只是一句声明。
+#[derive(Debug, Default, Clone, Copy)]
+pub struct Untouched {
+    pub objects: usize,
+    pub geometries: usize,
+    pub textures: usize,
+    pub params_bytes: usize,
+    pub instances: usize,
+    pub cells: usize,
+}
+
+impl ReloadReport {
+    /// 进日志 / 进审计的那几行。**先报"变了什么"、再报"没动什么"** ——
+    /// 少了后半截，"热重载了"就只是一句自我声明（这一档付过代价的那条纪律）。
+    pub fn readout(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        let files: Vec<String> = self
+            .changed_files
+            .iter()
+            .map(|path| {
+                path.strip_prefix(shader::workspace())
+                    .unwrap_or(path)
+                    .display()
+                    .to_string()
+            })
+            .collect();
+        if self.reloaded.is_empty() && self.refused.is_empty() {
+            out.push(format!(
+                "—— 热重载：盘上变了 {} 个文件（{}），但**没有哪一槽的文本跟着变** ⇒ 什么都没作废\
+                 （跳过 {} 槽：原文与闭包都没变）——",
+                files.len(),
+                files.join(" / "),
+                self.skipped
+            ));
+        } else {
+            out.push(format!(
+                "—— 热重载：盘上变了 {} 个文件（{}）｜作废 {} 槽｜跳过 {} 槽（原文与闭包都没变）\
+                 ｜拒 {} 槽 ——",
+                files.len(),
+                files.join(" / "),
+                self.reloaded.len(),
+                self.skipped,
+                self.refused.len()
+            ));
+        }
+        for change in &self.reloaded {
+            let key = match change.key {
+                Some((before, after)) => {
+                    format!("｜材质的管线键 shader {before:#018x} → {after:#018x}")
+                }
+                None => String::new(),
+            };
+            out.push(format!(
+                "  {}｜{}｜原文 {}｜组装后 {:016x} → {:016x}{key}｜重载本身 {:.1} ms",
+                change.what,
+                change
+                    .path
+                    .strip_prefix(shader::workspace())
+                    .unwrap_or(&change.path)
+                    .display(),
+                change.text_hash,
+                change.old,
+                change.new,
+                self.millis
+            ));
+            if let Some(member) = &change.member {
+                out.push(format!(
+                    "    ⚠ 从这一刻起它跑的是**盘上**的文本（键 {:016x}），文档指的那个成员还是 {member}\
+                     —— 热重载的语义就是这件事；要回到「文档说了算」就重烘再装载",
+                    change.new
+                ));
+            }
+        }
+        for why in &self.refused {
+            out.push(format!("  ✗ 拒：{why}"));
+        }
+        for note in &self.notes {
+            out.push(format!("  · {note}"));
+        }
+        if !self.reloaded.is_empty() {
+            out.push(format!(
+                "  没动的层（计数）：物体 {} / 几何 {} / 贴图 {} 张 / 参数 {} 字节 / 实例数组 {} 份 / {} 格组\
+                 ｜执行器（管线缓存与池子、seed 进去的那几张图）**同一个**",
+                self.untouched.objects,
+                self.untouched.geometries,
+                self.untouched.textures,
+                self.untouched.params_bytes,
+                self.untouched.instances,
+                self.untouched.cells
+            ));
+        }
+        out
+    }
+}
+
 
 impl Session {
     /// **准备**：文档 → 一切与"怎么看"无关的 GPU 句柄，外加**第一层**"尺寸那一层"。
@@ -1498,6 +1780,16 @@ impl Session {
     //    现在它活着这件事由字段本身说得清（而且必须在 `make_stage` 最后一次调用**之后**
     //    才能 move —— 本单元实测过 E0505）。
 
+    // ⚠⚠ **"这一槽的来源是哪个文件"必须在**这里**判**（`open` = 还没人改过任何东西的那一刻），
+    //     判完把结论**存下来**（`Session::shader_slots`）。
+    //
+    //     热重载时再判是**错的**，而且错得很隐蔽：那时盘上那份**已经**被改过了，
+    //     于是"盘上 ≠ 产物记的"永远成立 ⇒ 每一槽都被自己那条"来源没证实"的门拒掉，
+    //     而拒的理由看起来还挺像回事（实测：2026-09-19，第一版就是这么写的）。
+    //     来源是**装载时的事实**，不是每一帧都要重问的问题。
+    let (shader_slots, shader_notes) =
+        Session::shader_slots_of(&spec, &scene, &frame_materials, pcg_root, &executed_plan, &modules);
+
     Ok(Session {
         spec,
         scene,
@@ -1519,6 +1811,8 @@ impl Session {
         audit_head,
         audit_rest: audit,
         loads_first,
+        shader_slots,
+        shader_notes,
         layer: Some(Layer {
             target,
             rects: placements.iter().map(|placement| placement.rect).collect(),
@@ -1777,6 +2071,442 @@ impl Session {
             skipped: Vec::new(),
             declared_clouds: spec.expects.iter().any(|tag| tag == "clouds"),
         })
+    }
+
+    // =======================================================================
+    // 热重载（§105 的 S7 第二条判据）：**作废的只有"组装后的 WGSL"这一层**
+    //
+    // ⚠ 这一档的**全部内容**就是下面这张表 + 那条边界。整份重开是错的答案（0.7–1.9 s，
+    //    判据当场不过），什么都不作废也是错的（画面不变）—— 而"哪一层"这件事必须
+    //    从**依赖**里推：`LoadedScene` 里同时住着组装后的 WGSL、网格、贴图，
+    //    改一份 WGSL 该动的只有第一样。
+    //
+    // ⚠ 与 §52.3 那条规矩的关系（"改了库、没重烘 ⇒ 当场拒"）：那条规矩管的是**装载**
+    //    ——"我怎么知道这一份产物是哪一版烘的"。热重载是**另一件事**：人明确地在改文件、
+    //    明确地要看新版本。所以它只在**预览窗口**这条路上开（`--offline` / `--serve`
+    //    照旧按产物内容键装载、照旧对账），而且它把"现在跑的不是文档指的那一份"打进读数。
+    // =======================================================================
+
+    /// **这张表**：文档里的文本 ← 盘上的文件（一个槽 = 一处要作废的文本）。
+    ///
+    /// 三个来源各一条规则，而且每条都**在装载时逐字验过**（见 [`ShaderSlot::proven`]）：
+    ///
+    /// | 槽 | 文档里记的 | 盘上的文件 | 怎么算"证实" |
+    /// |---|---|---|---|
+    /// | 内容材质 | CAS 成员（`graph`/`node`）+ 产物里的**原文** | `shader::try_source_of("<node>.wgsl")` | 盘上那份 == 产物记的原文 |
+    /// | 全屏 pass 的片元 | 成员（`shaders/blit`）+ 产物里的原文 | 同上 | 同上 |
+    /// | 帧自有材质 | **内联全文**（没有名字、没有成员） | `art/frame/<名字>.wgsl` | 盘上那份 == 文档内联的那份 |
+    ///
+    /// ⚠ **顶点阶段（`vertex_mesh.wgsl` / `vertex_sky.wgsl`）不在表里**，而且这不是漏了：
+    ///    它们在文档里是**内联全文、不带来源名**（`PassSpec::vertex_shader` 就是那几个字），
+    ///    盘上那份与它对不对得上**无从谈起** —— 见读数里那条"没进表"的说明。
+    ///    要热重载它们，得让帧图烘进产物时**记下来源名**（`PassSpec` 加一栏），
+    ///    那是协议那一侧的事，不在这一档。
+    fn shader_slots_of(
+        spec: &px_protocol::scene::SceneSpec,
+        scene: &art::LoadedScene,
+        frame_materials: &[(art::LoadedFrameMaterial, material::MaterialBinding)],
+        pcg_root: &Path,
+        plan: &Plan,
+        modules: &px_shader::ModuleTable,
+    ) -> (Vec<ShaderSlot>, Vec<String>) {
+        let mut slots: Vec<ShaderSlot> = Vec::new();
+        let mut notes: Vec<String> = Vec::new();
+        for (index, object) in scene.objects.iter().enumerate() {
+            let name = format!("{}.wgsl", object.shader.member.node);
+            let what = format!("材质 '{}'", object.id);
+            match shader::try_source_of(&name) {
+                Ok((text, path)) => slots.push(ShaderSlot::new(
+                    what,
+                    path,
+                    SlotPlace::Object(index),
+                    &object.shader.assembled,
+                    Some(object.shader.member.to_string()),
+                    &object.shader.source,
+                    &text,
+                    modules,
+                )),
+                Err(err) => notes.push(format!("{what}：{err} ⇒ 这一槽不热重载")),
+            }
+        }
+        for (index, pass) in spec.passes.iter().enumerate() {
+            let Some(member) = pass.shader.as_ref() else {
+                continue; // 几何 pass 的片元属于材质，这一栏为空是**对**的（见 `PassSpec::shader`）。
+            };
+            let what = format!("pass '{}' 的片元", pass.label_or(index));
+            let name = format!("{}.wgsl", member.node);
+            match shader::try_source_of(&name) {
+                Ok((text, path)) => {
+                    // 全屏 pass 的原文**没有留在会话里**（计划里那一栏是组装后的全文），
+                    // 所以"盘上那份是不是它的来源"要现问一次产物 —— 走的是**同一条**
+                    // 装载路（`art::load_shader`），不是另写一份读法。
+                    match art::load_shader(member, &pcg_root, &shader::modules()) {
+                        Ok(loaded) => slots.push(ShaderSlot::new(
+                            what,
+                            path,
+                            SlotPlace::Pass(index),
+                            &plan.passes[index].shader,
+                            Some(member.to_string()),
+                            &loaded.source,
+                            &text,
+                            modules,
+                        )),
+                        Err(err) => notes.push(format!("{what}：{err} ⇒ 这一槽不热重载")),
+                    }
+                }
+                Err(err) => notes.push(format!("{what}：{err} ⇒ 这一槽不热重载")),
+            }
+        }
+        for (index, frame) in spec.frame_materials.iter().enumerate() {
+            let what = format!("帧自有材质 '{}'", frame.name);
+            // ⚠ 帧材质在文档里**没有名字以外的任何来源**：文件名是**按名字找**的。
+            //    所以这条规则只在"盘上那份 == 文档内联的那份"时才成立（`proven`），
+            //    否则一律不重载 —— 一个同名的别的 shader 改起来看着像生效了，其实不是。
+            let path = shader::workspace()
+                .join("art")
+                .join("frame")
+                .join(format!("{}.wgsl", frame.name));
+            match std::fs::read_to_string(&path) {
+                // ⚠ 下标对齐：`frame_materials` 就是照 `spec.frame_materials` 的次序推的
+                //    （`open` 里那一个循环，一条声明一条 push）。
+                Ok(text) => match frame_materials.get(index) {
+                    Some((loaded, _)) => slots.push(ShaderSlot::new(
+                        what,
+                        path,
+                        SlotPlace::FrameMaterial(index),
+                        &loaded.assembled,
+                        None,
+                        &frame.shader,
+                        &text,
+                        modules,
+                    )),
+                    None => notes.push(format!("{what}：产物里没有装载过的那一份 ⇒ 不热重载")),
+                },
+                Err(err) => notes.push(format!(
+                    "{what}：读不了 {}：{err}（它在文档里是内联全文、盘上找不到同名文件）\
+                     ⇒ 这一槽不热重载",
+                    path.display()
+                )),
+            }
+        }
+        let vertex: Vec<String> = spec
+            .passes
+            .iter()
+            .filter(|pass| !pass.vertex_shader.trim().is_empty())
+            .map(|pass| pass.label.clone())
+            .collect();
+        if !vertex.is_empty() {
+            notes.push(format!(
+                "顶点阶段（pass {}）在文档里是**内联全文**、不带来源名 ⇒ 不热重载\
+                 （`art/frame/vertex_*.wgsl` 改了要重烘）",
+                vertex.join(" / ")
+            ));
+        }
+        (slots, notes)
+    }
+
+    /// **热重载**：把盘上改过的 `.wgsl` 重新组装进这一份保留态，返回**读数**。
+    ///
+    /// 只碰三样东西：`scene.objects[].shader.assembled`、`executed_plan.passes[].shader`、
+    /// `scene.frame_materials[].assembled/version`。**网格、贴图、几何缓冲、参数块、
+    /// 实例数组、宿主目标、每格的组、执行器（连同它的池子与 seed 进去的三张图）一个都不动。**
+    ///
+    /// 四道门，任一不过就**整条改动不落地**（画面还是上一版，日志说清为什么）：
+    /// ① 组装 + `naga` 校验（写坏一行 ⇒ 报行号，不是等 wgpu 报"找不到入口"）；
+    /// ② 反射出来的**契约**必须逐字节不变（参数块打包结果 + 贴图格）—— 改布局是重烘的事；
+    /// ③ 片元入口必须还在（§136 那条，装载前拒）；
+    /// ④ 整份计划 `Plan::check()`（先把新文本放进一份**克隆**里验，过了才落）。
+    pub fn reload_shaders(&mut self, changed: &[PathBuf]) -> ReloadReport {
+        let started = std::time::Instant::now();
+        let mut report = ReloadReport {
+            changed_files: changed.to_vec(),
+            ..ReloadReport::default()
+        };
+        // 库那一侧：整张模块表**重新读盘**。库改了 ⇒ 每一份 import 了它的入口都重组装
+        // （这正是"库文件也在被看"的兑现处：它没有成员名，只有文本进得去）。
+        let modules = match shader::try_modules() {
+            Ok(modules) => modules,
+            Err(err) => {
+                report.refused.push(format!("读不了 shader 库：{err}（下一次改动再试）"));
+                report.millis = started.elapsed().as_secs_f64() * 1e3;
+                return report;
+            }
+        };
+        // ⚠ 表是**装载时**算的（`open` 末尾）：这里**不重算** —— 重算就变成"拿改过之后的盘
+        //    再判一次来源"，每一槽都会被自己那条门拒掉（第一版就是这么错的）。
+        let slots = self.shader_slots.clone();
+        report.notes = self.shader_notes.clone();
+        // 先**攒**着：一处坏改动不许把别的槽也带下水。
+        // 每一项：`(槽下标, 入口原文, 原文 sha16, 闭包指纹, 组装后全文, 内容键)` ——
+        // 后两样是"落"的时候要写进去的，前几样是"下一次改动跟谁比"要记的。
+        let mut staged: Vec<(usize, String, String, u64, String, u64)> = Vec::new();
+        for (index, slot) in slots.iter().enumerate() {
+            if !slot.proven {
+                report.refused.push(format!(
+                    "{}：盘上那份与文档记的那份**对不上**（{} ≠ {}）⇒ 我不敢说它就是这一槽的来源，\
+                     不重载；要改它请重烘\n    {}",
+                    slot.what,
+                    slot.disk,
+                    slot.source_hash,
+                    slot.difference
+                ));
+                continue;
+            }
+            let text = match std::fs::read_to_string(&slot.path) {
+                Ok(text) => text,
+                Err(err) => {
+                    report
+                        .refused
+                        .push(format!("{}：读不了 {}：{err}", slot.what, slot.path.display()));
+                    continue;
+                }
+            };
+            // ⚠ **跳过判据**（这是判据 1 秒里最值钱的一步）：组装结果是
+            //    （入口原文、可达模块源码、桩表）的纯函数，而闭包指纹把前两样都含进去了。
+            //    两样都没变 ⇒ 组装结果不可能变 ⇒ 不必组装、不必 naga 校验、不必反射。
+            //    实测：不跳过时一次改动要把 5 槽全组装一遍（200–370 ms）；
+            //    跳过之后只有**真的受影响**的那几槽重做。
+            let text_hash = sha16(&text);
+            let closure = px_shader::closure(&text, &modules).fingerprint();
+            if text_hash == slot.text_hash && closure == slot.closure {
+                report.skipped += 1;
+                continue;
+            }
+            let reflected = match art::reflect_source(&slot.what, &text, &modules) {
+                Ok(reflected) => reflected,
+                Err(err) => {
+                    report.refused.push(format!("{}：{err}", slot.what));
+                    continue;
+                }
+            };
+            let version = text_version(&reflected.assembled);
+            if version == slot.version {
+                // 文本换了、组装结果却一样（比如只改了 `#import` 的空格）⇒ 它不算"作废"。
+                report.skipped += 1;
+                continue;
+            }
+            if let Some(entry) = self.entry_of(slot) {
+                if let Err(err) = art::fragment_entry(&reflected.module, &entry, &slot.what) {
+                    report.refused.push(format!("{}：{err}", slot.what));
+                    continue;
+                }
+            }
+            if let Err(why) = self.contract_unchanged(slot, &reflected) {
+                report.refused.push(format!("{}：{why}", slot.what));
+                continue;
+            }
+            report.reloaded.push(SlotChange {
+                what: slot.what.clone(),
+                path: slot.path.clone(),
+                text_hash: text_hash.clone(),
+                old: slot.version,
+                new: version,
+                key: None,
+                member: slot.member.clone(),
+            });
+            staged.push((index, text, text_hash, closure, reflected.assembled, version));
+        }
+        if staged.is_empty() {
+            report.millis = started.elapsed().as_secs_f64() * 1e3;
+            return report;
+        }
+        // ④ 整份计划：在一份**克隆**上验，过了才落 —— "过不了"与"落了一半"是两回事。
+        let mut candidate = self.executed_plan.clone();
+        for (index, _, _, _, text, _) in &staged {
+            if let SlotPlace::Pass(pass) = slots[*index].place {
+                candidate.passes[pass].shader = text.clone();
+            }
+        }
+        if let Err(err) = candidate.check() {
+            report.refused.push(format!(
+                "整份计划过不了 `Plan::check()`：{err} ⇒ 这一批改动**一条都没落**（画面还是上一版）"
+            ));
+            report.reloaded.clear();
+            report.millis = started.elapsed().as_secs_f64() * 1e3;
+            return report;
+        }
+        // 落了。**先记旧键再换文本**：宿主自己那条尺子（`material::key_of`）就是
+        // "这一份材质是哪条管线"的身份，它必须能证明键真的变了（不是"应该变了"）。
+        for (index, text_source, text_hash, closure, text, version) in staged {
+            let place = slots[index].place;
+            // 表的这一槽跟着走到新版本：下一次改动要跟**现在跑的**那一份比
+            // （不更新就会拿装载时那一版当"现在"，第二刀永远被当成"没变"）。
+            self.shader_slots[index].version = version;
+            self.shader_slots[index].text_hash = text_hash;
+            self.shader_slots[index].closure = closure;
+            let _ = text_source;
+            if let SlotPlace::Object(object) = place {
+                let before = material::key_of(&self.scene.objects[object]).map(|key| key.shader);
+                self.scene.objects[object].shader.assembled = text;
+                let after = material::key_of(&self.scene.objects[object]).map(|key| key.shader);
+                if let (Ok(before), Ok(after)) = (before, after) {
+                    if let Some(change) = report
+                        .reloaded
+                        .iter_mut()
+                        .find(|change| change.what == slots[index].what)
+                    {
+                        change.key = Some((before, after));
+                    }
+                }
+            } else if let SlotPlace::Pass(pass) = place {
+                self.executed_plan.passes[pass].shader = text;
+            } else if let SlotPlace::FrameMaterial(frame) = place {
+                if let Some((loaded, _)) = self.frame_materials.get_mut(frame) {
+                    loaded.assembled = text;
+                    loaded.version = version;
+                }
+            }
+        }
+        report.untouched = self.untouched();
+        report.millis = started.elapsed().as_secs_f64() * 1e3;
+        // 审计里**追加**一节：上面那几行说的是**文档**那一份（它们仍然是实话），
+        // 这一节说的是**现在跑的**这一份 —— 与 §42.1 那条"更正"同一个形状：
+        // 原文留着，更正跟在后面，冲突时以后者为准。
+        for line in report.readout() {
+            self.audit_rest.push(line);
+        }
+        report
+    }
+
+    /// 这一槽的片元入口名（改入口 = 改契约，改完必须还在）。
+    ///
+    /// ⚠ 内容材质那一栏是**宿主写死的那一个**（`FRAGMENT_ENTRY`）：`LoadedShader` 不存入口名
+    /// （内容材质的入口是约定，不是文档里的一栏），帧自有材质与全屏 pass 的入口**在文档里**
+    /// （`FrameMaterial::entry` / `PassSpec::entry`）⇒ 三种来源各按自己那一栏取。
+    fn entry_of(&self, slot: &ShaderSlot) -> Option<String> {
+        match slot.place {
+            SlotPlace::Object(_) => Some(FRAGMENT_ENTRY.to_string()),
+            SlotPlace::Pass(index) => Some(self.spec.passes.get(index)?.entry.clone()),
+            SlotPlace::FrameMaterial(index) => {
+                Some(self.frame_materials.get(index)?.0.entry.clone())
+            }
+        }
+    }
+
+    /// 契约那一栏：**参数块与贴图格必须逐字节不变**。
+    ///
+    /// 改了 `#import` 的东西、改了结构体、加了贴图格 ⇒ 手里这份产物给的参数值与格号
+    /// 已经不能描述这份 shader 了，而那正是"画出来既不是老那一版也不是新那一版"。
+    /// ⇒ 这一档只热重载**不改契约**的改动（常数、算式、注释），改契约请重烘。
+    fn contract_unchanged(&self, slot: &ShaderSlot, reflected: &art::Reflected) -> Result<(), String> {
+        match slot.place {
+            SlotPlace::Object(index) => {
+                let object = self
+                    .scene
+                    .objects
+                    .get(index)
+                    .ok_or_else(|| "物体不见了".to_string())?;
+                let before = object
+                    .shader
+                    .layout
+                    .to_json()
+                    .map_err(|err| format!("旧布局解不开：{err}"))?;
+                let after = reflected
+                    .layout
+                    .to_json()
+                    .map_err(|err| format!("新布局解不开：{err}"))?;
+                if before != after {
+                    return Err(format!(
+                        "反射出来的契约变了 ⇒ 不重载（改布局要重烘）：\n  文档那一版 {before}\n  盘上这一版 {after}"
+                    ));
+                }
+                // 参数块：文档给的是**值**，用新布局重新打包必须与手里那份逐字节相同。
+                let packed = reflected
+                    .layout
+                    .pack(&object_params(&self.spec, &object.id))
+                    .map_err(|err| format!("按新布局打包参数：{err}"))?;
+                if packed != object.params {
+                    return Err(format!(
+                        "参数块按新布局打出来与手里那份不同（{} 字节 vs {} 字节）⇒ 不重载",
+                        packed.len(),
+                        object.params.len()
+                    ));
+                }
+                Ok(())
+            }
+            SlotPlace::Pass(index) => {
+                let pass = self
+                    .spec
+                    .passes
+                    .get(index)
+                    .ok_or_else(|| "pass 不见了".to_string())?;
+                let packed = reflected
+                    .layout
+                    .pack(&pass.params)
+                    .map_err(|err| format!("按新布局打包参数：{err}"))?;
+                let now = &self.executed_plan.passes[index];
+                if packed != now.params {
+                    return Err(format!(
+                        "参数块按新布局打出来与计划里那份不同（{} 字节 vs {} 字节）⇒ 不重载",
+                        packed.len(),
+                        now.params.len()
+                    ));
+                }
+                let declared: Vec<u32> = reflected.layout.textures.iter().map(|slot| slot.binding).collect();
+                if declared != now.slots {
+                    return Err(format!(
+                        "声明的贴图格变了（{:?} → {declared:?}）⇒ 不重载",
+                        now.slots
+                    ));
+                }
+                Ok(())
+            }
+            SlotPlace::FrameMaterial(index) => {
+                let frame = self
+                    .spec
+                    .frame_materials
+                    .get(index)
+                    .ok_or_else(|| "帧材质不见了".to_string())?;
+                let loaded = self
+                    .frame_materials
+                    .get(index)
+                    .map(|(loaded, _)| loaded)
+                    .ok_or_else(|| "帧材质没装载过".to_string())?;
+                let packed = reflected
+                    .layout
+                    .pack(&frame.params)
+                    .map_err(|err| format!("按新布局打包参数：{err}"))?;
+                if packed != loaded.params {
+                    return Err(format!(
+                        "参数块按新布局打出来与手里那份不同（{} 字节 vs {} 字节）⇒ 不重载",
+                        packed.len(),
+                        loaded.params.len()
+                    ));
+                }
+                let declared: Vec<(u32, _)> = reflected
+                    .layout
+                    .textures
+                    .iter()
+                    .map(|slot| (slot.binding, slot.dimension))
+                    .collect();
+                if declared != loaded.textures {
+                    return Err(format!(
+                        "声明的贴图格变了（{:?} → {declared:?}）⇒ 不重载",
+                        loaded.textures
+                    ));
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// **没动的那些层**（计数）：这是"哪一层作废"的另一半 —— 只说"热重载了"不是证据，
+    /// "网格 1 份 / 贴图 3 张 / 参数 68 字节一个都没重读"才是。
+    fn untouched(&self) -> Untouched {
+        let textures = self
+            .scene
+            .objects
+            .iter()
+            .map(|object| object.textures.len())
+            .sum();
+        Untouched {
+            objects: self.scene.objects.len(),
+            geometries: self.geometries.len(),
+            textures,
+            params_bytes: self.scene.objects.iter().map(|object| object.params.len()).sum(),
+            instances: 1,
+            cells: self.layer.as_ref().map(|layer| layer.cells.len()).unwrap_or(0),
+        }
     }
 }
 
@@ -2685,6 +3415,39 @@ mod tests {
             ..Default::default()
         };
         assert!(loads_before_write(&plan).is_empty(), "宿主目标由宿主自己清");
+    }
+
+    /// **热重载那道"来源"门**：两份文本的第一处不同要说得出来（行号 + 两边原文）。
+    ///
+    /// ⚠ 它是"拒"那条路上的读数：只说"对不上"会让人对着两个 sha256 猜
+    /// （第一版实测就是这么写的，而它把**我自己的一个 bug** 藏了两轮 ——
+    /// 表在改完之后才算，于是每一槽都"来源没证实"，理由看着还挺像回事）。
+    #[test]
+    fn the_first_difference_points_at_the_line_and_shows_both_sides() {
+        let left = "#import planet_x::light\nfn f() -> f32 { return 1.0; }\n";
+        let right = "#import planet_x::light\nfn f() -> f32 { return 2.0; }\n";
+        let why = first_difference(left, right);
+        assert!(why.contains("第 2 行"), "{why}");
+        assert!(why.contains("return 1.0"), "{why}");
+        assert!(why.contains("return 2.0"), "{why}");
+    }
+
+    /// 只差行尾 ⇒ **不算不同**：`.wgsl` 在盘上是 CRLF 还是 LF，与"这是不是同一份 shader"无关。
+    /// （`git checkout` 会改行尾，把行尾算进去就是一次检出关掉热重载。）
+    #[test]
+    fn a_line_ending_difference_is_not_a_difference() {
+        assert_eq!(
+            first_difference("fn f() {}\n", "fn f() {}\r\n"),
+            "逐行相同（只差行尾：那一栏已经被归一过了）"
+        );
+    }
+
+    /// 一边比另一边短（多出来那几行）也要指得出来 —— 少一个 `}` 是最常见的那种坏。
+    #[test]
+    fn a_missing_tail_line_is_reported_at_its_line() {
+        let why = first_difference("a\nb\nc\n", "a\nb\n");
+        assert!(why.contains("第 3 行"), "{why}");
+        assert!(why.contains("（没有这一行）"), "{why}");
     }
 
     /// 深度那一栏同样算：`copy` 是整张覆盖（与 `clear` 同档），它之后的 `load` 不算"没写过"。

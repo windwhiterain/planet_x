@@ -32,7 +32,13 @@ pub fn workspace() -> &'static Path {
 }
 
 pub fn modules() -> ModuleTable {
-    px_shader::module_sources(&roots()).unwrap_or_else(|err| panic!("{err}"))
+    try_modules().unwrap_or_else(|err| panic!("{err}"))
+}
+
+/// 同 [`modules`]，但**读不出来就返回 `Err`**（理由与 [`try_source_of`] 同一条：
+/// 热重载那条路要能"这一份不重载并说清为什么"，而不是把窗口整个带走）。
+pub fn try_modules() -> Result<ModuleTable, String> {
+    px_shader::module_sources(&roots())
 }
 
 /// 一份入口 shader 的**自足** WGSL：`#import` 全展开、`#{MATERIAL_BIND_GROUP}` 已替。
@@ -48,6 +54,16 @@ pub fn assemble(entry: &str, modules: &ModuleTable, stubs: Stubs) -> String {
 /// 名字 → 入口文本。两处都找：内容（`art/shaders`）与库（`assets/shaders`）。
 /// 与 `px_render::shaders::shader_source_of` 同口径，**重名要报错**。
 pub fn source_of(name: &str) -> (String, PathBuf) {
+    try_source_of(name).unwrap_or_else(|err| panic!("{err}"))
+}
+
+/// 同 [`source_of`]，但**找不到 / 重名都返回 `Err`**。
+///
+/// ⚠ 为什么要两个入口：装载期那条路的规矩是"文档说不通就当场拒"（panic 也是拒），
+/// 而**热重载**那条路要能"这一份不重载，并说清为什么不"—— 一个 panicking 的取法
+/// 会把"盘上少了一个文件"变成"窗口整个没了"。取法本身只有一份（这里），
+/// 两个入口只差"拿不到时怎么办"。
+pub fn try_source_of(name: &str) -> Result<(String, PathBuf), String> {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
     let candidates = [manifest.join("../art/shaders"), manifest.join("assets/shaders")];
     let mut found: Vec<PathBuf> = candidates
@@ -59,19 +75,54 @@ pub fn source_of(name: &str) -> (String, PathBuf) {
         1 => {
             let path = found.remove(0);
             let text = std::fs::read_to_string(&path)
-                .unwrap_or_else(|err| panic!("读不了 {}：{err}", path.display()));
-            (text, path)
+                .map_err(|err| format!("读不了 {}：{err}", path.display()))?;
+            Ok((text, path))
         }
-        0 => panic!("哪里都找不到 shader '{name}'（找过 {}）", manifest.display()),
-        _ => panic!(
+        0 => Err(format!(
+            "哪里都找不到 shader '{name}'（找过 {}）",
+            manifest.display()
+        )),
+        _ => Err(format!(
             "shader '{name}' 在两处都有：{} —— 名字必须唯一，否则测的是这一份、用的是那一份",
             found
                 .iter()
                 .map(|path| path.display().to_string())
                 .collect::<Vec<_>>()
                 .join(" / ")
-        ),
+        )),
     }
+}
+
+/// 盘上**所有可能被热重载**的 `.wgsl`：两个 shader 根 + 帧图那一档（`art/frame/*.wgsl`）。
+///
+/// ⚠ 为什么是"扫目录"而不是"从文档推一张文件清单"：文档里记的是**成员**（`graph`/`node`）
+/// 与**内联全文**，库文件（`planet_x::*`）在文档里根本没有名字 —— 扫目录是唯一不靠猜的取法。
+/// 而"哪几份真的变了"由**组装后逐字比较**给出（那是读数，不是推断），所以扫宽一点不危险，
+/// 只会多报一条"这个文件变了，但没有哪一槽的文本跟着变"。
+///
+/// ⚠ `art/frame/` 不是 shader 库根（`px_shader::roots` 里没有它）：它是**帧自己的**那几个
+/// 阶段住的地方（`vertex_mesh.wgsl` / `vertex_sky.wgsl` / 帧材质的入口）。热重载要看它，
+/// 因为判据说的是"改一个 `.wgsl` 存盘"；而那几个文件**今天只有帧材质那一份有来源**
+/// （顶点阶段在文档里是内联全文、没有名字），见 `Session::shader_slots` 那段。
+pub fn watch_files() -> Result<Vec<PathBuf>, String> {
+    let mut roots = roots();
+    roots.push(workspace().join("art").join("frame"));
+    let mut files: Vec<PathBuf> = Vec::new();
+    for root in &roots {
+        let entries = std::fs::read_dir(root)
+            .map_err(|err| format!("读不了 shader 目录 {}：{err}", root.display()))?;
+        for entry in entries {
+            let path = entry
+                .map_err(|err| format!("读不了 {} 里的一项：{err}", root.display()))?
+                .path();
+            if path.extension().is_some_and(|ext| ext == "wgsl") {
+                files.push(path);
+            }
+        }
+    }
+    // 排序 ⇒ 读数与 `read_dir` 的顺序无关（与 `px_shader::wgsl_files` 同一条纪律）。
+    files.sort();
+    Ok(files)
 }
 
 /// 内容 shader（入口）的名字。判据只认这几个 —— 目录里多出来的东西不该悄悄进判据。

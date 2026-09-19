@@ -48,6 +48,7 @@ use winit::window::{Window, WindowId};
 
 use crate::gpu::Gpu;
 use crate::render::{self, Views};
+use crate::shader;
 use crate::shot;
 
 // ---------------------------------------------------------------------------
@@ -405,6 +406,20 @@ pub fn view(options: &crate::Options) -> Result<(), String> {
         cursor: None,
         session: None,
         session_key: None,
+        // ⚠ 看不了（目录读不出来）不该让窗口起不来：热重载是**附加**能力，
+        //    起不来的话读数里说一声，别的照旧（窗口的价值不止热重载）。
+        shaders: match ShaderWatch::new() {
+            Ok(watch) => {
+                println!("shader 热重载：看着 {}", watch.describe());
+                Some(watch)
+            }
+            Err(err) => {
+                eprintln!("⚠ shader 热重载这一路看不了盘：{err}");
+                None
+            }
+        },
+        shader_changes: Vec::new(),
+        image_hash: options.image_hash,
         dirty: true,
         last: None,
         scene_modified: std::fs::metadata(&request.scene)
@@ -765,6 +780,16 @@ struct Viewer {
     session: Option<render::Session>,
     /// 上面那一份是按**哪一份产物**开的：`(路径, 内容键)`。
     session_key: Option<(String, u64)>,
+    /// 盘上那些 `.wgsl` 的闹钟 + 载荷指纹（shader 热重载的**看**那一半）。
+    shaders: Option<ShaderWatch>,
+    /// 看出来了、还没落成的改动（保留态还没开的那一小段窗口里攒着）。
+    shader_changes: Vec<PathBuf>,
+    /// `--image-hash`：每帧把**回读出来那张图**的 sha16 与时刻打进日志。
+    ///
+    /// ⚠ 它是个开关而不是默认：算一次 sha256 要读 2.4 MB（dev 档实测几毫秒到十几毫秒），
+    ///    默认开着就把"每帧多少钱"这个数改了。判据（1 秒内画面变）量的是**图**，
+    ///    所以量的时候把它打开，量完关掉。
+    image_hash: bool,
     /// 画面脏了：下一次 `RedrawRequested` 要重画一帧。
     dirty: bool,
     /// 上一次画出来的尺寸（`--shot` 与"重呈一次"都要用它）。
@@ -776,6 +801,105 @@ struct Viewer {
     scene_modified: Option<SystemTime>,
     last_poll: Instant,
     last_heartbeat: Instant,
+}
+
+/// 盘上那些 `.wgsl` 的**闹钟 + 载荷指纹**（与 `poll_scene_file` 同一条规矩，§50）。
+///
+/// ⚠ 两级判据，缺一不可：
+/// 1. **闹钟**：`(mtime, 长度)` —— 一次 tick 只花几次 `stat`，不动磁盘内容；
+/// 2. **指纹**：闹钟响了才读盘算 sha256 ⇒ **只认字节真的变了的**（"touch 一下"、
+///    "存盘但内容没变"都不算改）。
+///
+/// ⚠ 扫的是**目录**（`shader::watch_files`：两个 shader 根 + `art/frame`），不是"从文档推
+/// 一张文件清单"：文档里记的是成员名与内联全文，库文件在文档里根本没有名字。
+/// 扫宽一点的代价只是"某个文件变了、但没有哪一槽的文本跟着变"这一条读数 ——
+/// 而那恰恰是**应该**看得见的东西（比如改的是顶点阶段：它今天不在可重载的槽里）。
+struct ShaderWatch {
+    files: Vec<Watched>,
+}
+
+struct Watched {
+    path: PathBuf,
+    /// `(mtime, 长度)`：闹钟。
+    alarm: Option<(SystemTime, u64)>,
+    /// 上一次读到的**内容**指纹（sha256 前 16）。
+    hash: Option<String>,
+}
+
+impl ShaderWatch {
+    /// 起窗口时记一遍**现状**：窗口起来之前就改过的文件不该在开窗那一刻当成"刚改的"。
+    fn new() -> Result<ShaderWatch, String> {
+        ShaderWatch::of(shader::watch_files()?)
+    }
+
+    /// 同上，但**文件清单由调用方给**（判据要能在几个临时文件上验这套逻辑，
+    /// 而不是只能靠"起一个窗口、手改一个真 shader"来验）。
+    fn of(files: Vec<PathBuf>) -> Result<ShaderWatch, String> {
+        let files = files
+            .into_iter()
+            .map(|path| {
+                Ok(Watched {
+                    alarm: alarm_of(&path),
+                    hash: content_hash_of(&path),
+                    path,
+                })
+            })
+            .collect::<Result<Vec<Watched>, String>>()?;
+        Ok(ShaderWatch { files })
+    }
+
+    /// 看着几个文件（进日志：**"看着谁"这件事要看得见**，不然"没反应"分不清是
+    /// "没改"还是"没在看"）。
+    fn describe(&self) -> String {
+        let names: Vec<String> = self
+            .files
+            .iter()
+            .map(|watched| {
+                watched
+                    .path
+                    .strip_prefix(shader::workspace())
+                    .unwrap_or(&watched.path)
+                    .display()
+                    .to_string()
+            })
+            .collect();
+        format!("{} 个：{}", names.len(), names.join(" / "))
+    }
+
+    /// 这一 tick 里**字节真的变了**的文件（内容没变的不算，闹钟却已经推新）。
+    ///
+    /// ⚠ 两种都报出来（第二种只报不做事）：`touch` 一下、或者"存盘但内容没变"
+    /// 与"真的改了一行"是两回事，而只有后者该让画面重画（§50 那条口径的 shader 版）。
+    fn changed(&mut self) -> (Vec<PathBuf>, Vec<PathBuf>) {
+        let mut changed = Vec::new();
+        let mut touched = Vec::new();
+        for watched in self.files.iter_mut() {
+            let alarm = alarm_of(&watched.path);
+            if alarm == watched.alarm {
+                continue;
+            }
+            watched.alarm = alarm;
+            let hash = content_hash_of(&watched.path);
+            if hash == watched.hash {
+                touched.push(watched.path.clone());
+                continue;
+            }
+            watched.hash = hash;
+            changed.push(watched.path.clone());
+        }
+        (changed, touched)
+    }
+}
+
+/// `(mtime, 长度)` —— 读不到就是 `None`（文件被删了也是"变了一次"：`None → Some` 会响）。
+fn alarm_of(path: &Path) -> Option<(SystemTime, u64)> {
+    let meta = std::fs::metadata(path).ok()?;
+    Some((meta.modified().ok()?, meta.len()))
+}
+
+fn content_hash_of(path: &Path) -> Option<String> {
+    let bytes = std::fs::read(path).ok()?;
+    Some(crate::digest::sha256_hex(&bytes)[..16].to_string())
 }
 
 impl Viewer {
@@ -1085,9 +1209,69 @@ impl Viewer {
     ///
     /// 判据是 mtime 闹钟 + **载荷指纹**（§50）：重新烘一份内容一模一样的产物
     /// （或者只是 touch 了一下）不该让窗口重画。指纹为 0 的旧产物照样重画 —— 判不了就照旧。
+    /// 周期活之三：**shader 热重载**（§105 的 S7 第二条判据：改一个 `.wgsl` 存盘、约 1 秒内画面变）。
     ///
-    /// ⚠ 下一单元（shader 热重载）接的就是**这一处**：`.wgsl` 改动不在产物的指纹里，
-    /// 它要在同一个 tick 里多问一句"内容闭包变了吗"，然后置 `dirty`。
+    /// 它做两件事，缺一不可：① 看出**盘上**哪几个 `.wgsl` 真的变了；② 把改动**落回"哪一层"**
+    /// （[`render::Session::reload_shaders`]，读数由它给）。
+    ///
+    /// ⚠ 判据要的是"**画面**变"，而"文件变了 + 日志打了一行"都不是画面：
+    ///    所以这里只负责置 `dirty`，真正的证据在下一帧那张图上
+    ///    （`--image-hash` 会把每帧的图哈希与时刻打出来；1 秒那条判据就是这么量的）。
+    ///
+    /// ⚠ 上一 tick 没落成的改动**不丢**（`shader_changes` 里攒着）：窗口还没准备好
+    ///    （第一帧还没画、`session` 还是 `None`）时把改动吞掉，就会变成"我明明改了、它什么都没说"。
+    fn poll_shaders(&mut self) {
+        let mut changed = std::mem::take(&mut self.shader_changes);
+        let mut touched: Vec<PathBuf> = Vec::new();
+        if let Some(watch) = self.shaders.as_mut() {
+            let (now, alarms) = watch.changed();
+            changed.extend(now);
+            touched = alarms;
+        }
+        for path in &touched {
+            println!(
+                "shader 文件动过，但**字节没变**（{}）⇒ 不重载、不重画",
+                path.strip_prefix(shader::workspace())
+                    .unwrap_or(path)
+                    .display()
+            );
+        }
+        if changed.is_empty() {
+            return;
+        }
+        changed.sort();
+        changed.dedup();
+        let Some(session) = self.session.as_mut() else {
+            // 保留态还没开（第一帧之前）⇒ 攒着，下一 tick 再落。
+            self.shader_changes = changed;
+            return;
+        };
+        let report = session.reload_shaders(&changed);
+        for line in report.readout() {
+            println!("{line}");
+        }
+        if self.image_hash {
+            // ⚠ 这一行**只在量的时候打**：它是给仪器用的时刻（epoch ms），
+            //    好用"文件 mtime → 这一条"分开量出"发现 + 重载"那一段有多长
+            //    （剩下那一段是"下一帧画完"，由帧行自己的 `t` 给）。
+            //    不进审计：审计是能逐字复现的文本，塞一个墙钟进去它就不可复现了（J4 那条口径）。
+            println!(
+                "｜热重载时刻 t={}",
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|since| since.as_millis())
+                    .unwrap_or(0)
+            );
+        }
+        if !report.reloaded.is_empty() {
+            self.dirty = true;
+            self.update_title();
+        }
+        // ⚠ 被拒的改动**不留在 `shader_changes` 里重试**：拒的理由（写坏了 / 契约变了）
+        //    不会因为再试一次而改变，留着就是每 200 ms 刷一遍同一段日志。
+        //    人改好了 = 盘上又变了一次 = 新的事件，那一条自然会重新走一遍。
+    }
+
     fn poll_scene_file(&mut self) {
         let Ok(meta) = std::fs::metadata(&self.scene) else {
             return;
@@ -1197,20 +1381,41 @@ impl Viewer {
                             present.upload(&gpu.device, &gpu.queue, width, height, &rendered.pixels);
                         }
                     }
+                    // ⚠ 上传之后**另起一段**计时：截图那一笔（PNG 编码，dev 档实测上百毫秒）
+                    //    混进"画+上传"里，会让那个数看着像渲染慢了一个数量级（§151 实测过）。
+                    let uploaded = std::time::Instant::now();
+                    // 图哈希**在截图之前**算：截图把 `pixels` 拿走（它自己那一段也不算进来）。
+                    let image: Option<String> = if self.image_hash {
+                        Some(crate::digest::sha256_hex(&rendered.pixels)[..16].to_string())
+                    } else {
+                        None
+                    };
                     // 截图**从刚回读出来的这批字节**走同一条 PNG 路径（§104 第 3 条）：
                     // 屏幕上是它、文件里也是它，中间没有第二次渲染。
+                    let mut shot_ms: u128 = 0;
                     if let Some(path) = self.pending_shot.take() {
                         match shot::write_png(&path, width, height, rendered.pixels) {
                             Ok(bytes) => println!(
-                                "预览截图 → {}（{}×{}，{} 字节，sha256 {}）",
+                                // ⚠ 两个哈希**不是一把尺子**，所以两个都报、并各自署名：
+                                //    `sha256` 那个是**文件**（PNG 编码之后，与 `art/anchor/*.png`
+                                //    以及 J1/J2 的判据同一个东西）；`像素` 那个是**回读出来的
+                                //    原始字节**（与上面那一行"图/像素"同一个东西）。
+                                //    只报一个的时候，人会拿文件哈希去比窗口那一行 —— 那两个
+                                //    永远不相等，而"不相等"看着就像画面错了。
+                                "预览截图 → {}（{}×{}，{} 字节，sha256 {}{}）",
                                 path.display(),
                                 width,
                                 height,
                                 bytes,
-                                crate::digest::short(&path)
+                                crate::digest::short(&path),
+                                match &image {
+                                    Some(image) => format!("｜像素 {image}"),
+                                    None => String::new(),
+                                }
                             ),
                             Err(message) => eprintln!("{message}"),
                         }
+                        shot_ms = uploaded.elapsed().as_millis();
                     }
                     self.last = Some((width, height));
                     self.frames += 1;
@@ -1228,12 +1433,32 @@ impl Viewer {
                     //    [`render::Session::draw`]：两条路的差在"窗口在跑"这件事上
                     //    （DWM 合成、上传、机器状态），不是保留态本身的代价。
                     note = Some(format!(
-                        "第 {} 帧：{}×{}｜{}｜画+上传 {} ms",
+                        "第 {} 帧：{}×{}｜{}｜画+上传 {} ms｜截图 {}{}",
                         self.frames,
                         width,
                         height,
                         describe_orbit(self.orbit),
-                        started.elapsed().as_millis()
+                        (uploaded - started).as_millis(),
+                        shot_ms,
+                        // ⚠ 图哈希是**判据的尺子**（1 秒内画面变）：它给的是"这一帧画出来的
+                        //    那张图"的身份，而不是"日志里多了一行"。`t` 是**墙钟毫秒**
+                        //    （epoch），好让外面的脚本拿文件 mtime 直接减出端到端延迟。
+                        if let Some(image) = &image {
+                            format!(
+                                // ⚠ 这个数是**回读出来的那批字节**（Rgba8UnormSrgb，宽×高×4）
+                                //    的 sha16，**不是** `--shot` 那个 PNG 文件的 sha256 ——
+                                //    判据（1 秒内画面变）要的正是前者：文件多一层编码，
+                                //    而"编码器换一版图就变了"这件事与渲染无关（§104 第 3 条）。
+                                //    `t` 是墙钟毫秒（epoch），好让外面的脚本拿文件 mtime 直接减。
+                                "｜像素 {image}｜t={}",
+                                std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .map(|since| since.as_millis())
+                                    .unwrap_or(0)
+                            )
+                        } else {
+                            String::new()
+                        }
                     ));
                 }
                 Err(message) => {
@@ -1261,9 +1486,31 @@ impl Viewer {
             | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
             wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
                 surface.configure(device, config);
+                // ⚠ **画出来的那一帧没有呈现**这件事必须说出来（§150 那条"不许哑掉"）：
+                //    帧号已经加过了，日志里却没有那一行 ⇒ 外面读日志的人会以为"第 4 帧
+                //    从来没画过"。§7b 实测踩到过：一次热重载后窗口自己那一帧正好被这里
+                //    吞掉，判据的仪器于是以为"画面没变"（而它变了）。
+                println!(
+                    "第 {} 帧画出来了，但**没有呈现**（交换链 Outdated/Lost ⇒ 重新配置，这一帧丢掉）\
+                     —— 立刻再画一帧",
+                    self.frames
+                );
+                // ⚠ 这一句是**判据要的**那一步：`configure` 把这一帧的内容丢了，而 `dirty`
+                //    在本帧开头就被清了 ⇒ 不主动再要一帧的话，画面会停在上一次呈现的内容上，
+                //    直到人来动一下鼠标。热重载正好撞上它时，症状就是"改完 shader 一秒内
+                //    没反应，动一下鼠标才变" —— §7b 实测：那一帧被丢掉之后，真正的更新是
+                //    1.4 s 后被仪器催的那一帧救回来的（而不是窗口自己）。
+                self.dirty = true;
+                self.request_redraw();
                 return;
             }
-            wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => return,
+            wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
+                println!(
+                    "第 {} 帧画出来了，但**没有呈现**（交换链 Timeout/Occluded —— 窗口被挡住或不可见）",
+                    self.frames
+                );
+                return;
+            }
             wgpu::CurrentSurfaceTexture::Validation => {
                 eprintln!("⚠ 交换链拿不到下一张（校验错）：这一帧跳过");
                 return;
@@ -1413,6 +1660,7 @@ impl ApplicationHandler for Viewer {
             self.last_poll = now;
             self.poll_request();
             self.poll_scene_file();
+            self.poll_shaders();
             if self.dirty {
                 self.request_redraw();
             }

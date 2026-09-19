@@ -55,6 +55,8 @@ fn usage() -> String {
         "        而 `tools/` 那套仪器（frame-probe / harness）就是这么调本 exe 的。",
         "        两套语义共用一个写法，等于让'这张图是谁画的'变成一条要靠猜的事。",
         "      --stats：报回读字节的逐通道 min/max 与颜色数（平场那种判据靠它）。",
+        "      --image-hash（--view）：窗口每帧把回读出来那张图的 sha16 与墙钟时刻打进日志。",
+        "        它服务的是 S7 那条「改一个 .wgsl ⇒ 约 1 秒内**画面**变」：判据的尺子是图，不是日志。",
         "      --time N：**保留态的读数** —— 准备一次、连画 N 帧，报「准备 / 第 1 帧（含建管线）/",
         "        第 2..N 帧（中位）」三段墙钟；落盘的是最后一帧（与不带 --time 的那张逐字节相同）。",
         "  px_render_wgpu --scene 文档.pxart --out sheet.png --sheet [--columns N] [--offline]",
@@ -131,6 +133,12 @@ struct Options {
     /// 从前一条 `render::run` = 从读文档到建管线重来一遍，量到的只有"重新准备一帧"的代价。
     /// 0 = 不开（缺省）；缺省不是"画一帧" —— 那是 `--offline` 那条路本来的行为。
     time: u32,
+    /// `--image-hash`：**窗口**每帧把回读出来那张图的 sha16 与墙钟时刻打进日志。
+    ///
+    /// ⚠ 它服务的是 S7 第二条判据（改一个 `.wgsl` ⇒ 约 1 秒内**画面**变）：
+    /// "文件变了 + 日志多了一行"都不是画面，判据要的尺子是**图**。
+    /// 默认关：算一次 sha256 要读 2.4 MB，开着会把"每帧多少钱"这个数改掉。
+    image_hash: bool,
     // ---- 服务 ----
     serve: bool,
     port: u16,
@@ -206,6 +214,7 @@ impl Default for Options {
             offline: false,
             stats: false,
             time: 0,
+            image_hash: false,
             serve: false,
             port: 0,
             // ⚠ 缺省 CAS 根**不是** `PathBuf::from("target/pcg")`：那是**当前目录**，
@@ -268,6 +277,7 @@ impl Options {
                 "--shaders" => options.shaders = true,
                 "--offline" => options.offline = true,
                 "--stats" => options.stats = true,
+                "--image-hash" => options.image_hash = true,
                 "--time" => {
                     options.time = next("--time")?
                         .parse()
@@ -732,6 +742,16 @@ fn main() {
             std::process::exit(1);
         }
         return;
+    }
+    // ⚠ `--image-hash` 是**窗口**那一帧的读数（每帧把回读字节的 sha16 与时刻打出来）。
+    //    别的路上收下不说就是"说了没做"：`--offline` 有自己的 `--stats`，
+    //    服务那条路一条请求只画一帧 —— 那里根本没有"每帧"这回事。
+    if options.image_hash {
+        eprintln!(
+            "--image-hash 是预览窗口（--view）的读数：它每帧把回读出来那批字节的 sha16 与墙钟打出来，\
+             服务与离线那两条路没有「每帧」可报"
+        );
+        std::process::exit(64);
     }
     if options.show {
         // `check_viewer` 已经保证至少给了一份 `--scene`。

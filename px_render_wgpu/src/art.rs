@@ -400,13 +400,13 @@ fn load_object(
 ///
 /// `module` 一并留着，因为**入口名要在那份真模块里查**（[`fragment_entry`]）——
 /// 组装后的文本与反射出来的契约是两件事，"这个名字在不在"只有 naga 说得准。
-struct Reflected {
-    assembled: String,
-    layout: MaterialLayout,
-    module: naga::Module,
+pub(crate) struct Reflected {
+    pub assembled: String,
+    pub layout: MaterialLayout,
+    pub module: naga::Module,
 }
 
-fn reflect_source(
+pub(crate) fn reflect_source(
     name: &str,
     source: &str,
     modules: &px_shader::ModuleTable,
@@ -430,7 +430,7 @@ fn reflect_source(
 /// （"找不到入口"），离病因（配方里一个词写错）已经很远。
 ///
 /// 拒的时候**必须把实际的入口列出来**：不列的话，作者只能对着两个名字猜。
-fn fragment_entry(module: &naga::Module, entry: &str, at: &str) -> Result<(), String> {
+pub(crate) fn fragment_entry(module: &naga::Module, entry: &str, at: &str) -> Result<(), String> {
     let names = |stage: Option<naga::ShaderStage>| -> String {
         let found: Vec<&str> = module
             .entry_points
