@@ -25,14 +25,14 @@ pub struct ProxyInput {
 pub struct CubeSphere;
 
 px_op! { CubeSphere = params::CUBESPHERE, params::cubesphere::Params, CubeSphereInput, MeshData,
-         OpKind::Mesh, &["height"],
+         OpKind::Mesh,
          |p, i, g| crate::cubesphere::eval(p, &[i.height.sample()], g) }
 
 /// 等值面代理：吃一份体积，吐一张闭合网格。
 pub struct Proxy;
 
 px_op! { Proxy = params::PROXY, params::proxy::Params, ProxyInput, MeshData,
-         OpKind::Mesh, &["volume"],
+         OpKind::Mesh,
          |p, i, _g| {
              // ⚠ 与老路径同一个采样器：`VolumeGrid` 只在**同一个面内**插值，
              // 换成 `VolumeData` 直接当 sampler 会把面缝焊法换掉。

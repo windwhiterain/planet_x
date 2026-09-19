@@ -43,6 +43,11 @@
 
 ### §25.2 画布尺寸必须进键
 
+> ⚠ **2026 更正**：本条下面说的「`node_key` 增加 `canvas: (u32, u32)`」**已过期** ——
+> 画布改成**按域**进键（`Payload::RESOLUTION_IS_CANVAS`：场 true、体积/网格 false），
+> 而且不再在 `node_key` 里，在 `px_cook::cook` 里。那两处告警（`GRAPH_VERSION`）
+> 也一并删掉了。见 `docs/generic-op-and-graph-integration.md` §3.7。
+
 `GraphSpec.width/height` 影响每个节点的输出，一度却没进缓存键：把画布从 384×192 改成 768×384 后**所有节点照样命中**，产物还是 295111 字节的旧尺寸 —— 是 §19.1 那条 ⚠️ 告警（「图 planet 的源码变了但 GRAPH_VERSION 仍是 1」）把它喊出来的。已修：`node_key` 增加 `canvas: (u32, u32)`，并补测试 `the_canvas_size_is_part_of_the_key`。
 
 ### §25.3 代价（768×384 + Perlin）
@@ -71,6 +76,9 @@
 - ⚠️ 这仍然**只进产物元数据、不进键**（§19：进键就等于自动失效，手动版本号就没意义了）——它买的是「命中时喊一声」。
 - 门：`px_ops/tests/source_hash.rs` 扫这几处，退回单文件版就红（语言管不住这件事，所以用门看住，§10.2 同一条思路）。
 - 图程序（`px_graphs/src/bin/*.rs`）**不在此列**：它们的 `SOURCE_HASH` 仍只哈希自己，拓扑与写死的常量由 `GRAPH_VERSION` 管（§19.2）；算子的共享依赖已经由各自的 `SOURCE_HASH` 覆盖。
+  > ⚠ **2026 更正**：`SOURCE_HASH` / `GRAPH_VERSION` 已从所有图脚本**删除**（原型期决定：
+  > 键只表达产出这个节点的东西）。写死的常量如今是缓存盲区 —— 这是**已知且接受**的代价，
+  > 不再有告警兜着。
 
 > ⚠ **§159 取代（2026-09-19，`16-graph-split.md`）：上面那三条路径全部搬了家**，口径不变、读数一字不删：
 > - 七个**场**算子 → `px_field_op/src/ops/*.rs`：自己的文件 + `../noise.rs` +

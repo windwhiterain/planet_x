@@ -7,13 +7,6 @@ use px_protocol::art::{Camera, Domain};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GraphSpec {
     pub name: String,
-    /// **图的身份**，不是键的一部分。
-    ///
-    /// ⚠ 它曾经进节点键 —— 那是错的：改图脚本里别处一行代码，不该让某个节点的产物作废。
-    ///   它现在的用途是"这张图的这一版"这个说法本身（清单里记着它）。
-    pub version: u32,
-    /// 图脚本源码的哈希。用途同上：图的身份，**不进键**。
-    pub source_hash: u64,
     pub width: u32,
     pub height: u32,
     pub projection: Domain,

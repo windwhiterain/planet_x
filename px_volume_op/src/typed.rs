@@ -21,5 +21,5 @@ pub type VolumeOut = Cooked<VolumeData>;
 pub struct CloudCoarse;
 
 px_op! { CloudCoarse = params::CLOUD_COARSE, params::Params, CloudCoarseInput, VolumeData,
-         OpKind::Volume, &["coverage"],
+         OpKind::Volume,
          |p, i, _g| crate::eval_sampled(p, i.coverage.sample()) }

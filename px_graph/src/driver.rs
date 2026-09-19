@@ -28,7 +28,6 @@ use px_volume_schema::{PATCHES, VolumeData};
 /// 于是「类型化的算子契约」与「缓存的实现」各自独立：前者在 `px_cook`，
 /// 后者在这里，两边都不需要知道对方的算子长什么样。
 pub trait Cache {
-    fn graph_version(&self) -> u32;
     /// **画布 = 算子拿到的那个 `Grid`**（尺寸 + 投影）。
     ///
     /// ⚠ 只有一个出口：键里那一份与算子 `render` 手里那一份必须是同一个值。
@@ -66,16 +65,8 @@ pub struct Report<'a> {
 /// 缓存机制的句柄。`begin(GraphSpec)` 之后才有，用 `driver()` 取。
 pub struct Driver;
 
-impl Driver {
-    pub fn graph_version(&self) -> u32 {
-        context().spec.version
-    }
-}
 
 impl Cache for Driver {
-    fn graph_version(&self) -> u32 {
-        context().spec.version
-    }
 
     fn grid(&self) -> Grid {
         context().grid
@@ -462,9 +453,8 @@ pub fn begin(spec: GraphSpec) {
     std::fs::create_dir_all(&context.cache_root).ok();
 
     println!(
-        "图 {} v{}｜画布 {}×{}｜参数 {}{}｜缓存 {} 条{}",
+        "图 {}｜画布 {}×{}｜参数 {}{}｜缓存 {} 条{}",
         context.spec.name,
-        context.spec.version,
         context.spec.width,
         context.spec.height,
         param_dir.display(),
@@ -484,15 +474,8 @@ fn context() -> &'static Context {
 pub fn node(op_id: &str, name: &str, inputs: &[&Artifact]) -> Artifact {
     let context = context();
     let (library, descriptor) = context.find(op_id);
-    assert_eq!(
-        inputs.len(),
-        descriptor.inputs.len(),
-        "{} 需要 {} 个输入 {}，实际给了 {}",
-        op_id,
-        descriptor.inputs.len(),
-        descriptor.inputs.join(" / "),
-        inputs.len(),
-    );
+    // ⚠ 输入**个数**不再由描述符声明（那是个手维护的名字清单，类型化那一支根本不用它）
+    //   —— 描述符只剩"我是谁"。老路径这一支没有编译期检查，只能凭调用点给对。
 
     let params_path = context.param_dir.join(format!("{name}.toml"));
     let params_text = load_params_text(&context.param_dir, name);

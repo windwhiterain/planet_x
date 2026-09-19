@@ -21,6 +21,21 @@
 
 ### §17.1 键 = 内容
 ```
+
+> ⚠ **2026 更正（原型期的大刀阔斧，见 `docs/generic-op-and-graph-integration.md` §3.7）**：
+> 本节以及下面 §「node_key = …」几处的键口径**都过期了**。现在：
+> ```text
+> node_key = blake3("px_pcg/v2" ‖ op_id ‖ 接口哈希 ‖ 规范参数 ‖ [各输入的 key])
+> ```
+> * `op_version` → **接口形状哈希**（从 `Params`/`Inputs`/`Payload` 三个类型名推，不用人升）
+> * `graph_version` **删掉** —— 它是图的属性；改图脚本里别处一行代码不该掀掉某个节点的产物
+> * **画布按域**进键（`Payload::RESOLUTION_IS_CANVAS`：场 true、体积/网格 false），
+>   不再是无条件掺
+> * 投影不进键（编解码口径由 `Payload` 承担）
+> * 那条「源码变了但版本没升」的告警**删掉**：源码指纹（`build.rs` 逐源码树算）直接进键，
+>   那种陈旧命中不可能发生
+> * `GRAPH_VERSION` / `SOURCE_HASH` 两个常量已从所有图脚本删除
+
 node_key = blake3("px_pcg/v1" ‖ op_id ‖ op_version ‖ graph_version
                   ‖ canvas.(W,H) ‖ projection.name ‖ 规范化参数 JSON ‖ [各输入的 key])
 ```

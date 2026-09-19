@@ -21,7 +21,6 @@ pub struct OpDescriptor {
     /// **源码指纹**：这个库编译进去全部源码的 blake3（`build.rs` 算的）。
     /// **不进键**，只在命中时对账（§19.1）。
     pub source_hash: &'static str,
-    pub inputs: &'static [&'static str],
     pub kind: OpKind,
 }
 

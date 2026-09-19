@@ -3,14 +3,10 @@ use px_graph::{GraphSpec, begin, finish, node};
 use px_mesh_schema::params as mesh_params;
 use px_protocol::art::Domain;
 
-const GRAPH_VERSION: u32 = 1;
-const SOURCE_HASH: u64 = px_graph::fnv1a(include_str!("planet.rs"));
 
 fn main() {
     begin(GraphSpec {
         name: "planet".to_string(),
-        version: GRAPH_VERSION,
-        source_hash: SOURCE_HASH,
         width: 780,
         height: 520,
         projection: Domain::Cube,

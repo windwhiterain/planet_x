@@ -963,8 +963,6 @@ mod tests {
         ONCE.call_once(|| {
             px_graph::begin(px_graph::GraphSpec {
                 name: "frame-tests".to_string(),
-                version: 1,
-                source_hash: 1,
                 width: 0,
                 height: 0,
                 projection: px_protocol::art::Domain::Cube,

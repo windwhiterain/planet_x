@@ -43,7 +43,8 @@ pub extern "Rust" fn table() -> &'static OpTable {
                 id: MONO_ID,
                 interface: interface(),
                 source_hash: SOURCE_HASH,
-                inputs: &["coverage"],
+                // ⚠ 输入名不在这里了（描述符只剩"我是谁"）。这一份实例的输入形状
+                //   由本文件的 `call` 自己解 —— 它知道"一个上游，覆盖度场"。
                 kind: OpKind::Volume,
             }]
             .into_boxed_slice(),

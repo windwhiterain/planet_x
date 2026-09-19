@@ -5,8 +5,6 @@ use px_scene::contract::{merge_named, shader_parts_of};
 use px_protocol::scene::{Member, PassResource, PassSpec, SceneSpec};
 use serde::Deserialize;
 
-const GRAPH_VERSION: u32 = 1;
-const SOURCE_HASH: u64 = px_graph::fnv1a(include_str!("passes.rs"));
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -115,8 +113,6 @@ fn usage() -> String {
 fn main() {
     px_graph::begin(px_graph::GraphSpec {
         name: "passdoc".to_string(),
-        version: GRAPH_VERSION,
-        source_hash: SOURCE_HASH,
         width: 0,
         height: 0,
         projection: px_protocol::art::Domain::Cube,

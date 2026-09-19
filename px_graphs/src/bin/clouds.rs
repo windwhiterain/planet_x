@@ -31,8 +31,6 @@ fn declared(key: &str) -> &'static str {
         .unwrap_or_else(|| panic!("clouds/mono.rs 里没有 `{key}`"))
 }
 
-const GRAPH_VERSION: u32 = 6;
-const SOURCE_HASH: u64 = px_graph::fnv1a(include_str!("clouds.rs"));
 const FACE: u32 = 256;
 
 /// 图侧对错误的统一态度：**当场失败**，不静默跳过（§62 那条口径的同一面）。
@@ -43,8 +41,6 @@ fn main() -> Result<(), Fault> {
     let (width, height) = cube_map_extent(FACE);
     begin(GraphSpec {
         name: "clouds".to_string(),
-        version: GRAPH_VERSION,
-        source_hash: SOURCE_HASH,
         width,
         height,
         projection: Domain::CubeMap,

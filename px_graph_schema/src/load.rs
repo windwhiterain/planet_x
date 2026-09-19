@@ -17,9 +17,36 @@ pub struct OpLibrary {
     fingerprint: u64,
 }
 
+/// libloading 的 Display 把 Win32 的错误码吞掉了（只留一句 LoadLibraryExW failed）
+/// —— 那句话对定位毫无用处：分不清是「文件被别人占着」、「找不到依赖的 DLL」
+/// 还是「文件不是合法的 PE」。所以这里把 GetLastError 读出来自己说。
+fn why(err: libloading::Error, path: &Path) -> String {
+    #[cfg(windows)]
+    let code = unsafe { windows_last_error() };
+    #[cfg(not(windows))]
+    let code = 0_u32;
+    let hint = match code {
+        5 => "文件或它依赖的某个 DLL 被拒绝访问（常见：杀软，或另一个进程正拿着它）",
+        32 => "文件正被另一个进程占用（构建或上一次生成还没退出？）",
+        126 => "找不到它依赖的某个模块",
+        193 => "不是合法的 Windows 程序（架构不对？）",
+        _ => "",
+    };
+    let exists = if path.is_file() { "在" } else { "不在盘上" };
+    format!("{err}｜Win32 错误码 {code}（{hint}）；文件{exists}")
+}
+
+#[cfg(windows)]
+unsafe fn windows_last_error() -> u32 {
+    unsafe extern "system" {
+        fn GetLastError() -> u32;
+    }
+    // SAFETY：GetLastError 无参数、无副作用，线程局部。
+    unsafe { GetLastError() }
+}
+
 impl OpLibrary {
-    pub fn load(path: &Path) -> Result<Self, String> {
-        let bytes = std::fs::read(path)
+    pub fn load(path: &Path) -> Result<Self, String> {        let bytes = std::fs::read(path)
             .map_err(|err| format!("读不了算子库 {}：{err}", path.display()))?;
         let digest = blake3::hash(&bytes);
         let fingerprint =
@@ -27,7 +54,7 @@ impl OpLibrary {
         // SAFETY：装载一个本仓自己编出来的 Rust dylib，入口按 §契约 取。
         // 句柄在 `Self` 里活到进程结束；不卸载（`table` 是它里面的静态数据）。
         let library = unsafe { libloading::Library::new(path) }
-            .map_err(|err| format!("装载算子库 {} 失败：{err}", path.display()))?;
+            .map_err(|err| format!("装载算子库 {} 失败：{}", path.display(), why(err, path)))?;
         let symbol = table_symbol(path);
         let table: &'static OpTable = unsafe {
             let entry: libloading::Symbol<extern "Rust" fn() -> &'static OpTable> =

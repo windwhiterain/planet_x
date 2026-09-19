@@ -40,12 +40,12 @@ pub struct MixInput {
 macro_rules! field_op {
     (
         $(#[$meta:meta])*
-        $name:ident, $id:expr, $params:ty, $inputs:ty, $arity:expr, $expr:expr
+        $name:ident, $id:expr, $params:ty, $inputs:ty, $expr:expr
     ) => {
         $(#[$meta])*
         pub struct $name;
 
-        px_op! { $name = $id, $params, $inputs, Field, OpKind::Field, $arity,
+        px_op! { $name = $id, $params, $inputs, Field, OpKind::Field,
                  |p, i, g| $expr(p, i, g) }
     };
 }
@@ -54,25 +54,25 @@ macro_rules! field_op {
 
 field_op! {
     /// 常量场（无输入）。
-    Constant, params::CONSTANT, params::constant::Params, (), &[],
+    Constant, params::CONSTANT, params::constant::Params, (),
     |p: &params::constant::Params, _i: &(), g| crate::ops::constant::eval(p, &[], g)
 }
 
 field_op! {
     /// 分形布朗噪声（无输入）。
-    Fbm, params::FBM, params::fbm::Params, (), &[],
+    Fbm, params::FBM, params::fbm::Params, (),
     |p: &params::fbm::Params, _i: &(), g| crate::ops::fbm::eval(p, &[], g)
 }
 
 field_op! {
     /// 脊状噪声（无输入）。
-    Ridged, params::RIDGED, params::ridged::Params, (), &[],
+    Ridged, params::RIDGED, params::ridged::Params, (),
     |p: &params::ridged::Params, _i: &(), g| crate::ops::ridged::eval(p, &[], g)
 }
 
 field_op! {
     /// 值域重映射（一张场）。
-    Remap, params::REMAP, params::remap::Params, FieldInput, &["field"],
+    Remap, params::REMAP, params::remap::Params, FieldInput,
     |p: &params::remap::Params, i: &FieldInput, g| {
         crate::ops::remap::eval(p, &[i.field.sample()], g)
     }
@@ -80,7 +80,7 @@ field_op! {
 
 field_op! {
     /// 切向梯度的一个分量（一张场）。
-    Gradient, params::GRADIENT, params::gradient::Params, FieldInput, &["field"],
+    Gradient, params::GRADIENT, params::gradient::Params, FieldInput,
     |p: &params::gradient::Params, i: &FieldInput, g| {
         crate::ops::gradient::eval(p, &[i.field.sample()], g)
     }
@@ -88,7 +88,7 @@ field_op! {
 
 field_op! {
     /// 三张场按第三张当权重混合。
-    Mix, params::MIX, params::mix::Params, MixInput, &["a", "b", "mask"],
+    Mix, params::MIX, params::mix::Params, MixInput,
     |p: &params::mix::Params, i: &MixInput, g| {
         crate::ops::mix::eval(p, &[i.a.sample(), i.b.sample(), i.mask.sample()], g)
     }
@@ -96,7 +96,7 @@ field_op! {
 
 field_op! {
     /// 域扭曲（两张场：待扭曲的场 + 偏移场）。
-    Warp, params::WARP, params::warp::Params, FieldPairInput, &["field", "offset"],
+    Warp, params::WARP, params::warp::Params, FieldPairInput,
     |p: &params::warp::Params, i: &FieldPairInput, g| {
         crate::ops::warp::eval(p, &[i.field.sample(), i.offset.sample()], g)
     }

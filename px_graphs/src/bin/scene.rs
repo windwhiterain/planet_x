@@ -21,15 +21,11 @@
 use px_scene::baked::Baked;
 use px_scene::recipe;
 
-const GRAPH_VERSION: u32 = 1;
-const SOURCE_HASH: u64 = px_graph::fnv1a(include_str!("scene.rs"));
 const DEFAULT_SCENE: &str = "orbit";
 
 fn main() {
     px_graph::begin(px_graph::GraphSpec {
         name: "scene".to_string(),
-        version: GRAPH_VERSION,
-        source_hash: SOURCE_HASH,
         width: 0,
         height: 0,
         projection: px_protocol::art::Domain::Cube,

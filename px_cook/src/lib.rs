@@ -152,9 +152,6 @@ impl Cooked<MeshData> {
 /// `#[derive(PxOp)]` 会把它生成出来；`clouds.rs` 里也能按需手写（见那个演示分支）。
 pub trait PxOp {
     const ID: &'static str;
-    /// 描述符里的输入**名**（老路径的接口形状：`["coverage"]` 那种字节边界上的名字）。
-    /// ⚠ 它只给 dylib 那一侧的描述符用；图侧的真实检查在 `Inputs` 上。
-    const INPUTS: &'static [&'static str];
     /// 产物档：决定键里要不要掺评审相机。
     const KIND: px_graph_schema::OpKind;
     /// ⚠ **声明的域必须与输出域推出来的一致**（相机掺不掺、解码走哪条都从它推）。
@@ -229,7 +226,6 @@ pub mod payload {
         /// ⚠ 声明里的 `OpKind` 必须与它一致；`px_op!` 里有 `const` 断言看着，
         /// 所以"写错域"是编译错而不是运行期的怪事。
         const KIND: px_graph_schema::OpKind;
-        const WITH_CAMERAS: bool;
         /// **这个域的产物尺寸是不是就是画布？**
         ///
         /// * `true`（场）：分辨率 = 画布 ⇒ 画布必须进键，否则"改了画布却命中旧分辨率"。
@@ -243,7 +239,6 @@ pub mod payload {
 
     impl Build for Field {
         const KIND: px_graph_schema::OpKind = px_graph_schema::OpKind::Field;
-        const WITH_CAMERAS: bool = true;
         const RESOLUTION_IS_CANVAS: bool = true;
         fn encode(payload: &Self) -> Result<Vec<u8>, String> {
             px_field_schema::payload::encode(payload).placeholder()
@@ -256,7 +251,6 @@ pub mod payload {
 
     impl Build for VolumeData {
         const KIND: px_graph_schema::OpKind = px_graph_schema::OpKind::Volume;
-        const WITH_CAMERAS: bool = false;
         const RESOLUTION_IS_CANVAS: bool = false;
         fn encode(payload: &Self) -> Result<Vec<u8>, String> {
             px_volume_schema::payload::encode(payload).placeholder()
@@ -269,7 +263,6 @@ pub mod payload {
 
     impl Build for MeshData {
         const KIND: px_graph_schema::OpKind = px_graph_schema::OpKind::Mesh;
-        const WITH_CAMERAS: bool = true;
         const RESOLUTION_IS_CANVAS: bool = false;
         fn encode(payload: &Self) -> Result<Vec<u8>, String> {
             px_mesh_schema::payload::encode(payload).placeholder()
@@ -287,9 +280,7 @@ pub mod payload {
         pub fn decode(&self, bytes: &[u8], projection: Domain, node: &str) -> Result<P, String> {
             P::decode(bytes, projection, node)
         }
-        pub fn with_cameras(&self) -> bool {
-            P::WITH_CAMERAS
-        }
+
     }
 }
 
@@ -355,7 +346,10 @@ where
     inputs.collect(&mut hasher);
     let base = *hasher.finalize().as_bytes();
     // ⚠ 相机那一档：产物里带着相机表 ⇒ 相机变了产物内容就变 ⇒ 必须进键。
-    let with_cameras = O::payload().with_cameras();
+    // ⚠ 相机口径从**域**推（`OpKind`）：Field/Mesh 的产物里带相机表，Volume 不带。
+    //   从前这是一个独立的 `Payload::WITH_CAMERAS` —— 它与 `KIND` 一一对应，
+    //   两处真相迟早会对不上。
+    let with_cameras = O::KIND != px_graph_schema::OpKind::Volume;
     let key = if with_cameras {
         px_graph_schema::key_with_cameras(base, cache.cameras())
     } else {
@@ -419,12 +413,11 @@ where
 #[macro_export]
 macro_rules! px_op {
     ($name:ident = $id:expr, $params:ty, $inputs:ty, $payload:ty,
-     $kind:expr, $arity:expr,
+     $kind:expr,
      |$p:ident, $i:ident, $g:ident| $body:expr
      $(, interface = $interface:literal)?) => {
         impl $crate::PxOp for $name {
             const ID: &'static str = $id;
-            const INPUTS: &'static [&'static str] = $arity;
             const KIND: $crate::px_graph_schema::OpKind = $kind;
 
             type Params = $params;
@@ -678,7 +671,6 @@ macro_rules! px_op_table {
                         id: <$op as $crate::PxOp>::ID,
                         interface: <$op as $crate::PxOp>::interface(),
                         source_hash: <$op as $crate::PxOp>::SOURCE_HASH,
-                        inputs: <$op as $crate::PxOp>::INPUTS,
                         kind: <$op as $crate::PxOp>::KIND,
                     }),+
                 ];

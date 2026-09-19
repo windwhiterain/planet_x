@@ -2,8 +2,6 @@ use std::path::{Path, PathBuf};
 
 use px_graph::{GraphSpec, ManifestEntry};
 
-const GRAPH_VERSION: u32 = 1;
-const SOURCE_HASH: u64 = px_graph::fnv1a(include_str!("shaders.rs"));
 
 /// 要烘的槽 = `art/shaders/*.wgsl` 里**每一个入口 shader**（§80 第 2 步）。
 ///
@@ -47,8 +45,6 @@ fn entry_slots() -> Result<Vec<String>, String> {
 fn main() {
     px_graph::begin(GraphSpec {
         name: "shaders".to_string(),
-        version: GRAPH_VERSION,
-        source_hash: SOURCE_HASH,
         width: 0,
         height: 0,
         projection: px_protocol::art::Domain::Cube,
