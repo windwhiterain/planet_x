@@ -182,6 +182,9 @@ let proxy = cook::<mesh::Proxy>(&cache, "proxy", mesh::VolumeInput { a: coarse }
 
 ### 3.6 参数文件 `art/<图>/mixed.toml`
 
+> 跑完看一眼 `target/pcg/<图>/params.json`：它是**每个节点实际生效的参数值 + 字段名**。
+> 缺参数文件的节点会在末行被点出来（"N 个节点走默认值：…"）—— 照着 JSON 补文件即可。
+
 ```toml
 frequency = 1.7
 octaves = 6
@@ -245,8 +248,9 @@ cargo run -q -p px_graphs --bin mono-gen -- px_graphs/src/bin/<图>/mono/fields.
    **dylib 那一半不许依赖 `px_graph`**（否则同一进程两份驱动，比"重编"严重得多）。
    两道门看着：`px_graphs/tests/crate_graph.rs`。
 
-3. **参数写错字段名**：靠 `deny_unknown_fields` 当场报；**缺文件是静默用默认值**
-   —— 设计师看不到自己少写了什么。**这一处还扎人**。
+3. **参数写错字段名**：靠 `deny_unknown_fields` 当场报。**缺文件仍是静默用默认值**
+   （老口径没动），但跑完会写一份 `<图>/params.json`：**每个节点实际生效的参数值 + 字段名**，
+   外加一句"N 个节点走默认值：<名字>"。想补参数文件，照着那份 JSON 抄字段名即可。
 
 4. **身份清单漏一份** ⇒ 改了共享依赖而身份没变 ⇒ 缓存静默给旧产物。
    `px_graph/tests/source_hash.rs` 那道门扫每个算子那段清单（至少两段 + 点到共享依赖）。

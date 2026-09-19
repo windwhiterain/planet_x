@@ -34,6 +34,11 @@ pub trait Cache {
     fn cameras(&self) -> &[Camera];
     /// `art/<图>/<name>.toml` 的原文；`None` = 文件不存在 ⇒ 用算子默认值。
     fn params_text(&self, name: &str) -> Option<String>;
+    /// 记一条"这个节点读了哪些参数"（诊断用：写进 `<图>/params.json`）。
+    ///
+    /// ⚠ 缺文件是**静默用默认值**的（老口径，不动）—— 于是设计师看不到自己少写了什么。
+    /// 这一条记录就是那个缺口：跑完能拿到"每个节点实际生效的参数值 + 它的字段名"。
+    fn record_params(&self, node: &str, op: &str, params_json: &str, from_file: bool);
     /// CAS 里那份字节。`PX_PCG_FRESH=1` 时一律 `None`（本次全部重算）。
     fn fetch(&self, key: Key) -> Option<Vec<u8>>;
     /// 键不在盘上：把产物写进 CAS、记索引与清单，并把读数打出来。
@@ -81,6 +86,22 @@ impl Cache for Driver {
 
     fn params_text(&self, name: &str) -> Option<String> {
         load_params_text(&context().param_dir, name)
+    }
+
+    fn record_params(&self, node: &str, op: &str, params_json: &str, from_file: bool) {
+        let value = serde_json::from_str(params_json).unwrap_or(serde_json::Value::Null);
+        context()
+            .params_used
+            .lock()
+            .expect("参数表锁坏了")
+            .insert(
+                node.to_string(),
+                ParamsUsed {
+                    op: op.to_string(),
+                    from_file,
+                    params: value,
+                },
+            );
     }
 
     fn fetch(&self, key: Key) -> Option<Vec<u8>> {
@@ -279,6 +300,16 @@ struct Context {
     libraries: OnceLock<Vec<OpLibrary>>,
     index: Mutex<BTreeMap<String, IndexEntry>>,
     manifest: Mutex<Vec<ManifestEntry>>,
+    /// 每个节点实际读到的参数（诊断：缺文件是静默用默认值的，设计师看不到自己少写了什么）。
+    params_used: Mutex<BTreeMap<String, ParamsUsed>>,
+}
+
+/// 一个节点用的参数：算子、是不是来自文件、规范 JSON（**键的名字就在里面**）。
+#[derive(Clone, serde::Serialize)]
+struct ParamsUsed {
+    op: String,
+    from_file: bool,
+    params: serde_json::Value,
 }
 
 impl Context {
@@ -395,6 +426,7 @@ pub fn begin(spec: GraphSpec) {
         libraries,
         index: Mutex::new(index),
         manifest: Mutex::new(Vec::new()),
+        params_used: Mutex::new(BTreeMap::new()),
         spec,
     });
 
@@ -706,6 +738,55 @@ pub fn finish() {
     let hits = manifest.iter().filter(|entry| entry.hit).count();
     let cooked = manifest.len() - hits;
     let millis: u64 = manifest.iter().map(|entry| entry.millis).sum();
+
+    // 参数索引：每个节点实际生效的参数值 + 字段名。
+    // ⚠ 缺文件是静默用默认值的 ⇒ 这是设计师唯一能看见"我少写了什么/写错了什么字段"的地方。
+    let used = context.params_used.lock().expect("参数表锁坏了");
+    let params_path = context
+        .cache_root
+        .join(&context.spec.name)
+        .join("params.json");
+    let defaults: Vec<&String> = used
+        .iter()
+        .filter(|(_, entry)| !entry.from_file)
+        .map(|(node, _)| node)
+        .collect();
+    if !used.is_empty() {
+        println!(
+            "参数索引：{} 个节点（{} 个走默认值{}）；字段名与生效值见 {}{}",
+            used.len(),
+            defaults.len(),
+            if defaults.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "：{}",
+                    defaults
+                        .iter()
+                        .map(|s| s.as_str())
+                        .collect::<Vec<_>>()
+                        .join(" / ")
+                )
+            },
+            params_path.display(),
+            if defaults.is_empty() {
+                ""
+            } else {
+                "（⚠ 缺参数文件的都在默认值上）"
+            },
+        );
+    }
+    if let Some(parent) = params_path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    match serde_json::to_string_pretty(&*used) {
+        Ok(text) => {
+            if let Err(err) = std::fs::write(&params_path, text) {
+                eprintln!("写参数索引失败：{err}");
+            }
+        }
+        Err(err) => eprintln!("参数索引无法序列化：{err}"),
+    }
 
     let path = context
         .cache_root

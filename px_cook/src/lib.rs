@@ -291,7 +291,11 @@ where
     O: PxOp,
 {
     let op = O::new();
-    let (params, params_json) = O::params().canonical(cache.params_text(node).as_deref())?;
+    let toml_text = cache.params_text(node);
+    let from_file = toml_text.is_some();
+    let (params, params_json) = O::params().canonical(toml_text.as_deref())?;
+    // ⚠ 缺文件是静默用默认值的 —— 这一条记录让"我少写了什么/写错了哪个字段名"跑完就看得见。
+    cache.record_params(node, O::ID, &params_json, from_file);
 
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"px_cook/v1");
