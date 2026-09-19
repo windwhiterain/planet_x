@@ -9,7 +9,7 @@
 
 name = "orbit"
 ambient = 80.0
-# 评审相机表（`--sheet` 用）。"review" = px_ops::cameras::review()。
+# 评审相机表（`--sheet` 用）。"review" = px_graph::cameras::review()。
 cameras = "review"
 
 [[parts]]

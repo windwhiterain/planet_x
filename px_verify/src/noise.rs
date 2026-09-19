@@ -1,4 +1,4 @@
-pub use px_ops::noise::Scalar;
+pub use px_field_schema::noise::Scalar;
 
 pub const GRADIENTS: [[f32; 3]; 12] = [
     [1.0, 1.0, 0.0],

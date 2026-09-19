@@ -13,7 +13,7 @@
 //! 3. 把"怎么看"（评审相机表）与"照什么"（灯表、环境）以及**帧图**（pass 表 / 中间目标 /
 //!    帧自有材质 / 材质实例）一并写进文档。
 //!
-//! ⚠ **键与字节不许动**：`scene_key`（`px_ops::scene_key`）与
+//! ⚠ **键与字节不许动**：`scene_key`（`px_graph::scene_key`）与
 //! `px_protocol::scene::write_scene` 一起定下了那份 `.pxart` 的**文件字节**，而
 //! `art/anchor/hashes.txt` §三 那六格判的就是它（逃生门）。改这两个中的任何一个，
 //! 那六份冻产物就不再"逐字节可复现"。
@@ -22,17 +22,17 @@ use px_scene::baked::Baked;
 use px_scene::recipe;
 
 const GRAPH_VERSION: u32 = 1;
-const SOURCE_HASH: u64 = px_ops::noise::fnv1a(include_str!("scene.rs"));
+const SOURCE_HASH: u64 = px_graph::fnv1a(include_str!("scene.rs"));
 const DEFAULT_SCENE: &str = "orbit";
 
 fn main() {
-    px_ops::begin(px_ops::GraphSpec {
+    px_graph::begin(px_graph::GraphSpec {
         name: "scene".to_string(),
         version: GRAPH_VERSION,
         source_hash: SOURCE_HASH,
         width: 0,
         height: 0,
-        projection: px_ops::field::Projection::Cube,
+        projection: px_protocol::art::Domain::Cube,
         cameras: Vec::new(),
     });
 
@@ -49,7 +49,7 @@ fn main() {
     }
 
     let file = recipe::load(&name).unwrap_or_else(|err| panic!("{err}"));
-    let root = px_ops::cache_root();
+    let root = px_graph::cache_root();
     let mut baked = Baked::new();
     let compiled = recipe::compile(&file, &mut baked, with_graph)
         .unwrap_or_else(|err| panic!("{} 编译失败：{err}", file.name));
@@ -64,13 +64,13 @@ fn main() {
         .iter()
         .map(|member| member.key.clone())
         .collect::<Vec<_>>();
-    let key = px_ops::scene_key(&spec_json, &member_keys);
-    let artifact = px_protocol::scene::cas_path(&root, &px_ops::hex(&key))
+    let key = px_graph::scene_key(&spec_json, &member_keys);
+    let artifact = px_protocol::scene::cas_path(&root, &px_graph::hex(&key))
         .unwrap_or_else(|err| panic!("{err}"));
     let bytes = px_protocol::scene::write_scene(
         &artifact,
         &compiled.document,
-        px_ops::noise::fnv1a(&spec_json),
+        px_graph::fnv1a(&spec_json),
     )
     .unwrap_or_else(|err| panic!("{err}"));
 
@@ -81,14 +81,14 @@ fn main() {
     println!(
         "产物 scene -> {}（内容键 {}，不是文件字节的 sha256）",
         artifact.display(),
-        px_ops::hex_short(&key)
+        px_graph::hex_short(&key)
     );
 
-    let entry = px_ops::ManifestEntry {
+    let entry = px_graph::ManifestEntry {
         node: compiled.document.name.clone(),
         op: "scene.document".to_string(),
         op_version: px_protocol::SCENE_SCHEMA,
-        key: px_ops::hex(&key),
+        key: px_graph::hex(&key),
         hit: false,
         millis: 0,
         bytes,
@@ -98,11 +98,11 @@ fn main() {
     };
     // 清单按场景名合并：一台机器上会并存好几份场景（有云 / 无云 / …），
     // 后烘的不许把先烘的挤掉。
-    let mut entries = px_ops::graph_manifest("scene").unwrap_or_default();
+    let mut entries = px_graph::graph_manifest("scene").unwrap_or_default();
     entries.retain(|old| old.node != entry.node);
     entries.push(entry);
     entries.sort_by(|one, two| one.node.cmp(&two.node));
-    let manifest = px_ops::write_graph_manifest("scene", &entries)
+    let manifest = px_graph::write_graph_manifest("scene", &entries)
         .unwrap_or_else(|err| panic!("写清单失败：{err}"));
     println!(
         "清单 {}｜共 {} 份场景：{}",

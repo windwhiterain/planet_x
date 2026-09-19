@@ -23,7 +23,7 @@
 //!
 //! ```text
 //! cargo run -p px_probe --bin field_dual \
-//!   --config 'profile.dev.package.px_ops.opt-level=2' \
+//!   --config 'profile.dev.package.px_graph.opt-level=2' \
 //!   --config 'profile.dev.package.px_verify.opt-level=2' \
 //!   --config 'profile.dev.package.px_probe.opt-level=2'
 //! ```

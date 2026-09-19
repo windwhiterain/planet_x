@@ -1,0 +1,17 @@
+[package]
+name = "px_field_op"
+version = "0.1.0"
+edition = "2024"
+
+# `dylib` 是给运行时装载的那个（`px_graph_schema::OpLibrary`）；
+# `rlib` 只是为了让测试与 dev-dependency 能把这一份编出来（产品 exe 不链它，
+# 判据是 `px_graphs` 的依赖门）。
+[lib]
+crate-type = ["dylib", "rlib"]
+
+[dependencies]
+px_protocol = { path = "../px_protocol" }
+px_graph_schema = { path = "../px_graph_schema" }
+px_field_schema = { path = "../px_field_schema" }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["float_roundtrip"] }

@@ -9,7 +9,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use px_ops::generate::{self, Palette};
+use px_graph::generate::{self, Palette};
 use px_protocol::art::Camera;
 use px_protocol::scene::{
     AlphaMode, CullMode, Environment, Geometry, Light, Material, Object, Sampler, SceneSpec,
@@ -224,7 +224,7 @@ pub fn compile(
     baked: &mut Baked,
     with_graph: bool,
 ) -> Result<Compiled, String> {
-    let root = px_ops::cache_root();
+    let root = px_graph::cache_root();
     let planet = file
         .parts
         .iter()
@@ -525,7 +525,7 @@ pub fn compile(
 
     // ---- 相机：局部方向 → 世界系 ----
     let cameras: Vec<Camera> = match file.cameras.as_deref() {
-        Some("review") | None => px_ops::cameras::review(),
+        Some("review") | None => px_graph::cameras::review(),
         Some(other) => {
             return Err(format!(
                 "不认识的相机表 '{other}'（现在只有 review）"
@@ -664,24 +664,24 @@ pub fn validate_material(
 /// 的工作目录是**两个**（调用目录 / 包目录）—— 相对路径会让同一份配方指向两个地方，
 /// 而那一处的症状是"环的键变了"（读不到文件就换一个 shader）。
 pub fn ring_shader() -> Result<px_protocol::scene::Member, String> {
-    let path = px_ops::workspace_root().join("art/shaders/ring.wgsl");
+    let path = px_graph::workspace_root().join("art/shaders/ring.wgsl");
     let text = std::fs::read_to_string(&path)
         .map_err(|err| format!("读不了 {}：{err}", path.display()))?;
-    let modules = px_shader::workspace_modules(&px_ops::workspace_root())?;
+    let modules = px_shader::workspace_modules(&px_graph::workspace_root())?;
     let closure = px_shader::closure(&text, &modules);
-    let (key, _path, _bytes) = px_ops::write_shader("ring", &text, &closure, &modules)
+    let (key, _path, _bytes) = px_graph::write_shader("ring", &text, &closure, &modules)
         .map_err(|err| format!("写环 shader 失败：{err}"))?;
-    println!("环 shader {}｜{}", px_ops::hex_short(&key), closure.summary());
+    println!("环 shader {}｜{}", px_graph::hex_short(&key), closure.summary());
     Ok(px_protocol::scene::Member::new(
         "shaders",
         "ring",
-        &px_ops::hex(&key),
+        &px_graph::hex(&key),
     ))
 }
 
 /// 配方文件的位置（`art/scene/<名>.toml`）。
 pub fn recipe_path(name: &str) -> PathBuf {
-    px_ops::workspace_root()
+    px_graph::workspace_root()
         .join("art")
         .join("scene")
         .join(format!("{name}.toml"))

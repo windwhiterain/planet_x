@@ -1368,12 +1368,61 @@ checksum = "3d595e54a326bc53c1c197b32d295e14b169e3cfeaa8dc82b529f947fba6bcf5"
 name = "px-scene"
 version = "0.1.0"
 dependencies = [
- "px_ops",
+ "px_graph",
  "px_protocol",
  "px_shader",
  "serde",
  "serde_json",
  "toml",
+]
+
+[[package]]
+name = "px_field_op"
+version = "0.1.0"
+dependencies = [
+ "px_field_schema",
+ "px_graph_schema",
+ "px_protocol",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "px_field_schema"
+version = "0.1.0"
+dependencies = [
+ "px_graph_schema",
+ "px_protocol",
+ "serde",
+ "serde_json",
+ "toml",
+]
+
+[[package]]
+name = "px_graph"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "px_field_schema",
+ "px_graph_schema",
+ "px_mesh_schema",
+ "px_protocol",
+ "px_shader",
+ "px_volume_schema",
+ "serde",
+ "serde_json",
+ "toml",
+]
+
+[[package]]
+name = "px_graph_schema"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "libloading",
+ "px_protocol",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -1381,32 +1430,41 @@ name = "px_graphs"
 version = "0.1.0"
 dependencies = [
  "px-scene",
- "px_mc",
- "px_ops",
+ "px_field_op",
+ "px_field_schema",
+ "px_graph",
+ "px_graph_schema",
+ "px_mesh_op",
+ "px_mesh_schema",
  "px_protocol",
  "px_shader",
  "px_verify",
+ "px_volume_op",
+ "px_volume_schema",
  "serde",
  "serde_json",
  "toml",
 ]
 
 [[package]]
-name = "px_mc"
+name = "px_mesh_op"
 version = "0.1.0"
 dependencies = [
  "isosurface",
- "px_ops",
- "serde",
+ "px_field_schema",
+ "px_graph_schema",
+ "px_mesh_schema",
+ "px_protocol",
+ "px_volume_schema",
+ "serde_json",
 ]
 
 [[package]]
-name = "px_ops"
+name = "px_mesh_schema"
 version = "0.1.0"
 dependencies = [
- "blake3",
+ "px_graph_schema",
  "px_protocol",
- "px_shader",
  "serde",
  "serde_json",
  "toml",
@@ -1473,7 +1531,31 @@ name = "px_verify"
 version = "0.1.0"
 dependencies = [
  "num-dual",
- "px_ops",
+ "px_field_schema",
+ "px_volume_schema",
+]
+
+[[package]]
+name = "px_volume_op"
+version = "0.1.0"
+dependencies = [
+ "px_field_schema",
+ "px_graph_schema",
+ "px_protocol",
+ "px_verify",
+ "px_volume_schema",
+ "serde_json",
+]
+
+[[package]]
+name = "px_volume_schema"
+version = "0.1.0"
+dependencies = [
+ "px_graph_schema",
+ "px_protocol",
+ "serde",
+ "serde_json",
+ "toml",
 ]
 
 [[package]]

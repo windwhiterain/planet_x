@@ -1,10 +1,12 @@
-use px_ops::field::cube_map_extent;
-use px_ops::noise::fnv1a;
-use px_ops::ops;
-use px_ops::{GraphSpec, begin, finish, node, surface_node, volume_node};
+use px_field_schema::field::cube_map_extent;
+use px_field_schema::params as field_params;
+use px_graph::{GraphSpec, begin, finish, node};
+use px_mesh_schema::params as mesh_params;
+use px_protocol::art::Domain;
+use px_volume_schema::{PATCHES, params as volume_params};
 
 const GRAPH_VERSION: u32 = 5;
-const SOURCE_HASH: u64 = fnv1a(include_str!("clouds.rs"));
+const SOURCE_HASH: u64 = px_graph::fnv1a(include_str!("clouds.rs"));
 const FACE: u32 = 256;
 
 fn main() {
@@ -15,31 +17,31 @@ fn main() {
         source_hash: SOURCE_HASH,
         width,
         height,
-        projection: px_ops::field::Projection::CubeMap,
-        cameras: px_ops::cameras::review(),
+        projection: Domain::CubeMap,
+        cameras: px_graph::cameras::review(),
     });
 
-    let clusters = node::<ops::fbm::Fbm>("clusters", &[]);
-    let billows = node::<ops::fbm::Fbm>("billows", &[]);
-    let flow = node::<ops::fbm::Fbm>("flow", &[]);
-    let carved = node::<ops::warp::Warp>("carved", &[&billows, &flow]);
-    let weight = node::<ops::constant::Constant>("weight", &[]);
-    let mixed = node::<ops::mix::Mix>("mixed", &[&clusters, &carved, &weight]);
-    let coverage = node::<ops::remap::Remap>("coverage", &[&mixed]);
+    let clusters = node(field_params::FBM, "clusters", &[]);
+    let billows = node(field_params::FBM, "billows", &[]);
+    let flow = node(field_params::FBM, "flow", &[]);
+    let carved = node(field_params::WARP, "carved", &[&billows, &flow]);
+    let weight = node(field_params::CONSTANT, "weight", &[]);
+    let mixed = node(field_params::MIX, "mixed", &[&clusters, &carved, &weight]);
+    let coverage = node(field_params::REMAP, "coverage", &[&mixed]);
 
-    let slope_x = node::<ops::gradient::Gradient>("slope_x", &[&mixed]);
-    let slope_y = node::<ops::gradient::Gradient>("slope_y", &[&mixed]);
-    let slope_z = node::<ops::gradient::Gradient>("slope_z", &[&mixed]);
+    let slope_x = node(field_params::GRADIENT, "slope_x", &[&mixed]);
+    let slope_y = node(field_params::GRADIENT, "slope_y", &[&mixed]);
+    let slope_z = node(field_params::GRADIENT, "slope_z", &[&mixed]);
 
     // 硬表面的代理：先烘一张立方球参数空间的场网格，再拿它出等值面。
     // 两级分开进缓存 ⇒ 只改等值面参数（比如 depth）时，网格照命中。
-    let coarse = volume_node::<px_graphs::cloud_proxy::CoarseVolume>("coarse", &[&mixed]);
-    let proxy = surface_node::<px_mc::ProxySurface>("proxy", &[&coarse]);
+    let coarse = node(volume_params::CLOUD_COARSE, "coarse", &[&mixed]);
+    let proxy = node(mesh_params::PROXY, "proxy", &[&coarse]);
 
     // 第二份：同样的算子、烘**含细节的真场**（`field = "final"`，见 art/clouds/coarse_fine.toml）。
     // 它不包住真场（它就是真表面）⇒ 判据从「包住」换成「像素逐字节」。
-    let fine = volume_node::<px_graphs::cloud_proxy::CoarseVolume>("coarse_fine", &[&mixed]);
-    let proxy_fine = surface_node::<px_mc::ProxySurface>("proxy_fine", &[&fine]);
+    let fine = node(volume_params::CLOUD_COARSE, "coarse_fine", &[&mixed]);
+    let proxy_fine = node(mesh_params::PROXY, "proxy_fine", &[&fine]);
 
     let stats = coverage.field().stats();
     println!(
@@ -84,27 +86,27 @@ fn main() {
     //   —— 没有"现场拿几个成员拼一个场景"这条路。⇒ 打一条**真跑得起来**的命令，
     //   而不是留一句谁也无法执行的提示（把成员配成场景的地方是 `art/scene/*.toml`）。
     // ⚠ 改这几行会动 `SOURCE_HASH`（本文件自己），但它只用来打一句"源码变了"的警告、
-    //   **不进任何产物键**（`px_ops/src/lib.rs` 里那条 `graph_source_hash` 的用法）。
+    //   **不进任何产物键**（`px_graph/src/driver.rs` 里那条 `graph_source_hash` 的用法）。
     println!(
         "看这一份内容：先 `cargo run -q -p px_graphs --bin scene <档>` 出场景文档（配方在 art/scene/），\
          再 `cargo run -q -p px_render -- --offline --scene <产物> --out x.png --width 960 --height 640`"
     );
     println!(
         "  这一趟烘的成员（要在 art/scene/ 里自己接上）：clouds {}｜slope_x {}｜slope_y {}｜slope_z {}",
-        px_ops::artifact_path_of(&mixed.key).display(),
-        px_ops::artifact_path_of(&slope_x.key).display(),
-        px_ops::artifact_path_of(&slope_y.key).display(),
-        px_ops::artifact_path_of(&slope_z.key).display(),
+        px_graph::artifact_path_of(&mixed.key).display(),
+        px_graph::artifact_path_of(&slope_x.key).display(),
+        px_graph::artifact_path_of(&slope_y.key).display(),
+        px_graph::artifact_path_of(&slope_z.key).display(),
     );
     println!(
         "代理：{}（{} 顶点 / {} 三角形）",
-        px_ops::artifact_path_of(&proxy.key).display(),
+        px_graph::artifact_path_of(&proxy.key).display(),
         proxy.mesh().vertices(),
         proxy.mesh().triangles(),
     );
     println!(
         "细代理：{}（{} 顶点 / {} 三角形）",
-        px_ops::artifact_path_of(&proxy_fine.key).display(),
+        px_graph::artifact_path_of(&proxy_fine.key).display(),
         proxy_fine.mesh().vertices(),
         proxy_fine.mesh().triangles(),
     );
@@ -117,12 +119,15 @@ fn main() {
 
 /// 判据 2（包住）与 `L` 的量法：每次烘完都在真数据上跑一遍，包括全部命中那一次
 /// —— 断言的对象是**存下来的产物**，不是内存里刚算出来的东西。
-fn check(name: &str, mixed: &px_ops::Artifact, volume: &px_ops::Artifact, proxy: &px_ops::Artifact) {
-    let params = px_ops::params_of::<px_graphs::cloud_proxy::Params>(name);
-    let cloud = params.cloud();
+fn check(name: &str, mixed: &px_graph::Artifact, volume: &px_graph::Artifact, proxy: &px_graph::Artifact) {
+    // ⚠ 参数走 schema 的类型化解析（驱动只给原文）：判据读的是**同一份 TOML**，
+    //   不是自己再抄一遍的数。
+    let params = px_volume_schema::params::parse(px_graph::params_text(name).as_deref())
+        .unwrap_or_else(|err| panic!("读参数 {name} 失败：{err}"));
+    let cloud = px_verify::proxy::from_volume(&params);
     let coverage = mixed.field();
     let mesh = proxy.mesh();
-    let final_field = params.field == px_graphs::cloud_proxy::FieldKind::Final;
+    let final_field = params.field == px_volume_schema::FieldKind::Final;
 
     let rays: usize = 256;
     let report = px_graphs::cloud_proxy::containment(mesh, &cloud, coverage, &params, rays, 4096);
@@ -175,7 +180,7 @@ fn check(name: &str, mixed: &px_ops::Artifact, volume: &px_ops::Artifact, proxy:
     );
     println!(
         "  {name} 场网格：{} 面 × {}² 射线 × {} 层 = {} 个采样",
-        px_ops::PATCHES,
+        PATCHES,
         volume.volume().res,
         volume.volume().layers,
         volume.volume().samples(),

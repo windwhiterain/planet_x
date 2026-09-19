@@ -1,7 +1,7 @@
 //! 组装：把一份入口 WGSL 加上它 `#import` 的东西，变成一份能交给 naga 的完整文本。
 //!
 //! 为什么住在叶子 crate：**烘图侧也要组装**（烘 shader 产物时要反射出 schema descriptor，
-//! 见 `px_ops::write_shader`），而 `px_render` 拖着 bevy 进不去。
+//! 见 `px_graph::write_shader`），而 `px_render` 拖着 bevy 进不去。
 //! ⚠ 这一句里的 `px_render` 是**已删的 Bevy 宿主**（§154）；§157 起同一个名字归 wgpu 宿主，
 //! 而那条理由对**今天那支**同样成立（它拖整棵 wgpu 树）。
 //!
@@ -27,11 +27,11 @@ use crate::ModuleTable;
 /// `fetch_directional_shadow`），离线门就该报「找不到这个符号」，而不是运行期才发现画面不对。
 pub type Stubs = fn(&str) -> Option<&'static str>;
 
-/// **Bevy 宿主**（`px_render`）与烘图侧（`px_ops`）用的那张表：把 `bevy_pbr::*` 替成
+/// **Bevy 宿主**（`px_render`）与烘图侧（`px_graph`）用的那张表：把 `bevy_pbr::*` 替成
 /// **最小声明**，只让离线文本解析得过去，**不是**运行期真正用的实现。
 ///
 /// ⚠ **S8-c 标注：上面的"Bevy 宿主（`px_render`）"已经不在了**（§154 删了那个 crate）。
-/// 这张表今天**还有真实用户**，所以留着 —— 烘图侧（`px_ops` 的 shader 路、`px_scene::frame`
+/// 这张表今天**还有真实用户**，所以留着 —— 烘图侧（`px_graph` 的 shader 路、`px_scene::frame`
 /// 烘帧材质）与 `px_render::stubs` 那条"影子那一格必须由本表显式提供"的对照判据都在用它。
 /// ⇒ 读这一行时把"两个用户"读成"**烘图侧 + 唯一那支宿主的对照判据**"。
 /// ⚠ **§157（2026-09-19）：`px_render` 这个名字换过手** —— 上面"Bevy 宿主（`px_render`）"里

@@ -42,7 +42,15 @@ $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 Push-Location $root
 try {
-    $packages = @('px_ops', 'px_verify', 'px_graphs')
+    # ⚠ §159 之后算子在 dylib 里（`px_*_op`）：`-Level opt` 必须**同时**覆盖它们，
+    # 否则`planet`/`clouds` 的热代码（噪声、等值面、体积烘培）还是 O0。
+    $packages = @(
+        'px_graph_schema', 'px_graph',
+        'px_field_schema', 'px_field_op',
+        'px_volume_schema', 'px_volume_op',
+        'px_mesh_schema', 'px_mesh_op',
+        'px_verify', 'px_graphs'
+    )
     if ($Target -in 'field_dual', 'gradient', 'device', 'dual', 'dual_field', 'dual_noise') { $packages += 'px_probe' }
 
     $extra = @()
@@ -58,6 +66,13 @@ try {
         'release' { $extra += '--release' }
     }
 
+    # ⚠ 算子库不在图程序 exe 里（这正是「改一个算子不必重编图程序」的另一面）⇒
+    #   跑图之前先把它们编出来，否则驱动找不到 dylib 会**当场拒**。
+    if ($Target -in 'planet', 'desert', 'clouds') {
+        & cargo build -p px_field_op -p px_volume_op -p px_mesh_op @extra
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    }
+
     # ⚠ `@(...)` 不是多余的：PowerShell 的 `switch` 只有**一个**匹配分支且它输出**一个**元素时，
     # 会把数组**拆成标量**（`@('test') + @()` ⇒ 字符串 `"test"`），而 `@cargoArgs` 对字符串
     # 是**按字符**摊开的 ⇒ cargo 实际收到 `test t e s t`，报「unexpected argument 's' found」。
@@ -68,7 +83,7 @@ try {
         { $_ -in 'planet', 'desert', 'clouds' } { @('run', '-p', 'px_graphs', '--bin', $Target) + $extra }
         'test' { @('test') + $extra }
         'test-all' { @('test', '--workspace') + $extra }
-        'check' { @('check', '-p', 'px_ops', '-p', 'px_verify', '-p', 'px_protocol') + $extra }
+        'check' { @('check', '-p', 'px_protocol', '-p', 'px_graph_schema', '-p', 'px_graph', '-p', 'px_field_schema', '-p', 'px_field_op', '-p', 'px_volume_schema', '-p', 'px_volume_op', '-p', 'px_mesh_schema', '-p', 'px_mesh_op', '-p', 'px_verify', '-p', 'px_graphs') + $extra }
     })
 
     Write-Host ("cargo " + ($cargoArgs -join ' ')) -ForegroundColor DarkGray

@@ -4,5 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-px_ops = { path = "../px_ops" }
+# 参照实现那一侧：场的数值抽象与载荷（`px_field_schema`）、体积参数空间的约定
+# （`px_volume_schema`）。⚠ **不依赖任何算子**：算子是它的消费者，反过来就是环。
+px_field_schema = { path = "../px_field_schema" }
+px_volume_schema = { path = "../px_volume_schema" }
 num-dual = { version = "0.15", default-features = false }

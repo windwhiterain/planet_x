@@ -1,9 +1,10 @@
-use px_ops::noise::fnv1a;
-use px_ops::ops;
-use px_ops::{GraphSpec, begin, finish, node};
+use px_field_schema::params;
+use px_graph::{GraphSpec, begin, finish, node};
+use px_mesh_schema::params as mesh_params;
+use px_protocol::art::Domain;
 
 const GRAPH_VERSION: u32 = 2;
-const SOURCE_HASH: u64 = fnv1a(include_str!("desert.rs"));
+const SOURCE_HASH: u64 = px_graph::fnv1a(include_str!("desert.rs"));
 
 fn main() {
     begin(GraphSpec {
@@ -12,19 +13,19 @@ fn main() {
         source_hash: SOURCE_HASH,
         width: 780,
         height: 520,
-        projection: px_ops::field::Projection::Cube,
-        cameras: px_ops::cameras::review(),
+        projection: Domain::Cube,
+        cameras: px_graph::cameras::review(),
     });
 
-    let plateaus = node::<ops::fbm::Fbm>("plateaus", &[]);
-    let canyons = node::<ops::ridged::Ridged>("canyons", &[]);
-    let flow = node::<ops::fbm::Fbm>("flow", &[]);
-    let carved = node::<ops::warp::Warp>("carved", &[&canyons, &flow]);
-    let blend = node::<ops::constant::Constant>("blend", &[]);
-    let terrain = node::<ops::mix::Mix>("terrain", &[&plateaus, &carved, &blend]);
-    let height = node::<ops::remap::Remap>("height", &[&terrain]);
+    let plateaus = node(params::FBM, "plateaus", &[]);
+    let canyons = node(params::RIDGED, "canyons", &[]);
+    let flow = node(params::FBM, "flow", &[]);
+    let carved = node(params::WARP, "carved", &[&canyons, &flow]);
+    let blend = node(params::CONSTANT, "blend", &[]);
+    let terrain = node(params::MIX, "terrain", &[&plateaus, &carved, &blend]);
+    let height = node(params::REMAP, "height", &[&terrain]);
 
-    let surface = px_ops::mesh_node::<ops::cubesphere::CubeSphere>("surface", &[&height]);
+    let surface = node(mesh_params::CUBESPHERE, "surface", &[&height]);
 
     let stats = height.field().stats();
     println!(
@@ -45,13 +46,9 @@ fn main() {
     );
     println!(
         "  这一趟烘的成员（要在 art/scene/ 里自己接上）：height {}｜surface {}",
-        px_ops::artifact_path_of(&height.key).display(),
-        px_ops::artifact_path_of(&surface.key).display(),
+        px_graph::artifact_path_of(&height.key).display(),
+        px_graph::artifact_path_of(&surface.key).display(),
     );
 
     finish();
 }
-
-
-
-

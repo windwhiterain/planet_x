@@ -43,7 +43,7 @@
 //!
 //! ## ⚠⚠ 连注释都不许随手改：这张表的文本**是进产物的**
 //!
-//! `px_ops::shader_key = blake3("px_shader/v2" ‖ SHADER_VERSION ‖ **include 闭包指纹** ‖ 入口文本)`，
+//! `px_graph::shader_key = blake3("px_shader/v2" ‖ SHADER_VERSION ‖ **include 闭包指纹** ‖ 入口文本)`，
 //! 而 `Closure::fingerprint` 哈希的是 **`#import` 子句字符串本身** ⇒ 谁引到了上面那几个符号，
 //! **改一个名字就换掉全工程的产物键 —— 哪怕组装出来的字一个字节都没动**（S8-b 实测，四份入口）：
 //!

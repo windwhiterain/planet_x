@@ -4,12 +4,13 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-# 底层三件：契约（类型 + serde）、算子与 CAS（`px_ops`）、shader 反射与组装（`px_shader`）。
+# 底层三件：契约（类型 + serde）、算子与 CAS（`px_graph`）、shader 反射与组装（`px_shader`）。
 # ⚠ **不依赖 `px_graphs`**：方向是 pcg 的图程序依赖这一层，反过来就是环。
 px_protocol = { path = "../px_protocol" }
-px_ops = { path = "../px_ops" }
+px_graph = { path = "../px_graph" }
 px_shader = { path = "../px_shader" }
-# 等值面那一条（`px_mc`）只为体积/代理那一支，今天这里还没有消费者 ⇒ 先不加。
+# ⚠ §159 之后等值面那一条住 `px_mesh_op`（dylib），体积烘培住 `px_volume_op`；
+# 这一层只要驱动与数据，所以都**不加**。
 serde = { version = "1", features = ["derive"] }
 # ⚠ `float_roundtrip` **必须开**：默认的浮点解析不是正确舍入的，于是
 # "读进来再写回去"不是恒等（实测 `0.11999999731779099` 会读成 +1 ulp 的值）。

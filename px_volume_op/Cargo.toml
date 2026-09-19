@@ -1,0 +1,16 @@
+[package]
+name = "px_volume_op"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["dylib", "rlib"]
+
+[dependencies]
+px_protocol = { path = "../px_protocol" }
+px_graph_schema = { path = "../px_graph_schema" }
+px_field_schema = { path = "../px_field_schema" }
+px_volume_schema = { path = "../px_volume_schema" }
+# 参照场那一侧：烘出来的粗场要能与它逐位对上（§28.2 的共享依赖）。
+px_verify = { path = "../px_verify" }
+serde_json = { version = "1", features = ["float_roundtrip"] }

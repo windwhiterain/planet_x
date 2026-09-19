@@ -79,7 +79,7 @@ pub fn probe_camera(cam: Option<[f32; 3]>, aspect: f32) -> Camera {
 ///    `NaN > 1e-12` 是 false ⇒ 非有限方向也走兜底 —— 那是 Bevy 的行为，不是一个巧合。
 /// 3. 距离的保底 `max(1e-3)` 在**乘法之前**：`direction * distance.max(1e-3)`。
 ///
-/// 方向在产物里是**世界系**的（烘图侧已经把倾斜乘进去了，见 `px_ops::cameras`），
+/// 方向在产物里是**世界系**的（烘图侧已经把倾斜乘进去了，见 `px_graph::cameras`），
 /// 所以这里一个渲染器常数都不需要 —— 与 `camera_for` 的注释同一条口径。
 pub fn review_camera(camera: &px_protocol::art::Camera, aspect: f32) -> Camera {
     let direction = Vec3::from_array(camera.direction);
