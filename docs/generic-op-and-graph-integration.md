@@ -123,7 +123,7 @@ pub fn eval(params: &params::fbm::Params, inputs: &[&Field], grid: Grid) -> Fiel
 ### 3.3 声明：`px_<域>_op/src/typed.rs`
 
 ```rust
-use px_cook::{Cooked, Grid, PxInputs, px_op};
+use px_cook::{Cooked, px_op};
 use px_graph_schema::OpKind;
 
 pub struct Fbm;
@@ -163,7 +163,7 @@ px_op! { Mix = params::MIX, 1, params::mix::Params, MixInput, Field,
 
 ```rust
 /// 三张场（两张待混 + 一张权重）。**字段名有语义。**
-#[derive(Clone, px_derive::PxInputs)]
+#[derive(px_derive::PxInputs)]
 pub struct MixInput {
     pub a: Cooked<Field>,
     pub b: Cooked<Field>,

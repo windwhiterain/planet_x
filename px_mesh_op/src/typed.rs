@@ -10,13 +10,13 @@ use px_mesh_schema::{MeshData, params};
 use px_volume_schema::VolumeData;
 
 /// 立方球网格要吃的东西：**一张高度场**。
-#[derive(Clone, px_derive::PxInputs)]
+#[derive(px_derive::PxInputs)]
 pub struct CubeSphereInput {
     pub height: Cooked<Field>,
 }
 
 /// 等值面要吃的东西：**一份体积**。
-#[derive(Clone, px_derive::PxInputs)]
+#[derive(px_derive::PxInputs)]
 pub struct ProxyInput {
     pub volume: Cooked<VolumeData>,
 }

@@ -28,20 +28,20 @@ macro_rules! sources {
 // `from_payloads` 把上游的**字节**解成这个 struct。
 
 /// 一张场（`Remap` / `Gradient` 吃它）。
-#[derive(Clone, px_derive::PxInputs)]
+#[derive(px_derive::PxInputs)]
 pub struct FieldInput {
     pub field: Cooked<Field>,
 }
 
 /// 两张场（`Warp` 吃它）。
-#[derive(Clone, px_derive::PxInputs)]
+#[derive(px_derive::PxInputs)]
 pub struct FieldPairInput {
     pub field: Cooked<Field>,
     pub offset: Cooked<Field>,
 }
 
 /// 三张场（`Mix` 吃它：两张待混 + 一张权重）。
-#[derive(Clone, px_derive::PxInputs)]
+#[derive(px_derive::PxInputs)]
 pub struct MixInput {
     pub a: Cooked<Field>,
     pub b: Cooked<Field>,

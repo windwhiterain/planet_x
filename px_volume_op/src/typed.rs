@@ -9,7 +9,7 @@ use px_graph_schema::OpKind;
 use px_volume_schema::{VolumeData, params};
 
 /// 烘一份体积要吃的东西：**一张覆盖度场**。
-#[derive(Clone, px_derive::PxInputs)]
+#[derive(px_derive::PxInputs)]
 pub struct CloudCoarseInput {
     pub coverage: Cooked<Field>,
 }
