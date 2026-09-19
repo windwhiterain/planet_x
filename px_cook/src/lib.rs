@@ -255,15 +255,14 @@ pub mod params {
 ///
 /// 参数来自 `art/<图>/<节点名>.toml`（按节点名取，与老路径同一个约定）；
 /// 上游来自 `inputs`（图参数 struct，键由它聚合）；域由 `PxOp::Payload` 决定。
-pub fn cook<O, I>(
+pub fn cook<O>(
     cache: &dyn Cache,
     node: &str,
-    inputs: I,
+    inputs: O::Inputs,
     grid: Grid,
 ) -> Result<Cooked<O::Payload>, String>
 where
-    O: PxOp<Inputs = I>,
-    I: PxInputs,
+    O: PxOp,
 {
     let op = O::new();
     let (params, params_json) = O::params().canonical(cache.params_text(node).as_deref())?;

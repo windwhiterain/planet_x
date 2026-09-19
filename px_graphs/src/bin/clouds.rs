@@ -71,7 +71,7 @@ fn main() -> Result<(), Fault> {
 
         let params = volume_params::parse(params_text("coarse").as_deref())?;
         // ① 老路：先用一个上游算子烘出整张覆盖度场，再在 3D 里按方向回采
-        let source = cook::<field::Fbm, None_>(&cache, "clusters", (), canvas)?;
+        let source = cook::<field::Fbm>(&cache, "clusters", (), canvas)?;
         let sampled = SampleField { field: source.field() };
         // 两条路混用时的桥：类型化的 `Cooked` → 老路径的 `Artifact`（键同一个，不重算）
         let source_artifact = source.to_artifact()?;
@@ -126,42 +126,42 @@ fn main() -> Result<(), Fault> {
     // ── 场：七步，每一步都是「普通函数调用 + 隐式缓存」 ───────────────────────
     // ⚠ 上游是**具名字段的普通 Rust 值**（`Unary1/2/3`），漏一个、接错域都是编译错。
     // ⚠ 共享的上游（`mixed` 被 6 处用）克隆一次就好 —— `Cooked` 里是值，不是引用。
-    let clusters = cook::<field::Fbm, None_>(&cache, "clusters", (), canvas)?;
-    let billows = cook::<field::Fbm, None_>(&cache, "billows", (), canvas)?;
-    let flow = cook::<field::Fbm, None_>(&cache, "flow", (), canvas)?;
-    let carved = cook::<field::Warp, field::Field2>(
+    let clusters = cook::<field::Fbm>(&cache, "clusters", (), canvas)?;
+    let billows = cook::<field::Fbm>(&cache, "billows", (), canvas)?;
+    let flow = cook::<field::Fbm>(&cache, "flow", (), canvas)?;
+    let carved = cook::<field::Warp>(
         &cache,
         "carved",
         Two { a: billows, b: flow },
         canvas,
     )?;
-    let weight = cook::<field::Constant, None_>(&cache, "weight", (), canvas)?;
-    let mixed = cook::<field::Mix, field::Field3>(
+    let weight = cook::<field::Constant>(&cache, "weight", (), canvas)?;
+    let mixed = cook::<field::Mix>(
         &cache,
         "mixed",
         Three { a: clusters, b: carved, c: weight },
         canvas,
     )?;
 
-    let coverage = cook::<field::Remap, field::Field1>(
+    let coverage = cook::<field::Remap>(
         &cache,
         "coverage",
         One { a: mixed.clone() },
         canvas,
     )?;
-    let slope_x = cook::<field::Gradient, field::Field1>(
+    let slope_x = cook::<field::Gradient>(
         &cache,
         "slope_x",
         One { a: mixed.clone() },
         canvas,
     )?;
-    let slope_y = cook::<field::Gradient, field::Field1>(
+    let slope_y = cook::<field::Gradient>(
         &cache,
         "slope_y",
         One { a: mixed.clone() },
         canvas,
     )?;
-    let slope_z = cook::<field::Gradient, field::Field1>(
+    let slope_z = cook::<field::Gradient>(
         &cache,
         "slope_z",
         One { a: mixed.clone() },
@@ -169,25 +169,25 @@ fn main() -> Result<(), Fault> {
     )?;
 
     // ── 体积：粗场（包住真场）与含细节的真场，参数文件不同、算子同一个 ─────────
-    let coarse = cook::<volume::CloudCoarse, volume::FieldInput>(
+    let coarse = cook::<volume::CloudCoarse>(
         &cache,
         "coarse",
         One { a: mixed.clone() },
         canvas,
     )?;
-    let proxy = cook::<mesh::Proxy, mesh::VolumeInput>(
+    let proxy = cook::<mesh::Proxy>(
         &cache,
         "proxy",
         mesh::VolumeInput { a: coarse.clone() },
         canvas,
     )?;
-    let fine = cook::<volume::CloudCoarse, volume::FieldInput>(
+    let fine = cook::<volume::CloudCoarse>(
         &cache,
         "coarse_fine",
         One { a: mixed.clone() },
         canvas,
     )?;
-    let proxy_fine = cook::<mesh::Proxy, mesh::VolumeInput>(
+    let proxy_fine = cook::<mesh::Proxy>(
         &cache,
         "proxy_fine",
         mesh::VolumeInput { a: fine.clone() },
