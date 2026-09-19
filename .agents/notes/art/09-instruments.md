@@ -224,13 +224,18 @@ cargo run -p px_probe --bin field_dual `
 
 | 门 | 抓到什么 |
 |---|---|
-| `crate_graph` | §10.1 的依赖方向：`px_render` 不许依赖 `px_sim`/`px_ops`（一句 `use` 就能把分层悄悄拆掉，编译照过） |
-| `px_ops/tests/keys` | **键 = 内容**：注释/空格不改键、改值改键、版本/画布/输入进键、未知参数拒绝（键撞了 = 缓存静默给旧内容） |
+| `crate_graph` | §10.1 的依赖方向：`px_render` 不许依赖 `px_sim`/`px_graph`（一句 `use` 就能把分层悄悄拆掉，编译照过） |
+| `px_graph/tests/keys` | **键 = 内容**：注释/空格不改键、改值改键、版本/画布/输入进键、未知参数拒绝（键撞了 = 缓存静默给旧内容） |
 | `px_protocol/tests/{cube,cubemap,octahedral,domain}` | 投影/UV 编码可逆、面序层序正确（这里错了整条烘焙链全歪，而画面只是"看起来怪"） |
-| `px_ops/src/ops/gradient` + `cube_map_sampling` | 梯度取切向投影、平坦场梯度为零、**面边界不跳变**（§43/§46 打过的那类接缝 bug） |
+| `px_field_op/src/ops/gradient` + `px_field_schema/tests/cube_map_sampling` | 梯度取切向投影、平坦场梯度为零、**面边界不跳变**（§43/§46 打过的那类接缝 bug） |
+| `px_graphs/tests/crate_graph`（§159 新增） | **图脚本 / 图库 / 四个 schema 都不许静态依赖 `*_op`** —— 否则算子代码被链进 exe，而任何一层都不会报错 |
 | `px_render/src/art_cache` | 缓存失效规则：指纹 0 永不入缓存、冷计数复位、派生键要全部输入可缓存、同内容两路径算两条 |
 | `px_render/tests/shaders` | 每个 shader 解析+校验、HLSL < 4000 行、**以及校验器必须能拒坏 shader / 未知 import 必须报错**（后两条是前两条可信的前提） |
 | `snapshot` + `roundtrip` | 跨进程契约：协议形状一变 `protocol_hash` 就变，旧对端必须被握手拒掉 |
+
+> ⚠ 上表里几处 `px_ops/…` 路径是 **§159 之前**的（`px_ops` 已按领域拆散）；本表已就地改成新家
+> （`px_graph/tests/keys`、`px_field_op/src/ops/gradient`、`px_field_schema/tests/cube_map_sampling`），
+> 并补上 §159 新增的那道门。§159 那一轮的读数在 `16-graph-split.md` §159.5。
 
 **近乎同义反复的**（便宜但只证明 serde 能用）：`snapshot_drives_the_protocol_hash`、
 `f32_payload_round_trips_exactly`、`stream_round_trips_byte_identically`、

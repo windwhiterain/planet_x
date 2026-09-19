@@ -72,6 +72,14 @@
 - 门：`px_ops/tests/source_hash.rs` 扫这几处，退回单文件版就红（语言管不住这件事，所以用门看住，§10.2 同一条思路）。
 - 图程序（`px_graphs/src/bin/*.rs`）**不在此列**：它们的 `SOURCE_HASH` 仍只哈希自己，拓扑与写死的常量由 `GRAPH_VERSION` 管（§19.2）；算子的共享依赖已经由各自的 `SOURCE_HASH` 覆盖。
 
+> ⚠ **§159 取代（2026-09-19，`16-graph-split.md`）：上面那三条路径全部搬了家**，口径不变、读数一字不删：
+> - 七个**场**算子 → `px_field_op/src/ops/*.rs`：自己的文件 + `../noise.rs` +
+>   `px_field_schema/src/{field,noise,params,payload}.rs`（参数与载荷也搬家了 ⇒ 必须一起进哈希）；
+> - **网格**算子 → `px_mesh_op/src/{cubesphere,proxy}.rs`；**体积**算子 → `px_volume_op/src/lib.rs`
+>   （后者还带上 `px_verify/src/{cloud_field,noise,dual,proxy}.rs` —— 参照场搬进了 `px_verify::proxy`）；
+> - 门也跟着搬：**`px_graph/tests/source_hash.rs`**（算子拆成 dylib 之后这条**更硬**了 ——
+>   共享依赖不在 dll 的源码集合里，只有 `SOURCE_HASH` 点得到它们）。
+
 ## §31 换到 cubemap（3×2 图集 + gutter）
 
 ### §31.1 布局
