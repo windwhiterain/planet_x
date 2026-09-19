@@ -62,14 +62,28 @@ fn package_name(doc: &toml::Value, fallback: &str) -> String {
         .unwrap_or_else(|| fallback.to_string())
 }
 
+/// 运行时那一格只许 serde / serde_json（协议是冻结且极小的）。
+///
+/// ⚠ **dev 那一格不许有 `px_render`**：宿主是 wgpu 栈，而 `px_protocol` 的测试要按**真类型**
+/// 构造快照里那几份形状 —— 图省事把宿主挂到 dev（曾经就是这么写的）会把 wgpu / naga / winit
+/// 整栈编进协议测试，dev 边 `px_protocol` → `px_render` → `px_protocol` 还把**方向**整个反过来。
+/// 形状该住哪就住哪：`px_host_protocol`（闭包里没有 GPU）。
 #[test]
-fn protocol_runtime_dependencies_are_whitelisted() {
+fn protocol_dependencies_are_whitelisted_and_never_pull_the_host() {
     let doc = manifest(&Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"));
     let names = dep_names(&doc, "dependencies");
     let allowed: BTreeSet<String> = PROTOCOL_WHITELIST.iter().map(|name| name.to_string()).collect();
     assert_eq!(
         names, allowed,
         "px_protocol 的运行时依赖只允许 {PROTOCOL_WHITELIST:?}（协议必须是冻结且极小的）"
+    );
+
+    let dev = dep_names(&doc, "dev-dependencies");
+    assert!(
+        !dev.contains("px_render"),
+        "px_protocol 的 dev 依赖里不许有 px_render：那会把 wgpu / naga / winit 编进协议测试，\
+         并且把依赖方向反过来（px_protocol → px_render → px_protocol）。\
+         要按真类型构造宿主形状就用不带 GPU 栈的 px_host_protocol。今天的 dev 依赖：{dev:?}"
     );
 }
 

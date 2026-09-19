@@ -2,23 +2,26 @@ use std::io::{self, Read, Write};
 
 use serde::{Deserialize, Serialize};
 
-use crate::render::{Request, Response};
 use crate::scene::SceneSpec;
 use crate::wire::{self, WireError};
-use crate::{ArtBundle, Blob, ProtocolId, WorldView};
+use crate::{ArtBundle, Blob, ProtocolId};
 
 pub const MAGIC: [u8; 4] = *b"PXST";
 pub const STREAM_VERSION: u32 = 1;
 
+/// 跨进程的信封：只装**两边都认**的那几样 —— 握手（`Protocol`）、产物清单与二进制块
+/// （`Art` / `Blob`）、场景文档（`Scene`）以及拒词。
+///
+/// ⚠ 原来这里还有三路：`World`（经济世界视图）、`Request` / `Response`（渲染作业）。
+/// 它们各自搬去了 `game`（`sim`）与 `px_host_protocol`（`render` / `frame`）—— 搬的理由不是整洁：
+/// 那两边的 crate **本来就依赖 `px_protocol`**，这三路再留在这里就是循环依赖，编都编不过。
+/// 信封留在本 crate 是因为它确实两边都认：px_ops 写产物、px_scene / px_pass / px_verify 读产物。
 #[derive(Debug, Clone, PartialEq)]
 pub enum Frame {
     Protocol(ProtocolId),
-    World(WorldView),
     Art(ArtBundle),
     Scene(SceneSpec),
     Blob(Blob),
-    Request(Request),
-    Response(Response),
     Refused(String),
 }
 
@@ -26,11 +29,8 @@ pub enum Frame {
 #[serde(tag = "frame", rename_all = "snake_case")]
 enum TextFrame {
     Protocol(ProtocolId),
-    World(WorldView),
     Art(ArtBundle),
     Scene(SceneSpec),
-    Request(Request),
-    Response(Response),
     Refused { reason: String },
 }
 
@@ -43,11 +43,8 @@ impl Frame {
                 Ok(out)
             }
             Self::Protocol(inner) => Self::encode_text(TextFrame::Protocol(inner.clone())),
-            Self::World(inner) => Self::encode_text(TextFrame::World(inner.clone())),
             Self::Art(inner) => Self::encode_text(TextFrame::Art(inner.clone())),
             Self::Scene(inner) => Self::encode_text(TextFrame::Scene(inner.clone())),
-            Self::Request(inner) => Self::encode_text(TextFrame::Request(inner.clone())),
-            Self::Response(inner) => Self::encode_text(TextFrame::Response(inner.clone())),
             Self::Refused(reason) => Self::encode_text(TextFrame::Refused {
                 reason: reason.clone(),
             }),
@@ -62,11 +59,8 @@ impl Frame {
                     std::str::from_utf8(rest).map_err(|err| WireError::Json(err.to_string()))?;
                 Ok(match wire::from_text::<TextFrame>(text)? {
                     TextFrame::Protocol(inner) => Self::Protocol(inner),
-                    TextFrame::World(inner) => Self::World(inner),
                     TextFrame::Art(inner) => Self::Art(inner),
                     TextFrame::Scene(inner) => Self::Scene(inner),
-                    TextFrame::Request(inner) => Self::Request(inner),
-                    TextFrame::Response(inner) => Self::Response(inner),
                     TextFrame::Refused { reason } => Self::Refused(reason),
                 })
             }
@@ -84,12 +78,6 @@ impl Frame {
 impl From<ProtocolId> for Frame {
     fn from(id: ProtocolId) -> Self {
         Self::Protocol(id)
-    }
-}
-
-impl From<WorldView> for Frame {
-    fn from(world: WorldView) -> Self {
-        Self::World(world)
     }
 }
 
@@ -143,17 +131,6 @@ pub fn read_stream<R: Read>(reader: &mut R) -> Result<Vec<Frame>, WireError> {
         frames.push(frame);
     }
     Ok(frames)
-}
-
-pub fn read_worlds(path: &std::path::Path) -> Result<Vec<WorldView>, WireError> {
-    let bytes = std::fs::read(path).map_err(io_error)?;
-    Ok(read_stream(&mut bytes.as_slice())?
-        .into_iter()
-        .filter_map(|frame| match frame {
-            Frame::World(world) => Some(world),
-            _ => None,
-        })
-        .collect())
 }
 
 pub fn declared_protocol(path: &std::path::Path) -> Result<Option<ProtocolId>, WireError> {

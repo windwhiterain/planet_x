@@ -1,42 +1,9 @@
 use std::collections::BTreeMap;
 
 use px_protocol::art::{ArtBundle, AssetKind, AssetManifest, Camera};
-use px_protocol::sim::{DepartmentView, GoodView, Totals, WorldView};
 use px_protocol::stream::{self, Frame};
 use px_protocol::wire::{Blob, BlobHeader, DType, WireError};
-use px_protocol::{Handshake, HandshakeError, ProtocolId, SCHEMA_VERSION};
-
-fn world(round: u32) -> WorldView {
-    WorldView {
-        schema_version: SCHEMA_VERSION,
-        round,
-        goods: vec![
-            GoodView {
-                name: "粮食".to_string(),
-                price: 1.0 + round as f32 / 8.0,
-            },
-            GoodView {
-                name: "工业品".to_string(),
-                price: 2.0 - round as f32 / 16.0,
-            },
-        ],
-        departments: vec![DepartmentView {
-            name: "甲(农业)".to_string(),
-            execution: 0.5,
-            revenue: 3.0,
-            payment: 1.0,
-            holdings: vec![0.25, 0.5, 0.75],
-        }],
-        totals: Totals {
-            cpi: 100.0 + round as f32,
-            output: 12.0,
-            consumption: 4.0,
-            turnover: 8.0,
-            granted: 30.0,
-            treasury: 7.5,
-        },
-    }
-}
+use px_protocol::{Handshake, HandshakeError, ProtocolId};
 
 fn frames() -> Vec<Frame> {
     let mut params = BTreeMap::new();
@@ -56,8 +23,6 @@ fn frames() -> Vec<Frame> {
     };
     vec![
         Frame::Protocol(ProtocolId::local()),
-        Frame::World(world(0)),
-        Frame::World(world(1)),
         Frame::Art(bundle),
         Frame::Blob(Blob::from_f32(vec![2, 2], &[0.0, 0.5, 1.0, -3.25])),
     ]

@@ -1,11 +1,11 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
+use game::sim::{DepartmentView, GoodView, Totals, WorldView};
 use px_protocol::art::{ArtBundle, AssetKind, AssetManifest, Camera};
-use px_protocol::render::{Lease, Request, Response, Scene};
-use px_protocol::sim::{DepartmentView, GoodView, Totals, WorldView};
 use px_protocol::wire::{Blob, BlobHeader, DType};
 use px_protocol::{Handshake, ProtocolId, SCHEMA_VERSION};
+use px_host_protocol::render::{self as render, Lease, Request, Response, Scene};
 
 /// 资产种类必须**逐个列出**（穷尽匹配）：加一种资产而不动这份快照就编不过 ——
 /// 快照一变 `protocol_hash` 就变，跨进程握手会因此拒绝旧对端，这正是要人看一眼的地方。
@@ -80,19 +80,19 @@ fn canonical() -> String {
     };
 
     let request = Request {
-        view: px_protocol::View {
+        view: render::View {
             cam: Some([30.0, 15.0, 3.2]),
             sheet: true,
             columns: 4,
         },
         scene: Scene::Sequence {
             shots: vec![
-                px_protocol::Shot {
+                render::Shot {
                     scene: "target/pcg/ab/xx/bare.pxart".to_string(),
                     out: "target/bare.png".to_string(),
                     cam: None,
                 },
-                px_protocol::Shot {
+                render::Shot {
                     scene: "target/pcg/ab/yy/orbit.pxart".to_string(),
                     out: "target/orbit.png".to_string(),
                     cam: Some([0.0, 8.0, 3.3]),
@@ -102,7 +102,7 @@ fn canonical() -> String {
         width: 960,
         height: 640,
         out: "target/orbit.png".to_string(),
-        job: px_protocol::Job::Perf {
+        job: render::Job::Perf {
             windows: 4,
             drop: 1,
         },
@@ -124,13 +124,13 @@ fn canonical() -> String {
         report_path: "target/report.json".to_string(),
     };
     // 两种活各自的形状（`Job` 是内部 tag 的枚举，两路的 JSON 必须都能被看到）。
-    let job_shots = px_protocol::Job::Shots;
-    let job_perf = px_protocol::Job::Perf {
+    let job_shots = render::Job::Shots;
+    let job_perf = render::Job::Perf {
         windows: 4,
         drop: 1,
     };
-    let job_stable = px_protocol::Job::Stable { frames: 60 };
-    let shot_report = px_protocol::ShotReport {
+    let job_stable = render::Job::Stable { frames: 60 };
+    let shot_report = render::ShotReport {
         scene: "target/pcg/ab/yy/orbit.pxart".to_string(),
         label: "场景 orbit｜rocky".to_string(),
         out: "target/orbit.png".to_string(),
@@ -145,7 +145,7 @@ fn canonical() -> String {
         has_cloud: true,
         verdict: "有云".to_string(),
     };
-    let perf_report = px_protocol::PerfReport {
+    let perf_report = render::PerfReport {
         scene: "target/pcg/ab/yy/orbit.pxart".to_string(),
         label: "场景 orbit｜rocky".to_string(),
         windows: vec![63.5, 63.1, 62.9, 63.4],
@@ -153,11 +153,11 @@ fn canonical() -> String {
         min: 62.9,
         median: 63.25,
         n: 4,
-        error_bar: px_protocol::ErrorBar {
+        error_bar: render::ErrorBar {
             rule: "单次请求内：干净窗口的半极差 (max−min)/2".to_string(),
             value_ms: 0.3,
         },
-        gpu: vec![px_protocol::GpuSample {
+        gpu: vec![render::GpuSample {
             window: 0,
             sm_mhz: vec![1245.0, 1942.0],
             power_w: vec![92.0, 112.0],
@@ -172,14 +172,14 @@ fn canonical() -> String {
         p99: 63.5,
         max: 63.5,
         key: "bee2a7ec00000000".to_string(),
-        waits: Some(px_protocol::Waits {
+        waits: Some(render::Waits {
             pipelines_ms: 412.0,
             assets_ms: 0.4,
             settle_ms: 96.0,
             sample_ms: 3810.0,
             total_ms: 4318.4,
         }),
-        gpu_ms: Some(px_protocol::GpuMs {
+        gpu_ms: Some(render::GpuMs {
             source: "render/main_opaque_pass_3d/elapsed_gpu=18.100 + render/main_transparent_pass_3d/elapsed_gpu=31.700".to_string(),
             lag_frames: 3,
             n: 4,
@@ -191,7 +191,7 @@ fn canonical() -> String {
             frames: vec![44.2, 49.4, 49.8, 52.1],
             poll_us: 6.5,
         }),
-        compare: Some(px_protocol::Compare {
+        compare: Some(render::Compare {
             app_p50_ms: 63.25,
             app_mean_ms: 43.8,
             gpu_p50_ms: 49.8,
@@ -200,7 +200,7 @@ fn canonical() -> String {
             note: "以前拿 app 循环周期当 GPU 时间的代理量".to_string(),
         }),
     };
-    let pair = px_protocol::Pair {
+    let pair = render::Pair {
         measured: "场景 orbit-surface｜planet".to_string(),
         reference: "场景 orbit-bare｜planet".to_string(),
         app_delta_ms: 27.5,
@@ -208,7 +208,7 @@ fn canonical() -> String {
         gpu_delta_ms: Some(24.1),
         rule: "配对差 = perf[0] − perf[1]（被测档 − 参照档）".to_string(),
     };
-    let report = px_protocol::Report {
+    let report = render::Report {
         schema_version: SCHEMA_VERSION,
         protocol_hash: "0000000000000000".to_string(),
         job: "stable".to_string(),
@@ -227,7 +227,7 @@ fn canonical() -> String {
         scene: "target/pcg/ab/7f/scene.pxart".to_string(),
     };
     let sequence_scene = Scene::Sequence {
-        shots: vec![px_protocol::Shot {
+        shots: vec![render::Shot {
             scene: "target/pcg/ab/7f/scene.pxart".to_string(),
             out: "target/shot.png".to_string(),
             cam: Some([0.0, 12.0, 3.15]),
@@ -426,12 +426,17 @@ fn canonical() -> String {
             "render::Lease": lease,
             "wire::BlobHeader": header,
             "wire::Blob.payload_bytes": blob.bytes.len(),
+            // ⚠ 这一串是**冻结记录**，不许跟着 `stream::Frame` 缩表（它今天只剩 5 种）：
+            // 它进 `protocol_hash()`，改一个字就是换指纹，旧对端在握手处当场被拒。
+            // 八种标签今天分散在三处：`protocol` / `art` / `scene` / `blob` / `refused` 还在
+            // `stream::Frame`，`request` / `response` 在 `px_host_protocol::frame`，`world`
+            // 那一支随 `game::sim` 搬走（它本来就没有生产者、也没有消费者）。
             "stream::Frame.kinds": [
                 "protocol", "world", "art", "scene", "blob", "request", "response", "refused"
             ],
             "stream::MAGIC": String::from_utf8_lossy(&px_protocol::stream::MAGIC),
             "stream::STREAM_VERSION": px_protocol::stream::STREAM_VERSION,
-            "client::LEASE_PATH": px_protocol::client::LEASE_PATH,
+            "client::LEASE_PATH": px_host_protocol::client::LEASE_PATH,
         }
     });
 

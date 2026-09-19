@@ -1,9 +1,17 @@
+//! **px-scene ⇄ px-pass 的交换边界**，只装两边都要认的东西：材质参数/绑定的契约
+//! （`material`）、场景文档与帧图（`scene`）、产物的信封（`art` / `stream` / `wire`），
+//! 以及跨进程握手（`SCHEMA_VERSION` / `protocol_hash` / `ProtocolId` / `Handshake`）。
+//!
+//! ⚠ pcg **内部**的序列化不在这里，各自归各自的 crate：渲染作业的形状与客户端搬去了
+//! `px_host_protocol`（`render` / `client` / `frame`），经济世界视图搬去了 `game`（`sim`）。
+//! 它们原来都住在这一份协议里，而"这份协议"的名义职责只有一句话 ——
+//! 边界每多装一样，跨进程握手就要为一个**只有一边认**的形状背一次版本。
+//!
+//! ⚠ 运行时依赖仍然只有 `serde` / `serde_json` 两样，`tests/crate_graph.rs` 钉着这一格。
+
 pub mod art;
-pub mod client;
 pub mod material;
-pub mod render;
 pub mod scene;
-pub mod sim;
 pub mod stream;
 pub mod wire;
 
@@ -12,15 +20,10 @@ pub use material::{
     MATERIAL_BIND_GROUP, MAX_PARAMS_BYTES, MaterialLayout, PARAMS_ALIGN, PARAMS_BINDING, ParamKind,
     ParamSlot, TEXTURE_SLOTS, TextureDimension, TextureSlot,
 };
-pub use render::{
-    ClientError, Compare, ErrorBar, GpuMs, GpuSample, Job, Lease, Pair, PerfReport, Report, Request,
-    Response, Scene, Shot, ShotReport, View, Waits,
-};
 pub use scene::{
     Address, AlphaMode, CullMode, Environment, Filter, Geometry, Light, LightKind, Material, Member,
     Object, SCENE_SCHEMA, Sampler, SceneSpec, TextureRef, Transform, Value,
 };
-pub use sim::{DepartmentView, GoodView, Totals, WorldView};
 pub use stream::Frame;
 pub use wire::{Blob, BlobHeader, DType, WireError};
 

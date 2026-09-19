@@ -1,0 +1,19 @@
+[package]
+name = "px_host_protocol"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+# ⚠ `float_roundtrip` **必须开**：默认的浮点解析不是正确舍入的，于是
+# "读进来再写回去"不是恒等（实测 `0.11999999731779099` 会读成 +1 ulp 的值）。
+# 本仓库的判据是逐字节的，读不出写进去的东西就是缺陷 —— 代价是浮点解析约 2×，
+# 而文档只有几 KB。凡是解这份 JSON 的 crate 都自己写一遍：别靠特性合并的偶然。
+serde_json = { version = "1", features = ["float_roundtrip"] }
+# ⚠ 除 serde 那两样之外，这里**只许**再有这一条，而且它必须是**纯数据**的一条：
+# `frame.rs` 的信封要 `ProtocolId` 与 `wire` 的文本编码，`render.rs` 的 `Lease::matches`
+# 要按 `ProtocolId` 比指纹 —— 抄一份到这里就是让"协议有几个名字"重新变成两处会漂开的默认值。
+# ⚠ 反过来的那条边（`px_protocol` 在本 crate 之上）**不许有**：那才是方向真的反了。
+# ⚠ 这条边的全部闭包是 serde / serde_json / px_protocol ⇒ `cargo test -p px_protocol`
+# 不再为这几份形状去编 wgpu / naga / winit（那正是这个 crate 存在的理由，`lib.rs` 里写了）。
+px_protocol = { path = "../px_protocol" }
