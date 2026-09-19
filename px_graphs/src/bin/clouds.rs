@@ -6,8 +6,9 @@
 //!   `field.fbm` 在别的图里叫别的名字，算子不该知道；
 //! * 键里多了算子的源码哈希 ⇒ 改算子体必然重算，不靠人记得升版本。
 
-use px_cook::{cook_field, cook_mesh, cook_volume};
+use px_cook::{Cooked, Unary1 as One, Unary2 as Two, Unary3 as Three, cook};
 use px_field_op::typed as field;
+use px_field_op::typed::None as None_;
 use px_field_schema::field::cube_map_extent;
 use px_graph::{GraphSpec, begin, finish, params_text};
 use px_graph_schema::Grid;
@@ -70,17 +71,10 @@ fn main() -> Result<(), Fault> {
 
         let params = volume_params::parse(params_text("coarse").as_deref())?;
         // ① 老路：先用一个上游算子烘出整张覆盖度场，再在 3D 里按方向回采
-        let source = cook_field::<field::Fbm>(&cache, "clusters", (), canvas)?;
+        let source = cook::<field::Fbm, None_>(&cache, "clusters", (), canvas)?;
         let sampled = SampleField { field: source.field() };
         // 两条路混用时的桥：类型化的 `Cooked` → 老路径的 `Artifact`（键同一个，不重算）
-        let source_artifact = px_cook::Cooked {
-            key: source.key,
-            value: source.value.clone(),
-            hit: source.hit,
-            millis: source.millis,
-            bytes: source.bytes,
-        }
-        .into_artifact()?;
+        let source_artifact = source.to_artifact()?;
 
         // ② 生成的单态化实例：**动态装载**进来的那一份。
         //    它的 `bake<ClosedForm<…>>` 是在那个 dylib **内部**单态化出来的。
@@ -123,35 +117,82 @@ fn main() -> Result<(), Fault> {
         println!(
             "  ⇒ 同一个 `bake<F>` 泛型体：老路把覆盖度烘成 {} 个采样的场再回采；\
              闭式路在 dylib 内部现算，**一次栅格化都没有**",
-            source.value.data.len(),
+            source.value().data.len(),
         );
         finish();
         return Ok(());
     }
 
     // ── 场：七步，每一步都是「普通函数调用 + 隐式缓存」 ───────────────────────
-    let clusters = cook_field::<field::Fbm>(&cache, "clusters", (), canvas)?;
-    let billows = cook_field::<field::Fbm>(&cache, "billows", (), canvas)?;
-    let flow = cook_field::<field::Fbm>(&cache, "flow", (), canvas)?;
-    let carved = cook_field::<field::Warp>(&cache, "carved", &[&billows, &flow], canvas)?;
-    let weight = cook_field::<field::Constant>(&cache, "weight", (), canvas)?;
-    let mixed = cook_field::<field::Mix>(
+    // ⚠ 上游是**具名字段的普通 Rust 值**（`Unary1/2/3`），漏一个、接错域都是编译错。
+    // ⚠ 共享的上游（`mixed` 被 6 处用）克隆一次就好 —— `Cooked` 里是值，不是引用。
+    let clusters = cook::<field::Fbm, None_>(&cache, "clusters", (), canvas)?;
+    let billows = cook::<field::Fbm, None_>(&cache, "billows", (), canvas)?;
+    let flow = cook::<field::Fbm, None_>(&cache, "flow", (), canvas)?;
+    let carved = cook::<field::Warp, field::Field2>(
         &cache,
-        "mixed",
-        &[&clusters, &carved, &weight],
+        "carved",
+        Two { a: billows, b: flow },
         canvas,
     )?;
-    let coverage = cook_field::<field::Remap>(&cache, "coverage", &mixed, canvas)?;
+    let weight = cook::<field::Constant, None_>(&cache, "weight", (), canvas)?;
+    let mixed = cook::<field::Mix, field::Field3>(
+        &cache,
+        "mixed",
+        Three { a: clusters, b: carved, c: weight },
+        canvas,
+    )?;
 
-    let slope_x = cook_field::<field::Gradient>(&cache, "slope_x", &mixed, canvas)?;
-    let slope_y = cook_field::<field::Gradient>(&cache, "slope_y", &mixed, canvas)?;
-    let slope_z = cook_field::<field::Gradient>(&cache, "slope_z", &mixed, canvas)?;
+    let coverage = cook::<field::Remap, field::Field1>(
+        &cache,
+        "coverage",
+        One { a: mixed.clone() },
+        canvas,
+    )?;
+    let slope_x = cook::<field::Gradient, field::Field1>(
+        &cache,
+        "slope_x",
+        One { a: mixed.clone() },
+        canvas,
+    )?;
+    let slope_y = cook::<field::Gradient, field::Field1>(
+        &cache,
+        "slope_y",
+        One { a: mixed.clone() },
+        canvas,
+    )?;
+    let slope_z = cook::<field::Gradient, field::Field1>(
+        &cache,
+        "slope_z",
+        One { a: mixed.clone() },
+        canvas,
+    )?;
 
     // ── 体积：粗场（包住真场）与含细节的真场，参数文件不同、算子同一个 ─────────
-    let coarse = cook_volume::<volume::CloudCoarse>(&cache, "coarse", &mixed, canvas)?;
-    let proxy = cook_mesh::<mesh::Proxy>(&cache, "proxy", &coarse, canvas)?;
-    let fine = cook_volume::<volume::CloudCoarse>(&cache, "coarse_fine", &mixed, canvas)?;
-    let proxy_fine = cook_mesh::<mesh::Proxy>(&cache, "proxy_fine", &fine, canvas)?;
+    let coarse = cook::<volume::CloudCoarse, volume::FieldInput>(
+        &cache,
+        "coarse",
+        One { a: mixed.clone() },
+        canvas,
+    )?;
+    let proxy = cook::<mesh::Proxy, mesh::VolumeInput>(
+        &cache,
+        "proxy",
+        mesh::VolumeInput { a: coarse.clone() },
+        canvas,
+    )?;
+    let fine = cook::<volume::CloudCoarse, volume::FieldInput>(
+        &cache,
+        "coarse_fine",
+        One { a: mixed.clone() },
+        canvas,
+    )?;
+    let proxy_fine = cook::<mesh::Proxy, mesh::VolumeInput>(
+        &cache,
+        "proxy_fine",
+        mesh::VolumeInput { a: fine.clone() },
+        canvas,
+    )?;
 
     report(
         &coverage,
@@ -172,22 +213,22 @@ fn report(
     coverage: &px_cook::Cooked<px_field_schema::field::Field>,
     mixed: &px_cook::Cooked<px_field_schema::field::Field>,
     slopes: [&px_cook::Cooked<px_field_schema::field::Field>; 3],
-    coarse: &px_cook::Cooked<px_volume_schema::VolumeData>,
-    fine: &px_cook::Cooked<px_volume_schema::VolumeData>,
+    coarse: &volume::VolumeOut,
+    fine: &volume::VolumeOut,
 ) {
     let stats = coverage.stats();
     println!(
         "输出 coverage：{}×{}（{} 面 × {face}²）｜值域 {:.4}..{:.4}｜均值 {:.4}",
-        coverage.width,
-        coverage.height,
-        coverage.height / FACE,
+        coverage.value().width,
+        coverage.value().height,
+        coverage.value().height / FACE,
         stats.min,
         stats.max,
         stats.mean,
         face = FACE,
     );
     let smooth = mixed.stats();
-    let mut sorted: Vec<f32> = mixed.data.clone();
+    let mut sorted: Vec<f32> = mixed.value().data.clone();
     sorted.sort_by(|one, two| one.partial_cmp(two).unwrap_or(std::cmp::Ordering::Equal));
     let share = |fraction: f64| sorted[((sorted.len() - 1) as f64 * fraction) as usize];
     println!(
@@ -214,7 +255,10 @@ fn report(
     for (label, node) in [("coarse", coarse), ("coarse_fine", fine)] {
         println!(
             "  {label} 体积：{} 面 × {}² × {} 层｜{} B",
-            PATCHES, node.res, node.layers, node.bytes,
+            PATCHES,
+            node.value().res,
+            node.value().layers,
+            node.bytes,
         );
     }
 }
@@ -224,7 +268,7 @@ fn report(
 fn check(
     name: &str,
     mixed: &px_cook::Cooked<px_field_schema::field::Field>,
-    volume: &px_cook::Cooked<px_volume_schema::VolumeData>,
+    volume: &volume::VolumeOut,
     proxy: &px_cook::Cooked<px_mesh_schema::MeshData>,
 ) {
     // ⚠ 参数走 schema 的类型化解析（驱动只给原文）：判据读的是**同一份 TOML**，
@@ -286,8 +330,8 @@ fn check(
     println!(
         "  {name} 场网格：{} 面 × {}² 射线 × {} 层 = {} 个采样",
         PATCHES,
-        volume.res,
-        volume.layers,
-        volume.value.samples(),
+        volume.value().res,
+        volume.value().layers,
+        volume.value().samples(),
     );
 }

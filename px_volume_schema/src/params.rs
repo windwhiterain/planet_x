@@ -20,7 +20,7 @@ pub enum FieldKind {
     Final,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, px_derive::PxParams)]
 #[serde(default, deny_unknown_fields)]
 pub struct Params {
     /// 烘哪个场（见 `FieldKind`）。默认 `coarse` ⇒ 老配方逐位不变。
@@ -96,5 +96,12 @@ pub fn parse(toml_text: Option<&str>) -> Result<Params, String> {
     match toml_text {
         Some(text) => toml::from_str(text).map_err(|err| err.to_string()),
         None => Ok(Params::default()),
+    }
+}
+
+/// `FieldKind` 是**纯局部开关**（决定粗场还是真场），但产物确实不同 ⇒ 进键。
+impl px_graph_schema::HashField for FieldKind {
+    fn hash_field(&self, hasher: &mut blake3::Hasher) {
+        hasher.update(&[*self as u8]);
     }
 }

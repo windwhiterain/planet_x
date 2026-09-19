@@ -9,7 +9,7 @@ pub const PROXY: &str = "mesh.proxy";
 pub mod cubesphere {
     use serde::{Deserialize, Serialize};
 
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Debug, Clone, Serialize, Deserialize, px_derive::PxParams)]
     #[serde(default)]
     pub struct Params {
         pub subdivisions: u32,
@@ -35,7 +35,7 @@ pub mod cubesphere {
 pub mod proxy {
     use serde::{Deserialize, Serialize};
 
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Debug, Clone, Serialize, Deserialize, px_derive::PxParams)]
     #[serde(default, deny_unknown_fields)]
     pub struct Params {
         /// 等值面高度。体积里存的是归一化后的场 `(粗场 - τ) / L`，所以默认 0.0。

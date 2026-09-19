@@ -18,7 +18,7 @@ pub const WARP: &str = "field.warp";
 pub mod constant {
     use serde::{Deserialize, Serialize};
 
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Debug, Clone, Serialize, Deserialize, px_derive::PxParams)]
     #[serde(default, deny_unknown_fields)]
     pub struct Params {
         pub value: f32,
@@ -34,7 +34,7 @@ pub mod constant {
 pub mod fbm {
     use serde::{Deserialize, Serialize};
 
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Debug, Clone, Serialize, Deserialize, px_derive::PxParams)]
     #[serde(default, deny_unknown_fields)]
     pub struct Params {
         pub frequency: f32,
@@ -64,7 +64,7 @@ pub mod fbm {
 pub mod gradient {
     use serde::{Deserialize, Serialize};
 
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Debug, Clone, Serialize, Deserialize, px_derive::PxParams)]
     #[serde(default, deny_unknown_fields)]
     pub struct Params {
         pub component: u32,
@@ -84,7 +84,7 @@ pub mod gradient {
 pub mod mix {
     use serde::{Deserialize, Serialize};
 
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Debug, Clone, Serialize, Deserialize, px_derive::PxParams)]
     #[serde(default, deny_unknown_fields)]
     pub struct Params {
         pub bias: f32,
@@ -100,7 +100,7 @@ pub mod mix {
 pub mod remap {
     use serde::{Deserialize, Serialize};
 
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Debug, Clone, Serialize, Deserialize, px_derive::PxParams)]
     #[serde(default, deny_unknown_fields)]
     pub struct Params {
         pub in_min: f32,
@@ -126,7 +126,7 @@ pub mod remap {
 pub mod ridged {
     use serde::{Deserialize, Serialize};
 
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Debug, Clone, Serialize, Deserialize, px_derive::PxParams)]
     #[serde(default, deny_unknown_fields)]
     pub struct Params {
         pub frequency: f32,
@@ -158,7 +158,7 @@ pub mod ridged {
 pub mod warp {
     use serde::{Deserialize, Serialize};
 
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Debug, Clone, Serialize, Deserialize, px_derive::PxParams)]
     #[serde(default, deny_unknown_fields)]
     pub struct Params {
         pub strength: f32,

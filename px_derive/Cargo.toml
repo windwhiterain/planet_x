@@ -1,0 +1,19 @@
+[package]
+name = "px_derive"
+version = "0.1.0"
+edition = "2024"
+
+# ⚠ 这一份**只有宏**：`#[derive(PxParams)]` 把超参数 struct 每个字段写进键。
+#
+# 为什么必须是 proc-macro：手写 `impl PxKeyed` 的话，"加了字段却忘了进 key"是个
+# **静默** bug —— 改了参数却命中旧产物。proc-macro 按字段列表生成，加字段自动跟上。
+#
+# ⚠ 依赖方向：本 crate **不依赖仓里任何 crate**（proc-macro 只吐 token）。
+# 生成出来的 `impl` 引用 `::px_graph_schema::PxKeyed`，谁用谁负责把那个 crate 带进来。
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = { version = "2", features = ["full"] }
+quote = "1"
+proc-macro2 = "1"

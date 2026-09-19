@@ -1397,6 +1397,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "px_derive"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "px_field_op"
 version = "0.1.0"
 dependencies = [
@@ -1412,6 +1421,8 @@ dependencies = [
 name = "px_field_schema"
 version = "0.1.0"
 dependencies = [
+ "blake3",
+ "px_derive",
  "px_graph_schema",
  "px_protocol",
  "serde",
@@ -1486,6 +1497,8 @@ dependencies = [
 name = "px_mesh_schema"
 version = "0.1.0"
 dependencies = [
+ "blake3",
+ "px_derive",
  "px_graph_schema",
  "px_protocol",
  "serde",
@@ -1576,6 +1589,8 @@ dependencies = [
 name = "px_volume_schema"
 version = "0.1.0"
 dependencies = [
+ "blake3",
+ "px_derive",
  "px_graph_schema",
  "px_protocol",
  "serde",

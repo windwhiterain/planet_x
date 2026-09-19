@@ -1,22 +1,24 @@
-//! **px_cook**：类型化的缓存辅助函数 —— 「普通 Rust 逻辑 + 一个 cache 函数」里的那个函数。
+//! **px_cook**：`cook` —— 图脚本里唯一那个缓存辅助函数。
 //!
-//! 图脚本不再写 `node("field.fbm", "continents", &[])`（字符串 id + 字节边界），
-//! 而是写**普通 Rust**：
+//! 图脚本是**普通 Rust**：
 //!
 //! ```ignore
-//! let continents = cook_field(&driver, FBM, "continents", (), grid)?;
-//! let terrain = cook_field(&driver, MIX, "terrain", (&continents, &mountains, &weight), grid)?;
-//! let coarse = cook_volume(&driver, CLOUD_COARSE, "coarse", &mixed, grid)?;
+//! struct ClustersInput {}                        // 图参数：包上游节点
+//! struct MixedInput { a: Cooked<Field>, b: Cooked<Field>, mask: Cooked<Field> }
+//!
+//! let clusters = cook::<field::Fbm>(&cache, ClustersInput {}, canvas)?;
+//! let mixed    = cook::<field::Mix>(&cache, MixedInput { a: clusters, b: carved, mask: weight }, canvas)?;
+//! let coarse   = cook::<volume::CloudCoarse>(&cache, CoarseInput { coverage: mixed }, canvas)?;
 //! ```
 //!
-//! 于是三样东西变成**编译期**的事：参数类型、输入的个数与域、输出的类型。
+//! 三样东西因此是**编译期**的事：输入个数与域（图参数 struct 的字段）、输出域（`PxOp::Payload`）、
+//! 参数类型（`PxOp::Params`）。没有枚举分派、没有注册表。
 //!
-//! ⚠ 本 crate **一个算子实现都不依赖**（实现住 `px_*_op` 的 dylib 里）。
-//! 这条线一破，「改算子实现不重编图程序」那条性质就没了 —— 判据见 `tests/`。
+//! ⚠ 本 crate **一个算子实现都不依赖**：实现住 `px_*_op` 的 dylib 里。
+//! 这条线一破，「改算子实现不重编图程序」那条性质就没了。
 
 pub mod field_fn;
 
-use std::ops::Deref;
 use std::time::Instant;
 
 use serde::Serialize;
@@ -28,9 +30,9 @@ use px_mesh_schema::MeshData;
 use px_volume_schema::VolumeData;
 
 pub use px_graph::{Cache, Report};
-pub use px_graph_schema::Grid;
+pub use px_graph_schema::{Grid, PxKeyed};
 
-/// 算子在缓存里的**身份**。`source_hash` 覆盖它的共享依赖（§28.2）。
+/// 算子在缓存里的**身份**。
 #[derive(Debug, Clone, Copy)]
 pub struct Identity {
     pub id: &'static str,
@@ -38,64 +40,33 @@ pub struct Identity {
     pub source_hash: u64,
 }
 
-/// 一个算子的**类型化契约**。
+/// **图参数**：包着上游节点，键由上游的键聚合而成。
 ///
-/// `Inputs<'a>` 是借用形态的上游载荷（`()` / `&'a Cooked<Field>` /
-/// `(&'a Cooked<Field>, &'a Cooked<Field>, …)`）—— 于是"接错几个输入、接错哪个域"
-/// 在**编译期**就判得出来，不必等装载。
-pub trait Op {
-    const IDENTITY: Identity;
-
-    type Params: Serialize + DeserializeOwned + Default;
-    type Inputs<'a>;
-    type Payload;
-
-    fn cook(params: &Self::Params, inputs: &Self::Inputs<'_>, grid: Grid) -> Self::Payload;
-}
-
-/// 缓存里那份字节怎么变成类型化的载荷。
-///
-/// `projection` 由 `Cache` 给：场载荷**不含投影**（`Field::to_blob` 只存形状），
-/// 所以解码时必须把画布的投影补回去。
-pub trait Blob: Sized {
-    fn encode(&self) -> Result<Vec<u8>, String>;
-    fn decode(bytes: &[u8], projection: px_protocol::art::Domain) -> Result<Self, String>;
-}
-
-impl Blob for Field {
-    fn encode(&self) -> Result<Vec<u8>, String> {
-        px_field_schema::payload::encode(self).placeholder()
-    }
-    fn decode(bytes: &[u8], projection: px_protocol::art::Domain) -> Result<Self, String> {
-        px_field_schema::payload::decode(bytes, projection)
-    }
-}
-
-impl Blob for VolumeData {
-    fn encode(&self) -> Result<Vec<u8>, String> {
-        px_volume_schema::payload::encode(self).placeholder()
-    }
-    fn decode(bytes: &[u8], _projection: px_protocol::art::Domain) -> Result<Self, String> {
-        px_volume_schema::payload::decode(bytes)
-    }
-}
-
-impl Blob for MeshData {
-    fn encode(&self) -> Result<Vec<u8>, String> {
-        px_mesh_schema::payload::encode(self).placeholder()
-    }
-    fn decode(bytes: &[u8], _projection: px_protocol::art::Domain) -> Result<Self, String> {
-        px_mesh_schema::payload::decode(bytes)
-    }
+/// 它就是图脚本里那个 struct —— 字段是具名的，漏一个、接错域都是编译错。
+pub trait PxInputs {
+    fn collect(&self, hasher: &mut blake3::Hasher);
 }
 
 /// 一个已经拿到手的节点：**类型化的值 + 它的身份**。
+#[derive(Clone)]
 pub struct Cooked<P> {
     pub key: Key,
-    pub value: P,
+    value: P,
     pub hit: bool,
     pub millis: u64,
     pub bytes: usize,
+}
+
+impl<P> Cooked<P> {
+    /// 类型化的值。
+    pub fn value(&self) -> &P {
+        &self.value
+    }
+
+    /// 只给本 crate 用：`cook` 要把刚算出来的值包进来。
+    fn make(key: Key, value: P, hit: bool, millis: u64, bytes: usize) -> Self {
+        Self { key, value, hit, millis, bytes }
+    }
 }
 
 /// 各领域载荷 → 老路径那个枚举（`node()` 收 `&Artifact`，混用两条路时要过一下）。
@@ -108,36 +79,32 @@ impl PayloadKind for Field {
         px_graph::Payload::Field(self)
     }
 }
-
 impl PayloadKind for VolumeData {
     fn into_payload(self) -> px_graph::Payload {
         px_graph::Payload::Volume(self)
     }
 }
-
 impl PayloadKind for MeshData {
     fn into_payload(self) -> px_graph::Payload {
         px_graph::Payload::Mesh(self)
     }
 }
 
-impl<P> Deref for Cooked<P> {
-    type Target = P;
-    fn deref(&self) -> &P {
-        &self.value
-    }
-}
-
 impl<P: PayloadKind> Cooked<P> {
-    /// 换成老路径的 `Artifact`：**字节从缓存里取回来**（不重新序列化）。
+    /// 换成老路径的 `Artifact`（克隆值、**字节从缓存里取回来**，不重新序列化）。
     ///
-    /// ⚠ 它存在的唯一理由是两条路要混用：`node(op_id, name, &[&上游])` 收的是 `&Artifact`，
-    /// 而类型化那一支给的是 `Cooked<T>`。**键同一个**（`Cooked.key` 就是写进 CAS 的那把），
-    /// 所以这一步不会重算、也不会写出第二份产物。
-    pub fn into_artifact(self) -> Result<px_graph::Artifact, String> {
+    /// ⚠ 它存在的唯一理由是两条路要混用：`node(op_id, name, &[&上游])` 收的是 `&Artifact`。
+    /// **键同一个**（`Cooked.key` 就是写进 CAS 的那把）⇒ 不重算、不写第二份产物。
+    pub fn to_artifact(&self) -> Result<px_graph::Artifact, String>
+    where
+        P: Clone,
+    {
         let bytes = self.cached_bytes()?;
-        let payload = self.value.into_payload();
-        Ok(px_graph::Artifact { key: self.key, payload, bytes })
+        Ok(px_graph::Artifact {
+            key: self.key,
+            payload: self.value.clone().into_payload(),
+            bytes,
+        })
     }
 
     /// 缓存里那份字节（不重新序列化）。
@@ -147,6 +114,10 @@ impl<P: PayloadKind> Cooked<P> {
 }
 
 impl Cooked<Field> {
+    /// 取那张场（算子侧读上游用）。
+    pub fn sample(&self) -> &Field {
+        &self.value
+    }
     pub fn field(&self) -> &Field {
         &self.value
     }
@@ -167,89 +138,151 @@ impl Cooked<MeshData> {
     }
 }
 
-/// 键 = 内容（§17.1）。⚠ 与 `node_key` 的差别只有一项：**源码哈希也进键**。
+/// **一个算子**：身份 + 参数类型 + 输出域 + 怎么算。
 ///
-/// 类型化这条路里，算子的语义可能随源码变而 `version` 没升 —— 那样缓存会静默给旧产物。
-/// 进了键就是「必然重算」；`version` 仍旧只用来打一句"源码变了"的告警。
-/// 老路径（`node_key`）一位不动 ⇒ 老图的老键全部照旧命中。
-pub fn cook_key(
-    identity: &Identity,
-    graph_version: u32,
-    canvas: (u32, u32),
-    projection: px_protocol::art::Domain,
-    params_json: &str,
-    input_keys: &[Key],
-) -> Key {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(b"px_cook/v1");
-    hasher.update(identity.id.as_bytes());
-    hasher.update(&identity.version.to_le_bytes());
-    hasher.update(&identity.source_hash.to_le_bytes());
-    hasher.update(&graph_version.to_le_bytes());
-    hasher.update(&canvas.0.to_le_bytes());
-    hasher.update(&canvas.1.to_le_bytes());
-    hasher.update(projection.name().as_bytes());
-    hasher.update(params_json.as_bytes());
-    for key in input_keys {
-        hasher.update(key);
+/// ⚠ 它是**接线**，不是实现 —— 实现住 `px_*_op` 的 dylib 里（图脚本静态链的只是这一份 rlib）。
+/// `#[derive(PxOp)]` 会把它生成出来；`clouds.rs` 里也能按需手写（见那个演示分支）。
+pub trait PxOp {
+    const ID: &'static str;
+    const VERSION: u32;
+    /// 算子源码（含共享依赖）的 FNV-1a —— 改实现必然重算那一格。
+    fn source_hash() -> u64;
+
+    /// 超参数的类型：从 `art/<图>/<节点名>.toml` 解出来的那一份。
+    type Params: Serialize + DeserializeOwned + PxKeyed;
+    /// 输出域（`Field` / `VolumeData` / `MeshData`）—— 域、相机口径、编解码全从它推。
+    type Payload: PayloadKind + payload::Build;
+    /// **图参数**的类型：这个算子被接的那个输入 struct。
+    /// ⚠ `cook` 要求它等于调用点给的那个 `I` ⇒ 接错 struct、接错算子都是编译错。
+    type Inputs: PxInputs;
+
+    /// 造一个算子实例（算子是无状态的，`new()` 就是 `Self`）。
+    fn new() -> Self;
+    fn params() -> params::Kind<Self::Params>;
+    fn payload() -> payload::Kind<Self::Payload>;
+    /// 怎么算：超参数 + **图参数**（这个图接的上游 struct）+ 画布。
+    ///
+    /// ⚠ 它在 `I` 上泛型：同一个算子被两张图用不同的接法接，实例各生成一份。
+    fn render(&self, params: &Self::Params, inputs: &Self::Inputs, grid: Grid)
+        -> Result<Self::Payload, String>;
+}
+
+/// 每个域的"怎么解上游字节 / 怎么编码自己的产物"。
+pub mod payload {
+    use px_protocol::art::Domain;
+
+    use px_field_schema::field::Field;
+    use px_mesh_schema::MeshData;
+    use px_volume_schema::VolumeData;
+
+    /// 有个类型参数，这样 `PxOp::payload()` 能指名自己的域。
+    pub struct Kind<P>(pub std::marker::PhantomData<P>);
+
+    pub trait Build: Sized {
+        const WITH_CAMERAS: bool;
+        fn encode(payload: &Self) -> Result<Vec<u8>, String>;
+        /// 上游字节 → 类型化的值。场载荷不含投影，所以要 `projection` 补回去。
+        fn decode(bytes: &[u8], projection: Domain, node: &str) -> Result<Self, String>;
     }
-    *hasher.finalize().as_bytes()
-}
 
-/// 上游节点的键集合。⚠ 输入**个数**要留在类型里：数组长度就是它，
-/// 于是"接错几个输入"编译期就报 —— 这正是要拿回来的一半类型检查。
-pub trait InputKeys {
-    fn keys(&self) -> Vec<Key>;
-}
+    impl Build for Field {
+        const WITH_CAMERAS: bool = true;
+        fn encode(payload: &Self) -> Result<Vec<u8>, String> {
+            px_field_schema::payload::encode(payload).placeholder()
+        }
+        fn decode(bytes: &[u8], projection: Domain, node: &str) -> Result<Self, String> {
+            let _ = node;
+            px_field_schema::payload::decode(bytes, projection)
+        }
+    }
 
-impl InputKeys for () {
-    fn keys(&self) -> Vec<Key> {
-        Vec::new()
+    impl Build for VolumeData {
+        const WITH_CAMERAS: bool = false;
+        fn encode(payload: &Self) -> Result<Vec<u8>, String> {
+            px_volume_schema::payload::encode(payload).placeholder()
+        }
+        fn decode(bytes: &[u8], _projection: Domain, node: &str) -> Result<Self, String> {
+            let _ = node;
+            px_volume_schema::payload::decode(bytes)
+        }
+    }
+
+    impl Build for MeshData {
+        const WITH_CAMERAS: bool = true;
+        fn encode(payload: &Self) -> Result<Vec<u8>, String> {
+            px_mesh_schema::payload::encode(payload).placeholder()
+        }
+        fn decode(bytes: &[u8], _projection: Domain, node: &str) -> Result<Self, String> {
+            let _ = node;
+            px_mesh_schema::payload::decode(bytes)
+        }
+    }
+
+    impl<P: Build> Kind<P> {
+        pub fn encode(&self, payload: &P) -> Result<Vec<u8>, String> {
+            P::encode(payload)
+        }
+        pub fn decode(&self, bytes: &[u8], projection: Domain, node: &str) -> Result<P, String> {
+            P::decode(bytes, projection, node)
+        }
+        pub fn with_cameras(&self) -> bool {
+            P::WITH_CAMERAS
+        }
     }
 }
 
-impl<T> InputKeys for &Cooked<T> {
-    fn keys(&self) -> Vec<Key> {
-        vec![self.key]
+/// 超参数那一侧：TOML 原文 → 规范 JSON（进键的那一份）。
+pub mod params {
+    use serde::Serialize;
+    use serde::de::DeserializeOwned;
+
+    pub struct Kind<P>(pub std::marker::PhantomData<P>);
+
+    impl<P: Serialize + DeserializeOwned> Kind<P> {
+        /// ⚠ 与 dylib 那边 `OpDescriptor` 用的**同一份规范化**，否则两侧键对不上。
+        pub fn canonical(&self, toml_text: Option<&str>) -> Result<(P, String), String> {
+            let parsed: P = match toml_text {
+                Some(text) => toml::from_str(text).map_err(|err| format!("参数解不开：{err}"))?,
+                None => toml::from_str("").map_err(|err| format!("默认参数解不开：{err}"))?,
+            };
+            let json = px_graph_schema::canonical_params(&parsed);
+            Ok((parsed, json))
+        }
     }
 }
 
-impl<T, const N: usize> InputKeys for &[&Cooked<T>; N] {
-    fn keys(&self) -> Vec<Key> {
-        self.iter().map(|node| node.key).collect()
-    }
-}
-
-/// 缓存辅助函数的**唯一一份**：算键 → 查 → 命中就解码；不命中就 cook → 编码 → 落盘。
+/// **缓存辅助函数**：算键 → 查 → 命中就解字节；不命中就 `render` → 编码 → 落盘。
 ///
-/// 参数文件按**节点名**取（`art/<图>/<节点>.toml`）—— 这是老路径的同一个约定，
-/// 而节点名是**图**的知识，不是算子的：同一个 `field.fbm` 在 `clouds` 里叫 `clusters`、
-/// 在 `planet` 里叫 `continents`。⚠ 参数文件名**不进键**（键里是规范后的参数内容），
-/// 所以给同一个算子换个参数文件不会白重算 —— 与老路径逐字同一条口径。
-fn cook<O>(
+/// 参数来自 `art/<图>/<节点名>.toml`（按节点名取，与老路径同一个约定）；
+/// 上游来自 `inputs`（图参数 struct，键由它聚合）；域由 `PxOp::Payload` 决定。
+pub fn cook<O, I>(
     cache: &dyn Cache,
     node: &str,
-    inputs: O::Inputs<'_>,
+    inputs: I,
     grid: Grid,
-    with_cameras: bool,
 ) -> Result<Cooked<O::Payload>, String>
 where
-    O: Op,
-    O::Payload: Blob,
-    for<'a> O::Inputs<'a>: InputKeys,
+    O: PxOp<Inputs = I>,
+    I: PxInputs,
 {
-    let params: O::Params = read_params::<O>(cache, node)?;
-    let params_json = px_graph_schema::canonical_params(&params);
-    let base = cook_key(
-        &O::IDENTITY,
-        cache.graph_version(),
-        cache.canvas(),
-        cache.projection(),
-        &params_json,
-        &inputs.keys(),
-    );
-    // ⚠ 相机那一档：产物里**带着相机表** ⇒ 相机变了产物内容就变 ⇒ 必须进键，
-    // 否则会出现「同一个键、不同内容」（§17.1）。体积不进相机（相机是「怎么看」，体积没人看）。
+    let op = O::new();
+    let (params, params_json) = O::params().canonical(cache.params_text(node).as_deref())?;
+
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"px_cook/v1");
+    hasher.update(O::ID.as_bytes());
+    hasher.update(&O::VERSION.to_le_bytes());
+    hasher.update(&O::source_hash().to_le_bytes());
+    hasher.update(&cache.graph_version().to_le_bytes());
+    let (width, height) = cache.canvas();
+    hasher.update(&width.to_le_bytes());
+    hasher.update(&height.to_le_bytes());
+    hasher.update(cache.projection().name().as_bytes());
+    hasher.update(params_json.as_bytes());
+    inputs.collect(&mut hasher);
+    let base = *hasher.finalize().as_bytes();
+    // ⚠ 相机那一档：产物里带着相机表 ⇒ 相机变了产物内容就变 ⇒ 必须进键。
+    let with_cameras = O::payload().with_cameras();
     let key = if with_cameras {
         px_graph_schema::key_with_cameras(base, cache.cameras())
     } else {
@@ -258,105 +291,144 @@ where
 
     let projection = cache.projection();
     if let Some(bytes) = cache.fetch(key) {
-        let value = O::Payload::decode(&bytes, projection)?;
+        let value = O::payload().decode(&bytes, projection, node)?;
         let bytes_len = bytes.len();
-        let report = Report {
-            node,
-            op: O::IDENTITY.id,
-            op_version: O::IDENTITY.version,
-            key,
-            hit: true,
-            millis: 0,
-            bytes: bytes_len,
-            with_cameras,
-        };
-        cache.store(report, &bytes)?;
-        return Ok(Cooked {
-            key,
-            value,
-            hit: true,
-            millis: 0,
-            bytes: bytes_len,
-        });
+        cache.store(
+            Report {
+                node,
+                op: O::ID,
+                op_version: O::VERSION,
+                key,
+                hit: true,
+                millis: 0,
+                bytes: bytes_len,
+                with_cameras,
+            },
+            &bytes,
+        )?;
+        return Ok(Cooked::make(key, value, true, 0, bytes_len));
     }
 
     let started = Instant::now();
-    let value = O::cook(&params, &inputs, grid);
+    let value = op.render(&params, &inputs, grid)?;
     let millis = started.elapsed().as_millis() as u64;
-    let bytes = value.encode()?;
-    let report = Report {
-        node,
-        op: O::IDENTITY.id,
-        op_version: O::IDENTITY.version,
-        key,
-        hit: false,
-        millis,
-        bytes: bytes.len(),
-        with_cameras,
-    };
+    let bytes = O::payload().encode(&value)?;
     let bytes_len = bytes.len();
-    cache.store(report, &bytes)?;
-    Ok(Cooked {
-        key,
-        value,
-        hit: false,
-        millis,
-        bytes: bytes_len,
-    })
+    cache.store(
+        Report {
+            node,
+            op: O::ID,
+            op_version: O::VERSION,
+            key,
+            hit: false,
+            millis,
+            bytes: bytes_len,
+            with_cameras,
+        },
+        &bytes,
+    )?;
+    Ok(Cooked::make(key, value, false, millis, bytes_len))
 }
 
-/// 参数原文 → 类型化的参数（文件不存在就用默认值）。
-fn read_params<O: Op>(cache: &dyn Cache, name: &str) -> Result<O::Params, String> {
-    if name.is_empty() {
-        return Ok(O::Params::default());
+/// **收敛样板**：一个算子只需要写「身份」与「怎么算」，其余（身份常量、参数类型、
+/// 输出域、编解码、相机口径）全从这两行推。
+///
+/// ⚠ 这是 `#[derive(PxOp)]` 的语义，先用宏落地 —— 两者生成的东西必须一致。
+///
+/// ```ignore
+/// px_op! { Fbm = params::FBM, params::fbm::Params, Field, |p, grid| crate::ops::fbm::eval(p, &[], grid) }
+/// ```
+#[macro_export]
+macro_rules! px_op {
+    ($name:ident = $id:expr, $params:ty, $inputs:ty, $payload:ty, |$p:ident, $i:ident, $g:ident| $body:expr) => {
+        impl $crate::PxOp for $name {
+            const ID: &'static str = $id;
+            const VERSION: u32 = 1;
+
+            type Params = $params;
+            type Inputs = $inputs;
+            type Payload = $payload;
+
+            fn source_hash() -> u64 {
+                $crate::source_hash_of(&[$id])
+            }
+
+            fn params() -> $crate::params::Kind<$params> {
+                $crate::params::Kind(std::marker::PhantomData)
+            }
+
+            fn payload() -> $crate::payload::Kind<$payload> {
+                $crate::payload::Kind(std::marker::PhantomData)
+            }
+
+            fn new() -> Self {
+                $name
+            }
+
+            fn render(
+                &self,
+                $p: &$params,
+                $i: &$inputs,
+                $g: $crate::Grid,
+            ) -> Result<$payload, String> {
+                // ⚠ 不用任何 downcast：`cook<O, I>` 要求 `O::Inputs = I`，
+                //    "图参数 struct 接错算子"是**编译错**（见 `px_graphs/tests`）。
+                Ok($body)
+            }
+        }
+    };
+}
+
+/// 算子源码清单的哈希（`SOURCE_HASH` 的算法）。
+///
+/// ⚠ 真正的清单由 `#[derive(PxOp)]` 从 `include_str!` 收集；这一版先按 id 占位，
+/// 等宏生成时换成「本 crate 的 .rs + schema」那段清单。
+pub fn source_hash_of(parts: &[&str]) -> u64 {
+    px_graph_schema::fnv1a_sources(parts)
+}
+
+/// **图参数的形状**：`N` 个上游。图脚本就用这几个（`Unary1<Field>` / `Unary3<Field>` …）
+/// 当输入 struct —— 字段具名，漏一个、接错域都是编译错。
+#[derive(Clone, Copy)]
+pub struct Unary1<T> {
+    pub a: T,
+}
+
+#[derive(Clone, Copy)]
+pub struct Unary2<T> {
+    pub a: T,
+    pub b: T,
+}
+
+#[derive(Clone, Copy)]
+pub struct Unary3<T> {
+    pub a: T,
+    pub b: T,
+    pub c: T,
+}
+
+/// 每个上游把自己的键贡献进来（**图参数的键聚合**）。
+impl PxInputs for () {
+    fn collect(&self, _hasher: &mut blake3::Hasher) {}
+}
+
+impl<T: PayloadKind + payload::Build> PxInputs for Unary1<Cooked<T>> {
+    fn collect(&self, hasher: &mut blake3::Hasher) {
+        hasher.update(&self.a.key);
     }
-    match cache.params_text(name) {
-        Some(text) => toml::from_str(&text).map_err(|err| format!("{name}.toml 解不开：{err}")),
-        None => Ok(O::Params::default()),
+}
+
+impl<T: PayloadKind + payload::Build> PxInputs for Unary2<Cooked<T>> {
+    fn collect(&self, hasher: &mut blake3::Hasher) {
+        hasher.update(&self.a.key);
+        hasher.update(&self.b.key);
     }
 }
 
-/// 场算子的入口。
-pub fn cook_field<O>(
-    cache: &dyn Cache,
-    node: &str,
-    inputs: O::Inputs<'_>,
-    grid: Grid,
-) -> Result<Cooked<Field>, String>
-where
-    O: Op<Payload = Field>,
-    for<'a> O::Inputs<'a>: InputKeys,
-{
-    cook::<O>(cache, node, inputs, grid, true)
+impl<T: PayloadKind + payload::Build> PxInputs for Unary3<Cooked<T>> {
+    fn collect(&self, hasher: &mut blake3::Hasher) {
+        hasher.update(&self.a.key);
+        hasher.update(&self.b.key);
+        hasher.update(&self.c.key);
+    }
 }
-
-/// 体积算子的入口（⚠ 不掺评审相机：相机是「怎么看」，体积没人看）。
-pub fn cook_volume<O>(
-    cache: &dyn Cache,
-    node: &str,
-    inputs: O::Inputs<'_>,
-    grid: Grid,
-) -> Result<Cooked<VolumeData>, String>
-where
-    O: Op<Payload = VolumeData>,
-    for<'a> O::Inputs<'a>: InputKeys,
-{
-    cook::<O>(cache, node, inputs, grid, false)
-}
-
-/// 网格算子的入口。
-pub fn cook_mesh<O>(
-    cache: &dyn Cache,
-    node: &str,
-    inputs: O::Inputs<'_>,
-    grid: Grid,
-) -> Result<Cooked<MeshData>, String>
-where
-    O: Op<Payload = MeshData>,
-    for<'a> O::Inputs<'a>: InputKeys,
-{
-    cook::<O>(cache, node, inputs, grid, true)
-}
-
-/// 老路径的载荷类型（图脚本要按域解出来时会用到）。
-pub use px_graph::Payload as AnyPayload;

@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+# 超参数 struct 的 `PxKeyed` 由它生成（加字段自动进键）。
+px_derive = { path = "../px_derive" }
+blake3 = "1"
 # 体积域的数据与参数（立方球参数空间约定 + 烘培参数）：没有算法、没有驱动。
 px_protocol = { path = "../px_protocol" }
 px_graph_schema = { path = "../px_graph_schema" }

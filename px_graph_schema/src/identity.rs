@@ -47,3 +47,62 @@ pub const fn fnv1a_sources(sources: &[&str]) -> u64 {
     }
     hash
 }
+
+/// **一个字段怎么进键**：按自己的类型写字节，不丢精度、不靠格式化。
+///
+/// ⚠ 闭集：只列仓里参数真用到的那些类型。加一种就要在这里加一条 ——
+/// 编译器会当场报（`PxParams` 生成的 `impl` 找不到实现）。
+pub trait HashField {
+    fn hash_field(&self, hasher: &mut blake3::Hasher);
+}
+
+macro_rules! hash_le {
+    ($($ty:ty),+ $(,)?) => {
+        $(impl HashField for $ty {
+            fn hash_field(&self, hasher: &mut blake3::Hasher) {
+                hasher.update(&self.to_le_bytes());
+            }
+        })+
+    };
+}
+
+hash_le!(f32, f64, u8, u16, u32, u64, i8, i16, i32, i64);
+
+impl HashField for bool {
+    fn hash_field(&self, hasher: &mut blake3::Hasher) {
+        hasher.update(&[*self as u8]);
+    }
+}
+
+impl<T: HashField, const N: usize> HashField for [T; N] {
+    fn hash_field(&self, hasher: &mut blake3::Hasher) {
+        for item in self {
+            item.hash_field(hasher);
+        }
+    }
+}
+
+impl HashField for str {
+    fn hash_field(&self, hasher: &mut blake3::Hasher) {
+        hasher.update(&(self.len() as u64).to_le_bytes());
+        hasher.update(self.as_bytes());
+    }
+}
+
+impl HashField for String {
+    fn hash_field(&self, hasher: &mut blake3::Hasher) {
+        self.as_str().hash_field(hasher);
+    }
+}
+
+/// **超参数**：一个 struct 自己说明它贡献给键的是什么。
+///
+/// ⚠ 由 `#[derive(PxParams)]`（住 `px_derive`）按字段列表生成。手写的话，
+/// "加了字段却忘了进 `key`"是个**静默** bug —— 改了参数却命中旧产物。
+pub trait PxKeyed {
+    fn key(&self, hasher: &mut blake3::Hasher);
+}
+
+/// re-export：生成出来的 `impl` 里写的是 `::blake3::Hasher`，
+/// 用的人（schema crate）不必自己再依赖 `blake3`。
+pub use blake3;
