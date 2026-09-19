@@ -2,9 +2,6 @@
 
 > **操作清单**：从一个空目录到图脚本跑出产物，一共要写哪些文件、敲哪些命令、每处约束是为什么。
 > 所有片段与仓里代码**逐字对齐**（`px_field_op` / `px_volume_op` / `px_mesh_op` 是已落地的实例）。
->
-> 例子里那个 `mesh.iso`（吃场函数吐网格）是**文档例子，没落地** —— 它比现有算子更"泛型"，
-> 正好把三条边界都走一遍。`px_volume_op::CloudCoarse` 是它的已落地对应物。
 
 ---
 
@@ -31,8 +28,8 @@ let proxy    = cook::<mesh::Proxy>(&cache, "proxy",
 
 | | 靠什么 | 报错长什么样 |
 |---|---|---|
-| 输入个数/形状 | `O::Inputs`（关联类型钉死） | `expected MixInput, found TwoInput` —— 见 §3.3b |
-| 输出域 | `O::Payload` | 把体积喂给声明 `In<Field>` 的结构就编不过 |
+| 输入个数/形状 | `O::Inputs`（关联类型钉死） | 少给一个上游、给错域 ⇒ `expected MixInput, found …` —— 见 §3.3b |
+| 输出域 | `O::Payload` | 把体积喂给要 `Cooked<Field>` 的字段就编不过 |
 | 参数类型 | `O::Params` | 参数文件字段写错当场报（`deny_unknown_fields`） |
 
 ---
@@ -70,14 +67,14 @@ px_graphs                ④ 图脚本：普通 Rust 调用链
 | 2 | `px_<域>_schema/src/payload.rs` | 载荷 ↔ 字节（**缓存里存的就是这一份**） |
 | 3 | `px_<域>_op/Cargo.toml` | `crate-type = ["rlib"]` + `px_cook` / `px_derive` |
 | 4 | `px_<域>_op/src/<算子>.rs` | **算法体**：普通 Rust 函数 |
-| 5 | `px_<域>_op/src/typed.rs` | **声明**：`px_op!` 一行 / 算子 + 输入别名 |
-| 6 | `px_<域>_op/src/lib.rs` | **三行宏**（见 §2.3） |
+| 5 | `px_<域>_op/src/typed.rs` | **声明**：`px_op!` 一行 / 算子；输入形状也住这儿（§3.3b） |
+| 6 | `px_<域>_op/src/lib.rs` | 模块声明 + 把算子 `pub use` 出去（见 §2.3） |
 
 ### 2.2 图作者
 
 | # | 文件 | 写什么 |
 |---|---|---|
-| 7 | `px_graphs/Cargo.toml` | `px_<域>_op`（`[dependencies]` **和** `[dev-dependencies]` 各一条） |
+| 7 | `px_graphs/Cargo.toml` | `px_<域>_op`（一条 `[dependencies]` 就够） |
 | 8 | `px_graphs/src/bin/<图>.rs` | `cook::<算子>(...)` 调用链 |
 | 9 | `art/<图>/<节点名>.toml` | 这个节点的**超参数** |
 
@@ -131,20 +128,13 @@ use px_cook::{Cooked, px_op};
 pub struct Fbm;
 pub struct Mix;
 
-px_op! { Fbm = params::FBM, 4, params::fbm::Params, (), Field,
-
-         [include_str!("fbm.rs"),
-          include_str!("../noise.rs"),
-          include_str!("../../px_field_schema/src/field.rs"),
-          include_str!("../../px_field_schema/src/params.rs")],
+// 不吃上游：最后一栏是 `()`，`render` 的输入就是它。
+px_op! { Fbm = params::FBM, params::fbm::Params, (), Field,
          |p, _i, g| crate::ops::fbm::eval(p, &[], g) }
 
-px_op! { Mix = params::MIX, 1, params::mix::Params, MixInput, Field,
-
-         [include_str!("mix.rs"),
-          include_str!("../../px_field_schema/src/field.rs"),
-          include_str!("../../px_field_schema/src/params.rs")],
-         |p, i, g| crate::ops::mix::eval(p, &[i.a.sample(), i.b.sample(), i.c.sample()], g) }
+// 吃三张场：形状是下面那个 `MixInput`。
+px_op! { Mix = params::MIX, params::mix::Params, MixInput, Field,
+         |p, i, g| crate::ops::mix::eval(p, &[i.a.sample(), i.b.sample(), i.mask.sample()], g) }
 ```
 
 参数顺序：`名字 = id, 超参数类型, 输入形状, 输出域, |超参数, 输入, 画布| 怎么算`。
@@ -153,12 +143,11 @@ px_op! { Mix = params::MIX, 1, params::mix::Params, MixInput, Field,
 
 | 字段 | 是什么 |
 |---|---|
-| `id` | 键认得出的那一半（图侧按它找节点） |
+| `id` | 键认得出的那一半（老路径按它找算子；现在是图脚本里的节点名之外的另一半身份） |
 | `超参数类型` | 从 `art/<图>/<节点>.toml` 解出来的那个 struct |
 | `输入形状` | 这个算子**自己定义**的输入 struct（`()` = 不吃上游）—— 见 §3.3b |
-| `输出域` | `Field` / `VolumeData` / `MeshData` —— 相机口径与编解码都从它推 |
-| `输出域` | `Field` / `VolumeData` / `MeshData`。⚠ **域就是这个类型** —— 不再有并行的 `OpKind`：相机掺不掺、画布算不算分辨率都由 `Payload` 自己声明（`WITH_CAMERAS` / `RESOLUTION_IS_CANVAS`）。一个声明，没有能对不上的第二处 |
-| `输入形状` | 这个算子**自己定义**的输入 struct —— 输入个数与域都在里面 |
+| `输出域` | `Field` / `VolumeData` / `MeshData`。⚠ **域就是这个类型** —— 相机掺不掺、画布算不算分辨率都由 `Payload` 自己声明（`WITH_CAMERAS` / `RESOLUTION_IS_CANVAS`），没有能对不上的第二处 |
+| `怎么算` | 一个闭包：`(超参数, 输入, 画布) -> 输出域`。**转发给 `ops/` 里那个普通函数**，声明里不放实现 |
 
 ### 3.3b 图参数的形状：**算子自己定义**，两条 impl 由宏生成
 
@@ -198,7 +187,7 @@ pub struct MixInput {
 
 ```text
 源码指纹 = build.rs 遍历「这个 crate 编译进去的全部源码」（自己 src/ + 所有 path 依赖的 src/ + 本文件）
-接口哈希 = interface_hash([type_name::<Params>, type_name::<Inputs>, type_name::<Payload>])
+接口哈希 = interface_hash([type_name::<Params>(), type_name::<Inputs>(), type_name::<Payload>()])
 ```
 
 | 你改了什么 | 源码指纹 | 接口哈希 | 结果 |
@@ -290,10 +279,10 @@ octaves = 6
 ## 4. 命令
 
 ```bash
-cargo build -p px_graphs --bin <图>     # 类型化那一路
-cargo build -p px_<域>_op              # 一个普通的 Rust 库
-cargo run   -q -p px_graphs --bin <图>  # 跑图
-cargo test  -p px_graphs                # 两条门（见 §5）
+cargo build -p px_<域>_op                  # 一个普通的 Rust 库
+cargo run   -q -p px_graphs --bin <图>      # 跑图
+cargo test  -p px_graphs                   # 两道门（见 §6 的 1、2）
+cargo run   -q -p px_graphs --bin scene    # 出场景文档（消费上面几张图的清单）
 ```
 
 ---
@@ -317,26 +306,21 @@ dylib，图程序按 op id 运行时装上，于是**改场函数不必重编图
 
 2. **`px_graph` 不许静态依赖任何算子**（它只认 `Cache`）；schema 层同理。同一个门看着。
 
-3. **参数写错字段名**：靠 `deny_unknown_fields` 当场报。**缺文件仍是静默用默认值**
-   （老口径没动），但跑完会写一份 `<图>/params.json`：**每个节点实际生效的参数值 + 字段名**，
+3. **参数写错字段名**：靠 `deny_unknown_fields` 当场报。**缺文件仍是静默用默认值**，
+   但跑完会写一份 `<图>/params.json`：**每个节点实际生效的参数值 + 字段名**，
    外加一句"N 个节点走默认值：<名字>"。想补参数文件，照着那份 JSON 抄字段名即可。
 
 4. **身份两半都是自动的**，所以「漏一份清单」「忘了升版本」这两类错**没有载体**了：
    源码指纹由 `build.rs` 遍历源码树算，接口哈希由三个类型名推。
    `px_graph/tests/source_hash.rs` 那道门现在守的是「**没有人再把清单加回来**」。
 
-5. ~~`OpKind` 必须与 `Payload` 一致~~ —— **这一条已经不存在了**。不再有 `OpKind`：
-   域就是 `Payload` 类型。从前那条 `const` 断言守的是“你写了个冗余字段又写错了”，
-   现在连字段都没有（`WITH_CAMERAS` / `RESOLUTION_IS_CANVAS` 直接挂在 `Payload` 上）。
+5. **别给"域"再加一个并行声明**。`OpKind` 就是这样一个东西，已经删了 ——
+   域就是 `Payload` 类型。那条 `const` 断言守的是"你写了个冗余字段又写错了"；
+   字段不存在的今天，这类错无从发生。**下次想加"域标签"时，回来读这一条。**
 
-6. **载荷里别放节点名**：节点名与相机是**驱动**写盘时补的（`Driver::store` 的 `bundling`）。
-   算子只回 `bundle.placeholder()`。
+6. **载荷里别放节点名**：节点名与相机是**驱动**写盘时补的（`Driver::store` 里
+   `PayloadBundle::from_bytes` → `to_bytes(node, cameras)`）。算子只回 `bundle.placeholder()`。
 
-7. ~~生成物与主 workspace 各用各的 `target/`~~ —— **这条随 dylib 一起没了**：
-   算子不再产出 dylib，也就没有“两个构建图互相覆盖同名 DLL”这件事。
-
-8. **生成的实例是自足的**（实测：只导入系统库，`px_` 前缀的导入 0 个）——
-   cargo 对 path 依赖选 rlib ⇒ 上游静态链进去。所以**永远不要**从 `target/mono/` 往
-   `target/debug/` 拷任何 `px_*.dll`：那是另一个构建图的产物，拷了就把正确的覆盖掉
-   （这条错只在运行期冒出来，`cargo build` 还判它 fresh）。生成器每次都会读 PE 导入表
-   验一遍（`assert_self_contained`）。
+7. **清单里"命中"也要有条目**。`store` 一度只在重算时记 —— 于是一趟**全命中**的运行
+   写出**空清单**，而下游（`scene`）是**按节点名查清单拿键**的，当场断在
+   "图 'planet' 的清单是空的"。清单是"这一趟图的成员与它们的键"，与命中与否无关。
