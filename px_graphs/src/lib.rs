@@ -17,4 +17,3 @@
 //! · [`cloud_proxy`]：体积代理那一条的**仪器**（射线求交、梯度上界），`--bin clouds` 用；
 //! · `art/<图名>/<节点>.toml` 那些参数所对应的图程序。
 pub mod cloud_proxy;
-pub mod mono;

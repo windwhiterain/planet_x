@@ -1,0 +1,27 @@
+# ⚠ 这一份是**生成的**（`cargo run -q -p px_graphs --bin mono-gen -- clouds` 复制到
+# `target/mono/<库名>/crate/`）。别手改 —— 编辑面是 `src/bin/clouds/mono/fields.rs`。
+#
+# 它落在 `target/` 下；空 `[workspace]` 表是为了让它**不**被要求当主 workspace 的成员
+# （那样每次生成都要改 workspace 的 members，等于每次改动都重编整个 workspace）。
+# 代价：它自己一份 `Cargo.lock` ⇒ 依赖与主 workspace **不通用**，所以
+# `target-dir` 必须分开（混用会把主 workspace 的同名 DLL 覆盖掉）。
+[workspace]
+
+[package]
+name = "@LIB@"
+version = "0.1.0"
+edition = "2024"
+
+# `cdylib`：导出面只有 `<库名>_op_table` 那一个符号（入口名由库名派生，
+# 见 `px_graph_schema::op::table_symbol`）。不必为一堆上游元数据买单。
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+px_cook = { path = "../../../../px_cook" }
+px_graph_schema = { path = "../../../../px_graph_schema" }
+px_field_schema = { path = "../../../../px_field_schema" }
+px_volume_schema = { path = "../../../../px_volume_schema" }
+px_verify = { path = "../../../../px_verify" }
+px_volume_op = { path = "../../../../px_volume_op" }
+serde_json = { version = "1", features = ["float_roundtrip"] }

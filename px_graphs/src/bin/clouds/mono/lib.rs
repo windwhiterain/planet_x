@@ -1,9 +1,10 @@
-// ⚠ 这一份是**生成物**的接线（`px_graphs/src/bin/mono-gen.rs` 复制到 `target/mono/crate/`）。
-// 别手改这里 —— 编辑面是 `px_graphs/mono/fields.rs`（stage 1）与
-// `px_graphs/src/mono.rs`（身份清单）。
+// ⚠ 这一份是**生成的**（`px_graphs/src/bin/mono-gen.rs` 复制到
+// `target/mono/<库名>/crate/`）。别手改这里 —— 编辑面是
+// `src/bin/clouds/mono/fields.rs`（stage 1）与 `src/bin/clouds/mono.rs`（声明）。
 //
 // ⚠ 本文件被 `identity.rs` 与 `fields.rs` 一起 `include!`/`#[path]` 进来，
-// 所以这里**不能有** `//!` 文档注释（外层文档只能出现在 crate 根的顶部）。
+// 所以这里**不能有** `//!` 文档注释（外层文档只能出现在 crate 根的顶部），
+// 也不能 `#![allow(...)]`（内层属性在 include! 展开后不是 crate 根的位置）。
 //
 // 为什么必须生成这么一层：`bake<F: FieldFn>` 的实例要与类型参数 `F` 在**同一个编译单元**
 // 里生成，而图程序是 `bin` ⇒ 实例只可能落在**图侧自建的 dylib** 里。
@@ -15,15 +16,18 @@ use px_graph_schema::{
 };
 use px_volume_schema::{VolumeData, params};
 
+/// stage 1 就在旁边（生成器把 `mono/fields.rs` 复制到同目录再引）。
 #[path = "fields.rs"]
 mod fields;
 
-// 这一份实例的身份（`id` / `version` / `source_hash`）由 `px_graphs::mono` 给 ——
+// 这一份实例的身份（`id` / `version` / `source_hash`）来自 `src/bin/clouds/mono.rs`，
 // 生成器把它具体化进 `identity.rs`。
 include!("identity.rs");
 
-#[unsafe(no_mangle)]
-pub extern "Rust" fn px_mono_op_table() -> &'static OpTable {
+// ⚠ 导出符号名由**库名**派生：驱动按 `<库名>_op_table` 找（`px_graph_schema::op::table_symbol`）。
+// 所以这里用 `#[export_name]` 把库名拼进去 —— 模板本身不带具体库名，生成器填 `@LIB@`。
+#[unsafe(export_name = concat!("@LIB@", "_op_table"))]
+pub extern "Rust" fn table() -> &'static OpTable {
     static TABLE: OpTable = OpTable {
         ops: &[DESCRIPTOR],
         canonical_params: canonical as ParamsCanonical,

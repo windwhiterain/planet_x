@@ -202,33 +202,47 @@ pub fn eval_closed<F: FieldFn>(params, &F) -> VolumeData // = bake::<F>
 **要的是「自动生成单态化 → 编成 dylib → 动态装载」，不是把实例静态烘进图程序。**
 ⚠ 而且**两个 stage 都必须住在 graph scripts 底下**（用户裁定：不是在 `tools/` 那种通用位置）。
 
-### §166.1 布局（`px_graphs/` 底下）
+### §166.1 布局：**每个图的 mono 跟它自己的图脚本同一个目录**
+
+⚠ 这一条是用户裁定的：单态化是**这张图自己的事**，不是全图共用的一个位置
+（放在共用位置时，第二张图会撞上第一张：同名库互相覆盖、同一个 id 互相抢、
+一份 `INGREDIENTS` 绑住所有图）。
 
 ```text
-px_graphs/
-  mono/fields.rs              ⭐ stage 1：要单态化的那一半（**编辑面**，图自己的场函数）
-  mono/template/              stage 2 的三份模板（人手写、进 git）
-    Cargo.toml                cdylib + 空 [workspace]
-    lib.rs                    接线：描述符 / canonical / call
-    identity.rs               身份占位（生成时具体化）
-  src/mono.rs                 身份：MONO_ID / VERSION / INGREDIENTS（配料清单）
-  src/bin/mono-gen.rs         生成器：算身份 → 复制到 target/mono/crate → cargo build → 装入
+px_graphs/src/bin/
+  clouds.rs                    图脚本本体（stage 2 的调用者）
+  clouds/
+    mono.rs                    ⭐ 这一张图的**单态化声明**（`key = value` 文本，不是 Rust 模块）
+    mono/
+      fields.rs                ⭐ stage 1：要单态化的那一半（**编辑面**）
+      Cargo.toml / lib.rs / identity.rs   stage 2 的三份模板
+  mono-gen.rs                  生成器（吃图名：`-- clouds`）
 ```
 
-用法：`cargo run -q -p px_graphs --bin mono-gen`。
+用法：`cargo run -q -p px_graphs --bin mono-gen -- clouds`。
+
+**为什么声明是 `key = value` 文本而不是 Rust 模块**：它要读的东西只有三样（库名 / id / 配料清单），
+而被三个不同的宿主牵动（`clouds.rs` 要 id、生成器要全部、`fields.rs` 谁都不要）。
+做成 Rust 模块就得为三个宿主凑出都能编译的形状（`//!` 与 `///` 在 `include!`/`#[path]`
+的位置会报错 —— 实测 `E0753` / `unused_doc_comments`）。文本声明把这些纠缠一次去掉：
+**id 只有一处**，图脚本用 `include_str!("clouds/mono.rs")` + `declared("id")` 读它。
+
+**每张图三样都不同**：库名（`px_mono_clouds`）、算子 id（`clouds.volume.cloud.coarse.closed`）、
+stage 1 的场函数。生成物落在 `target/debug/px_mono_clouds_op.dll`
+（入口名由**库名**派生：`#[export_name = concat!("<库名>", "_op_table")]`）。
 
 **`bake<ClosedForm<…>>` 的实例是在那个 dylib 内部单态化出来的** —— 这是这一级存在的全部理由
 （泛型的实例化要求"定义"与"类型参数"在同一个编译单元里，而图程序是 `bin`）。
-图脚本只写 `node(px_graphs::mono::MONO_ID, "coarse_closed", &[&source])` ——
+图脚本只写 `node(declared("id"), "coarse_closed", &[&source])` ——
 **`clouds.exe` 里没有那个算子的任何代码**。
 
 ### §166.2 读数（改一行场函数）
 
 | | 读数 |
 |---|---|
-| 改一行 `mono/fields.rs` → 生成 + 编 dylib | **1.75 s** |
+| 改一行 `clouds/mono/fields.rs` → 生成 + 编 dylib | **1.7 s 级** |
 | 同期 `clouds.exe` 的 sha256 | **不变**（图程序一个字节都没重编） |
-| 下一次跑（`--closed-cover`） | 键必变（`2bf8ab4e` → `316df462`）⇒ **必然重算**，不可能陈旧命中 |
+| 下一次跑（`--closed-cover`） | 键必变 ⇒ **必然重算**，不可能陈旧命中 |
 | 生成物大小 | **2.89 MB**（对比 `px_volume_op.dll` 的 13.8 MB） |
 | 全套测试 | **180 通过 / 0 失败** |
 
@@ -255,7 +269,18 @@ px_graphs/
 | **target 也按 mono_key 分** | ❌ 每次改一行场函数都在**新目录**里从零编依赖（**20.8 s/次**），比不带这一级还差 |
 | **构建目录固定 + 源码目录固定** | ✅ **1.56 s**（依赖编一次、之后复用）。代价：`target/mono/crate` 这个位置**不代表身份**，身份由内容（`SOURCE_HASH`）带 —— 想同时要"内容寻址的源码路径"与"复用的依赖"，得自己管依赖产物的存放（**未做**） |
 
-### §166.4 未决：生成的 dylib 仍要**一整套上游 DLL**
+### §166.4 ⚠ 一个会咬人的操作约束（实测两次）
+
+**生成器与主 workspace 不能同时污染同一个 `target/`**：混过一次之后，
+`target/debug/` 里的算子 DLL 会被另一个构建图的产物覆盖（或留下半成品），
+表现是 `LoadLibraryExW failed`，而 `cargo build` **判它 fresh、不会重编** ——
+所以看上去"什么都没改却坏了"。恢复办法是 `cargo clean -p <那三个算子 crate>` 重编。
+
+⚠ 更阴的一点：**装载器的诊断探针（单独一个 crate）能把 4 个库全装好，
+而图程序却失败** —— 因为探针自己的进程里没有那些半成品的依赖冲突。
+所以"探针说没事"不能当"图程序没事"的证据。
+
+### §166.5 未决：生成的 dylib 仍要**一整套上游 DLL**
 
 `px_volume_op` 等算子是 `crate-type = ["dylib", "rlib"]`。生成物**静态链**它们（用的是 rlib），
 但那份 rlib 里的 `dylib`-ABI 依赖会**递归要求上游一整套 `.dll`**

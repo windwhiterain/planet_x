@@ -16,6 +16,21 @@ use px_protocol::art::Domain;
 use px_volume_op::typed as volume;
 use px_volume_schema::PATCHES;
 
+/// `clouds` 的单态化声明（与图脚本同一个目录）：`src/bin/clouds/mono.rs`。
+/// ⚠ 它是 `key = value` 文本、不是 Rust 模块 ⇒ 这里 `include_str!` 进来按行读。
+/// 于是 **id 只有一处**，图脚本与生成器不会各自抄一份。
+const MONO_DECLARATION: &str = include_str!("clouds/mono.rs");
+
+/// 从声明里取一个 `key = value`。
+fn declared(key: &str) -> &'static str {
+    MONO_DECLARATION
+        .lines()
+        .filter_map(|line| line.trim().split_once('='))
+        .find(|(name, _)| name.trim() == key)
+        .map(|(_, value)| value.trim())
+        .unwrap_or_else(|| panic!("clouds/mono.rs 里没有 `{key}`"))
+}
+
 const GRAPH_VERSION: u32 = 6;
 const SOURCE_HASH: u64 = px_graph::fnv1a(include_str!("clouds.rs"));
 const FACE: u32 = 256;
@@ -45,8 +60,8 @@ fn main() -> Result<(), Fault> {
     // ⚠ 这一支是**演示 + 判据**：它走的是「生成的单态化实例 + 动态装载」那一级。
     // 用法：`cargo run -p px_graphs --bin clouds -- --closed-cover`
     //
-    // 关键：`"volume.cloud.coarse.closed"` 这个算子**不在图程序里**，也不在 `px_volume_op` 里 ——
-    // 它在 `target/debug/px_mono_clouds_op.dll`（由 `tools/mono-gen.ps1` 生成 + 编），
+    // 关键：这个算子**不在图程序里**，也不在 `px_volume_op` 里 ——
+    // 它在 `target/debug/px_mono_clouds_op.dll`（由 `--bin mono-gen -- clouds` 生成 + 编），
     // 由 `load_directory` 扫出来接上。所以图程序**一个字节都不用重编**。
     if std::env::args().any(|arg| arg == "--closed-cover") {
         use px_cook::field_fn::{FieldFn, SampleField};
@@ -70,7 +85,7 @@ fn main() -> Result<(), Fault> {
         //    它的 `bake<ClosedForm<…>>` 是在那个 dylib **内部**单态化出来的。
         //    ⚠ 描述符声明了 `inputs = ["coverage"]`（老路径的接口形状），所以这一格必须给；
         //      但**闭式那一档不看它** —— 覆盖度是 dylib 里现算的。
-        let closed = px_graph::node(px_graphs::mono::MONO_ID, "coarse_closed", &[&source_artifact]);
+        let closed = px_graph::node(declared("id"), "coarse_closed", &[&source_artifact]);
 
         // 在**同一批方向**上把两条路的覆盖度并排量出来（这才是可比的东西：
         // 比烘出来的体积没有信息量 —— `shape` 在覆盖度低于阈值时两边都归零）。
@@ -95,7 +110,7 @@ fn main() -> Result<(), Fault> {
         );
         println!(
             "  生成的实例：{}（键 {}）{} 面 × {}² × {} 层 = {} 个采样，值域 {:.4}..{:.4}",
-            px_graphs::mono::MONO_ID,
+            declared("id"),
             px_graph::hex_short(&closed.key),
             PATCHES,
             volume.res,
