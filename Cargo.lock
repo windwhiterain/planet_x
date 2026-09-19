@@ -1362,9 +1362,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3d595e54a326bc53c1c197b32d295e14b169e3cfeaa8dc82b529f947fba6bcf5"
 
 [[package]]
+name = "px-scene"
+version = "0.1.0"
+dependencies = [
+ "px_ops",
+ "px_protocol",
+ "px_shader",
+ "serde",
+ "serde_json",
+ "toml",
+]
+
+[[package]]
 name = "px_graphs"
 version = "0.1.0"
 dependencies = [
+ "px-scene",
  "px_mc",
  "px_ops",
  "px_protocol",

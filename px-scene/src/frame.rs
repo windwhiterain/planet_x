@@ -574,9 +574,9 @@ pub fn build(
                 let member = Member::new("shaders", node, &key);
                 // 参数按**这份 shader 自己的契约**打包：烘图时就把三档
                 // （名字不认识 / 声明了没人给 / 类型不符）全拦下来，不等装载时才拒。
-                let layout = crate::params::schema_of(&member, &px_ops::cache_root())
+                let layout = crate::contract::schema_of(&member, &px_ops::cache_root())
                     .map_err(|err| format!("{at}：{err}"))?;
-                params = crate::params::merge_named(
+                params = crate::contract::merge_named(
                     &format!("帧图 pass '{}'", entry.label),
                     &entry.params,
                     &[],
@@ -827,7 +827,7 @@ fn bake_material(
         given.insert(slot.name.clone(), toml_of(&resolved));
     }
 
-    let params = crate::params::merge_named(&at, &given, &[], &layout, BTreeMap::new())
+    let params = crate::contract::merge_named(&at, &given, &[], &layout, BTreeMap::new())
         .map_err(|err| err.to_string())?;
     Ok(FrameMaterial {
         name: material.name.clone(),

@@ -1,21 +1,23 @@
 [package]
-name = "px_graphs"
+name = "px-scene"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-# ⚠ 依赖方向：**pcg 的图程序依赖 `px_scene`**（高层场景语义 + 帧图编译器），
-# 反过来就是环。`frame` / `params` 两个模块已经从本 crate 搬进 `px_scene`（§px-scene）。
-px-scene = { path = "../px-scene" }
+# 底层三件：契约（类型 + serde）、算子与 CAS（`px_ops`）、shader 反射与组装（`px_shader`）。
+# ⚠ **不依赖 `px_graphs`**：方向是 pcg 的图程序依赖这一层，反过来就是环。
+px_protocol = { path = "../px_protocol" }
 px_ops = { path = "../px_ops" }
 px_shader = { path = "../px_shader" }
-px_protocol = { path = "../px_protocol" }
-px_verify = { path = "../px_verify" }
-px_mc = { path = "../px_mc" }
+# 等值面那一条（`px_mc`）只为体积/代理那一支，今天这里还没有消费者 ⇒ 先不加。
 serde = { version = "1", features = ["derive"] }
 # ⚠ `float_roundtrip` **必须开**：默认的浮点解析不是正确舍入的，于是
 # "读进来再写回去"不是恒等（实测 `0.11999999731779099` 会读成 +1 ulp 的值）。
 # 本仓库的判据是逐字节的，读不出写进去的东西就是缺陷 —— 代价是浮点解析约 2×，
 # 而文档只有几 KB。五个 crate 都写一遍：别靠特性合并的偶然。
 serde_json = { version = "1", features = ["float_roundtrip"] }
+toml = "0.8"
+
+[dev-dependencies]
+# 搬过来的那批判据用 TOML 当夹具（`contract` 的单测直接构造 toml 值）。
 toml = "0.8"

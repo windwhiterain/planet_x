@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use px_graphs::params::{merge_named, shader_parts_of};
+use px_scene::contract::{merge_named, shader_parts_of};
 use px_protocol::scene::{Member, PassResource, PassSpec, SceneSpec};
 use serde::Deserialize;
 
@@ -125,7 +125,7 @@ fn main() {
 
     // 位置参数：<场景产物> <pass 配方> [输出路径]；开关：--frame <名> / --no-frame-graph。
     let mut positional: Vec<String> = Vec::new();
-    let mut frame_name = px_graphs::frame::DEFAULT_FRAME.to_string();
+    let mut frame_name = px_scene::frame::DEFAULT_FRAME.to_string();
     let mut with_graph = true;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -313,14 +313,14 @@ fn main() {
         all.extend(passes);
         spec.passes = all;
     } else {
-        let frame = px_graphs::frame::load(&frame_name).unwrap_or_else(|err| panic!("{err}"));
+        let frame = px_scene::frame::load(&frame_name).unwrap_or_else(|err| panic!("{err}"));
         // 先核对基准产物是不是这张帧图烘的：不是就**当场拒**（说清期望什么、实际是什么）。
-        px_graphs::frame::verify(&spec, &frame, &frame_name)
+        px_scene::frame::verify(&spec, &frame, &frame_name)
             .unwrap_or_else(|err| panic!("{err}"));
         // 插入点：`after` 段的第一条在文档里的下标。
         //
         // ⚠ **不能拿 `before.len()` 当下标**（这里原来就是这么写的，而它每一次都越界）：
-        //    `px_graphs::frame::build` 在**一盏投影的点光都没有**时会把那几条影子 pass
+        //    `px_scene::frame::build` 在**一盏投影的点光都没有**时会把那几条影子 pass
         //    整条丢掉（§109.4），于是 `before.len()` 是**配方**的条数 6，而文档里只有
         //    5 条绘制 pass —— 6 已经不是下标了。上一版还错在第二处：它拿这个数当
         //    `after` 的第一条，而 `after` 里的 pass 在数组里的位置**本来就靠后**。
