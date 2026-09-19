@@ -13,15 +13,15 @@
 ```rust
 use px_cook::cook;
 
-let clusters = cook::<field::Fbm>(&cache, "clusters", (), canvas)?;
+let clusters = cook::<field::Fbm>(&cache, "clusters", ())?;
 let carved   = cook::<field::Warp>(&cache, "carved",
-                   field::FieldPairInput { field: billows, offset: flow }, canvas)?;
+                   field::FieldPairInput { field: billows, offset: flow })?;
 let mixed    = cook::<field::Mix>(&cache, "mixed",
-                   field::MixInput { a: clusters, b: carved, mask: weight }, canvas)?;
+                   field::MixInput { a: clusters, b: carved, mask: weight })?;
 let coarse   = cook::<volume::CloudCoarse>(&cache, "coarse",
-                   volume::CloudCoarseInput { coverage: mixed.clone() }, canvas)?;
+                   volume::CloudCoarseInput { coverage: mixed.clone() })?;
 let proxy    = cook::<mesh::Proxy>(&cache, "proxy",
-                   mesh::ProxyInput { volume: coarse }, canvas)?;
+                   mesh::ProxyInput { volume: coarse })?;
 ```
 
 **就这些**。没有 `OpKind`、没有 `encode`/`decode`、没有 `cook_field`/`cook_volume`/`cook_mesh`、
@@ -228,18 +228,18 @@ pub struct MixInput {
 use px_cook::cook;
 
 // 无上游
-let clusters = cook::<field::Fbm>(&cache, "clusters", (), canvas)?;
+let clusters = cook::<field::Fbm>(&cache, "clusters", ())?;
 // 两个上游：具名字段
 let carved = cook::<field::Warp>(&cache, "carved",
-    field::FieldPairInput { field: billows, offset: flow }, canvas)?;
+    field::FieldPairInput { field: billows, offset: flow })?;
 // 三个
 let mixed = cook::<field::Mix>(&cache, "mixed",
-    field::MixInput { a: clusters, b: carved, mask: weight }, canvas)?;
+    field::MixInput { a: clusters, b: carved, mask: weight })?;
 // 体积与网格
 let coarse = cook::<volume::CloudCoarse>(&cache, "coarse",
-    volume::CloudCoarseInput { coverage: mixed.clone() }, canvas)?;
+    volume::CloudCoarseInput { coverage: mixed.clone() })?;
 let proxy = cook::<mesh::Proxy>(&cache, "proxy",
-    mesh::ProxyInput { volume: coarse }, canvas)?;
+    mesh::ProxyInput { volume: coarse })?;
 ```
 
 - **上游是值，不是引用**：`Cooked<T>` 里是值 ⇒ 同一份被多处用就 `.clone()`。

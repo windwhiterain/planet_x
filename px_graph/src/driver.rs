@@ -29,8 +29,12 @@ use px_volume_schema::{PATCHES, VolumeData};
 /// 后者在这里，两边都不需要知道对方的算子长什么样。
 pub trait Cache {
     fn graph_version(&self) -> u32;
-    fn canvas(&self) -> (u32, u32);
-    fn projection(&self) -> Domain;
+    /// **画布 = 算子拿到的那个 `Grid`**（尺寸 + 投影）。
+    ///
+    /// ⚠ 只有一个出口：键里那一份与算子 `render` 手里那一份必须是同一个值。
+    ///   从前它们是两处（`canvas()` + `projection()` 给键、`cook` 的参数给算子）——
+    ///   那种"双份真相"是错的。
+    fn grid(&self) -> Grid;
     fn cameras(&self) -> &[Camera];
     /// `art/<图>/<name>.toml` 的原文；`None` = 文件不存在 ⇒ 用算子默认值。
     fn params_text(&self, name: &str) -> Option<String>;
@@ -73,12 +77,8 @@ impl Cache for Driver {
         context().spec.version
     }
 
-    fn canvas(&self) -> (u32, u32) {
-        (context().spec.width, context().spec.height)
-    }
-
-    fn projection(&self) -> Domain {
-        context().spec.projection
+    fn grid(&self) -> Grid {
+        context().grid
     }
 
     fn cameras(&self) -> &[Camera] {
@@ -305,6 +305,8 @@ impl Artifact {
 
 struct Context {
     spec: GraphSpec,
+    /// 画布：尺寸 + 投影。**只在这里折算一次** —— 键里那份与算子手里那份因此必然相同。
+    grid: Grid,
     param_dir: PathBuf,
     cache_root: PathBuf,
     fresh: bool,
@@ -433,6 +435,11 @@ pub fn begin(spec: GraphSpec) {
     let cached = index.len();
 
     let _ = CONTEXT.set(Context {
+        grid: Grid {
+            width: spec.width,
+            height: spec.height,
+            projection: spec.projection,
+        },
         param_dir: param_dir.clone(),
         cache_root: cache_root.clone(),
         fresh,

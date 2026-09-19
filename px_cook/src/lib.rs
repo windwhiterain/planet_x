@@ -307,11 +307,14 @@ pub fn cook<O>(
     cache: &dyn Cache,
     node: &str,
     inputs: O::Inputs,
-    grid: Grid,
 ) -> Result<Cooked<O::Payload>, String>
 where
     O: PxOp,
 {
+    // ⚠ 画布从 `cache` 取，**不是参数**：它本来就住在驱动里（`GraphSpec`），
+    //   而键里那一份与算子 `render` 手里那一份必须是同一个值。
+    //   从前它是参数 ⇒ 两处可以不一致，而那种不一致没有任何检查看得见。
+    let grid = cache.grid();
     let op = O::new();
     let toml_text = cache.params_text(node);
     let from_file = toml_text.is_some();
@@ -325,10 +328,9 @@ where
     hasher.update(&O::interface().to_le_bytes());
     hasher.update(O::SOURCE_HASH.as_bytes());
     hasher.update(&cache.graph_version().to_le_bytes());
-    let (width, height) = cache.canvas();
-    hasher.update(&width.to_le_bytes());
-    hasher.update(&height.to_le_bytes());
-    hasher.update(cache.projection().name().as_bytes());
+    hasher.update(&grid.width.to_le_bytes());
+    hasher.update(&grid.height.to_le_bytes());
+    hasher.update(grid.projection.name().as_bytes());
     hasher.update(params_json.as_bytes());
     inputs.collect(&mut hasher);
     let base = *hasher.finalize().as_bytes();
@@ -340,9 +342,8 @@ where
         base
     };
 
-    let projection = cache.projection();
     if let Some(bytes) = cache.fetch(key) {
-        let value = O::payload().decode(&bytes, projection, node)?;
+        let value = O::payload().decode(&bytes, grid.projection, node)?;
         let bytes_len = bytes.len();
         cache.store(
             Report {
