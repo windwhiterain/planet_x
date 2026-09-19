@@ -6,11 +6,10 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
-use std::time::Instant;
 
 use px_graph_schema::{
-    GraphSpec, Grid, Key, ManifestEntry, OpDescriptor, OpKind, OpLibrary, PayloadBundle,
-    fnv1a, hex, hex_short, key_with_cameras, node_key,
+    GraphSpec, Grid, Key, ManifestEntry, OpKind, PayloadBundle,
+    fnv1a, hex, hex_short,
 };
 use px_protocol::art::{Camera, Domain};
 use px_protocol::stream::{self, Frame};
@@ -20,7 +19,7 @@ use px_field_schema::payload as field_payload;
 use px_mesh_schema::MeshData;
 use px_mesh_schema::payload as mesh_payload;
 use px_volume_schema::payload as volume_payload;
-use px_volume_schema::{PATCHES, VolumeData};
+use px_volume_schema::VolumeData;
 
 /// **缓存机制**：图脚本那边的类型化门面（`px_cook`）只认这一个接口。
 ///
@@ -58,8 +57,11 @@ pub struct Report<'a> {
     pub hit: bool,
     pub millis: u64,
     pub bytes: usize,
-    /// 与老路径同一个口径：体积那一档不掺评审相机。
+    /// 体积那一档不掺评审相机。
     pub with_cameras: bool,
+    /// 清单里那三个读数 `(min, max, mean)` —— 由**算子那一侧**算（类型化的值在它手里，
+    /// 不必让驱动解字节去猜域）。
+    pub stats: (f64, f64, f64),
 }
 
 /// 缓存机制的句柄。`begin(GraphSpec)` 之后才有，用 `driver()` 取。
@@ -107,9 +109,17 @@ impl Cache for Driver {
     fn store(&self, report: Report<'_>, bytes: &[u8]) -> Result<(), String> {
         let context = context();
         // ⚠ 算子回的是**无名、无相机**的占位载荷（"算子只回一个载荷，驱动把它补成产物"）。
-        // 所以这里必须把节点名与相机表补回去 —— 老路径那句话（`to_bytes(name, cameras)`）
-        // 在这一层同样成立，漏了就会写出"id 空、相机空"的产物（逐字节对账会当场抓到）。
-        let bytes = bundling(bytes, report.node, report.op, report.with_cameras, &context.spec)?;
+        // 所以这里必须把节点名与相机表补回去，漏了就会写出"id 空、相机空"的产物。
+        let cameras: &[Camera] = if report.with_cameras {
+            &context.spec.cameras
+        } else {
+            &[]
+        };
+        let bundle = PayloadBundle::from_bytes(bytes)
+            .unwrap_or_else(|err| panic!("{}（{}）回的载荷解不开：{err}", report.node, report.op));
+        let bytes = bundle
+            .to_bytes(report.node, cameras)
+            .unwrap_or_else(|err| panic!("包 {} 的产物失败：{err}", report.node));
         let path = artifact_path(&context.cache_root, &report.key);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
@@ -118,14 +128,9 @@ impl Cache for Driver {
         std::fs::write(&path, &bytes)
             .map_err(|err| format!("写产物 {} 失败：{err}", path.display()))?;
 
+        // ⚠ 清单那三个读数由**算子那一侧**算（类型化的值在它手里，不必让驱动解字节猜域）。
+        let (min, max, mean) = report.stats;
         if !report.hit {
-            let payload = decode_payload(
-                &bytes,
-                kind_of(report.op),
-                context.spec.projection,
-                report.node,
-            );
-            let stats = payload_stats(&payload);
             let entry = ManifestEntry {
                 node: report.node.to_string(),
                 op: report.op.to_string(),
@@ -134,9 +139,9 @@ impl Cache for Driver {
                 hit: false,
                 millis: report.millis,
                 bytes: bytes.len() as u64,
-                min: stats.min,
-                max: stats.max,
-                mean: stats.mean,
+                min: min as f32,
+                max: max as f32,
+                mean: mean as f32,
             };
             println!(
                 "重算 {:<12} {:<16} @{}  {}  {:>5} ms  {:>9} B",
@@ -165,34 +170,9 @@ impl Cache for Driver {
         }
         Ok(())
     }
+
 }
 
-/// 把算子回的占位载荷补成产物：**节点名 + 本次该带的相机表**。
-///
-/// ⚠ 相机那一档与老路径逐字同一条口径：体积不进相机（相机是「怎么看」，体积没人看）。
-fn bundling(
-    bytes: &[u8],
-    node: &str,
-    op_id: &str,
-    with_cameras: bool,
-    spec: &GraphSpec,
-) -> Result<Vec<u8>, String> {
-    let bundle = PayloadBundle::from_bytes(bytes)?;
-    let _ = op_id;
-    let cameras: &[Camera] = if with_cameras { &spec.cameras } else { &[] };
-    bundle.to_bytes(node, cameras)
-}
-
-/// 画布折进键（只对**场**那一档：场的分辨率就是画布）。
-fn key_with_canvas(key: Key, grid: Grid) -> Key {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(b"px_canvas/v1");
-    hasher.update(&key);
-    hasher.update(&grid.width.to_le_bytes());
-    hasher.update(&grid.height.to_le_bytes());
-    hasher.update(grid.projection.name().as_bytes());
-    *hasher.finalize().as_bytes()
-}
 
 /// 接口哈希的低 32 位：清单里那个只用于显示/对账的 `op_version` 字段。
 ///
@@ -206,104 +186,17 @@ fn interface_tag(interface: u64) -> String {
     format!("{:016x}", interface)[..8].to_string()
 }
 
-/// 把算子的**源码哈希**折进键（§17.1 那条「键 = 内容」的补丁）。
-///
-/// 与 `px_graph_schema::key_with_cameras` 同一条做法：在键的末尾再混一维，
-/// 老键的具体值只取决于这一维加不加。⚠ 加不加是**一次性的口径决定**，不是每键可选。
-fn key_with_source_hash(key: Key, source_hash: &str) -> Key {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(b"px_source/v1");
-    hasher.update(&key);
-    hasher.update(source_hash.as_bytes());
-    *hasher.finalize().as_bytes()
-}
-
-/// 从 CAS 里读回一份产物的字节（按键）。
-///
-/// ⚠ 这是「键 → 字节」的**唯一**出口：类型化那一支（`px_cook`）要靠它把
-/// `Cooked<T>` 换成老路径的 `Artifact`，而两条路混用时不重新序列化、不写第二份产物。
-pub fn read_cached(key: Key) -> Result<Vec<u8>, String> {
-    let context = context();
-    let path = artifact_path(&context.cache_root, &key);
-    std::fs::read(&path).map_err(|err| format!("读不了产物 {}：{err}", path.display()))
-}
 
 /// 取缓存机制的句柄（`begin` 之后才有效）。
 pub fn driver() -> Driver {
     Driver
 }
 
-fn kind_of(op_id: &str) -> OpKind {
-    if op_id.starts_with("volume.") || op_id == px_volume_schema::params::CLOUD_COARSE {
-        OpKind::Volume
-    } else if op_id.starts_with("mesh.") {
-        OpKind::Mesh
-    } else {
-        OpKind::Field
-    }
-}
 
-fn payload_stats(payload: &Payload) -> Stats {
-    match payload {
-        Payload::Field(field) => field.stats(),
-        Payload::Mesh(mesh) => Stats {
-            min: mesh.vertices() as f32,
-            max: mesh.triangles() as f32,
-            mean: 0.0,
-        },
-        Payload::Volume(volume) => volume_stats(volume),
-    }
-}
 
-pub enum Payload {
-    Field(Field),
-    Mesh(MeshData),
-    Volume(VolumeData),
-}
 
-impl Payload {
-    pub fn field(&self) -> &Field {
-        match self {
-            Self::Field(field) => field,
-            _ => panic!("这个产物是网格/体积，不是场"),
-        }
-    }
 
-    pub fn mesh(&self) -> &MeshData {
-        match self {
-            Self::Mesh(mesh) => mesh,
-            _ => panic!("这个产物是场/体积，不是网格"),
-        }
-    }
 
-    pub fn volume(&self) -> &VolumeData {
-        match self {
-            Self::Volume(volume) => volume,
-            _ => panic!("这个产物是场/网格，不是体积"),
-        }
-    }
-}
-
-pub struct Artifact {
-    pub key: Key,
-    pub payload: Payload,
-    /// 产物在 CAS 里的那串字节。下游算子吃的是它（**不是**重新序列化一遍）。
-    pub bytes: Vec<u8>,
-}
-
-impl Artifact {
-    pub fn field(&self) -> &Field {
-        self.payload.field()
-    }
-
-    pub fn mesh(&self) -> &MeshData {
-        self.payload.mesh()
-    }
-
-    pub fn volume(&self) -> &VolumeData {
-        self.payload.volume()
-    }
-}
 
 struct Context {
     spec: GraphSpec,
@@ -314,7 +207,6 @@ struct Context {
     fresh: bool,
     /// 算子库**按需装载**：只写 shader / 只写场景的图（`--bin shaders` / `--bin scene`）
     /// 一个算子都不需要，不该因为找不到 dylib 就起不来。
-    libraries: OnceLock<Vec<OpLibrary>>,
     manifest: Mutex<Vec<ManifestEntry>>,
     /// 每个节点实际读到的参数（诊断：缺文件是静默用默认值的，设计师看不到自己少写了什么）。
     params_used: Mutex<BTreeMap<String, ParamsUsed>>,
@@ -329,43 +221,9 @@ struct ParamsUsed {
 }
 
 impl Context {
-    fn libraries(&self) -> &[OpLibrary] {
-        self.libraries.get_or_init(|| {
-            let loaded = load_ops();
-            let ops: Vec<String> = loaded
-                .iter()
-                .flat_map(|library| library.descriptors())
-                .map(|op| format!("{}@{}", op.id, interface_tag(op.interface)))
-                .collect();
-            println!(
-                "算子库 {} 个：{}",
-                loaded.len(),
-                ops.join(" / "),
-            );
-            loaded
-        })
-    }
 
-    /// 按 op_id 在**已装载的**算子库里找它。找不到就把已装载的算子列出来 ——
-    /// 「静默地什么也没算」在这条路上是不允许的。
-    fn find(&self, op_id: &str) -> (&OpLibrary, OpDescriptor) {
-        let libraries = self.libraries();
-        for library in libraries {
-            if let Some(descriptor) = library.descriptor(op_id) {
-                return (library, descriptor);
-            }
-        }
-        let known: Vec<&str> = libraries
-            .iter()
-            .flat_map(|library| library.descriptors())
-            .map(|op| op.id)
-            .collect();
-        panic!(
-            "不认识算子 '{op_id}'；已装载的算子库 {} 个，算子：{}",
-            libraries.len(),
-            known.join(" / "),
-        );
-    }
+
+
 }
 
 static CONTEXT: OnceLock<Context> = OnceLock::new();
@@ -377,53 +235,7 @@ pub fn workspace_root() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
-/// 算子库找哪几个目录（按顺序，先在哪个目录找到就只认那一个）。
-///
-/// `cargo run`/`cargo test` 把 exe 放进 `target/<profile>`（测试在 `.../deps`），
-/// 所以 exe 目录、它的上一级、以及 workspace 的 `target/<profile>` 都要看一遍。
-fn op_directories() -> Vec<PathBuf> {
-    let mut dirs = Vec::new();
-    if let Ok(dir) = std::env::var("PX_GRAPH_OP_DIR") {
-        dirs.push(PathBuf::from(dir));
-    }
-    if let Ok(exe) = std::env::current_exe()
-        && let Some(dir) = exe.parent()
-    {
-        dirs.push(dir.to_path_buf());
-        if let Some(parent) = dir.parent() {
-            dirs.push(parent.to_path_buf());
-        }
-    }
-    let profile = if cfg!(debug_assertions) { "debug" } else { "release" };
-    dirs.push(workspace_root().join("target").join(profile));
-    dirs
-}
-
 /// 把算子库都装进来。一个都没找到就**当场拒**，并把该跑的命令打出来。
-fn load_ops() -> Vec<OpLibrary> {
-    let dirs = op_directories();
-    let mut notes = Vec::new();
-    for dir in &dirs {
-        match px_graph_schema::load::load_directory(dir) {
-            Ok(found) if !found.is_empty() => return found,
-            Ok(_) => notes.push(format!("{}：没有 px_*_op", dir.display())),
-            Err(err) => notes.push(err),
-        }
-    }
-    panic!(
-        "一个算子库（px_*_op 动态库）都没找到。\n\
-         找过：{}\n\
-         ⚠ 每个目录的读数（空 = 没有匹配 `px_*_op` 的文件；Err = 有文件但装载失败）：\n  {}\n\
-         先 `cargo build -p px_field_op -p px_volume_op -p px_mesh_op`（改完算子之后要重跑这一条），\n\
-         或者用 PX_GRAPH_OP_DIR 指到它们所在的目录。",
-        dirs.iter()
-            .map(|dir| dir.display().to_string())
-            .collect::<Vec<_>>()
-            .join("、"),
-        notes.join("\n  "),
-    );
-}
-
 pub fn begin(spec: GraphSpec) {
     let root = workspace_root();
     let param_dir = root.join("art").join(&spec.name);
@@ -431,7 +243,6 @@ pub fn begin(spec: GraphSpec) {
     let fresh = std::env::var("PX_PCG_FRESH")
         .map(|value| value != "0")
         .unwrap_or(false);
-    let libraries = OnceLock::new();
     let cached = cache_root.join(&spec.name).join("manifest.json").is_file() as usize;
 
     let _ = CONTEXT.set(Context {
@@ -443,7 +254,6 @@ pub fn begin(spec: GraphSpec) {
         param_dir: param_dir.clone(),
         cache_root: cache_root.clone(),
         fresh,
-        libraries,
         manifest: Mutex::new(Vec::new()),
         params_used: Mutex::new(BTreeMap::new()),
         spec,
@@ -468,213 +278,8 @@ fn context() -> &'static Context {
     CONTEXT.get().expect("先调用 px_graph::begin")
 }
 
-/// 一个节点：`op_id` 说「用哪个算子」，`name` 说「参数文件叫什么、清单里记什么」。
-///
-/// 两遍走（§17.1）：先按描述符表把参数规范化、算键、查 CAS；键不在盘上才叫算子求值。
-pub fn node(op_id: &str, name: &str, inputs: &[&Artifact]) -> Artifact {
-    let context = context();
-    let (library, descriptor) = context.find(op_id);
-    // ⚠ 输入**个数**不再由描述符声明（那是个手维护的名字清单，类型化那一支根本不用它）
-    //   —— 描述符只剩"我是谁"。老路径这一支没有编译期检查，只能凭调用点给对。
 
-    let params_path = context.param_dir.join(format!("{name}.toml"));
-    let params_text = load_params_text(&context.param_dir, name);
-    let params_json = library
-        .canonical_params(op_id, params_text.as_deref())
-        .unwrap_or_else(|err| panic!("读参数 {} 失败：{err}", params_path.display()));
 
-    let input_keys: Vec<Key> = inputs.iter().map(|artifact| artifact.key).collect();
-    // ⚠ 接口哈希取代了手写的 `version`：它由算子那三个类型名推出来，
-    //   改了参数/输入/输出类型自动变，没有"忘了升版本"这回事。
-    let interface = format!("{:016x}", descriptor.interface);
-    // ⚠ 老路径的每个节点都掺画布（它不知道域）。类型化那一支按域决定 ——
-    //   两条路的键从此**不必一致**，因为老路径只剩演示分支在用。
-    let key = node_key(op_id, &interface, &params_json, &input_keys);
-    let key = if descriptor.kind == OpKind::Field {
-        key_with_canvas(key, context.grid)
-    } else {
-        key
-    };
-    // ⚠ 体积那一档**不掺相机**：相机是「怎么看」，而体积没人看（渲染器只读 mesh）。
-    let key = if descriptor.kind == OpKind::Volume {
-        key
-    } else {
-        key_with_cameras(key, &context.spec.cameras)
-    };
-    // ⚠ **算子的源码哈希也进键**（在相机之后，与 `key_with_cameras` 同一个位置）。
-    //
-    // 理由：算子的语义可能随源码变而 `VERSION` 没升，而描述符表里那份 `SOURCE_HASH`
-    // 是编译期带过来的 —— 只拿它对账、不进键，就会出现「同一个键、不同内容」：
-    // 改了算子实现之后**命中旧产物**，只有一行 stderr 告警。
-    // 类型化那一支（`px_cook::cook_key`）从一开始就是这么做的；这里补上，
-    // 让两条路的**新鲜度**一致。
-    // ⚠ 老产物的键会因此**全部失效**（第一次重烘一遍），这是**故意的**：
-    // 换掉的正是「源码变了而版本没升」那一档的陈旧命中。之后老键稳定。
-    let key = key_with_source_hash(key, descriptor.source_hash);
-    let path = artifact_path(&context.cache_root, &key);
-    let short = hex_short(&key);
-    let started = Instant::now();
-
-    let cached = if context.fresh {
-        None
-    } else {
-        std::fs::read(&path).ok()
-    };
-
-    let (bytes, hit, size) = match cached {
-        Some(bytes) => {
-            let size = bytes.len() as u64;
-            (bytes, true, size)
-        }
-        None => {
-            let borrowed: Vec<&[u8]> = inputs
-                .iter()
-                .map(|artifact| artifact.bytes.as_slice())
-                .collect();
-            let grid = Grid {
-                width: context.spec.width,
-                height: context.spec.height,
-                projection: context.spec.projection,
-            };
-            let out = library
-                .call(op_id, &params_json, grid, &borrowed)
-                .unwrap_or_else(|err| panic!("{name}（{op_id}）求值失败：{err}"));
-            let bundle = PayloadBundle::from_bytes(&out)
-                .unwrap_or_else(|err| panic!("{name}（{op_id}）回的载荷解不开：{err}"));
-            let cameras: &[Camera] = if descriptor.kind == OpKind::Volume {
-                &[]
-            } else {
-                &context.spec.cameras
-            };
-            let bytes = bundle
-                .to_bytes(name, cameras)
-                .unwrap_or_else(|err| panic!("包 {name} 的产物失败：{err}"));
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent).ok();
-            }
-            std::fs::write(&path, &bytes)
-                .unwrap_or_else(|err| panic!("写产物 {} 失败：{err}", path.display()));
-            let size = bytes.len() as u64;
-            (bytes, false, size)
-        }
-    };
-
-    let payload = decode_payload(&bytes, descriptor.kind, context.spec.projection, name);
-    let millis = started.elapsed().as_millis() as u64;
-    let entry = match &payload {
-        Payload::Field(field) => {
-            let stats = field.stats();
-            println!(
-                "{} {:<12} {:<16} @{}  {}  {:>4} ms  {:>9} B  值域 {:.4}..{:.4} 均 {:.4}",
-                if hit { "命中" } else { "重算" },
-                name,
-                op_id,
-                interface_tag(descriptor.interface),
-                short,
-                millis,
-                size,
-                stats.min,
-                stats.max,
-                stats.mean,
-            );
-            ManifestEntry {
-                node: name.to_string(),
-                op: op_id.to_string(),
-                op_version: interface_version(descriptor.interface),
-                key: hex(&key),
-                hit,
-                millis,
-                bytes: size,
-                min: stats.min,
-                max: stats.max,
-                mean: stats.mean,
-            }
-        }
-        Payload::Mesh(mesh) => {
-            println!(
-                "{} {:<12} {:<16} @{}  {}  {:>4} ms  {:>9} B  {} 顶点 / {} 三角形",
-                if hit { "命中" } else { "重算" },
-                name,
-                op_id,
-                interface_tag(descriptor.interface),
-                short,
-                millis,
-                size,
-                mesh.vertices(),
-                mesh.triangles(),
-            );
-            ManifestEntry {
-                node: name.to_string(),
-                op: op_id.to_string(),
-                op_version: interface_version(descriptor.interface),
-                key: hex(&key),
-                hit,
-                millis,
-                bytes: size,
-                min: mesh.vertices() as f32,
-                max: mesh.triangles() as f32,
-                mean: 0.0,
-            }
-        }
-        Payload::Volume(volume) => {
-            let stats = volume_stats(volume);
-            println!(
-                "{} {:<12} {:<16} @{}  {}  {:>5} ms  {:>9} B  值域 {:.4}..{:.4} 均 {:.4}  {} 面 {}×{}×{} 层",
-                if hit { "命中" } else { "重算" },
-                name,
-                op_id,
-                interface_tag(descriptor.interface),
-                short,
-                millis,
-                size,
-                stats.min,
-                stats.max,
-                stats.mean,
-                PATCHES,
-                volume.res,
-                volume.res,
-                volume.layers,
-            );
-            ManifestEntry {
-                node: name.to_string(),
-                op: op_id.to_string(),
-                op_version: interface_version(descriptor.interface),
-                key: hex(&key),
-                hit,
-                millis,
-                bytes: size,
-                min: stats.min,
-                max: stats.max,
-                mean: stats.mean,
-            }
-        }
-    };
-
-    context
-        .manifest
-        .lock()
-        .expect("清单锁坏了")
-        .push(entry);
-
-    Artifact { key, payload, bytes }
-}
-
-fn decode_payload(bytes: &[u8], kind: OpKind, projection: Domain, name: &str) -> Payload {
-    match kind {
-        OpKind::Field => Payload::Field(
-            field_payload::decode(bytes, projection)
-                .unwrap_or_else(|err| panic!("{name} 的场载荷解不开：{err}")),
-        ),
-        OpKind::Mesh => Payload::Mesh(
-            mesh_payload::decode(bytes)
-                .unwrap_or_else(|err| panic!("{name} 的网格载荷解不开：{err}")),
-        ),
-        OpKind::Volume => Payload::Volume(
-            volume_payload::decode(bytes)
-                .unwrap_or_else(|err| panic!("{name} 的体积载荷解不开：{err}")),
-        ),
-    }
-}
 
 fn volume_stats(volume: &VolumeData) -> Stats {
     let mut min = f32::INFINITY;

@@ -15,22 +15,6 @@ use px_protocol::art::Domain;
 use px_volume_op::typed as volume;
 use px_volume_schema::PATCHES;
 
-/// `clouds` 的单态化声明：`src/bin/clouds/mono/fields.mono`
-/// （与 stage 1 的 `fields.rs` 同目录、同主名）。
-/// ⚠ 它是 `key = value` 文本、不是 Rust 模块 ⇒ 这里 `include_str!` 进来按行读。
-/// 于是 **id 只有一处**，图脚本与生成器不会各自抄一份。
-const MONO_DECLARATION: &str = include_str!("clouds/mono/fields.mono");
-
-/// 从声明里取一个 `key = value`。
-fn declared(key: &str) -> &'static str {
-    MONO_DECLARATION
-        .lines()
-        .filter_map(|line| line.trim().split_once('='))
-        .find(|(name, _)| name.trim() == key)
-        .map(|(_, value)| value.trim())
-        .unwrap_or_else(|| panic!("clouds/mono.rs 里没有 `{key}`"))
-}
-
 const FACE: u32 = 256;
 
 /// 图侧对错误的统一态度：**当场失败**，不静默跳过（§62 那条口径的同一面）。
@@ -47,70 +31,6 @@ fn main() -> Result<(), Fault> {
         cameras: px_graph::cameras::review(),
     });
     let cache = px_graph::driver();
-
-    // ⚠ 这一支是**演示 + 判据**：它走的是「生成的单态化实例 + 动态装载」那一级。
-    // 用法：`cargo run -p px_graphs --bin clouds -- --closed-cover`
-    //
-    // 关键：这个算子**不在图程序里**，也不在 `px_volume_op` 里 ——
-    // 它在 `target/debug/px_mono_clouds_op.dll`（由 `--bin mono-gen -- clouds` 生成 + 编），
-    // 由 `load_directory` 扫出来接上。所以图程序**一个字节都不用重编**。
-    if std::env::args().any(|arg| arg == "--closed-cover") {
-        use px_cook::field_fn::{FieldFn, SampleField};
-        use px_volume_schema::params as volume_params;
-
-        let params = volume_params::parse(params_text("coarse").as_deref())?;
-        // ① 老路：先用一个上游算子烘出整张覆盖度场，再在 3D 里按方向回采
-        let source = cook::<field::Fbm>(&cache, "clusters", ())?;
-        let sampled = SampleField { field: source.field() };
-        // 两条路混用时的桥：类型化的 `Cooked` → 老路径的 `Artifact`（键同一个，不重算）
-        let source_artifact = source.to_artifact()?;
-
-        // ② 生成的单态化实例：**动态装载**进来的那一份。
-        //    它的 `bake<ClosedForm<…>>` 是在那个 dylib **内部**单态化出来的。
-        //    ⚠ 描述符声明了 `inputs = ["coverage"]`（老路径的接口形状），所以这一格必须给；
-        //      但**闭式那一档不看它** —— 覆盖度是 dylib 里现算的。
-        let closed = px_graph::node(declared("id"), "coarse_closed", &[&source_artifact]);
-
-        // 在**同一批方向**上把两条路的覆盖度并排量出来（这才是可比的东西：
-        // 比烘出来的体积没有信息量 —— `shape` 在覆盖度低于阈值时两边都归零）。
-        let cloud = px_verify::proxy::from_volume(&params);
-        let mut open_range = (f32::INFINITY, f32::NEG_INFINITY);
-        let steps = 2000_u32;
-        for index in 0..steps {
-            // 一条**确定性**的扫描线（不带随机数，跨进程一致）
-            let t = index as f32 / steps as f32;
-            let direction = px_field_schema::field::normalize([
-                (t * std::f32::consts::TAU).cos(),
-                (t * 3.7).sin() * 0.7,
-                (t * std::f32::consts::TAU).sin(),
-            ]);
-            let opened = sampled.cover(&cloud, direction);
-            open_range = (open_range.0.min(opened), open_range.1.max(opened));
-        }
-        let volume = closed.volume();
-        println!(
-            "覆盖度对账（{steps} 条方向）：老路（回采混合场）{:.4}..{:.4}",
-            open_range.0, open_range.1,
-        );
-        println!(
-            "  生成的实例：{}（键 {}）{} 面 × {}² × {} 层 = {} 个采样，值域 {:.4}..{:.4}",
-            declared("id"),
-            px_graph::hex_short(&closed.key),
-            PATCHES,
-            volume.res,
-            volume.layers,
-            volume.samples(),
-            volume.data.iter().cloned().fold(f32::INFINITY, f32::min),
-            volume.data.iter().cloned().fold(f32::NEG_INFINITY, f32::max),
-        );
-        println!(
-            "  ⇒ 同一个 `bake<F>` 泛型体：老路把覆盖度烘成 {} 个采样的场再回采；\
-             闭式路在 dylib 内部现算，**一次栅格化都没有**",
-            source.value().data.len(),
-        );
-        finish();
-        return Ok(());
-    }
 
     // ── 场：七步，每一步都是「普通函数调用 + 隐式缓存」 ───────────────────────
     // ⚠ 上游是**具名字段的普通 Rust 值**（`Unary1/2/3`），漏一个、接错域都是编译错。

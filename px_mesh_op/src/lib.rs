@@ -10,8 +10,3 @@ pub mod typed;
 pub mod cubesphere;
 pub mod proxy;
 
-px_cook::px_canonical_params!(typed::CubeSphere, typed::Proxy);
-px_cook::px_dylib_call!(typed::CubeSphere, typed::Proxy);
-
-// ⚠ 第一个参数必须与 crate 名（dll 名）一致：驱动按文件名词干算入口符号。
-px_cook::px_op_table!("px_mesh_op", typed::CubeSphere, typed::Proxy);

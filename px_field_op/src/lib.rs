@@ -11,35 +11,3 @@ pub mod noise;
 pub mod ops;
 pub mod typed;
 
-px_cook::px_canonical_params!(
-    typed::Constant,
-    typed::Fbm,
-    typed::Gradient,
-    typed::Mix,
-    typed::Remap,
-    typed::Ridged,
-    typed::Warp,
-);
-
-px_cook::px_dylib_call!(
-    typed::Constant,
-    typed::Fbm,
-    typed::Gradient,
-    typed::Mix,
-    typed::Remap,
-    typed::Ridged,
-    typed::Warp,
-);
-
-// ⚠ 第一个参数必须与 crate 名（也就是产出的 dll 名）一致 ——
-// 驱动按**文件名词干**算入口符号（`px_field_op.dll` → `px_field_op_table`）。
-px_cook::px_op_table!(
-    "px_field_op",
-    typed::Constant,
-    typed::Fbm,
-    typed::Gradient,
-    typed::Mix,
-    typed::Remap,
-    typed::Ridged,
-    typed::Warp,
-);

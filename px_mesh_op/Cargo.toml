@@ -4,7 +4,10 @@ version = "0.1.0"
 edition = "2024"
 
 [lib]
-crate-type = ["dylib", "rlib"]
+# ⚠ **只要 rlib**：算子现在是图程序**静态链**进来的一个 Rust 库。
+#   从前那个 `dylib` 是给"驱动按描述符表装载"用的，那条路已经删掉
+#   （连同描述符、OpTable、loader、生成的单态化实例）。
+crate-type = ["rlib"]
 
 [dependencies]
 # 图参数 struct 的 `PxInputs` 由它生成（字段名进键、按位置解字节）。

@@ -1453,7 +1453,6 @@ name = "px_graph_schema"
 version = "0.1.0"
 dependencies = [
  "blake3",
- "libloading",
  "px_protocol",
  "serde",
  "serde_json",

@@ -9,7 +9,7 @@ edition = "2024"
 px-scene = { path = "../px-scene" }
 # 图库本体（驱动 / 键 / 清单 / CAS / 参数）。
 px_graph = { path = "../px_graph" }
-# 契约与动态装载（`OpLibrary` 住在这里）。
+# 契约层（键、载荷格式、参数规范化）。
 px_graph_schema = { path = "../px_graph_schema" }
 # 三个领域的数据：图脚本读写产物要用它们的解出来的类型。
 px_field_schema = { path = "../px_field_schema" }
@@ -17,10 +17,10 @@ px_volume_schema = { path = "../px_volume_schema" }
 px_mesh_schema = { path = "../px_mesh_schema" }
 # 参照场（判据仪器与体积算子共用同一份）。
 px_verify = { path = "../px_verify" }
-# ⚠ **类型化的算子契约**（`px_cook`）+ 各领域的算子**类型**（`px_*_op` 的 rlib 那一半）。
-# 图脚本静态链接的是这一份：于是参数类型、输入个数、输出域全是**编译期**的事。
-# ⚠ 与 `[dev-dependencies]` 里那三条不是一回事：那三条只为把 dylib 编出来，
-#   而这三条是图脚本真的要用的**类型**（老 `node()` 路径仍在，两条并存）。
+# ⚠ **类型化的算子契约**（`px_cook`）+ 各领域的算子（`px_*_op`）。
+# 图脚本静态链接的就是它们：参数类型、输入个数、输出域全是**编译期**的事。
+# ⚠ 这里原来还有一组同名 `[dev-dependencies]`，只为把算子库的 dylib 编出来给驱动装载
+#   —— 那条路已经删掉（连同描述符、`OpTable`、loader、生成的单态化实例），两组合成一组。
 px_cook = { path = "../px_cook" }
 px_field_op = { path = "../px_field_op" }
 px_volume_op = { path = "../px_volume_op" }
@@ -34,11 +34,3 @@ serde = { version = "1", features = ["derive"] }
 # 而文档只有几 KB。五个 crate 都写一遍：别靠特性合并的偶然。
 serde_json = { version = "1", features = ["float_roundtrip"] }
 toml = "0.8"
-
-[dev-dependencies]
-# ⚠ 这两条**不是**「图脚本依赖算子」：它们只在测试里把算子库编出来（dylib 落在
-# `target/debug/`，驱动运行时按描述符表装载）。产品 exe 里一个算子的代码都没有 ——
-# 判据是 `tests/crate_graph.rs` 那道门。
-px_field_op = { path = "../px_field_op" }
-px_volume_op = { path = "../px_volume_op" }
-px_mesh_op = { path = "../px_mesh_op" }

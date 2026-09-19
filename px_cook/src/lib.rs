@@ -77,49 +77,6 @@ impl<P> Cooked<P> {
     }
 }
 
-/// 各领域载荷 → 老路径那个枚举（`node()` 收 `&Artifact`，混用两条路时要过一下）。
-pub trait PayloadKind {
-    fn into_payload(self) -> px_graph::Payload;
-}
-
-impl PayloadKind for Field {
-    fn into_payload(self) -> px_graph::Payload {
-        px_graph::Payload::Field(self)
-    }
-}
-impl PayloadKind for VolumeData {
-    fn into_payload(self) -> px_graph::Payload {
-        px_graph::Payload::Volume(self)
-    }
-}
-impl PayloadKind for MeshData {
-    fn into_payload(self) -> px_graph::Payload {
-        px_graph::Payload::Mesh(self)
-    }
-}
-
-impl<P: PayloadKind> Cooked<P> {
-    /// 换成老路径的 `Artifact`（克隆值、**字节从缓存里取回来**，不重新序列化）。
-    ///
-    /// ⚠ 它存在的唯一理由是两条路要混用：`node(op_id, name, &[&上游])` 收的是 `&Artifact`。
-    /// **键同一个**（`Cooked.key` 就是写进 CAS 的那把）⇒ 不重算、不写第二份产物。
-    pub fn to_artifact(&self) -> Result<px_graph::Artifact, String>
-    where
-        P: Clone,
-    {
-        let bytes = self.cached_bytes()?;
-        Ok(px_graph::Artifact {
-            key: self.key,
-            payload: self.value.clone().into_payload(),
-            bytes,
-        })
-    }
-
-    /// 缓存里那份字节（不重新序列化）。
-    pub fn cached_bytes(&self) -> Result<Vec<u8>, String> {
-        px_graph::read_cached(self.key)
-    }
-}
 
 impl Cooked<Field> {
     /// 取那张场（算子侧读上游用）。
@@ -154,13 +111,6 @@ pub trait PxOp {
     const ID: &'static str;
     /// 产物档：决定键里要不要掺评审相机。
     const KIND: px_graph_schema::OpKind;
-    /// ⚠ **声明的域必须与输出域推出来的一致**（相机掺不掺、解码走哪条都从它推）。
-    /// 语言管不住这件事（写错照样编译），所以做成一条编译期断言。
-    /// 它不可见、不占空间，只在有人引用时才求值 —— 宏会引用它。
-    const KIND_MATCHES_PAYLOAD: () = assert!(
-        crate::op_kind_eq(Self::KIND, <Self::Payload as payload::Build>::KIND),
-        "声明的 OpKind 与输出域对不上（Field/Mesh 掺相机、Volume 不掺）",
-    );
     /// **源码指纹**（`build.rs` 算的十六进制）—— 改实现必然重算那一格。
     ///
     /// ⚠ 由 `build.rs` 生成、`env!("PX_SOURCE_HASH")` 取用：**没有手维护的清单**。
@@ -186,15 +136,13 @@ pub trait PxOp {
     /// 超参数的类型：从 `art/<图>/<节点名>.toml` 解出来的那一份。
     type Params: Serialize + DeserializeOwned + Default + PxKeyed;
     /// 输出域（`Field` / `VolumeData` / `MeshData`）—— 域、相机口径、编解码全从它推。
-    type Payload: PayloadKind + payload::Build;
+    type Payload: payload::Build;
     /// **图参数**的类型：这个算子被接的那个输入 struct。
     /// ⚠ `cook` 要求它等于调用点给的那个 `I` ⇒ 接错 struct、接错算子都是编译错。
     type Inputs: PxInputs;
 
     /// 造一个算子实例（算子是无状态的，`new()` 就是 `Self`）。
     fn new() -> Self;
-    fn params() -> params::Kind<Self::Params>;
-    fn payload() -> payload::Kind<Self::Payload>;
     /// 怎么算：超参数 + **图参数**（这个图接的上游 struct）+ 画布。
     ///
     /// ⚠ 它在 `I` 上泛型：同一个算子被两张图用不同的接法接，实例各生成一份。
@@ -232,6 +180,11 @@ pub mod payload {
         /// * `false`（体积/网格）：自己的分辨率由参数给 ⇒ 画布与产物无关，
         ///   掺进去只会让"改画布"连带重烘它们。
         const RESOLUTION_IS_CANVAS: bool;
+        /// 清单里那三个读数（`min` / `max` / `mean`）。
+        ///
+        /// ⚠ 从前这件事由驱动**解字节**去猜（那要求驱动同时认识三个域）；
+        ///   类型化之后值就在手里，不必解。
+        fn stats(payload: &Self) -> (f64, f64, f64);
         fn encode(payload: &Self) -> Result<Vec<u8>, String>;
         /// 上游字节 → 类型化的值。场载荷不含投影，所以要 `projection` 补回去。
         fn decode(bytes: &[u8], projection: Domain, node: &str) -> Result<Self, String>;
@@ -240,6 +193,10 @@ pub mod payload {
     impl Build for Field {
         const KIND: px_graph_schema::OpKind = px_graph_schema::OpKind::Field;
         const RESOLUTION_IS_CANVAS: bool = true;
+        fn stats(payload: &Self) -> (f64, f64, f64) {
+            let stats = payload.stats();
+            (stats.min as f64, stats.max as f64, stats.mean as f64)
+        }
         fn encode(payload: &Self) -> Result<Vec<u8>, String> {
             px_field_schema::payload::encode(payload).placeholder()
         }
@@ -252,6 +209,21 @@ pub mod payload {
     impl Build for VolumeData {
         const KIND: px_graph_schema::OpKind = px_graph_schema::OpKind::Volume;
         const RESOLUTION_IS_CANVAS: bool = false;
+        fn stats(payload: &Self) -> (f64, f64, f64) {
+            // ⚠ 逐元素 + 用 f64 累加：与老路径 `volume_stats` 逐字一致。
+            let (mut min, mut max, mut sum) = (f32::INFINITY, f32::NEG_INFINITY, 0.0_f64);
+            for value in &payload.data {
+                min = min.min(*value);
+                max = max.max(*value);
+                sum += *value as f64;
+            }
+            let mean = if payload.data.is_empty() {
+                0.0
+            } else {
+                sum / payload.data.len() as f64
+            };
+            (min as f64, max as f64, mean)
+        }
         fn encode(payload: &Self) -> Result<Vec<u8>, String> {
             px_volume_schema::payload::encode(payload).placeholder()
         }
@@ -264,6 +236,10 @@ pub mod payload {
     impl Build for MeshData {
         const KIND: px_graph_schema::OpKind = px_graph_schema::OpKind::Mesh;
         const RESOLUTION_IS_CANVAS: bool = false;
+        fn stats(payload: &Self) -> (f64, f64, f64) {
+            // 与老路径同一口径：`min` = 顶点数、`max` = 三角形数、`mean` = 0。
+            (payload.vertices() as f64, payload.triangles() as f64, 0.0)
+        }
         fn encode(payload: &Self) -> Result<Vec<u8>, String> {
             px_mesh_schema::payload::encode(payload).placeholder()
         }
@@ -282,6 +258,21 @@ pub mod payload {
         }
 
     }
+}
+
+/// 超参数那一侧：TOML 原文 → `(解析后的参数, 进键的规范 JSON)`。
+///
+/// ⚠ 缺文件（`None`）走 `Default`，**不是**解一个空串。
+pub fn canonical_params<P>(toml_text: Option<&str>) -> Result<(P, String), String>
+where
+    P: serde::Serialize + serde::de::DeserializeOwned + Default,
+{
+    let parsed: P = match toml_text {
+        Some(text) => toml::from_str(text).map_err(|err| format!("参数解不开：{err}"))?,
+        None => P::default(),
+    };
+    let json = px_graph_schema::canonical_params(&parsed);
+    Ok((parsed, json))
 }
 
 /// 超参数那一侧：TOML 原文 → 规范 JSON（进键的那一份）。
@@ -325,7 +316,7 @@ where
     let op = O::new();
     let toml_text = cache.params_text(node);
     let from_file = toml_text.is_some();
-    let (params, params_json) = O::params().canonical(toml_text.as_deref())?;
+    let (params, params_json) = canonical_params::<O::Params>(toml_text.as_deref())?;
     // ⚠ 缺文件是静默用默认值的 —— 这一条记录让"我少写了什么/写错了哪个字段名"跑完就看得见。
     cache.record_params(node, O::ID, &params_json, from_file);
 
@@ -337,7 +328,7 @@ where
     // ⚠ **画布按域决定要不要进键**：场的分辨率就是画布，体积/网格不是。
     //   一刀切（都掺）会让"改画布"连带重烘体积；一刀切（都不掺）会让场出现
     //   "同一个键、不同分辨率"。
-    if O::payload().resolution_is_canvas() {
+    if <O::Payload as payload::Build>::RESOLUTION_IS_CANVAS {
         hasher.update(&grid.width.to_le_bytes());
         hasher.update(&grid.height.to_le_bytes());
         hasher.update(grid.projection.name().as_bytes());
@@ -357,7 +348,7 @@ where
     };
 
     if let Some(bytes) = cache.fetch(key) {
-        let value = O::payload().decode(&bytes, grid.projection, node)?;
+        let value = <O::Payload as payload::Build>::decode(&bytes, grid.projection, node)?;
         let bytes_len = bytes.len();
         cache.store(
             Report {
@@ -369,6 +360,7 @@ where
                 millis: 0,
                 bytes: bytes_len,
                 with_cameras,
+                stats: <O::Payload as payload::Build>::stats(&value),
             },
             &bytes,
         )?;
@@ -378,7 +370,7 @@ where
     let started = Instant::now();
     let value = op.render(&params, &inputs, grid)?;
     let millis = started.elapsed().as_millis() as u64;
-    let bytes = O::payload().encode(&value)?;
+    let bytes = <O::Payload as payload::Build>::encode(&value)?;
     let bytes_len = bytes.len();
     cache.store(
         Report {
@@ -390,6 +382,7 @@ where
             millis,
             bytes: bytes_len,
             with_cameras,
+            stats: <O::Payload as payload::Build>::stats(&value),
         },
         &bytes,
     )?;
@@ -428,6 +421,7 @@ macro_rules! px_op {
             /// 没有手维护的清单（见 `build/fingerprint.rs`）。
             const SOURCE_HASH: &'static str = env!("PX_SOURCE_HASH");
 
+
             // 逃生门：给了字面量就强制失效（改类型之外的理由）。
             $(
                 fn interface() -> u64 {
@@ -439,14 +433,6 @@ macro_rules! px_op {
                     ])
                 }
             )?
-
-            fn params() -> $crate::params::Kind<$params> {
-                $crate::params::Kind(std::marker::PhantomData)
-            }
-
-            fn payload() -> $crate::payload::Kind<$payload> {
-                $crate::payload::Kind(std::marker::PhantomData)
-            }
 
             fn new() -> Self {
                 $name
@@ -466,6 +452,16 @@ macro_rules! px_op {
                 Ok($body)
             }
         }
+
+        /// ⚠ **声明的域必须与输出域推出来的一致**（相机掺不掺、画布算不算分辨率都从它推）。
+        /// 语言管不住这件事，所以做成一条编译期断言。
+        const _: () = assert!(
+            $crate::op_kind_eq(
+                <$name as $crate::PxOp>::KIND,
+                <$payload as $crate::payload::Build>::KIND,
+            ),
+            "声明的 OpKind 与输出域对不上（Field/Mesh 掺相机、Volume 不掺）",
+        );
     };
 }
 
@@ -529,33 +525,6 @@ impl PxInputs for () {
 
 // ── dylib 那一侧的管道（全部由宏生成，算子作者看不到）─────────────────────────
 
-/// `canonical_params` 的通用实现：TOML 原文 → 键用的规范 JSON。
-pub fn canonical_params<P>(toml_text: Option<&str>) -> Result<String, String>
-where
-    P: Serialize + DeserializeOwned + Default,
-{
-    let parsed: P = match toml_text {
-        Some(text) => toml::from_str(text).map_err(|err| err.to_string())?,
-        None => P::default(),
-    };
-    Ok(px_graph_schema::canonical_params(&parsed))
-}
-
-/// 把**规范参数 JSON + 上游载荷字节**渲染成产物的字节。
-///
-/// ⚠ 这就是 dylib `call` 的全部内容：它不认识具体算子，只认 `PxOp` 的关联类型 ——
-///   上游怎么解、算子的 `render` 怎么调、产物怎么编码，全从 `O::Inputs` / `O::Payload` 推。
-pub fn call_dylib<O>(params_json: &str, grid: Grid, inputs: &[&[u8]]) -> Result<Vec<u8>, String>
-where
-    O: PxOp,
-{
-    let params: O::Params = serde_json::from_str(params_json)
-        .map_err(|err| format!("参数 JSON 解不开：{err}"))?;
-    let typed = O::Inputs::from_payloads(inputs, grid)?;
-    let value = O::payload().encode(&O::new().render(&params, &typed, grid)?)?;
-    Ok(value)
-}
-
 /// `PxInputs::from_payloads` 要的那个 trait —— 与 `PxInputs` 同一份实现。
 pub use input_bytes::FromPayloads;
 
@@ -579,7 +548,7 @@ mod input_bytes {
 
 }
 
-impl<P: PayloadKind + payload::Build> Cooked<P> {
+impl<P: payload::Build> Cooked<P> {
     /// **从上游字节解出一个"已经拿到手"的节点**。
     ///
     /// ⚠ 算子侧写自己的 `<算子>Input` 时用它：`Cooked::from_bytes(bytes, grid)?`。
@@ -597,93 +566,6 @@ impl<P: PayloadKind + payload::Build> Cooked<P> {
 }
 
 // ── 导出宏：dylib 那一侧的四样样板（描述符 / 规范化 / 分派 / 入口符号）──────────
-
-/// 生成 `canonical_params`：按 `op_id` 找到算子的参数类型，把 TOML 规范化成 JSON。
-#[macro_export]
-macro_rules! px_canonical_params {
-    ($($op:ty),+ $(,)?) => {
-        extern "Rust" fn canonical_params(
-            op_id: &str,
-            toml_text: Option<&str>,
-        ) -> Result<String, String> {
-            $(
-                if op_id == <$op as $crate::PxOp>::ID {
-                    return $crate::canonical_params::<<$op as $crate::PxOp>::Params>(toml_text);
-                }
-            )+
-            Err(format!("这个算子库不认识算子 {op_id}"))
-        }
-    };
-}
-
-/// 生成 `call`：按 `op_id` 找到算子，把**字节**渲染成**字节**。
-#[macro_export]
-macro_rules! px_dylib_call {
-    ($($op:ty),+ $(,)?) => {
-        extern "Rust" fn call(
-            op_id: &str,
-            params_json: &str,
-            grid: $crate::Grid,
-            inputs: &[&[u8]],
-        ) -> Result<Vec<u8>, String> {
-            $(
-                if op_id == <$op as $crate::PxOp>::ID {
-                    return $crate::call_dylib::<$op>(params_json, grid, inputs);
-                }
-            )+
-            Err(format!("这个算子库不认识算子 {op_id}"))
-        }
-    };
-}
-
-/// 生成入口符号 `<库名>_table` —— 驱动按**文件名词干**找它（`px_graph_schema::op::table_symbol`）。
-///
-/// ⚠ `$lib` 必须与 crate 名（也就是产出的 dll 名）一致，否则运行期 `GetProcAddress failed`，
-///   编译期毫无提示。
-#[macro_export]
-macro_rules! px_op_table {
-    ($lib:literal, $($op:ty),+ $(,)?) => {
-        // ⚠ **编译期**把"宏第一个参数 = crate 名"这条钉死。
-        //   驱动按**文件名词干**算入口符号（`px_volume_op.dll` → `px_volume_op_table`），
-        //   而 dll 名派生自 crate 名 ⇒ 两者不一致就是运行期 `GetProcAddress failed`。
-        //   语言管不住这件事，所以在这儿当场炸（比那条门早一步）。
-        const _: () = assert!(
-            $crate::str_eq(env!("CARGO_PKG_NAME"), $lib),
-            "px_op_table! 的第一个参数必须与 crate 名（= dll 名）一致，否则驱动找不到入口符号",
-        );
-
-        // ⚠ 引用每条"域与载荷一致"的断言 —— trait 里的默认常量是惰性的，读了才求值。
-        //   于是"OpKind 写错"在**算子库编译时**就炸（图侧不引用它，那边不必管）。
-        const _: () = {
-            $(let _ = <$op as $crate::PxOp>::KIND_MATCHES_PAYLOAD;)+
-        };
-
-        #[unsafe(export_name = concat!($lib, "_table"))]
-        pub extern "Rust" fn table() -> &'static $crate::px_graph_schema::OpTable {
-            // ⚠ 描述符表必须**运行期建一次**：`interface()` 是"哈希类型名"，
-            //   而 `type_name` 不是 const ⇒ `const`/`static` 里都调不了它。
-            //   建一次就泄漏那一小段（每个库一份）—— 换来的是"接口变了自动失效"。
-            static TABLE: std::sync::OnceLock<$crate::px_graph_schema::OpTable> =
-                std::sync::OnceLock::new();
-            TABLE.get_or_init(|| {
-                let ops: Vec<$crate::px_graph_schema::OpDescriptor> = vec![
-                    $($crate::px_graph_schema::OpDescriptor {
-                        id: <$op as $crate::PxOp>::ID,
-                        interface: <$op as $crate::PxOp>::interface(),
-                        source_hash: <$op as $crate::PxOp>::SOURCE_HASH,
-                        kind: <$op as $crate::PxOp>::KIND,
-                    }),+
-                ];
-                $crate::px_graph_schema::OpTable {
-                    ops: Box::leak(ops.into_boxed_slice()),
-                    canonical_params: canonical_params
-                        as $crate::px_graph_schema::ParamsCanonical,
-                    call: call as $crate::px_graph_schema::OpCall,
-                }
-            })
-        }
-    };
-}
 
 #[cfg(test)]
 mod tests {

@@ -24,10 +24,10 @@ fn normalize(vector: [f32; 3]) -> [f32; 3] {
 }
 
 /// 烘一份体积。⚠ `cover` 是**泛型方法**：算子只要求"给一个方向、回一个覆盖度"，
-/// 至于那个覆盖度是从上游那张采样场里采的、还是图上现算的，这里一概不管。
+/// 至于那个覆盖度是从哪儿来的，这里一概不管。
 ///
-/// * 老路径（dylib 那一半）：`bake(params, &SampleField { cloud, field })` —— 逐位与拆分前相同；
-/// * 图脚本：`bake(params, &MyClosedForm { … })` —— 覆盖度**不必先栅格化**成一张场。
+/// ⚠ 现在唯一的调用点是 [`eval_sampled`]（上游那张采样场）。从前还有图脚本现写的
+/// 闭式场那一档 —— 它靠"生成的单态化实例 + 动态装载"，那条路已删（原型期决定）。
 pub fn bake<F: FieldFn>(params: &params::Params, cover: &F) -> VolumeData {
     let cloud = proxy::from_volume(params);
     let at = |direction: [f32; 3]| cover.cover(&cloud, direction);
@@ -150,14 +150,3 @@ pub fn eval_sampled(params: &params::Params, coverage: &Field) -> VolumeData {
     bake(params, &SampleField { field: coverage })
 }
 
-/// 闭式那一档的入口：场函数由调用方给（图脚本现写的结构，或 `ClosedForm { f }`）。
-pub fn eval_closed<F: FieldFn>(params: &params::Params, field: &F) -> VolumeData {
-    bake(params, field)
-}
-
-// ── dylib 那一侧的全部管道（见 px_field_op/src/lib.rs 的同一段注释）──────────────
-px_cook::px_canonical_params!(typed::CloudCoarse);
-px_cook::px_dylib_call!(typed::CloudCoarse);
-
-// ⚠ 第一个参数必须与 crate 名（dll 名）一致：驱动按文件名词干算入口符号。
-px_cook::px_op_table!("px_volume_op", typed::CloudCoarse);

@@ -25,7 +25,7 @@ let proxy    = cook::<mesh::Proxy>(&cache, "proxy",
 ```
 
 **就这些**。没有 `OpKind`、没有 `encode`/`decode`、没有 `cook_field`/`cook_volume`/`cook_mesh`、
-没有 `&[&a, &b]`、没有描述符、没有注册表。域、相机口径、编解码、身份全从算子类型推。
+没有 `&[&a, &b]`、没有描述符、没有注册表、没有字符串 id。域、相机口径、编解码、身份全从算子类型推。
 
 三件事因此是**编译期**的：
 
@@ -40,18 +40,23 @@ let proxy    = cook::<mesh::Proxy>(&cache, "proxy",
 ## 1. 三层分工
 
 ```text
-px_graph_schema::op      ① 契约：OpTable / OpDescriptor / OpCall / ParamsCanonical
+px_graph_schema          ① 契约：键 / 载荷格式 / OpKind / 参数规范化
         ↑
 px_<域>_schema           ② 数据：超参数 struct（serde）+ 载荷类型 + 序列化
         ↑
-px_<域>_op               ③ 实现（dylib）+ **声明**（rlib：typed.rs 里那几行宏）
+px_<域>_op               ③ 实现 + 声明（`typed.rs` 里那几行宏）—— 一个普通 rlib
         ↑
 px_graphs                ④ 图脚本：普通 Rust 调用链
 ```
 
-**一句话判据**：算子的**实现**住在 dylib ⇒ 改实现不重编图程序；
-图脚本**静态链**算子的 rlib ⇒ 参数/输入/输出都在编译期判。
-两条同时成立的关键是：**rlib 那一半只有声明，没有实现**。
+**一句话判据**：算子就是图程序**静态链**进来的一个 Rust 库 ⇒ 参数类型、输入个数、
+输出域全在**编译期**判。
+
+⚠ **这里从前还有第二层**：算子编成 dylib、驱动按描述符表运行时装载，于是"改实现不重编
+图程序"。那一层**整个删掉了**（原型期决定）—— 连同 `OpDescriptor` / `OpTable` / `OpCall` /
+`ParamsCanonical` / loader / `mono-gen` / 生成的单态化实例。
+代价是明摆着的：**改算子实现、或改图脚本里现写的场函数，都要重编图程序**。
+换回来的是：没有运行时分派、没有字符串 id、没有"两份驱动"的风险。
 
 ---
 
@@ -62,8 +67,8 @@ px_graphs                ④ 图脚本：普通 Rust 调用链
 | # | 文件 | 写什么 |
 |---|---|---|
 | 1 | `px_<域>_schema/src/params.rs` | 超参数 struct：`#[derive(PxParams, Serialize, Deserialize, Default)]` |
-| 2 | `px_<域>_schema/src/payload.rs` | 载荷 ↔ 字节（跨 dylib 边界只走这里） |
-| 3 | `px_<域>_op/Cargo.toml` | `crate-type = ["dylib", "rlib"]` + `px_cook` / `px_derive` |
+| 2 | `px_<域>_schema/src/payload.rs` | 载荷 ↔ 字节（**缓存里存的就是这一份**） |
+| 3 | `px_<域>_op/Cargo.toml` | `crate-type = ["rlib"]` + `px_cook` / `px_derive` |
 | 4 | `px_<域>_op/src/<算子>.rs` | **算法体**：普通 Rust 函数 |
 | 5 | `px_<域>_op/src/typed.rs` | **声明**：`px_op!` 一行 / 算子 + 输入别名 |
 | 6 | `px_<域>_op/src/lib.rs` | **三行宏**（见 §2.3） |
@@ -82,13 +87,11 @@ px_graphs                ④ 图脚本：普通 Rust 调用链
 pub mod typed;
 pub mod ops;          // 算法体
 
-px_cook::px_canonical_params!(typed::Fbm, typed::Mix);   // 超参数规范化
-px_cook::px_dylib_call!(typed::Fbm, typed::Mix);         // 字节 → 字节
-px_cook::px_op_table!("px_field_op", typed::Fbm, typed::Mix);  // 入口符号
+pub use typed::{Constant, Fbm, Gradient, Mix, Remap, Ridged, Warp};
 ```
 
-⚠ `px_op_table!` 的第一个参数必须等于 **crate 名**（dll 名）：驱动按**文件名词干**算入口符号
-（`px_field_op.dll` → `px_field_op_table`）。写错是**编译错**（`const` 断言），不是运行期惊喜。
+**就这些。** ⚠ 从前这里还有三行 dylib 管道（`px_canonical_params!` / `px_dylib_call!` /
+`px_op_table!`）—— 它们只为"驱动按描述符表装载"服务，已经随那一层删掉。
 
 ---
 
@@ -156,7 +159,7 @@ px_op! { Mix = params::MIX, 1, params::mix::Params, MixInput, Field,
 | `输入形状` | 这个算子**自己定义**的输入 struct（`()` = 不吃上游）—— 见 §3.3b |
 | `输出域` | `Field` / `VolumeData` / `MeshData` —— 相机口径与编解码都从它推 |
 | `OpKind` | 描述符里的档；**必须与输出域一致**（`Field`↔`Field`、`VolumeData`↔`Volume`…）。⚠ 不一致是**编译错**（`px_op!` 里的 `const` 断言） |
-| `输入名` | 老路径描述符里的输入名（`["coverage"]` 那种）。图侧真正的检查在 `输入形状` 上 |
+| `输入形状` | 这个算子**自己定义**的输入 struct —— 输入个数与域都在里面 |
 
 ### 3.3b 图参数的形状：**算子自己定义**，两条 impl 由宏生成
 
@@ -180,7 +183,7 @@ pub struct MixInput {
 | 编解码 | serde：`toml` → 结构 → 规范 JSON | 宏：`Cooked::from_bytes`（按**字段顺序**解上游字节） |
 
 **为什么不给图参数用 serde 编解码**：超参数是**文本**（`art/<图>/<节点>.toml`），而图参数是内存里
-的 `Cooked<T>` —— 它没有文本形式，dylib 那一侧拿到的只是字节 + 它自己那把键。所以编解码走
+的 `Cooked<T>` —— 它没有文本形式，重算那一侧拿到的只是字节 + 它自己那把键。所以编解码走
 `Cooked::from_bytes`，但**同样是机械生成的**。
 
 ⚠⚠ **字段顺序 = 上游顺序**。这是"按位置解字节"的代价（手写版也是，只是 `let [a, b, mask] = inputs`
@@ -289,55 +292,31 @@ octaves = 6
 
 ```bash
 cargo build -p px_graphs --bin <图>     # 类型化那一路
-cargo build -p px_<域>_op              # 把 dylib 编出来（老路径/测试用）
+cargo build -p px_<域>_op              # 一个普通的 Rust 库
 cargo run   -q -p px_graphs --bin <图>  # 跑图
 cargo test  -p px_graphs                # 两条门（见 §5）
 ```
 
 ---
 
-## 5. 泛型算子额外的一步：让它有"实例落点"
+## 5. 泛型算子的实例落在哪
 
-上面 1–9 已经给了编译期检查。**但 `render` 的实例还没落点** ——
-若要让图侧**现写**一个场函数（不先栅格化成一张场），实例必须住在**图侧自建的 dylib** 里：
+泛型的实例化要求「`bake<F>` 的定义」与「类型参数 `F`」在**同一个编译单元**里。
+实例现在只有**一份**：图程序自己 —— `cook::<volume::CloudCoarse>(…)` 时静态链接进去。
 
-```text
-px_graphs/src/bin/<图>/mono/
-  fields.rs            ⭐ stage 1：图自己的场函数（唯一编辑面）
-  fields.mono          ⭐ 声明：lib / id / version / ingredient
-  template.Cargo.toml / template.lib.rs / template.identity.rs / template.build.rs   stage 2 模板
-```
-
-```bash
-cargo run -q -p px_graphs --bin mono-gen -- px_graphs/src/bin/<图>/mono/fields.rs
-```
-
-生成器只吃 **stage 1 的路径**，其余全从它推出来（stage 1 可以在任何位置）：
-
-| 从哪来 | 是什么 |
-|---|---|
-| 命令行 | stage 1 的 `.rs` |
-| 同目录、同主名的 `<主名>.mono` | 声明（`lib` 默认 `px_mono_<主名>`） |
-| 同目录的 `template.*` | stage 2 的三份模板 |
-| 计算的 | `target/mono/<库名>/{crate,build}` → `target/debug/<库名>_op.dll` |
-
-图脚本用 `node(<id>, <节点名>, &[&上游])` 接上（老路径，因为这一份实例导出的是描述符表）。
-
-**读数**（已实测）：改一行场函数 → 生成 + 编 **1.7 s**，同期图程序 exe 的 sha256 **不变**，键必变。
-
-**为什么必须这个形状**：泛型的实例化要求「`render<F>` 的定义」与「类型参数 `F`」在**同一个
-编译单元**里；`F` 是图侧的东西、图程序是 `bin` ⇒ 实例只能落在图侧自建的 dylib 里。
+⚠ **从前还有一份**：图侧现写场函数（`ClosedForm { f: |cloud, dir| … }`）编成一个
+dylib，图程序按 op id 运行时装上，于是**改场函数不必重编图程序**。
+那一整套（`mono-gen` + 四份模板 + 描述符表 + loader + `--closed-cover`）**已删**。
+`px_cook::field_fn` 的模块文档里记着这件事与代价，别把它当成"还没做"。
 
 ---
 
 ## 6. 会咬人的地方（都踩过）
 
-1. **入口符号由库名派生**（`<文件名词干>_table`）。`px_op_table!` 现在有 `const` 断言看着它 ⇒
-   写错是编译错。**但改了 crate 名之后别忘了同步那个字面量。**
+1. **算子库不许再声明 `dylib`/`cdylib`** —— 那会让"运行时按描述符装载"悄悄长回来。
+   `px_graphs/tests/crate_graph.rs` 有一道门看着。
 
-2. **`typed.rs` 里不许放实现**（放了就失去"改算法不重编图程序"）；
-   **dylib 那一半不许依赖 `px_graph`**（否则同一进程两份驱动，比"重编"严重得多）。
-   两道门看着：`px_graphs/tests/crate_graph.rs`。
+2. **`px_graph` 不许静态依赖任何算子**（它只认 `Cache`）；schema 层同理。同一个门看着。
 
 3. **参数写错字段名**：靠 `deny_unknown_fields` 当场报。**缺文件仍是静默用默认值**
    （老口径没动），但跑完会写一份 `<图>/params.json`：**每个节点实际生效的参数值 + 字段名**，

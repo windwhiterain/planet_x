@@ -14,5 +14,3 @@ serde = { version = "1", features = ["derive"] }
 # 而文档只有几 KB。五个 crate 都写一遍：别靠特性合并的偶然。
 serde_json = { version = "1", features = ["float_roundtrip"] }
 blake3 = "1"
-# dyn lib 的调用住在这里（用户裁决）：装载、取描述符表、把 op 叫起来。
-libloading = "0.8"
