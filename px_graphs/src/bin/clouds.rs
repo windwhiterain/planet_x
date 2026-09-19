@@ -16,10 +16,11 @@ use px_protocol::art::Domain;
 use px_volume_op::typed as volume;
 use px_volume_schema::PATCHES;
 
-/// `clouds` 的单态化声明（与图脚本同一个目录）：`src/bin/clouds/mono.rs`。
+/// `clouds` 的单态化声明：`src/bin/clouds/mono/fields.mono`
+/// （与 stage 1 的 `fields.rs` 同目录、同主名）。
 /// ⚠ 它是 `key = value` 文本、不是 Rust 模块 ⇒ 这里 `include_str!` 进来按行读。
 /// 于是 **id 只有一处**，图脚本与生成器不会各自抄一份。
-const MONO_DECLARATION: &str = include_str!("clouds/mono.rs");
+const MONO_DECLARATION: &str = include_str!("clouds/mono/fields.mono");
 
 /// 从声明里取一个 `key = value`。
 fn declared(key: &str) -> &'static str {
