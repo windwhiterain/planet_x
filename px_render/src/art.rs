@@ -1119,7 +1119,7 @@ mod tests {
 
     /// **帧自有材质**装载这一档（§135/§136）：与内容材质**同一条**组装 / 反射 / 打包路。
     ///
-    /// 期望值来自烘图侧的日志（`px_graphs::frame::bake_material` 印的那一版）：
+    /// 期望值来自烘图侧的日志（`px_scene::frame::bake_material` 印的那一版）：
     /// 入口 `fragment`、参数一个 `f32`、只声明第 5 格（Cube）。
     #[test]
     fn the_frame_material_is_reflected_and_packed_like_a_content_material() {
@@ -1159,7 +1159,7 @@ mod tests {
 
     /// 入口名指不到东西 ⇒ **宿主当场拒**，并把那份 WGSL 实际的入口列出来（§136）。
     ///
-    /// ⚠ 这一条与烘图侧那条（`px_graphs::frame::bake_material` 的第 ⑥ 条）是**两道**守卫，
+    /// ⚠ 这一条与烘图侧那条（`px_scene::frame::bake_material` 的第 ⑥ 条）是**两道**守卫，
     /// 不是重复：烘图侧拦的是"配方写错了"，这里拦的是"手上这份文本里的名字指不到东西"
     /// （老产物、手改的文档都会走到这一条）。
     #[test]

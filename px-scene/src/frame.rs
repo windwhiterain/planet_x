@@ -145,7 +145,7 @@ fn source_of(name: &str, sources: &Sources) -> Option<(Value, ParamKind)> {
 
 /// `px_protocol::scene::Value` → `toml::Value`。
 ///
-/// 为什么绕一圈：参数的校验与打包只有一份实现（`px_graphs::params::merge_named` +
+/// 为什么绕一圈：参数的校验与打包只有一份实现（`px_scene::contract::merge_named` +
 /// `MaterialLayout::pack`，材质与全屏 pass 都走它），而它的入口是 toml 值
 /// （配方那一侧本来就是 toml）。在烘图侧再写一份"按名字打包"就是第二个真相。
 fn toml_of(value: &Value) -> toml::Value {
@@ -710,7 +710,7 @@ fn frame_stubs(symbol: &str) -> Option<&'static str> {
 ///
 /// 三档校验都在**烘图时**做完（三处都在下面点名）：
 /// ① 来源名不认识；② WGSL 声明了参数而配方没给来源；③ 类型不符。
-/// ④ 配方给了 WGSL 没声明的参数 —— 交给 `px_graphs::params::merge_named`（它会把两张表列出来）。
+/// ④ 配方给了 WGSL 没声明的参数 —— 交给 `px_scene::contract::merge_named`（它会把两张表列出来）。
 ///
 /// 为什么要反射而不是信任配方：参数的**类型**只有 WGSL 说了算（那是契约的真本，
 /// 与材质、全屏 pass 走的是同一条路）。烘图时不问，就要等到装载/打包那一刻才报错，

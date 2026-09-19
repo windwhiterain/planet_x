@@ -128,7 +128,7 @@ fn looking_at(translation: Vec3, target: Vec3, up: Vec3) -> Quat {
 /// 点光 cube 的**六面朝向**：`bevy_camera-0.19.1/src/primitives.rs:347-378` 的
 /// `CUBE_MAP_FACES`，次序 `+X −X +Y −Y +Z −Z`。
 ///
-/// ⚠ 次序**不是**随便排的：它同时定了两件事 —— 烘图侧那个 `face` 数（`px_graphs::frame::
+/// ⚠ 次序**不是**随便排的：它同时定了两件事 —— 烘图侧那个 `face` 数（`px_scene::frame::
 /// FACE_NAMES` 与它同序）与这里算矩阵用的 target/up。两处不一致 ⇒ 影子贴到别的面上，
 /// 而"贴错面"在画面上常常看着像"影子有点歪"。宿主拿到的 `face` 与 `layer` 是一起进来的
 /// （`PassSpec::cube_face`），对账那条算式（`layer == light×6 + face`）就是这条一致性的门。

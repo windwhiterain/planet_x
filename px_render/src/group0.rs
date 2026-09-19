@@ -441,7 +441,7 @@ pub const POINT_SHADOW_TEXTURES_BINDING: (u32, u32) = (0, 2);
 /// `GreaterEqual` 正是 reverse-Z 那条深度约定的一半（`light.rs:244-259`）。
 pub const POINT_SHADOW_SAMPLER_BINDING: (u32, u32) = (0, 3);
 
-/// cube 有几面。⚠ 与 `px_graphs::frame::CUBE_FACES` 是**同一个数**的两个落点：
+/// cube 有几面。⚠ 与 `px_scene::frame::CUBE_FACES` 是**同一个数**的两个落点：
 /// 一份在文档侧（烘图算层号用），一份在宿主侧（对账与建视图用）。
 /// 两处一致由"层号对账"钉住（`plan::layer_of`：`layer == light × 6 + face`）——
 /// 不一致的那一天，文档里那六条 pass 会当场被拒。
