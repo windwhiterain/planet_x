@@ -8,8 +8,6 @@ use px_field_schema::field::Field;
 use px_graph_schema::{Grid, fnv1a_sources};
 use px_volume_schema::{VolumeData, params};
 
-use crate::bake;
-
 /// 烘一份体积（立方球参数空间）。
 pub struct CloudCoarse;
 
@@ -36,6 +34,6 @@ impl Op for CloudCoarse {
     type Payload = VolumeData;
 
     fn cook(params: &Self::Params, coverage: &Self::Inputs<'_>, _grid: Grid) -> VolumeData {
-        bake(params, coverage.field())
+        crate::eval_sampled(params, coverage.field())
     }
 }

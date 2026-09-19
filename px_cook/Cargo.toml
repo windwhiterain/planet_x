@@ -13,6 +13,8 @@ px_protocol = { path = "../px_protocol" }
 px_field_schema = { path = "../px_field_schema" }
 px_volume_schema = { path = "../px_volume_schema" }
 px_mesh_schema = { path = "../px_mesh_schema" }
+# 参照场（`SampleField` 用的那几个 helper：`to_local` / `cover_from_mask`）。
+px_verify = { path = "../px_verify" }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
 toml = "0.8"

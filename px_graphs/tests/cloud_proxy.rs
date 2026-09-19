@@ -62,7 +62,7 @@ fn surface_params() -> mesh_params::proxy::Params {
 }
 
 fn bake(params: &Params, coverage: &Field) -> px_volume_schema::VolumeData {
-    px_volume_op::bake(params, coverage)
+    px_volume_op::eval_sampled(params, coverage)
 }
 
 fn surface(params: &mesh_params::proxy::Params, volume: &px_volume_schema::VolumeData) -> px_mesh_schema::MeshData {

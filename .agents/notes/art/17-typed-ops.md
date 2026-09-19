@@ -147,15 +147,65 @@ let proxy    = cook_mesh::<mesh::Proxy>(&cache, "proxy", &coarse, canvas)?;
 
 ---
 
-## §164 未做 / 下一步（按价值排）
+## §164 泛型方法：`bake<F: FieldFn>`（这一轮的原始目标）
+
+**要的是泛型方法，不是 `dyn`。** 落成的形状：
+
+```rust
+// px_cook/src/field_fn.rs —— 算子唯一需要的那个抽象
+pub type CoverCloud = px_verify::cloud_field::CloudFieldParams;
+pub trait FieldFn {
+    fn cover(&self, cloud: &CoverCloud, direction: [f32; 3]) -> f32;
+}
+pub struct SampleField<'a> { pub field: &'a Field }     // 上游采样场当函数（老路径）
+pub struct ClosedForm<F> { pub f: F }                    // 闭包：图脚本现算
+
+// px_volume_op/src/lib.rs —— 泛型方法
+pub fn bake<F: FieldFn>(params: &params::Params, cover: &F) -> VolumeData
+pub fn eval_sampled(params, &Field) -> VolumeData        // = bake::<SampleField>
+pub fn eval_closed<F: FieldFn>(params, &F) -> VolumeData // = bake::<F>
+```
+
+⚠ **一处接口设计上的坑**（记下来，别重犯）：第一版把云参数放进 `SampleField` 的字段里，
+结果是「`bake` 自己建云、而场函数也要云」——**同一个东西建两遍/借两次**。
+正确的分法是：**算子建上下文、当参数交给场函数**（`cover(&cloud, direction)`）。
+这样「云参数怎么算」只有一处（`proxy::from_volume`），闭式场不必自己再推一遍
+`to_local` / `cover_from_mask` 的口径。
+
+### §164.1 判据
+
+* **默认路径逐字节不变：14/14 ✓**（`PX_PCG_FRESH=1` 强制重算后对账，同 §163.1 的方法）。
+  泛型化**没有**动语义 —— `SampleField::cover` 就是转发到 `proxy::cover_at`。
+* **闭式路径能跑**（`cargo run -p px_graphs --bin clouds -- --closed-cover`）：
+
+```text
+覆盖度对账（2000 条方向）：老路（回采混合场）0.0000..0.8479｜闭式路（图上现算）0.0000..1.0000
+  两路最大差 +1.0000 —— 两条路问的是**不同的场函数**，这个差就是「换了一个覆盖度」的代价，不是误差
+  ⇒ 同一个算子、同一份 `bake<F>` 体；闭式路省掉了整张覆盖度场（393216 个采样）
+```
+
+⚠ 第一次量的时候我比的是**烘出来的体积**，两条路的值域**完全相同**（都 `-0.0008..0.0033`）——
+因为 `shape` 在覆盖度低于阈值时两边都归零 ⇒ **那个比较没有信息量**。
+改成在**同一批方向**上并排量覆盖度本身之后才有读数。这条值得记住：
+**判据要选在信号还没被下游压平的那一层。**
+
+### §164.2 泛型方法的代价（必须说清）
+
+`bake<F>` 的实例在**图脚本那一侧**生成 ⇒ **`bake` 的体被静态链进图程序**。
+后果：改 `bake` 的体要重编图脚本（这是 §161 第 3 条那条性质在**类型化这一支**上必然的代价）。
+老路径（dylib 里那份 `eval_sampled`）仍在，所以 dylib 那一支一位没动。
+
+---
+
+## §165 未做 / 下一步（按价值排）
 
 1. **另外三张图没迁**（`planet` / `desert` / `scene` 仍是老 `node()` 路径）。
    两条路**并存**且互不干扰（老驱动一位未动），所以这不是缺陷；但"契约"只有在图脚本
    真的用它的时候才有类型检查的收益。迁移是纯机械活。
-2. **装单态化的位置还没有**：`field_fn.rs`（`FieldFn` + `ConstantField`）已落，
-   但还没有一个真算子吃它。要让"图侧的闭式场函数"跑起来，得让 `CloudCoarse`
-   多一个 `dyn FieldFn` 的入口（`bake` 已经是具体的 `&Field`，要改成 trait 才能吃闭式场）。
-   ⚠ 这条才是用户最初问的"泛型密度函数"，**它一步都没做**。
+2. **闭式那一支只到"演示 + 判据"，没有进任何一张图的正路**：`--closed-cover` 是个
+   单独的分支（`clouds.rs` 里 early return）。要让它成为正路，得改 `art/clouds/*.toml`
+   的语义或加一个算子 id（`volume.cloud.coarse.closed` 之类）——
+   那又回到「同一个算子、两个身份」的问题（§162.2 的键那一维就是为它准备的）。
 3. **`source_hash.rs` 那道门没覆盖新的 `typed.rs`**：`typed.rs` 里的
    `Identity.source_hash` 是手写清单，门看不见它。该把三份 `typed.rs`
    按同一条形状加进门（每个算子至少两段、点到共享依赖）。
@@ -164,19 +214,19 @@ let proxy    = cook_mesh::<mesh::Proxy>(&cache, "proxy", &coarse, canvas)?;
    迁移过程中同一张图**不能混用**（混用会让上半截命中、下半截重算，白烧一遍）。⚠ 已知、未堵。
 5. **`px_graphs` 的 `[dev-dependencies]` 与 `[dependencies]` 现在都点了三个算子库** ——
    前者只为把 dylib 编出来（老路径/测试用），后者为 rlib（类型用）。语义重复，但**不能合并**
-   （合并会让 `cargo test` 不再编 dylib）。值得在 Cargo.toml 的注释里写死，已在 §162 记。
+   （合并会让 `cargo test` 不再编 dylib）。已在 Cargo.toml 的注释里写死。
 
 ---
 
-## §165 与 `16-graph-split.md` 的关系
+## §166 与 `16-graph-split.md` 的关系
 
 | §159 的口径 | 这一轮之后 |
 |---|---|
 | 图脚本依赖 `xxx_schema` | **仍成立**，但它现在**也**依赖 `px_cook`（类型化契约） |
 | 图脚本不许静态依赖任何 `*_op` | **改口径**：允许（那是类型检查的手段）；替代门见 §162 |
 | `xxx_op` 是动态链接 | **仍成立**：实现那一半照旧是 dylib，入口名派生不变 |
-| 算子之间只走 schema 的序列化数据 | **仍成立**：跨边界仍是 `PayloadBundle`；**载荷仍逐字节相同**（§163.1） |
-| 需要单态化的算子由图自建的 `xxx_op` 并着用 | **位置找到了**（`px_cook` 的契约层），**样本还没有**（§164 第 2 条） |
+| 算子之间只走 schema 的序列化数据 | **仍成立**：跨边界仍是 `PayloadBundle`；**载荷仍逐字节相同**（§163.1 / §164.1） |
+| 需要单态化的算子由图自建的 `xxx_op` 并着用 | **样本有了**：`bake<F: FieldFn>` + 图侧的 `SampleField` / `ClosedForm`（§164） |
 
-⇒ 一句话：**这一轮把"算子 id 字符串 + 字节"这层擦除去掉了，代价是改算子重编图程序（3.5 s）；
-产物逐字节不变的判据说明它不是重写而是换壳。**
+⇒ 一句话：**这一轮把"算子 id 字符串 + 字节"这层擦除去掉了；泛型方法落在 `bake<F>` 上，
+实例由图脚本生成。产物逐字节不变的判据（14/14）说明它不是重写而是换壳。**

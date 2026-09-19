@@ -1388,6 +1388,7 @@ dependencies = [
  "px_mesh_op",
  "px_mesh_schema",
  "px_protocol",
+ "px_verify",
  "px_volume_op",
  "px_volume_schema",
  "serde",

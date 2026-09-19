@@ -9,6 +9,7 @@
 
 pub mod typed;
 
+use px_cook::field_fn::{FieldFn, SampleField};
 use px_field_schema::field::{Field, tangent_frame};
 use px_field_schema::payload as field_payload;
 use px_graph_schema::identity::fnv1a_sources;
@@ -49,8 +50,14 @@ fn normalize(vector: [f32; 3]) -> [f32; 3] {
     [vector[0] / length, vector[1] / length, vector[2] / length]
 }
 
-pub fn bake(params: &params::Params, coverage: &Field) -> VolumeData {
+/// 烘一份体积。⚠ `cover` 是**泛型方法**：算子只要求"给一个方向、回一个覆盖度"，
+/// 至于那个覆盖度是从上游那张采样场里采的、还是图上现算的，这里一概不管。
+///
+/// * 老路径（dylib 那一半）：`bake(params, &SampleField { cloud, field })` —— 逐位与拆分前相同；
+/// * 图脚本：`bake(params, &MyClosedForm { … })` —— 覆盖度**不必先栅格化**成一张场。
+pub fn bake<F: FieldFn>(params: &params::Params, cover: &F) -> VolumeData {
     let cloud = proxy::from_volume(params);
+    let at = |direction: [f32; 3]| cover.cover(&cloud, direction);
     let res = params.res.max(2);
     let layers = params.layers.max(2);
     let inv_scale = 1.0 / if params.scale > 0.0 { params.scale } else { 1.0 };
@@ -70,7 +77,7 @@ pub fn bake(params: &params::Params, coverage: &Field) -> VolumeData {
                     s as f32 / (res - 1) as f32,
                     t as f32 / (res - 1) as f32,
                 );
-                let mut best = proxy::cover_at(&cloud, coverage, direction);
+                let mut best = at(direction);
                 if radius > 0.0 {
                     let (east, north) = tangent_frame(direction);
                     for far in -steps..=steps {
@@ -85,7 +92,7 @@ pub fn bake(params: &params::Params, coverage: &Field) -> VolumeData {
                                 direction[1] + east[1] * across + north[1] * along,
                                 direction[2] + east[2] * across + north[2] * along,
                             ]);
-                            best = best.max(proxy::cover_at(&cloud, coverage, neighbour));
+                            best = best.max(at(neighbour));
                         }
                     }
                 }
@@ -172,6 +179,19 @@ pub extern "Rust" fn px_volume_op_table() -> &'static OpTable {
     &TABLE
 }
 
+/// 老路径的入口：上游那张**采样好的场**。
+///
+/// ⚠ 它就是 `bake<SampleField>`，单独留一个名字是因为它是 dylib 那一半与图脚本
+/// 都常用的那一档；`SampleField` 那层包装保证与 `proxy::cover_at` 逐步同一件事。
+pub fn eval_sampled(params: &params::Params, coverage: &Field) -> VolumeData {
+    bake(params, &SampleField { field: coverage })
+}
+
+/// 闭式那一档的入口：场函数由调用方给（图脚本现写的结构，或 `ClosedForm { f }`）。
+pub fn eval_closed<F: FieldFn>(params: &params::Params, field: &F) -> VolumeData {
+    bake(params, field)
+}
+
 extern "Rust" fn call(
     op_id: &str,
     params_json: &str,
@@ -183,7 +203,7 @@ extern "Rust" fn call(
             let params: params::Params = serde_json::from_str(params_json)
                 .map_err(|err| format!("参数 JSON 解不开：{err}"))?;
             let coverage = field_payload::decode(inputs[0], grid.projection)?;
-            let volume: VolumeData = bake(&params, &coverage);
+            let volume: VolumeData = eval_sampled(&params, &coverage);
             let bundle: PayloadBundle = volume_payload::encode(&volume);
             bundle.placeholder()
         }
