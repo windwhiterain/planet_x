@@ -11,13 +11,17 @@
 ## 0. 图脚本里只看到这些（先把结论摆出来）
 
 ```rust
-use px_cook::{cook, Unary1 as One, Unary2 as Two, Unary3 as Three};
+use px_cook::cook;
 
 let clusters = cook::<field::Fbm>(&cache, "clusters", (), canvas)?;
-let carved   = cook::<field::Warp>(&cache, "carved", Two { a: billows, b: flow }, canvas)?;
-let mixed    = cook::<field::Mix>(&cache, "mixed", Three { a: clusters, b: carved, c: weight }, canvas)?;
-let coarse   = cook::<volume::CloudCoarse>(&cache, "coarse", One { a: mixed.clone() }, canvas)?;
-let proxy    = cook::<mesh::Proxy>(&cache, "proxy", mesh::VolumeInput { a: coarse }, canvas)?;
+let carved   = cook::<field::Warp>(&cache, "carved",
+                   field::FieldPairInput { field: billows, offset: flow }, canvas)?;
+let mixed    = cook::<field::Mix>(&cache, "mixed",
+                   field::MixInput { a: clusters, b: carved, mask: weight }, canvas)?;
+let coarse   = cook::<volume::CloudCoarse>(&cache, "coarse",
+                   volume::CloudCoarseInput { coverage: mixed.clone() }, canvas)?;
+let proxy    = cook::<mesh::Proxy>(&cache, "proxy",
+                   mesh::ProxyInput { volume: coarse }, canvas)?;
 ```
 
 **就这些**。没有 `OpKind`、没有 `encode`/`decode`、没有 `cook_field`/`cook_volume`/`cook_mesh`、
@@ -27,7 +31,7 @@ let proxy    = cook::<mesh::Proxy>(&cache, "proxy", mesh::VolumeInput { a: coars
 
 | | 靠什么 | 报错长什么样 |
 |---|---|---|
-| 输入个数/形状 | `O::Inputs`（关联类型钉死） | `expected Unary3<Cooked<Field>>, found Unary2<Cooked<Field>>` |
+| 输入个数/形状 | `O::Inputs`（关联类型钉死） | `expected MixInput, found TwoInput` —— 见 §3.3b |
 | 输出域 | `O::Payload` | 把体积喂给声明 `In<Field>` 的结构就编不过 |
 | 参数类型 | `O::Params` | 参数文件字段写错当场报（`deny_unknown_fields`） |
 
@@ -119,7 +123,7 @@ pub fn eval(params: &params::fbm::Params, inputs: &[&Field], grid: Grid) -> Fiel
 ### 3.3 声明：`px_<域>_op/src/typed.rs`
 
 ```rust
-use px_cook::{px_op, Cooked, Unary1, Unary2, Unary3};
+use px_cook::{Cooked, Grid, PxInputs, px_op};
 use px_graph_schema::OpKind;
 
 pub struct Fbm;
@@ -133,7 +137,7 @@ px_op! { Fbm = params::FBM, 4, params::fbm::Params, (), Field,
           include_str!("../../px_field_schema/src/params.rs")],
          |p, _i, g| crate::ops::fbm::eval(p, &[], g) }
 
-px_op! { Mix = params::MIX, 1, params::mix::Params, Unary3<Cooked<Field>>, Field,
+px_op! { Mix = params::MIX, 1, params::mix::Params, MixInput, Field,
          OpKind::Field, &["a", "b", "mask"],
          [include_str!("mix.rs"),
           include_str!("../../px_field_schema/src/field.rs"),
@@ -147,11 +151,52 @@ px_op! { Mix = params::MIX, 1, params::mix::Params, Unary3<Cooked<Field>>, Field
 |---|---|
 | `id` / `版本` | 键认得出的那一半。⚠ **版本只在接口变了时才升**；改实现不用动（源码哈希自己会变） |
 | `超参数类型` | 从 `art/<图>/<节点>.toml` 解出来的那个 struct |
-| `输入形状` | `()` / `Unary1<Cooked<T>>` / `Unary2<…>` / `Unary3<…>` —— **个数写进类型里** |
+| `输入形状` | 这个算子**自己定义**的输入 struct（`()` = 不吃上游）—— 见 §3.3b |
 | `输出域` | `Field` / `VolumeData` / `MeshData` —— 相机口径与编解码都从它推 |
 | `OpKind` | 描述符里的档；**必须与输出域一致**（`Field`↔`Field`、`VolumeData`↔`Volume`…）。⚠ 不一致是**编译错**（`px_op!` 里的 `const` 断言） |
 | `输入名` | 老路径描述符里的输入名（`["coverage"]` 那种）。图侧真正的检查在 `输入形状` 上 |
 | `源码清单` | **它自己的实现文件 + 它依赖的共享件**。漏一份 ⇒ 改了它却命中旧产物 |
+
+### 3.3b 图参数的形状：**算子自己定义**
+
+形状是这个算子**接口的一部分**，所以住 `typed.rs`，字段名就是它吃的东西的名字：
+
+```rust
+/// 三张场（两张待混 + 一张权重）。**注意字段名有语义。**
+#[derive(Clone)]
+pub struct MixInput {
+    pub a: Cooked<Field>,
+    pub b: Cooked<Field>,
+    pub mask: Cooked<Field>,
+}
+
+/// 键：把上游的键折进来。
+impl PxInputs for MixInput {
+    fn collect(&self, hasher: &mut px_cook::blake3::Hasher) {
+        hasher.update(&self.a.key);
+        hasher.update(&self.b.key);
+        hasher.update(&self.mask.key);
+    }
+}
+
+/// 字节：dylib 那一侧重算时要能把上游解回来。
+impl px_cook::FromPayloads for MixInput {
+    fn from_payloads(inputs: &[&[u8]], grid: Grid) -> Result<Self, String> {
+        let [a, b, mask] = inputs else {
+            return Err(format!("吃 3 张场，却收到 {} 个上游", inputs.len()));
+        };
+        Ok(Self { a: Cooked::from_bytes(a, grid)?,
+                  b: Cooked::from_bytes(b, grid)?,
+                  mask: Cooked::from_bytes(mask, grid)? })
+    }
+}
+```
+
+**为什么不是 `px_cook` 给一组通用的 `Unary1/2/3`**（那一版我做过，删了）：字段名会变成
+`a`/`b`/`c` —— **没有语义**，而且形状就"谁都不属于"了。**为什么也不加泛型**：那只为"多个
+算子共用同一个形状"，而仓里吃三张场的算子只有一个 —— 换不来什么，却要多一个类型参数到处传。
+
+**"接错就是编译错"一条不丢**：`O::Inputs` 是具体类型，少一个字段、给错域都编不过。
 
 ### 3.4 输出域与相机
 
@@ -162,17 +207,21 @@ px_op! { Mix = params::MIX, 1, params::mix::Params, Unary3<Cooked<Field>>, Field
 ### 3.5 图脚本
 
 ```rust
-use px_cook::{Cooked, Unary1 as One, Unary2 as Two, Unary3 as Three, cook};
+use px_cook::cook;
 
 // 无上游
 let clusters = cook::<field::Fbm>(&cache, "clusters", (), canvas)?;
 // 两个上游：具名字段
-let carved = cook::<field::Warp>(&cache, "carved", Two { a: billows, b: flow }, canvas)?;
+let carved = cook::<field::Warp>(&cache, "carved",
+    field::FieldPairInput { field: billows, offset: flow }, canvas)?;
 // 三个
-let mixed = cook::<field::Mix>(&cache, "mixed", Three { a: clusters, b: carved, c: weight }, canvas)?;
+let mixed = cook::<field::Mix>(&cache, "mixed",
+    field::MixInput { a: clusters, b: carved, mask: weight }, canvas)?;
 // 体积与网格
-let coarse = cook::<volume::CloudCoarse>(&cache, "coarse", One { a: mixed.clone() }, canvas)?;
-let proxy = cook::<mesh::Proxy>(&cache, "proxy", mesh::VolumeInput { a: coarse }, canvas)?;
+let coarse = cook::<volume::CloudCoarse>(&cache, "coarse",
+    volume::CloudCoarseInput { coverage: mixed.clone() }, canvas)?;
+let proxy = cook::<mesh::Proxy>(&cache, "proxy",
+    mesh::ProxyInput { volume: coarse }, canvas)?;
 ```
 
 - **上游是值，不是引用**：`Cooked<T>` 里是值 ⇒ 同一份被多处用就 `.clone()`。

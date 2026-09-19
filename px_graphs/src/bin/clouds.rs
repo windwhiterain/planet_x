@@ -6,9 +6,8 @@
 //!   `field.fbm` 在别的图里叫别的名字，算子不该知道；
 //! * 键里多了算子的源码哈希 ⇒ 改算子体必然重算，不靠人记得升版本。
 
-use px_cook::{Cooked, Unary1 as One, Unary2 as Two, Unary3 as Three, cook};
+use px_cook::{Cooked, cook};
 use px_field_op::typed as field;
-use px_field_op::typed::None as None_;
 use px_field_schema::field::cube_map_extent;
 use px_graph::{GraphSpec, begin, finish, params_text};
 use px_graph_schema::Grid;
@@ -132,39 +131,39 @@ fn main() -> Result<(), Fault> {
     let carved = cook::<field::Warp>(
         &cache,
         "carved",
-        Two { a: billows, b: flow },
+        field::FieldPairInput { field: billows, offset: flow },
         canvas,
     )?;
     let weight = cook::<field::Constant>(&cache, "weight", (), canvas)?;
     let mixed = cook::<field::Mix>(
         &cache,
         "mixed",
-        Three { a: clusters, b: carved, c: weight },
+        field::MixInput { a: clusters, b: carved, mask: weight },
         canvas,
     )?;
 
     let coverage = cook::<field::Remap>(
         &cache,
         "coverage",
-        One { a: mixed.clone() },
+        field::FieldInput { field: mixed.clone() },
         canvas,
     )?;
     let slope_x = cook::<field::Gradient>(
         &cache,
         "slope_x",
-        One { a: mixed.clone() },
+        field::FieldInput { field: mixed.clone() },
         canvas,
     )?;
     let slope_y = cook::<field::Gradient>(
         &cache,
         "slope_y",
-        One { a: mixed.clone() },
+        field::FieldInput { field: mixed.clone() },
         canvas,
     )?;
     let slope_z = cook::<field::Gradient>(
         &cache,
         "slope_z",
-        One { a: mixed.clone() },
+        field::FieldInput { field: mixed.clone() },
         canvas,
     )?;
 
@@ -172,25 +171,25 @@ fn main() -> Result<(), Fault> {
     let coarse = cook::<volume::CloudCoarse>(
         &cache,
         "coarse",
-        One { a: mixed.clone() },
+        volume::CloudCoarseInput { coverage: mixed.clone() },
         canvas,
     )?;
     let proxy = cook::<mesh::Proxy>(
         &cache,
         "proxy",
-        mesh::VolumeInput { a: coarse.clone() },
+        mesh::ProxyInput { volume: coarse.clone() },
         canvas,
     )?;
     let fine = cook::<volume::CloudCoarse>(
         &cache,
         "coarse_fine",
-        One { a: mixed.clone() },
+        volume::CloudCoarseInput { coverage: mixed.clone() },
         canvas,
     )?;
     let proxy_fine = cook::<mesh::Proxy>(
         &cache,
         "proxy_fine",
-        mesh::VolumeInput { a: fine.clone() },
+        mesh::ProxyInput { volume: fine.clone() },
         canvas,
     )?;
 

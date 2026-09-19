@@ -3,15 +3,18 @@
 //! 图脚本是**普通 Rust**：
 //!
 //! ```ignore
-//! struct ClustersInput {}                        // 图参数：包上游节点
-//! struct MixedInput { a: Cooked<Field>, b: Cooked<Field>, mask: Cooked<Field> }
-//!
-//! let clusters = cook::<field::Fbm>(&cache, ClustersInput {}, canvas)?;
-//! let mixed    = cook::<field::Mix>(&cache, MixedInput { a: clusters, b: carved, mask: weight }, canvas)?;
-//! let coarse   = cook::<volume::CloudCoarse>(&cache, CoarseInput { coverage: mixed }, canvas)?;
+//! let clusters = cook::<field::Fbm>(&cache, "clusters", (), canvas)?;
+//! let mixed    = cook::<field::Mix>(&cache, "mixed",
+//!                    field::MixInput { a: clusters, b: carved, mask: weight }, canvas)?;
+//! let coarse   = cook::<volume::CloudCoarse>(&cache, "coarse",
+//!                    volume::CloudCoarseInput { coverage: mixed.clone() }, canvas)?;
 //! ```
 //!
-//! 三样东西因此是**编译期**的事：输入个数与域（图参数 struct 的字段）、输出域（`PxOp::Payload`）、
+//! ⚠ **输入 struct 由算子自己定义**（住在 `px_*_op/src/typed.rs`），字段名就是它吃的东西的
+//! 名字（`MixInput { a, b, mask }`、`WarpInput { field, offset }`）。于是图侧写错一个字段、
+//! 少给一个上游，都是**编译错**。`px_cook` 只提供那个"不吃上游"的 `()`。
+//!
+//! 三样东西因此是**编译期**的事：输入个数与域（输入 struct 的字段）、输出域（`PxOp::Payload`）、
 //! 参数类型（`PxOp::Params`）。没有枚举分派、没有注册表。
 //!
 //! ⚠ 本 crate **一个算子实现都不依赖**：实现住 `px_*_op` 的 dylib 里。
@@ -33,6 +36,9 @@ pub use px_graph::{Cache, Report};
 /// 宏生成出来的代码按 `$crate::px_graph_schema::…` 走 —— 于是用宏的人不必自己依赖它。
 pub use px_graph_schema;
 pub use px_graph_schema::{Grid, PxKeyed};
+/// ⚠ `PxInputs::collect` 的签名里就是 `blake3::Hasher` —— 实现者（算子侧）得拿到它，
+/// 所以从这里 re-export，别让人为一个签名去加依赖。
+pub use px_graph_schema::identity::blake3;
 
 /// 算子在缓存里的**身份**。
 #[derive(Debug, Clone, Copy)]
@@ -453,50 +459,9 @@ pub const fn source_hash_of(parts: &[&str]) -> u64 {
     hash
 }
 
-/// **图参数的形状**：`N` 个上游。图脚本就用这几个（`Unary1<Field>` / `Unary3<Field>` …）
-/// 当输入 struct —— 字段具名，漏一个、接错域都是编译错。
-#[derive(Clone, Copy)]
-pub struct Unary1<T> {
-    pub a: T,
-}
-
-#[derive(Clone, Copy)]
-pub struct Unary2<T> {
-    pub a: T,
-    pub b: T,
-}
-
-#[derive(Clone, Copy)]
-pub struct Unary3<T> {
-    pub a: T,
-    pub b: T,
-    pub c: T,
-}
-
-/// 每个上游把自己的键贡献进来（**图参数的键聚合**）。
+/// **无上游**那一档的形状：它没有名字问题，留在契约里。
 impl PxInputs for () {
     fn collect(&self, _hasher: &mut blake3::Hasher) {}
-}
-
-impl<T: PayloadKind + payload::Build> PxInputs for Unary1<Cooked<T>> {
-    fn collect(&self, hasher: &mut blake3::Hasher) {
-        hasher.update(&self.a.key);
-    }
-}
-
-impl<T: PayloadKind + payload::Build> PxInputs for Unary2<Cooked<T>> {
-    fn collect(&self, hasher: &mut blake3::Hasher) {
-        hasher.update(&self.a.key);
-        hasher.update(&self.b.key);
-    }
-}
-
-impl<T: PayloadKind + payload::Build> PxInputs for Unary3<Cooked<T>> {
-    fn collect(&self, hasher: &mut blake3::Hasher) {
-        hasher.update(&self.a.key);
-        hasher.update(&self.b.key);
-        hasher.update(&self.c.key);
-    }
 }
 
 // ── dylib 那一侧的管道（全部由宏生成，算子作者看不到）─────────────────────────
@@ -532,7 +497,7 @@ where
 pub use input_bytes::FromPayloads;
 
 mod input_bytes {
-    use crate::{Cooked, Grid, PayloadKind, PxInputs, payload};
+    use crate::Grid;
 
     /// 本 crate 内部用：把上游的**字节**解成图参数 struct。
     pub trait FromPayloads: Sized {
@@ -549,46 +514,15 @@ mod input_bytes {
         }
     }
 
-    impl<T: PayloadKind + payload::Build> FromPayloads for crate::Unary1<Cooked<T>> {
-        fn from_payloads(inputs: &[&[u8]], grid: Grid) -> Result<Self, String> {
-            let [a] = inputs else {
-                return Err(format!("这个算子吃 1 个上游，却收到 {}", inputs.len()));
-            };
-            Ok(Self {
-                a: Cooked::from_payload(a, grid)?,
-            })
-        }
-    }
-
-    impl<T: PayloadKind + payload::Build> FromPayloads for crate::Unary2<Cooked<T>> {
-        fn from_payloads(inputs: &[&[u8]], grid: Grid) -> Result<Self, String> {
-            let [a, b] = inputs else {
-                return Err(format!("这个算子吃 2 个上游，却收到 {}", inputs.len()));
-            };
-            Ok(Self {
-                a: Cooked::from_payload(a, grid)?,
-                b: Cooked::from_payload(b, grid)?,
-            })
-        }
-    }
-
-    impl<T: PayloadKind + payload::Build> FromPayloads for crate::Unary3<Cooked<T>> {
-        fn from_payloads(inputs: &[&[u8]], grid: Grid) -> Result<Self, String> {
-            let [a, b, c] = inputs else {
-                return Err(format!("这个算子吃 3 个上游，却收到 {}", inputs.len()));
-            };
-            Ok(Self {
-                a: Cooked::from_payload(a, grid)?,
-                b: Cooked::from_payload(b, grid)?,
-                c: Cooked::from_payload(c, grid)?,
-            })
-        }
-    }
 }
 
 impl<P: PayloadKind + payload::Build> Cooked<P> {
-    /// 从上游字节解出一个"已经拿到手"的节点（dylib 那一侧用；键不在这儿，用空键占位）。
-    fn from_payload(bytes: &[u8], grid: Grid) -> Result<Self, String> {
+    /// **从上游字节解出一个"已经拿到手"的节点**。
+    ///
+    /// ⚠ 算子侧写自己的 `<算子>Input` 时用它：`Cooked::from_bytes(bytes, grid)?`。
+    /// 键不在这儿（字节里没有键），所以先给一把空键占位 —— 它只用于 dylib 那一侧的
+    /// 重算路径，不参与任何键的计算。
+    pub fn from_bytes(bytes: &[u8], grid: Grid) -> Result<Self, String> {
         Ok(Self::make(
             [0; 32],
             P::decode(bytes, grid.projection, "")?,

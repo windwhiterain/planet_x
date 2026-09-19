@@ -1,17 +1,19 @@
-//! 场算子的**声明**：身份 + 超参数类型 + 图参数形状 + 输出域 + 怎么算。
+//! 场算子的**声明**：身份 / 超参数 / 图参数形状 / 输出域 / 怎么算 / 源码清单。
+//!
+//! ⚠ **图参数的形状是算子接口的一部分**，所以住在这里 —— 字段名就是这个算子吃的东西的名字
+//! （`WarpInput { field, offset }` 而不是 `Two { a, b }`）。
+//! 于是图侧写错一个字段、少给一个上游，都是**编译错**。
 //!
 //! ⚠ 这里**一行实现都没有** —— `render` 转发到本 crate 里那个既有的 `eval`。
-//! 一旦把实现搬进来，图程序就静态链住了算法体 ⇒ 改算法要重编图程序
-//! ——「类型检查」与「改实现不重编」两条会互斥。
-//!
-//! ⚠ **图参数**（哪张图接谁）不在这里：那是**图**的知识。这里声明的只是"我这条形状"。
 
-use px_cook::{px_op, Cooked, Unary1, Unary2, Unary3};
+use px_cook::{Cooked, Grid, PxInputs, px_op};
+use px_field_schema::field::Field;
+use px_field_schema::params;
 use px_graph_schema::OpKind;
 
 /// 每个算子的身份清单：**它自己的实现文件 + 它依赖的共享件**。
 ///
-/// ⚠ 它同时喂给图侧（`PxOp::source_hash()`）与 dylib 侧（描述符）——同一份，
+/// ⚠ 它同时喂给图侧（`PxOp::SOURCE_HASH`）与 dylib 侧（描述符）——同一份，
 ///   才不会出现"改了算子体却命中旧产物"。数组长度写死（多一条编译期就报）。
 macro_rules! sources {
     ($own:literal $(, $shared:literal)*) => {
@@ -19,16 +21,89 @@ macro_rules! sources {
          $(include_str!(concat!("../../", $shared))),*]
     };
 }
-use px_field_schema::field::Field;
-use px_field_schema::params;
 
-/// 无上游。
-pub type None = ();
+// ── 图参数的形状：一个算子一个 ────────────────────────────────────────────────
+//
+// 两条 impl 是同一件事的两面：`collect` 把上游的**键**折进自己的键，
+// `from_payloads` 把上游的**字节**解成这个 struct。
 
-/// 一张场（具名字段：`Unary1 { a: clusters }`）。
-pub type Field1 = Unary1<Cooked<Field>>;
-pub type Field2 = Unary2<Cooked<Field>>;
-pub type Field3 = Unary3<Cooked<Field>>;
+/// 一张场（`Remap` / `Gradient` 吃它）。
+#[derive(Clone)]
+pub struct FieldInput {
+    pub field: Cooked<Field>,
+}
+
+impl PxInputs for FieldInput {
+    fn collect(&self, hasher: &mut px_cook::blake3::Hasher) {
+        hasher.update(&self.field.key);
+    }
+}
+
+impl px_cook::FromPayloads for FieldInput {
+    fn from_payloads(inputs: &[&[u8]], grid: Grid) -> Result<Self, String> {
+        let [field] = inputs else {
+            return Err(format!("吃 1 张场，却收到 {} 个上游", inputs.len()));
+        };
+        Ok(Self {
+            field: Cooked::from_bytes(field, grid)?,
+        })
+    }
+}
+
+/// 两张场（`Warp` 吃它）。
+#[derive(Clone)]
+pub struct FieldPairInput {
+    pub field: Cooked<Field>,
+    pub offset: Cooked<Field>,
+}
+
+impl PxInputs for FieldPairInput {
+    fn collect(&self, hasher: &mut px_cook::blake3::Hasher) {
+        hasher.update(&self.field.key);
+        hasher.update(&self.offset.key);
+    }
+}
+
+impl px_cook::FromPayloads for FieldPairInput {
+    fn from_payloads(inputs: &[&[u8]], grid: Grid) -> Result<Self, String> {
+        let [field, offset] = inputs else {
+            return Err(format!("吃 2 张场，却收到 {} 个上游", inputs.len()));
+        };
+        Ok(Self {
+            field: Cooked::from_bytes(field, grid)?,
+            offset: Cooked::from_bytes(offset, grid)?,
+        })
+    }
+}
+
+/// 三张场（`Mix` 吃它：两张待混 + 一张权重）。
+#[derive(Clone)]
+pub struct MixInput {
+    pub a: Cooked<Field>,
+    pub b: Cooked<Field>,
+    pub mask: Cooked<Field>,
+}
+
+impl PxInputs for MixInput {
+    fn collect(&self, hasher: &mut px_cook::blake3::Hasher) {
+        hasher.update(&self.a.key);
+        hasher.update(&self.b.key);
+        hasher.update(&self.mask.key);
+    }
+}
+
+impl px_cook::FromPayloads for MixInput {
+    fn from_payloads(inputs: &[&[u8]], grid: Grid) -> Result<Self, String> {
+        let [a, b, mask] = inputs else {
+            return Err(format!("吃 3 张场，却收到 {} 个上游", inputs.len()));
+        };
+        Ok(Self {
+            a: Cooked::from_bytes(a, grid)?,
+            b: Cooked::from_bytes(b, grid)?,
+            mask: Cooked::from_bytes(mask, grid)?,
+        })
+    }
+}
 
 macro_rules! field_op {
     (
@@ -44,55 +119,64 @@ macro_rules! field_op {
     };
 }
 
+// ⚠ 这四条不吃上游 ⇒ 形状是 `()`（它没有名字问题，留在 `px_cook` 的契约里）。
+
 field_op! {
     /// 常量场（无输入）。
-    Constant, params::CONSTANT, 1, params::constant::Params, None, &[],
+    Constant, params::CONSTANT, 1, params::constant::Params, (), &[],
     sources!("constant.rs", "px_field_schema/src/field.rs", "px_field_schema/src/params.rs"),
-    |p: &params::constant::Params, _i: &None, g| crate::ops::constant::eval(p, &[], g)
+    |p: &params::constant::Params, _i: &(), g| crate::ops::constant::eval(p, &[], g)
 }
 
 field_op! {
     /// 分形布朗噪声（无输入）。
-    Fbm, params::FBM, 4, params::fbm::Params, None, &[],
-    sources!("fbm.rs", "px_field_op/src/noise.rs", "px_field_schema/src/field.rs", "px_field_schema/src/noise.rs", "px_field_schema/src/params.rs"),
-    |p: &params::fbm::Params, _i: &None, g| crate::ops::fbm::eval(p, &[], g)
+    Fbm, params::FBM, 4, params::fbm::Params, (), &[],
+    sources!("fbm.rs", "px_field_op/src/noise.rs", "px_field_schema/src/field.rs",
+             "px_field_schema/src/noise.rs", "px_field_schema/src/params.rs"),
+    |p: &params::fbm::Params, _i: &(), g| crate::ops::fbm::eval(p, &[], g)
 }
 
 field_op! {
     /// 脊状噪声（无输入）。
-    Ridged, params::RIDGED, 4, params::ridged::Params, None, &[],
-    sources!("ridged.rs", "px_field_op/src/noise.rs", "px_field_schema/src/field.rs", "px_field_schema/src/noise.rs", "px_field_schema/src/params.rs"),
-    |p: &params::ridged::Params, _i: &None, g| crate::ops::ridged::eval(p, &[], g)
+    Ridged, params::RIDGED, 4, params::ridged::Params, (), &[],
+    sources!("ridged.rs", "px_field_op/src/noise.rs", "px_field_schema/src/field.rs",
+             "px_field_schema/src/noise.rs", "px_field_schema/src/params.rs"),
+    |p: &params::ridged::Params, _i: &(), g| crate::ops::ridged::eval(p, &[], g)
 }
 
 field_op! {
     /// 值域重映射（一张场）。
-    Remap, params::REMAP, 1, params::remap::Params, Field1, &["field"],
+    Remap, params::REMAP, 1, params::remap::Params, FieldInput, &["field"],
     sources!("remap.rs", "px_field_schema/src/field.rs", "px_field_schema/src/params.rs"),
-    |p: &params::remap::Params, i: &Field1, g| crate::ops::remap::eval(p, &[i.a.sample()], g)
-}
-
-field_op! {
-    /// 切向梯度的一个分量（一张场）。
-    Gradient, params::GRADIENT, 1, params::gradient::Params, Field1, &["field"],
-    sources!("gradient.rs", "px_field_schema/src/field.rs", "px_field_schema/src/params.rs"),
-    |p: &params::gradient::Params, i: &Field1, g| crate::ops::gradient::eval(p, &[i.a.sample()], g)
-}
-
-field_op! {
-    /// 三张场按第三张当权重混合。
-    Mix, params::MIX, 1, params::mix::Params, Field3, &["a", "b", "mask"],
-    sources!("mix.rs", "px_field_schema/src/field.rs", "px_field_schema/src/params.rs"),
-    |p: &params::mix::Params, i: &Field3, g| {
-        crate::ops::mix::eval(p, &[i.a.sample(), i.b.sample(), i.c.sample()], g)
+    |p: &params::remap::Params, i: &FieldInput, g| {
+        crate::ops::remap::eval(p, &[i.field.sample()], g)
     }
 }
 
 field_op! {
-    /// 域扭曲（两张场）。
-    Warp, params::WARP, 3, params::warp::Params, Field2, &["field", "offset"],
-    sources!("warp.rs", "px_field_schema/src/field.rs", "px_field_schema/src/params.rs", "px_verify/src/noise.rs"),
-    |p: &params::warp::Params, i: &Field2, g| {
-        crate::ops::warp::eval(p, &[i.a.sample(), i.b.sample()], g)
+    /// 切向梯度的一个分量（一张场）。
+    Gradient, params::GRADIENT, 1, params::gradient::Params, FieldInput, &["field"],
+    sources!("gradient.rs", "px_field_schema/src/field.rs", "px_field_schema/src/params.rs"),
+    |p: &params::gradient::Params, i: &FieldInput, g| {
+        crate::ops::gradient::eval(p, &[i.field.sample()], g)
+    }
+}
+
+field_op! {
+    /// 三张场按第三张当权重混合。
+    Mix, params::MIX, 1, params::mix::Params, MixInput, &["a", "b", "mask"],
+    sources!("mix.rs", "px_field_schema/src/field.rs", "px_field_schema/src/params.rs"),
+    |p: &params::mix::Params, i: &MixInput, g| {
+        crate::ops::mix::eval(p, &[i.a.sample(), i.b.sample(), i.mask.sample()], g)
+    }
+}
+
+field_op! {
+    /// 域扭曲（两张场：待扭曲的场 + 偏移场）。
+    Warp, params::WARP, 3, params::warp::Params, FieldPairInput, &["field", "offset"],
+    sources!("warp.rs", "px_field_schema/src/field.rs", "px_field_schema/src/params.rs",
+             "px_verify/src/noise.rs"),
+    |p: &params::warp::Params, i: &FieldPairInput, g| {
+        crate::ops::warp::eval(p, &[i.field.sample(), i.offset.sample()], g)
     }
 }
