@@ -8,5 +8,6 @@ pub mod remap;
 pub mod ridged;
 pub mod ridged3;
 pub mod stamps;
+pub mod stars;
 pub mod warp;
 pub mod warp3;

@@ -28,6 +28,22 @@ pub struct DensityInput {
     pub density: Cooked<Field>,
 }
 
+/// 算光照要吃的东西：**一份密度体积**（`cloud.density` 的产物）。
+#[derive(px_derive::PxInputs)]
+pub struct EmissionInput {
+    pub volume: Cooked<VolumeData>,
+}
+
+/// 沿视线积分要吃的东西：**一份发射体积** + **一张星图**（`CubeMap`）。
+///
+/// ⚠ 星图是**图输入**（不是参数）：星点要参与积分（被气遮住、被尘埃染红），所以它必须
+///   与发射体积在同一趟里被读到。给成参数的话那张图就没法由别的节点造出来。
+#[derive(px_derive::PxInputs)]
+pub struct SkyInput {
+    pub volume: Cooked<VolumeData>,
+    pub stars: Cooked<Field>,
+}
+
 /// 产物形状：`cook::<CloudCoarse>` 返回的就是它。
 ///
 /// ⚠ 图脚本那一侧读体积的判据仪器都拿这个别名当签名（它只说明"拿到手的是一份体积"）。
@@ -43,7 +59,26 @@ px_op! {
     ///
     /// ⚠ 与 [`CloudCoarse`] 是**两个算子**（不是同一份参数的新档）：那一档服务**等值面提取**
     ///   （存 `(场-τ)/L`，形状参数是一整套云的形状），这一档服务**体渲染的沿视线积分**
-    ///   （存密度本身 + 壳的内外半径，多一个径向保守化）。两者的"值"含义不同，
-    ///   混用会让"步进读到的密度"与"网格提取的等值面"说的不是同一件事。
+    ///   （存密度本身 + 壳的内外半径，多一个径向保守化）。两者的"值"含义不同。
     Density, "cloud.density", "px_volume_op", params::density::DensityParams, DensityInput, VolumeData
+}
+
+px_op! {
+    /// **密度体积 → 逐体素的发射与消光**（体渲染的"材质"）。
+    ///
+    /// ⚠ 光照（含朝光源的遮挡）在这里按**体素**算完，不留给步进：阴影只与"这一点"有关、
+    ///   与看它的视线无关 ⇒ 算一遍是 `体素数 × 阴影步数`，塞进步进就是
+    ///   `射线数 × 步数 × 阴影步数`。差三个数量级，而那正是"烘图时步进"能成立的全部理由。
+    Emission, "cloud.emission", "px_volume_op", params::emission::EmissionParams, EmissionInput, VolumeData
+}
+
+px_op! {
+    /// **沿视线积分**：发射体积 → 天空（立方贴图场）。
+    ///
+    /// ⚠ 输出是**场**（`CubeMap`，一条通道），不是贴图：`px_volume_schema` 在 `px_graph`
+    ///   **下面**（驱动依赖算法），够不到 `TextureData`。三条通道由图脚本各积一遍再拼成贴图。
+    ///
+    /// ⚠ 参数里的 `channel` 不存在 —— 通道由**节点自己**声明（`SkyInput` 一次只积一条），
+    ///   见 `params::sky::SkyParams`。三张同参数、不同通道的节点在图里是三个节点（三份缓存）。
+    SkyNebula, "sky.nebula", "px_volume_op", params::sky::SkyParams, SkyInput, Field
 }

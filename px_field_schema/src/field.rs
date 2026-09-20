@@ -8,7 +8,9 @@ use px_protocol::art::AssetKind;
 use px_protocol::wire::{Blob, DType, WireError};
 
 pub use px_protocol::art::Domain as Projection;
-pub use px_protocol::art::{CUBE_FACES, cube_map_extent};
+pub use px_protocol::art::{
+    CUBE_FACES, cube_direction, cube_face_of, cube_map_extent, direction_at as art_direction_at,
+};
 
 pub trait ProjectionKind {
     fn asset_kind(self) -> AssetKind;

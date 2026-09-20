@@ -99,7 +99,118 @@ impl px_graph_schema::HashField for FieldKind {
     }
 }
 
-/// **`cloud.density` 的参数**：体网格多粗、壳摆在哪、要不要保守化。
+/// **`cloud.emission` 的参数**：把密度体积变成"逐体素的发射与消光"。
+///
+/// ⚠ 为什么它要**单独一档**（而不是让步进每一步自己算光照）：光照里的阴影步进是
+///   **逐体素**的量（"从这一点到光源之间有多少气"），与视线无关 ⇒ 算一遍就够。
+///   塞进步进就等于**每条射线每一步都重算一遍**，代价是"射线数 × 步数"倍。
+///
+/// ⚠ 这也是"烘图时光线步进"能成立的全部理由：递归光照在烘图时按体素摊掉，渲染期不用再算。
+pub mod emission {
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, px_derive::PxParams)]
+    #[serde(default, deny_unknown_fields)]
+    pub struct EmissionParams {
+        /// **光源方向**（世界空间，单位向量）：星云内部那颗电离源的方位。
+        ///
+        /// ⚠ 参考图里"亮脊 + 暗柱"的来源就是它：朝着光源的那一侧被照亮，背光那一侧与
+        ///   "被前面的气挡住"的地方是暗的。没有这一栏，雾就是均匀自发光的（第一版那样）。
+        pub light: [f32; 3],
+        /// 光源在壳内的**半径比例**（`0` = 球心、`1` = 外壁）。
+        pub light_radius: f32,
+        /// 朝光源步进多少步算遮挡。⚠ 步数越多边缘越锐（代价线性）。
+        pub shadow_steps: u32,
+        /// 遮挡的浓度：`exp(-τ × 这个)`。`0` = 完全不投影（处处同亮）。
+        pub shadow_gain: f32,
+        /// 发射 = `density^power × gain`（`power > 1` ⇒ 只有浓的地方才亮）。
+        pub emission_power: f32,
+        pub emission_gain: f32,
+        /// 消光 = `density^power × gain`，**逐通道**（尘埃的偏红就是这么来的）。
+        ///
+        /// ⚠ 三个数**不是**同一个数乘系数：真实的尘埃消光随波长走（蓝光被吃得更多），
+        ///   于是"被尘埃压过的区域偏红"。给成一样的话尘埃只会把东西变暗，不会变色。
+        pub extinction: [f32; 3],
+        pub extinction_power: f32,
+        /// 尘埃的**额外**权重（叠在消光上）：参考图里那些黑柱比周围的雾浓得多。
+        pub dust_bias: f32,
+        pub dust_threshold: f32,
+    }
+
+    impl Default for EmissionParams {
+        fn default() -> Self {
+            Self {
+                light: [0.3, 0.5, 0.8],
+                light_radius: 0.25,
+                shadow_steps: 24,
+                shadow_gain: 1.6,
+                emission_power: 2.2,
+                emission_gain: 1.0,
+                // 蓝吃得比红多 ⇒ 透过尘埃的光偏红（星云照片里那条"红化"）。
+                extinction: [1.6, 2.4, 3.4],
+                extinction_power: 1.0,
+                dust_bias: 2.0,
+                dust_threshold: 0.35,
+            }
+        }
+    }
+}
+
+/// **`sky.nebula` 的参数**：沿视线积分，出一张立方贴图。
+///
+/// ⚠ 这一档**只积分**（不造形状、不投影）：它的输入是 [`super::emission`] 出来的
+///   "逐体素发射 + 消光"，输出是一张立方贴图 —— 于是它可以直接当天空盒用。
+pub mod sky {
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, px_derive::PxParams)]
+    #[serde(default, deny_unknown_fields)]
+    pub struct SkyParams {
+        /// 立方贴图每个面的分辨率（输出是 `face × face × 6`）。
+        pub face: u32,
+        /// **积哪一条通道**（0/1/2 = R/G/B）。
+        ///
+        /// ⚠ 通道是**节点自己的参数**（不是图输入）：一条通道一个节点、一份缓存。
+        ///   想让三条通道用不同的消光系数（尘埃偏红）就得分开积 —— 合成一条的话
+        ///   偏色只能靠事后乘系数，而那与"光线穿过多浓的介质"脱节。
+        pub channel: u32,
+        /// 每条射线的步数（**含**抖动）。⚠ 给少了会出层状条纹。
+        pub steps: u32,
+        /// 抖动：按格给采样点加一个只与格子有关的伪随机偏移，把层状条纹打散成噪声。
+        ///
+        /// ⚠ 它是**确定性**的（同一个格子永远同一个偏移）⇒ 重烘逐字节相同，缓存键不受影响。
+        ///   用时间/随机数做抖动会让同一份参数烘出两张不同的图。
+        pub jitter: f32,
+        /// 星点的亮度倍率（星点**乘**透射率 ⇒ 被前面的气遮住、被尘埃染红）。
+        pub star_gain: f32,
+        /// 背景天空的底色（通常是近黑）。
+        pub background: [f32; 3],
+        /// 星点的角半径（弧度）与光晕半径。
+        pub star_size: f32,
+        pub star_halo: f32,
+        pub star_halo_gain: f32,
+        /// 星图的哪一档算数（星图里亮纹素的比例很小，门限决定"有几颗星"）。
+        pub star_floor: f32,
+    }
+
+    impl Default for SkyParams {
+        fn default() -> Self {
+            Self {
+                face: 256,
+                channel: 0,
+                steps: 96,
+                jitter: 1.0,
+                star_gain: 1.0,
+                background: [0.0, 0.0, 0.0],
+                star_size: 0.0025,
+                star_halo: 0.012,
+                star_halo_gain: 0.22,
+                star_floor: 0.4,
+            }
+        }
+    }
+}
+
 ///
 /// ⚠ 它与顶上的 [`Params`]（`cloud.coarse`）**不是同一件事**，所以各留一份：
 ///   `cloud.coarse` 吃"覆盖度场 + 云的形状参数"，烘的是**等值面提取**要的那张场
@@ -154,4 +265,3 @@ pub mod density {
         }
     }
 }
-
