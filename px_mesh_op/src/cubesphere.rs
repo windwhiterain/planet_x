@@ -11,7 +11,7 @@ use px_protocol::art::{
 
 px_graph_schema::px_body! {
     CubeSphere,
-    |p, i, g| crate::cubesphere::eval(p, &[i.height.value()], g)
+    |p, i, g| crate::cubesphere::eval(p, &[i.height.value()], g)?
 }
 
 fn normalize(vector: [f32; 3]) -> [f32; 3] {
@@ -35,7 +35,11 @@ fn vertex_of(positions: &[f32], index: u32) -> [f32; 3] {
     [positions[slot], positions[slot + 1], positions[slot + 2]]
 }
 
-pub fn eval(params: &params::cubesphere::Params, inputs: &[&Field], grid: Grid) -> MeshData {
+pub fn eval(
+    params: &params::cubesphere::Params,
+    inputs: &[&Field],
+    grid: Grid,
+) -> Result<MeshData, String> {
         let field = inputs[0];
         let stats = field.stats();
         let span = if (stats.max - stats.min).abs() <= f32::EPSILON {
@@ -220,11 +224,32 @@ pub fn eval(params: &params::cubesphere::Params, inputs: &[&Field], grid: Grid) 
             indices.len() / 3,
         );
 
-        MeshData {
+        // ⚠ **法线朝内是硬失败**（2026-09-20 加）。在那之前这条审计只是**打印**：
+        //   一个顶点法线翻了 1/3 的网格照样烘得出来、场景照样编得过 —— 症状是**一颗黑球**
+        //   （实测：`moon` 图把 `displace` 从 0.045 提到 0.075，`height` 场一个字没动，
+        //   审计从"朝内 0、最小点积 0.783"变成"朝内 51858、最小点积 -1.000"，
+        //   渲染出来整个圆面是暗的、只剩轮廓一圈亮边）。
+        //   ⇒ 报错要**说得清是哪两件事**：`displace` 与"场比网格还碎"。这两条都是实测过的：
+        //     * `planet` / `desert`（平滑场）在 `displace = 0.075` 下朝内都是 0（0.769 / 0.476）；
+        //     * `moon` 的场里最小波长只有几十个格（`pits` 频率 24 × 3 层）⇒ 同一个 0.075 就翻了。
+        //   ⚠ 不做"自动把法线翻回来"：翻回来只是把**几何自交**盖住，那张网格仍然是错的
+        //     （渲染出来还会自我遮挡），错的是图，不是这一行的判据。
+        if worst < 0.0 {
+            return Err(format!(
+                "这份立方球网格有 {inward} 个顶点的**法线朝内**（最小点积 {worst:.3}）⇒ 几何在网格分辨率上已经翻转或自交，\
+                 渲染出来是一颗黑球。两条路（都是实测过的方向）：\
+                 ① 调小 `displace`（这一档是 {}，`moon` 图在 0.045 上朝内 0、在 0.075 上朝内 51858）；\
+                 ② 把输入场做平滑 —— 场里比网格还碎的细节会被采样成尖刺\
+                 （这份场 {}×{}、每面划 {n}²；`planet` 与 `desert` 那种低频场在同一个 `displace` 下不出问题）",
+                params.displace, field.width, field.height,
+            ));
+        }
+
+        Ok(MeshData {
             positions,
             normals,
             uvs,
             indices,
-        }
+        })
 }
 

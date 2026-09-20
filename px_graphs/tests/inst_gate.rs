@@ -122,9 +122,13 @@ fn a_real_instance_cooks_end_to_end() {
     );
 
     if !Path::new(&info.library).is_file() {
+        // ⚠ 命令走 `driver_command()`（**直接跑 driver exe**），与别处的提示同一口径 ——
+        //   从前这里手写了一句 `cargo run -p px_graphs --bin px -- build`，那是**慢路径**
+        //   （`cargo run` 会按另一套特性合并把图程序重链一遍），而且是**第三份**手抄的命令串。
         eprintln!(
-            "⚠ 跳过端到端：实例库不在盘上（{}）⇒ 先跑 `cargo run -p px_graphs --bin px -- build`",
-            info.library
+            "⚠ 跳过端到端：实例库不在盘上（{}）⇒ 先跑 `{} build`",
+            info.library,
+            px_cook::inst::driver_command(),
         );
         return;
     }
@@ -169,9 +173,6 @@ fn a_real_instance_cooks_end_to_end() {
         key,
         "`source_hash()` 两次算出来不一样"
     );
-    assert!(
-        !first.value().data.is_empty(),
-        "实例算子算出了一份空体积"
-    );
+    assert!(!first.value().data.is_empty(), "实例算子算出了一份空体积");
     graph.finish();
 }

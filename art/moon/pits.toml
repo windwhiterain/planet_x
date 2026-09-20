@@ -1,6 +1,6 @@
 # 第三层：小坑与麻点（近看的那一层）。
-frequency = 13.0
-octaves = 2
+frequency = 24.0
+octaves = 3
 lacunarity = 2.05
 gain = 0.50
 jitter = 0.95
@@ -9,5 +9,5 @@ aspect = 2.0
 spherical = true
 radius = 0.62
 rim = 0.16
-depth = 0.20
-height = 0.13
+depth = 0.16
+height = 0.14

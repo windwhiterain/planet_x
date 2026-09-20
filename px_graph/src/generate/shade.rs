@@ -92,7 +92,7 @@ fn shade(
             // 溅射纹（ejecta ray）：拿高度做一组很细的条纹，只在**高地**上淡淡压一点，
             // 让陨坑密集的地方不至于平得像一块水泥。
             let rays = (height * 61.0).sin() * 0.5 + 0.5;
-            color = mix(color, [0.867, 0.871, 0.878], rays * land_t * 0.10);
+            color = mix(color, [0.867, 0.871, 0.878], rays * land_t * 0.20);
             // 极区稍暗（观测上的极地阴影区），与 rocky 那条"极冠提亮"方向相反。
             let cap = ((latitude - 0.86) / 0.14).clamp(0.0, 1.0);
             color = mix(color, [0.318, 0.325, 0.345], cap * 0.30);
