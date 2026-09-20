@@ -293,9 +293,11 @@ pub const POINT_LIGHT_SHADOW_MAP_NEAR_Z: f32 = 0.1;
 
 /// `PointLightShadowMap::default().size`（`point_light.rs:183`）—— cube 每面的边长（texel）。
 ///
-/// ⚠ 它出现在**两个**地方：影子图本身的边长，以及 `shadow_normal_bias` 里那个 texel
-/// （`light.rs:444-449`）。所以它是一份契约、两个用处 —— 改一处而忘了另一处，
-/// 画面上只是"阴影边缘的锯齿换了一种"，任何门都不会响。
+/// ⚠ **虚拟影图之后它不再决定分辨率**（§本轮）：影图的分辨率现在是"每个物体要多少
+/// texel"（`Object::shadow_density`）算出来的虚拟面，见 `px_render::vshadow`。
+/// 这个常量只留在注释里当历史：它是旧口径 `shadow_normal_bias = 0.6 × (2/1024) × √2`
+/// 的出处，而那个口径把偏移挂在**固定边长**上 —— 太阳一拉远，偏移在世界单位里按
+/// `distance_to_light` 涨，于是整颗行星被压暗一档（实测：平均通道差 4.43、65% 像素 >8）。
 pub const POINT_LIGHT_SHADOW_MAP_SIZE: u32 = 1024;
 
 /// `PointLightFlags::SHADOW_MAPS_ENABLED`（`light.rs:136`）—— bit0。
@@ -310,15 +312,19 @@ pub const POINT_LIGHT_FLAGS_SHADOWS_ENABLED: u32 = 1 << 0;
 /// ⇒ 这个场景每盏灯的 flags 里**都**有这一位（不是 0 就是 8）。
 pub const POINT_LIGHT_FLAGS_AFFECTS_LIGHTMAPPED_MESH_DIFFUSE: u32 = 1 << 3;
 
-/// `shadow_normal_bias`：`0.6 × texel × √2`（`light.rs:442-449` 与 `:545-547`）。
+/// `shadow_normal_bias`（§本轮改口径）：**以 texel 为单位**的那个偏移量。
 ///
-/// texel 是**每面边长**推出来的：`2.0 × tan(π/4) / 边长` = `2 / 边长`（`light.rs:444-449`）。
-/// √2 那一项是"最坏情况的对角偏移"（源码原话）。f32 的**乘法次序**照抄源码
-/// （`(0.6 × texel) × √2`）—— 换一下次序在 IEEE 下本来就是同一个数，但这里留着是为了
-/// 让"与哪一行对"这件事在代码里看得见。
+/// 从前它是 `0.6 × (2/1024) × √2` —— 把"texel 的世界尺寸"**焊死在固定边长**上，
+/// 于是 `fetch_point_shadow` 里那句 `normal_offset = shadow_normal_bias × distance_to_light × N`
+/// 会随着太阳拉远而按比例涨：太阳远 20 倍 ⇒ 偏移涨 20 倍 ⇒ 整颗行星被自己的影压暗一档
+/// （实测：平均通道差 **4.43**、最大 **68**、65% 的像素差 >8）。
+///
+/// 现在这一格只说"**偏移几个 texel**"（`0.6 × √2`，两个数都照抄 `light.rs:442-449`），
+/// 而"一个 texel 在世界里多大"由采样侧按**这一盏灯真实的虚拟面分辨率**算
+/// （`texel_world = 2·d / N_virt`）—— 分辨率是虚拟影图给的，所以这个偏移从此
+/// **与灯多远无关**。
 pub fn shadow_normal_bias() -> f32 {
-    POINT_LIGHT_SHADOW_NORMAL_BIAS * (2.0 / POINT_LIGHT_SHADOW_MAP_SIZE as f32)
-        * core::f32::consts::SQRT_2
+    POINT_LIGHT_SHADOW_NORMAL_BIAS * core::f32::consts::SQRT_2
 }
 
 /// 文档里的一盏灯 → 聚类缓冲里的那 80 字节（逐字复刻 `light.rs:1318-1345`）。
@@ -447,21 +453,40 @@ pub fn globals_zero() -> GlobalsUniform {
     GlobalsUniform::default()
 }
 
-/// `point_shadow_textures`（group 0 binding 2）—— 点光 cube 影图（**cube array**）。
+/// 虚拟影图的**物理 atlas**（group 0 binding 2）。
 ///
-/// ⚠ 视图维度是 `CubeArray`：着色器那一格的 `light_id` 是 **cube 的下标**（不是层号），
-/// 面由方向自己选（`shadow_sampling.wgsl:324-341`）。层号的排法是 `light × 6 + face`
-/// （`light.rs:2075`），而整份 cube 的视图是 `CubeArray` + `DepthOnly`
-/// （`light.rs:1416-1444`）；**每一面**那个视图是 `D2` + 单层（`light.rs:2083-2093`），
-/// 那一份由执行器按 `PassPlan::layer` 建（见 `px_pass::Executor::layer_view`）。
+/// ⚠ 维度从 `CubeArray` 换成了 **`D2Array`**（§本轮）：一张 atlas 每面一层（层号 =
+/// 灯 × 6 + 面），页在层里是一格一格的矩形 —— 采样侧要按**页**取 texel
+/// （`textureLoad`），而 cube 的层没法给定页内坐标。名字保留
+/// `point_shadow_textures`（WGSL 侧那一格的声明在 `px_shader` 的桩里，两处同一个名字）。
+///
+/// ⚠ 旧口径那几句留在这里当对照：从前 `light_id` 是 **cube 的下标**、面由方向自己选
+/// （`shadow_sampling.wgsl:324-341`），整份视图是 `CubeArray` + `DepthOnly`
+/// （`light.rs:1416-1444`）。现在"哪一面"由采样侧按页算出来，而层号仍然是
+/// `light × 6 + face` —— 那一半没变，改的只是"层里怎么看"。
 pub const POINT_SHADOW_TEXTURES_BINDING: (u32, u32) = (0, 2);
 
 /// `point_shadow_textures_comparison_sampler`（group 0 binding 3）。
 ///
-/// ⚠ 它必须是**比较采样器**（`compare: Some(GreaterEqual)`）：`fetch_point_shadow` 走的是
-/// `textureSampleCompareLevel`，普通采样器在那条路上是"类型不符"，而且
-/// `GreaterEqual` 正是 reverse-Z 那条深度约定的一半（`light.rs:244-259`）。
+/// ⚠ 名字里的 `comparison` 是**旧口径的遗留**（§本轮）：`fetch_point_shadow` 从前走
+/// `textureSampleCompareLevel`，所以那一格必须是比较采样器（`GreaterEqual`，reverse-Z 的
+/// 一半）。虚拟影图的采样改成**手动比较**（`textureLoad` 取深度、shader 自己比）——
+/// 因为 atlas 是 `D2Array` 而页内坐标要按 texel 取，`textureSampleCompareLevel` 那条路
+/// 是按**面的**坐标采样的。名字保留：`px_shader` 的桩、`material.rs` 的反射判据与
+/// 绑定号三处都引它，改名字要动三处而一格像素都不换。
+///
+/// ⚠ 布局这一格仍然声明成 `Comparison`：`material.rs` 按 shader 声明那一侧反射
+/// （`Sampler { comparison: true }`），两边对不上就建不出管线。真正绑上去的那份
+/// 采样器也照旧是比较采样器 —— 它在这一档**一次都不会被采**。
 pub const POINT_SHADOW_SAMPLER_BINDING: (u32, u32) = (0, 3);
+
+/// **页表**（group 0 binding 4）：`array<u32>`，所有灯的页表段连在一起。
+///
+/// 用它而不是一张页表**贴图**：执行器的 `Use` 白名单里没有 `storage_texture`
+/// （`px_pass::Use::parse` 只有四档），加一档就是动执行器的能力面；而页表是
+/// "每页一个 u32 + 每行一个基址"，`storage` 缓冲正好装得下，读法也只有
+/// `textureLoad` 与 `array[i]` 的区别。形状见 `px_render::vshadow` 的模块头。
+pub const SHADOW_PAGE_TABLE_BINDING: (u32, u32) = (0, 4);
 
 /// cube 有几面。⚠ 与 `px_scene::frame::CUBE_FACES` 是**同一个数**的两个落点：
 /// 一份在文档侧（烘图算层号用），一份在宿主侧（对账与建视图用）。
@@ -469,24 +494,22 @@ pub const POINT_SHADOW_SAMPLER_BINDING: (u32, u32) = (0, 3);
 /// 不一致的那一天，文档里那六条 pass 会当场被拒。
 pub const SHADOW_CUBE_FACES: u32 = 6;
 
-/// 「这一帧没有影子 pass」时绑的那份 cube 影图：**1×1×6 层，全是 0**。
+/// 「这一帧没有影子 pass」时绑的那份 atlas：**1×1×1 层，全是 0**。
 ///
 /// 为什么要它：着色器**声明**了 binding 2（内容 shader 引 `fetch_point_shadow`），
 /// 于是管线布局必须有这一格，绑不上就建不了管线。而没有投影的灯时，
 /// 内容 shader 一次都不会去采它（`surface.wgsl`：`principal.shadow_maps != 0` 才进
 /// `fetch_point_shadow`，而那个位来自 `flags`）—— 所以绑什么不影响像素。
 ///
-/// ⚠ 与 oracle 的差别说清楚：Bevy 那边**照样分配**那张 1024²×6 的图
-/// （`max(1,count)*6` 层，`light.rs:1398-1414`），只是不往里渲染。而"分配"不出图 ——
-/// 一份没有任何 pass 写的资源进不了我们的文档（`px_pass` 的池子是**按需**建的，
-/// 而 `seed` 了没人用是当场拒）。所以这里绑一份小到看得见的兜底图，并**打印出来**。
+/// ⚠ 从 1×1×**6** 层缩到 1×1×**1** 层是跟着维度走的：atlas 是 `D2Array`，
+/// 而"一盏投影灯都没有"时一层都用不上。
 pub fn fallback_cube(device: &wgpu::Device) -> (wgpu::Texture, wgpu::TextureView) {
     let texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("组 0：兜底 cube 影图（1×1×6，全 0）"),
+        label: Some("组 0：兜底 atlas（1×1×1，全 0）"),
         size: wgpu::Extent3d {
             width: 1,
             height: 1,
-            depth_or_array_layers: SHADOW_CUBE_FACES,
+            depth_or_array_layers: 1,
         },
         mip_level_count: 1,
         sample_count: 1,
@@ -496,15 +519,15 @@ pub fn fallback_cube(device: &wgpu::Device) -> (wgpu::Texture, wgpu::TextureView
         view_formats: &[],
     });
     let view = texture.create_view(&wgpu::TextureViewDescriptor {
-        label: Some("组 0：兜底 cube 影图（CubeArray/DepthOnly）"),
+        label: Some("组 0：兜底 atlas（D2Array/DepthOnly）"),
         format: None,
-        dimension: Some(wgpu::TextureViewDimension::CubeArray),
+        dimension: Some(wgpu::TextureViewDimension::D2Array),
         usage: None,
         aspect: wgpu::TextureAspect::DepthOnly,
         base_mip_level: 0,
         mip_level_count: None,
         base_array_layer: 0,
-        array_layer_count: Some(SHADOW_CUBE_FACES),
+        array_layer_count: Some(1),
     });
     (texture, view)
 }
@@ -544,13 +567,15 @@ pub fn bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
         entries: &[
             buffer(VIEW_BINDING.1, wgpu::BufferBindingType::Uniform),
             buffer(LIGHTS_BINDING.1, wgpu::BufferBindingType::Uniform),
-            // 点光 cube 影图 + 它的比较采样器（§109）：`fetch_point_shadow` 要这两格。
+            // 虚拟影图的物理 atlas + 它的采样器（§本轮）：`fetch_point_shadow` 要这两格。
             wgpu::BindGroupLayoutEntry {
                 binding: POINT_SHADOW_TEXTURES_BINDING.1,
                 visibility: wgpu::ShaderStages::FRAGMENT,
                 ty: wgpu::BindingType::Texture {
                     sample_type: wgpu::TextureSampleType::Depth,
-                    view_dimension: wgpu::TextureViewDimension::CubeArray,
+                    // ⚠ 从 `CubeArray` 换成 `D2Array`（§本轮）：页要按 texel 取，
+                    //    所以 atlas 是"每面一层、层里一格一格"的平面。
+                    view_dimension: wgpu::TextureViewDimension::D2Array,
                     multisampled: false,
                 },
                 count: None,
@@ -561,6 +586,12 @@ pub fn bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
                 ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
                 count: None,
             },
+            // 页表（§本轮）：**storage**，因为它的长度按这一帧的页数走
+            // （uniform 那块 64 KiB 的上限会把"物体多、精度高"的场景卡死）。
+            buffer(
+                SHADOW_PAGE_TABLE_BINDING.1,
+                wgpu::BufferBindingType::Storage { read_only: true },
+            ),
             buffer(
                 CLUSTERED_LIGHTS_BINDING.1,
                 wgpu::BufferBindingType::Storage { read_only: true },
@@ -657,6 +688,7 @@ pub fn frame(
     depth: &wgpu::TextureView,
     shadow_cube: &wgpu::TextureView,
     shadow_sampler: &wgpu::Sampler,
+    shadow_page_table: &wgpu::Buffer,
     shadow_note: &str,
 ) -> Result<GroupZero, String> {
     // ⚠ `viewport` 是 **`view.viewport`**：**绝对像素矩形** `(x, y, w, h)`
@@ -744,6 +776,10 @@ pub fn frame(
                 resource: wgpu::BindingResource::Sampler(shadow_sampler),
             },
             wgpu::BindGroupEntry {
+                binding: SHADOW_PAGE_TABLE_BINDING.1,
+                resource: shadow_page_table.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
                 binding: CLUSTERED_LIGHTS_BINDING.1,
                 resource: cluster_buffer.as_entire_binding(),
             },
@@ -781,14 +817,17 @@ pub fn frame(
                 cluster.len(),
                 cluster.len()
             ),
-            // ⚠ 影图那一格要说清**绑的是哪一份**：文档烘了 cube 就是它，没烘就是兜底图
-            //    （1×1×6 全 0）。"绑了什么"看不见的话，"影子怎么全亮/全黑"就只能猜。
+            // ⚠ 影图那一格要说清**绑的是哪一份**：这一帧有虚拟影图就是它，没有就是兜底图
+            //    （1×1×1 全 0）。"绑了什么"看不见的话，"影子怎么全亮/全黑"就只能猜。
             format!(
-                "point_shadow_textures（group 0 binding {}）：cube array，{shadow_note}｜\
-                 comparison sampler（binding {}）：ClampToEdge×3 / Linear / Linear / Nearest / \
-                 lod [0, 32] / GreaterEqual",
+                "point_shadow_textures（group 0 binding {}）：**D2Array**（每面一层，层号 = 灯×6+面），\
+                 {shadow_note}｜sampler（binding {}）：ClampToEdge×3 / Linear / Linear / Nearest / \
+                 lod [0, 32] / GreaterEqual（虚拟影图改手动比较之后这一格不再被采）｜\
+                 页表（binding {}）：{} 个 u32",
                 POINT_SHADOW_TEXTURES_BINDING.1,
-                POINT_SHADOW_SAMPLER_BINDING.1
+                POINT_SHADOW_SAMPLER_BINDING.1,
+                SHADOW_PAGE_TABLE_BINDING.1,
+                shadow_page_table.size() / 4
             ),
     ];
     // 逐盏把**真的填进去的那几个数**打出来：出问题时先看这几行，不必猜"是不是灯没填"。

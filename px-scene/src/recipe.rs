@@ -21,8 +21,8 @@ use crate::contract::{merge_named, schema_of};
 use crate::members::{member_of, path_of};
 use crate::vocab::{
     self, ATMOSPHERE_KEYS, CLOUD_BASE, CLOUD_SHADOW_GAIN, CLOUD_SHADOW_HEIGHT, CLOUD_TOP,
-    CLOUDS_KEYS, CloudShape, MOON_KEYS, PLANET_KEYS, RING_BAND, RING_SEGMENTS, SKYBOX_BRIGHTNESS,
-    STARS_FACE, SUN_RANGE_FACTOR,
+    CLOUDS_KEYS, CloudShape, DEFAULT_SHADOW_DENSITY, MOON_KEYS, PLANET_KEYS, RING_BAND,
+    RING_SEGMENTS, SKYBOX_BRIGHTNESS, STARS_FACE, SUN_RANGE_FACTOR,
 };
 use crate::{math, stage};
 
@@ -454,12 +454,16 @@ pub fn compile(
             ))
         }
     };
+    // ⚠ 半径**在这里量**（见 `measure_radius`）：虚拟影图分页要它，而分页是烘图时做的。
+    let shape_radius = measure_radius(&geometry, &root)?;
+    let geometry = geometry.with_bounding_radius(shape_radius);
     objects.push(Object {
         id: "planet".to_string(),
         geometry,
         material: surface,
         transform: Transform::rotated(world),
         cast_shadow: true,
+        shadow_density: shadow_density_of(planet)?,
     });
 
     // ⚠ 物体的次序**就是文档的次序**，而透明物体（大气、云）都摆在原点 ⇒ 深度排序分不出
@@ -509,11 +513,14 @@ pub fn compile(
                     ("radius".to_string(), Value::Num(f64::from(outer))),
                     ("subdivisions".to_string(), Value::Num(64.0)),
                 ]),
-            ),
+            )
+            .with_bounding_radius(outer),
             material,
             // 大气壳是**球对称**的：迁移前它挂在根上（不带倾斜），这里也就给单位变换。
             transform: Transform::default(),
             cast_shadow: false,
+            // 大气不投影 ⇒ 不进虚拟影图的分配。
+            shadow_density: 0.0,
         });
     }
 
@@ -561,6 +568,10 @@ pub fn compile(
                 ]),
             ),
         };
+        // 云不投影 ⇒ 这一栏量了也只是"说得全"，不进任何分配。量它仍然值得：
+        // 哪天云要投影，半径就已经在文档里了（而它是唯一能从那颗壳量出来的数）。
+        let cloud_radius = measure_radius(&geometry, &root)?;
+        let geometry = geometry.with_bounding_radius(cloud_radius);
         objects.push(Object {
             id: "clouds".to_string(),
             geometry,
@@ -568,6 +579,7 @@ pub fn compile(
             transform: Transform::rotated(world),
             // 云壳**不投**阴影：它是一整颗球，进 shadow map 就是一颗球形硬影。
             cast_shadow: false,
+            shadow_density: 0.0,
         });
     }
 
@@ -599,10 +611,12 @@ pub fn compile(
         check_stage(&file.name, "rings", &material)?;
         objects.push(Object {
             id: "rings".to_string(),
-            geometry: Geometry::mesh(mesh),
+            geometry: Geometry::mesh(mesh).with_bounding_radius(outer),
             material,
             transform: Transform::rotated(world),
             cast_shadow: true,
+            // 环的影落在行星赤道带上（参考图上那道暗带就是它）：要影，密度与行星同口径。
+            shadow_density: shadow_density_of(planet)?,
         });
     }
 
@@ -634,6 +648,10 @@ pub fn compile(
             material,
             transform,
             cast_shadow: true,
+            // ⚠ 卫星是**自己的密度**：它半径只有 0.09 量级，用行星那档密度的话
+            //   它在影图里只占几十个 texel，影就是一团糊。第 7 轮那颗"凌日的卫星"
+            //   在参考图上有清楚的轮廓，靠的正是这一栏（配方里给 2048）。
+            shadow_density: shadow_density_of(part)?,
         });
     }
 
@@ -693,6 +711,13 @@ pub fn compile(
     })
     .collect();
 
+    // ---- 灯表：**先摆出来**，因为帧图（虚拟影图的分配）要按灯的位置分页 ----
+    let lights: Vec<px_protocol::scene::Light> = {
+        let mut all = vec![sun];
+        all.extend(extra_lights);
+        all
+    };
+
     // ---- 帧图（§128）：**渲染器的形状**烘进文档 ----
     let frame_name = file
         .frame
@@ -707,10 +732,13 @@ pub fn compile(
         let sources = crate::frame::Sources {
             ambient: file.ambient,
             skybox_brightness: SKYBOX_BRIGHTNESS,
-            // 投影的点光有几盏：今天这张场景表就一盏（`sun`，`shadows` 由 planet 那一格给）。
-            shadow_lights: usize::from(sun.shadows),
+            // 投影的点光有几盏（`lights[].shadows`）：帧图里那份 atlas 的层数、
+            // 以及"展开几条影子 pass"都由它算出来。
+            shadow_lights: lights.iter().filter(|light| light.shadows).count(),
         };
-        crate::frame::build(&frame, &objects, &sources, true)?
+        // ⚠ 灯表也递进去：**虚拟影图的页是烘图时分配的**（`frame::build`），
+        //    而分页要知道"灯在哪"。
+        crate::frame::build(&frame, &objects, &sources, &lights, true)?
     } else {
         crate::frame::Baked {
             resources: Vec::new(),
@@ -736,11 +764,7 @@ pub fn compile(
         },
         resources: framebaked.resources,
         passes: framebaked.passes,
-        lights: {
-            let mut all = vec![sun];
-            all.extend(extra_lights);
-            all
-        },
+        lights,
         objects,
         frame_materials: framebaked.materials,
         material_instances: framebaked.material_instances,
@@ -821,7 +845,8 @@ fn moon_body(part: &PartFile) -> Result<(Geometry, Transform, [f32; 4]), String>
             ("radius".to_string(), Value::Num(f64::from(radius))),
             ("subdivisions".to_string(), Value::Num(subdivisions)),
         ]),
-    );
+    )
+    .with_bounding_radius(radius as f32);
     let position = match part.params.get("position") {
         Some(_) => part.triple("position")?,
         None => [0.0, 0.0, 0.0],
@@ -865,6 +890,99 @@ pub fn validate_material(
         .map(|_| ())
         .map_err(|err| format!("{label} 的材质参数对不上 {} 的契约：{err}", shader.node))
 }
+
+/// 一份**内建图元**的包围球半径：`icosphere` 的 `radius` 参数。
+///
+/// ⚠ 只认它一个：图元名是**白名单**（`primitive` 那一栏只放行 `icosphere`），
+/// 而半径那一格是它的定义参数 —— 不认识的名字在别处已经拒过了。
+fn primitive_radius(geometry: &Geometry) -> Option<f32> {
+    let Geometry::Primitive { name, params, .. } = geometry else {
+        return None;
+    };
+    if name != "icosphere" {
+        return None;
+    }
+    match params.get("radius") {
+        Some(Value::Num(value)) => Some(*value as f32),
+        _ => None,
+    }
+}
+
+/// 一份**网格产物**的包围球半径：顶点到原点的最大距离。
+///
+/// ⚠ 为什么烘图侧要读网格：虚拟影图的页分配问的是"这个物体在灯看来张开多大的角"，
+/// 而那个数就是它的包围球半径。半径**只有网格自己知道** —— 把"半径"当成一栏内容参数
+/// 写在配方里，就是让作者手抄一个可以从产物量出来的数（`displace` 一改它会漂）。
+fn mesh_radius(member: &px_protocol::scene::Member, root: &Path) -> Result<f32, String> {
+    let path = member
+        .resolve(root)
+        .map_err(|err| format!("网格成员 {member} 的路径：{err}"))?;
+    let bytes =
+        std::fs::read(&path).map_err(|err| format!("读不到 {}：{err}", path.display()))?;
+    let frames = px_protocol::stream::read_stream(&mut bytes.as_slice())
+        .map_err(|err| format!("解 {} 的流：{err}", path.display()))?;
+    // ⚠ 读法照 `px_render::mesh::load_mesh`：清单帧说 kind、后面的 blob 帧是载荷。
+    let kind = frames.iter().find_map(|frame| match frame {
+        px_protocol::stream::Frame::Art(bundle) => {
+            bundle.assets.first().map(|asset| asset.kind)
+        }
+        _ => None,
+    });
+    if kind != Some(px_protocol::art::AssetKind::Mesh) {
+        return Err(format!("{} 不是 Mesh 产物：{kind:?}", path.display()));
+    }
+    let blobs: Vec<&px_protocol::wire::Blob> = frames
+        .iter()
+        .filter_map(|frame| match frame {
+            px_protocol::stream::Frame::Blob(blob) => Some(blob),
+            _ => None,
+        })
+        .collect();
+    let mesh = px_protocol::art::MeshData::from_blobs(&blobs)
+        .map_err(|err| format!("解 {} 的网格载荷：{err}", path.display()))?;
+    let mut radius = 0.0_f32;
+    for point in mesh.positions.chunks_exact(3) {
+        let length = (point[0] * point[0] + point[1] * point[1] + point[2] * point[2]).sqrt();
+        radius = radius.max(length);
+    }
+    if radius <= 0.0 || !radius.is_finite() {
+        return Err(format!(
+            "网格产物 {} 的包围球半径量出来是 {radius}：顶点都在原点或者数值不合法",
+            path.display()
+        ));
+    }
+    Ok(radius)
+}
+
+/// 一份几何的包围球半径 —— **量出来**（网格读顶点、图元读半径参数）。
+///
+/// 见 [`Geometry::bounding_radius`]：这一栏是虚拟影图页分配的唯一依据，
+/// 而它必须由**拿得到几何产物**的那一侧填。
+fn measure_radius(geometry: &Geometry, root: &Path) -> Result<f32, String> {
+    if let Some(radius) = primitive_radius(geometry) {
+        return Ok(radius);
+    }
+    match geometry.member() {
+        Some(member) => mesh_radius(member, root),
+        None => Err("这份几何既不是内建图元、也没有网格成员：量不出包围球".to_string()),
+    }
+}
+
+/// 一个 part 的**阴影密度**（texel / 世界单位）—— 虚拟影图那一侧要的量。
+///
+/// 判定只有两条，且都与"要不要影"这件事对齐：
+/// - `shadows = 1`（缺省 0，与 `sun.shadows` 同一只旋钮的读法）而**没给** `shadow_density`
+///   ⇒ [`DEFAULT_SHADOW_DENSITY`]："要影"说了就不该一点影都没有；
+/// - 其余的（含 `shadows = 0` 与 `shadows = 1, shadow_density = 0`）⇒ **0** = 不参与分配。
+///
+/// ⚠ 0 是**真的不分配**，不是"退回旧路"：旧的那条 1024² cube 已经被虚拟影图**替掉**了
+/// （§本轮），文档里的 0 就是"这个物体不进任何页"。一个场景若所有投影物体都是 0，
+/// 它就没有影 —— 而不是"一副糊影"。
+fn shadow_density_of(part: &PartFile) -> Result<f32, String> {
+    if part.number_or("shadows", 0.0) <= 0.5 {
+        return Ok(0.0);
+    }
+    Ok(part.number_or("shadow_density", DEFAULT_SHADOW_DENSITY))}
 
 /// 环的自写材质（原来是 Bevy 的 `StandardMaterial { unlit: true, blend, cull: none }`）。
 /// 和 `shaders` 图里那三份同规矩：**include 闭包进键**（§17.1、§52.3）。
@@ -968,7 +1086,7 @@ params = { radius = 0.093, position = [-0.62, 0.30, 1.32] }
         assert_eq!(transform.translation, [-0.62, 0.30, 1.32]);
         assert_eq!(transform.scale, [1.0, 1.0, 1.0]);
         match geometry {
-            Geometry::Primitive { name, params } => {
+            Geometry::Primitive { name, params, .. } => {
                 assert_eq!(name, "icosphere");
                 assert_eq!(params.get("radius"), Some(&Value::Num(0.093)));
                 // ⚠ 默认细分：不写这一栏也该有一颗球（不是 0 个三角形）。

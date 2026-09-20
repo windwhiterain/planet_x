@@ -98,6 +98,7 @@ fn pass_spec(
         render: String::new(),
         depth_target: None,
         cube_face: None,
+        viewport: None,
     }
 }
 

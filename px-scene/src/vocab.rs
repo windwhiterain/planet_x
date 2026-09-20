@@ -78,6 +78,20 @@ quantity! {
     Softness,    "大气软化量。";
 }
 
+/// **缺省阴影密度**（texel / 世界单位）：配方写了 `shadows = 1` 而**没写** `shadow_density`
+/// 时就用它 —— "要影"这件事一旦说了，就不该因为忘了一个旋钮而**一点影都没有**。
+///
+/// ⚠ 而没写 `shadows`（缺省 0）的 part 拿到的是 **0**：影是**要来的**。
+/// 那一条是这一轮有意保留的：`orbit-uranus` 那类配方自己写着 `shadows = 0`，
+/// 而"没要求影子"与"要求了影子但没给密度"是两件事，混成一件会让每个旧场景突然长出
+/// 一整套虚拟影图来。
+///
+/// ⚠ 这个数是"每 1 世界单位至少分到 256 个影图 texel"。行星半径 1.0 时一个 texel
+/// ≈ 0.004 世界单位（半径的 0.4%）；旧的全局 1024² cube 在太阳距离 4.92 时约 0.0096
+/// （`px_render::group0::POINT_LIGHT_SHADOW_MAP_SIZE` 那条口径），细一倍多，而
+/// **这个数不随光源拉远变大** —— 那正是虚拟影图要买的东西。要更清就单独给大一点的密度。
+pub const DEFAULT_SHADOW_DENSITY: f32 = 256.0;
+
 /// 云壳的分段数：形状档里的整数档。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct RaySteps(pub u32);
@@ -97,7 +111,7 @@ impl RaySteps {
 ///
 /// ⚠ `subdivisions`（2026-09-20 追加）只在 `primitive = "icosphere"` 那一支用：它是**内建球
 /// 的细分数**，与材质无关 ⇒ 必须是结构键，否则会被当成"shader 没声明的参数"当场拒。
-pub const PLANET_KEYS: [&str; 16] = [
+pub const PLANET_KEYS: [&str; 17] = [
     "palette",
     "displace",
     "sea_level",
@@ -105,6 +119,7 @@ pub const PLANET_KEYS: [&str; 16] = [
     "spin",
     "rings",
     "shadows",
+    "shadow_density",
     "cloud_shadow",
     "shadow_height",
     "light_position",
@@ -129,7 +144,7 @@ pub const PLANET_KEYS: [&str; 16] = [
 /// ⚠ 它**没有 shader**：灯不是物体（`PartFile.shader` 因此是可选字段）。
 pub const LIGHT_KEYS: [&str; 5] = ["position", "color", "intensity", "range", "shadows"];
 
-pub const MOON_KEYS: [&str; 4] = ["radius", "subdivisions", "position", "spin"];
+pub const MOON_KEYS: [&str; 5] = ["radius", "subdivisions", "position", "spin", "shadow_density"];
 
 /// **编译器自己消化的结构键**（云）：形状档、消融档、风 —— 这些要么进几何、要么与云影同口径。
 pub const CLOUDS_KEYS: [&str; 24] = [

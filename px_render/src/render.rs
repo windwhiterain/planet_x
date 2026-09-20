@@ -2755,6 +2755,7 @@ fn cell_materials<'a>(
                         bind_group: &zero.bind_group,
                         layout: zero.layout.clone(),
                         layout_id: ZERO_LAYOUT_ID,
+                        dynamic_offset: 0,
                     },
                     ResolvedGroup {
                         group: 1,
@@ -2765,12 +2766,14 @@ fn cell_materials<'a>(
                         // 一份布局，所有视图共用（见上面那段）。
                         layout: stage_layout.clone(),
                         layout_id: STAGE_LAYOUT_ID,
+                        dynamic_offset: 0,
                     },
                     ResolvedGroup {
                         group: MATERIAL_BIND_GROUP,
                         bind_group: &binding.bind_group,
                         layout: material_layout.clone(),
                         layout_id: MATERIAL_LAYOUT_ID,
+                        dynamic_offset: 0,
                     },
                 ],
                 // 混合档来自**材质契约**那一份（`Add` 与 `Premultiplied` 在 Bevy 0.19 里同档）。
@@ -2792,12 +2795,14 @@ fn cell_materials<'a>(
                 bind_group: &zero.bind_group,
                 layout: zero.layout.clone(),
                 layout_id: ZERO_LAYOUT_ID,
+                dynamic_offset: 0,
             },
             ResolvedGroup {
                 group: MATERIAL_BIND_GROUP,
                 bind_group: &binding.bind_group,
                 layout: material_layout.clone(),
                 layout_id: MATERIAL_LAYOUT_ID,
+                dynamic_offset: 0,
             },
         ],
         // 混合档与剔除档来自 `material::frame_key`（那两档**不在文档里**：它们是策略，
@@ -2957,6 +2962,7 @@ fn cell_materials<'a>(
                 bind_group: &face_stages[face_index].bind_group,
                 layout: stage_layout.clone(),
                 layout_id: STAGE_LAYOUT_ID,
+                dynamic_offset: 0,
             }];
             resolved_materials.push(ResolvedMaterial {
                 name: instance.name.as_str(),

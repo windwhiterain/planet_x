@@ -857,6 +857,19 @@ pub struct PassPlan {
     /// 不是搬到材质：顶点阶段说的是"这份几何**提供**什么"，不是"材质**期望**什么"。
     pub vertex_shader: String,
     pub vertex_entry: String,
+    /// **这一条 pass 落在它附件里的哪一块**：`[x, y, 宽, 高]`（texel，左上角原点）。
+    ///
+    /// ⚠ 它与 [`Frame::viewport`] 是**两件事**，不许混：
+    /// - `Frame::viewport` 说的是"这一帧落在宿主那块**目标**里的哪一格"（多相机那一档），
+    ///   它按 [`CellSpace`] 变成 viewport 或 scissor；
+    /// - 这一个说的是"这条 pass 落在**它自己那张附件**里的哪一块"，对**池里的**纹理生效。
+    ///
+    /// 为什么需要它（虚拟影图，§本轮）：影子的一页要画进 atlas 的一格，而**每一页要用
+    /// 它自己那一小块投影**（`PassView` 的缩放投影）。执行器没有 indirect、也没有
+    /// per-draw 的 viewport，所以"一格一页"只能落在"一条 pass 一格 viewport"上。
+    ///
+    /// ⚠ `None` = 一个 `set_viewport` 都不发，行为与没有这一格时**逐字节相同**。
+    pub viewport: Option<[f32; 4]>,
 }
 
 impl PassPlan {
@@ -1178,6 +1191,28 @@ impl Plan {
                     }
                 }
             }
+            // ---- `viewport`：附件里的落点。形状不对就当场拒 ----
+            //
+            // ⚠ 为什么在这里判而不是留给 wgpu：`set_viewport` 给的矩形超出附件是
+            //    **未定义行为**（不是报错），而"影少画了一块"在画面上看不出来是分配错了。
+            if let Some(rect) = pass.viewport {
+                if rect[2] <= 0.0 || rect[3] <= 0.0 {
+                    return Err(format!(
+                        "{at} 的 viewport 是 ({}, {}, {}, {})：宽高必须是正数\
+                         （一个零宽的格子画不出东西，而画不出来与画错了在画面上分不开）",
+                        rect[0], rect[1], rect[2], rect[3]
+                    ));
+                }
+                if !rect.iter().all(|value| value.is_finite()) {
+                    return Err(format!("{at} 的 viewport 里有不是有限数的值：{rect:?}"));
+                }
+                // 落点必须有附件可落：颜色目标或深度目标至少一个。
+                if pass.render.color == Attachment::None && pass.render.depth == Attachment::None {
+                    return Err(format!(
+                        "{at} 给了 viewport 却一个附件都没挂：那一块落在哪张图上？"
+                    ));
+                }
+            }
             // ---- 类型各自的形状 ----
             match pass.kind {
                 PassKind::Compute => unreachable!("上面已经 return 了"),
@@ -1416,6 +1451,17 @@ pub struct ResolvedGroup<'a> {
     /// 执行器手里没有"这两份布局是不是同一份"的判据；而布局本来就是宿主建的，
     /// 只有它知道。
     pub layout_id: u64,
+    /// 设这一组时带的**动态偏移**（字节）。0 = 不带（`&[]`，今天所有组都是这样）。
+    ///
+    /// 为什么需要它（虚拟影图，§本轮）：影子的一页要用**它自己那一小块**的
+    /// `PassView`（那一页的缩放投影），而页有几百个 —— 一页一份 `BindGroup` 就是
+    /// 几百个对象；而动态偏移是"**一份**组 + 每笔一个数"，正好对上
+    /// "一条 pass 一笔 draw、每笔一块 64 字节"这个形状。
+    ///
+    /// ⚠ 它只对**布局里声明了动态偏移**的那一格有效，而"哪一格是动态的"写在
+    /// `wgpu::BindGroupLayoutEntry.has_dynamic_offset` 上（宿主建布局时说了算）——
+    /// 执行器不认识"页"，它只把这一个数转交给 wgpu。
+    pub dynamic_offset: u32,
 }
 
 /// 宿主**解析好的材质**：`Draw::material` 那个名字 → 要设的绑定组 + 混合档 + 剔除。
@@ -2839,9 +2885,13 @@ impl Executor {
                 }
             }
             // 格子：内容那一条按 viewport 落位，交给宿主目标那一条只按 scissor 裁剪。
-            match space {
-                CellSpace::Whole => {}
-                CellSpace::Viewport(rect) => render_pass.set_viewport(
+            //
+            // ⚠ `pass.viewport` 优先：它是"这条 pass 落在**自己附件**里的哪一块"
+            //    （虚拟影图的一页），与 `Frame::viewport` 那条"落在宿主目标里的哪一格"
+            //    是两件事。两者同时给的场合并成立（不同纹理），所以这里不是二选一的冲突，
+            //    而是**两条各自生效**：cell 决定格子，pass.viewport 决定附件里的落点。
+            match pass.viewport {
+                Some(rect) => render_pass.set_viewport(
                     rect[0],
                     rect[1],
                     rect[2],
@@ -2849,12 +2899,23 @@ impl Executor {
                     0.0,
                     1.0,
                 ),
-                CellSpace::Scissor(rect) => render_pass.set_scissor_rect(
-                    rect[0] as u32,
-                    rect[1] as u32,
-                    rect[2] as u32,
-                    rect[3] as u32,
-                ),
+                None => match space {
+                    CellSpace::Whole => {}
+                    CellSpace::Viewport(rect) => render_pass.set_viewport(
+                        rect[0],
+                        rect[1],
+                        rect[2],
+                        rect[3],
+                        0.0,
+                        1.0,
+                    ),
+                    CellSpace::Scissor(rect) => render_pass.set_scissor_rect(
+                        rect[0] as u32,
+                        rect[1] as u32,
+                        rect[2] as u32,
+                        rect[3] as u32,
+                    ),
+                },
             }
             if let Some((pipeline, bind_group)) = &fullscreen_draw {
                 render_pass.set_pipeline(pipeline);
@@ -2865,7 +2926,15 @@ impl Executor {
                     render_pass.set_pipeline(pipeline);
                     if let Some(material) = material {
                         for group in &material.groups {
-                            render_pass.set_bind_group(group.group, group.bind_group, &[]);
+                            if group.dynamic_offset == 0 {
+                                render_pass.set_bind_group(group.group, group.bind_group, &[]);
+                            } else {
+                                render_pass.set_bind_group(
+                                    group.group,
+                                    group.bind_group,
+                                    &[group.dynamic_offset],
+                                );
+                            }
                         }
                     }
                     if let Some((buffer, _)) = &geometry.vertices {
@@ -2914,16 +2983,22 @@ impl Executor {
                     Some(layer) => format!("第 {layer} 层（{} 的）", pass.depth_target.as_deref().unwrap_or("?")),
                     None => "不分层".to_string(),
                 },
-                match space {
-                    CellSpace::Whole => "整幅".to_string(),
-                    CellSpace::Viewport(rect) => format!(
-                        "viewport ({}, {}, {}, {})",
+                match pass.viewport {
+                    Some(rect) => format!(
+                        "附件里的 viewport ({}, {}, {}, {})",
                         rect[0], rect[1], rect[2], rect[3]
                     ),
-                    CellSpace::Scissor(rect) => format!(
-                        "scissor ({}, {}, {}, {})（不设 viewport：宿主目标那一条按 oracle 的形状搬）",
-                        rect[0], rect[1], rect[2], rect[3]
-                    ),
+                    None => match space {
+                        CellSpace::Whole => "整幅".to_string(),
+                        CellSpace::Viewport(rect) => format!(
+                            "viewport ({}, {}, {}, {})",
+                            rect[0], rect[1], rect[2], rect[3]
+                        ),
+                        CellSpace::Scissor(rect) => format!(
+                            "scissor ({}, {}, {}, {})（不设 viewport：宿主目标那一条按 oracle 的形状搬）",
+                            rect[0], rect[1], rect[2], rect[3]
+                        ),
+                    },
                 },
                 if fullscreen {
                     format!("全屏三角｜参数 {} 字节｜格 {}", pass.params.len(), pass.slots.len())
@@ -3893,6 +3968,161 @@ fn vs_main(@location(0) position: vec3<f32>) -> Out {
         assert_eq!(pixels[0], WHITE, "格子里那一笔应当被移到右半幅（(6,4) 白）");
         assert_eq!(pixels[1], RED, "(4,4) 落在三角外面 ⇒ 清屏色（不带格子时它是白的）");
         assert_eq!(pixels[2], RED, "格子外面一个像素都不许动");
+    }
+
+    /// **`PassPlan::viewport` 真的落到了光栅化上**（虚拟影图那一页的判据）。
+    ///
+    /// 为什么非要一条 GPU 判据：纯数据判据只钉"规则"，钉不到"宿主给了 `pass.viewport`、
+    /// 而执行器**没发** `set_viewport`"这一类错 —— 那一类错在画面上是"影的每一页都画在
+    /// atlas 的左上角"，看着像分配器的问题。
+    ///
+    /// 做法与上面那条 `Frame::viewport` 的判据同形（同一支三角、同样的两个读数），
+    /// 差别是**格子来自 pass、目标来自池子**：这正是虚拟影图那条路。
+    #[test]
+    fn the_pass_viewport_moves_the_geometry_and_not_only_the_audit() {
+        let (device, queue) = test_device();
+        let mut executor = Executor::new();
+        let side = SIDE;
+        let target = device.create_texture(&TextureDescriptor {
+            label: Some("px_pass 判据：pass viewport 的池内目标"),
+            size: Extent3d {
+                width: side,
+                height: side,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: GpuDimension::D2,
+            format: TextureFormat::Rgba8UnormSrgb,
+            usage: TextureUsages::RENDER_ATTACHMENT
+                | TextureUsages::TEXTURE_BINDING
+                | TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let spec = ResourceSpec {
+            name: "a".to_string(),
+            format: Format::Rgba8UnormSrgb,
+            size: SizeRule::View,
+            layers: 1,
+            usage: vec![Use::RenderAttachment, Use::TextureBinding, Use::CopySrc],
+        };
+        executor
+            .seed(&spec, side, side, target.clone())
+            .expect("把中间目标 seed 进池子");
+
+        let plan = plan_with(
+            vec![spec],
+            vec![PassPlan {
+                kind: PassKind::Geometry,
+                label: "page".to_string(),
+                vertex_shader: TRIANGLE_VERTEX.to_string(),
+                vertex_entry: "vs_main".to_string(),
+                writes: vec!["a".to_string()],
+                draws: vec![draw("near", "white")],
+                render: RenderState::parse(STATE_BASE).expect("状态文本"),
+                viewport: Some([4.0, 0.0, 4.0, 8.0]),
+                ..Default::default()
+            }],
+        );
+
+        let near = vertex_buffer(&device, 0.5);
+        let vertex_layout = VertexBufferLayout {
+            array_stride: 12,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &TINT_ATTRIBUTES,
+        };
+        let geometries = [ResolvedGeometry {
+            name: "near",
+            vertices: Some((&near, vertex_layout.clone())),
+            indices: None,
+            vertex_count: 3,
+            instances: 0..1,
+        }];
+        let tint_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+            label: Some("px_pass 判据材质布局（pass viewport）"),
+            entries: &[BindGroupLayoutEntry {
+                binding: 0,
+                visibility: ShaderStages::FRAGMENT,
+                ty: BindingType::Buffer {
+                    ty: BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+        let white = test_material(&device, &tint_layout, [1.0, 1.0, 1.0, 1.0]);
+        let materials = [resolved_material("white", &white, &tint_layout, Cull::None)];
+
+        let frame = Frame {
+            width: side,
+            height: side,
+            // ⚠ 整幅：这一条判的**只**是 `pass.viewport`。
+            viewport: None,
+            sets: &[],
+            geometries: &geometries,
+            materials: &materials,
+        };
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("px_pass 判据（pass viewport）"),
+        });
+        let audit = executor
+            .execute(&device, &mut encoder, &plan, &frame)
+            .unwrap_or_else(|err| panic!("execute 失败：{err}"));
+        println!("{audit}");
+        assert!(
+            audit.contains("附件里的 viewport (4, 0, 4, 8)"),
+            "审计要说清这一条落在附件的哪一块：{audit}"
+        );
+        let pixels = read_points(&device, &queue, encoder, &target, &[(6, 4), (4, 4), (0, 4)]);
+        assert_eq!(pixels[0], WHITE, "附件里那一块应当被移到右半幅（(6,4) 白）");
+        assert_eq!(pixels[1], RED, "(4,4) 落在三角外面 ⇒ 清屏色（没发 viewport 时它是白的）");
+        assert_eq!(pixels[2], RED, "附件里那一块外面一个像素都不许动");
+    }
+
+    /// 落点形状不对就**当场拒**，而且拒的理由要说清是哪一条 pass。
+    #[test]
+    fn a_pass_viewport_with_a_degenerate_shape_is_refused() {
+        let mut pass = geometry_into("page", "a");
+        pass.viewport = Some([0.0, 0.0, 0.0, 8.0]);
+        let why = plan_with(
+            vec![ResourceSpec {
+                name: "a".to_string(),
+                format: Format::Depth32Float,
+                size: SizeRule::Fixed(8, 8),
+                layers: 1,
+                usage: vec![Use::RenderAttachment],
+            }],
+            vec![pass],
+        )
+        .check()
+        .expect_err("零宽的格子 ⇒ 拒");
+        assert!(why.contains("page"), "要说清是哪一条：{why}");
+        assert!(why.contains("viewport"), "要说清是哪一栏：{why}");
+
+        // 没有附件却给 viewport：那一块落在哪张图上？
+        let mut orphan = geometry_into("orphan", "a");
+        orphan.viewport = Some([0.0, 0.0, 4.0, 4.0]);
+        orphan.writes.clear();
+        orphan.render.color = Attachment::None;
+        orphan.render.depth = Attachment::None;
+        orphan.depth_target = None;
+        let why = plan_with(
+            vec![ResourceSpec {
+                name: "a".to_string(),
+                format: Format::Depth32Float,
+                size: SizeRule::Fixed(8, 8),
+                layers: 1,
+                usage: vec![Use::RenderAttachment],
+            }],
+            vec![orphan],
+        )
+        .check()
+        .expect_err("没有附件却给 viewport ⇒ 拒");
+        assert!(
+            why.contains("viewport") || why.contains("附件"),
+            "拒词要说清是 viewport 与附件对不上：{why}"
+        );
     }
 
     /// **时间戳真的记下了这一条 pass**（J4 的仪器自己那一条判据）。
@@ -4900,6 +5130,7 @@ fn fs_main(@location(0) tint: vec4<f32>) -> @location(0) vec4<f32> {
                 bind_group: &group.bind_group,
                 layout: layout.clone(),
                 layout_id: 1,
+                dynamic_offset: 0,
             }],
             blend: None,
             // 剔除关掉：这条判据要说的是"值到没到"，不是"三角形朝向对不对"。
@@ -4971,6 +5202,7 @@ fn fs_main(@location(0) tint: vec4<f32>) -> @location(0) vec4<f32> {
                 layout: layout.clone(),
                 // 这一台只有一份材质布局 ⇒ 一个 id。⚠ 契约：同布局同 id、异布局异 id。
                 layout_id: 1,
+                dynamic_offset: 0,
             }],
             blend: None,
             // ⚠ 剔除**在这里**（材质那一层，§127），不在 pass 的状态文本里。

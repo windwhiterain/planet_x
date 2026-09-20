@@ -537,6 +537,7 @@
               }
             }
           },
+          "shadow_density": 256.0,
           "transform": {
             "rotation": [
               0.0,
@@ -614,7 +615,7 @@
           }
         }
       ],
-      "schema": 2
+      "schema": 3
     },
     "sim::WorldView": {
       "departments": [

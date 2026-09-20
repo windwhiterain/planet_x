@@ -108,8 +108,8 @@ pub struct Sources {
     pub skybox_brightness: f32,
     /// **投影的点光有几盏**（`lights[].shadows == true` 的点光）。
     ///
-    /// 帧图里那一份 cube 影图的层数与"展开几条影子 pass"都由它算出来：
-    /// 每盏投影的点光一个 cube（六层），而**一盏都没有时整份资源与那些 pass 都不烘**
+    /// 帧图里那一份 atlas 的层数与"展开几条影子 pass"都由它算出来：
+    /// 每盏投影的点光一个 cube、每面一层，而**一盏都没有时整份资源与那些 pass 都不烘**
     /// （oracle 那边也不渲染影子图 —— 它照样分配那张纹理，而"分配"不出图，
     /// 不值得我们往文档里放一份没人写的图）。
     ///
@@ -167,9 +167,9 @@ pub struct ResourceFile {
     pub name: String,
     pub format: String,
     pub size: String,
-    /// 层数：**来源**（不是数）。今天只认一个来源 `"shadow_cubes"` ——
-    /// "每盏投影的点光一个 cube"，由 [`Sources::shadow_lights`] 解出来（§133 同一条口径：
-    /// 配方里不写内容值，文档里落**解出来的整数**）。
+    /// 层数：**来源**（不是数）。今天只认一个来源 `"shadow_faces"` ——
+    /// "每盏投影的点光一个 cube，每面一层"，由 [`Sources::shadow_lights`] 解出来
+    /// （§133 同一条口径：配方里不写内容值，文档里落**解出来的整数**）。
     #[serde(default)]
     pub layers: Option<String>,
     #[serde(default)]
@@ -210,8 +210,13 @@ pub struct EntryFile {
     /// ⚠ 展开是**按投影的灯 × 6 面**：一盏都不投时**一条都不展开**（oracle 那边也不渲染
     /// 影子图）；而那六面各自的 `cube_face = { light, face, layer }` 由烘图侧算好写进文档 ——
     /// 算式（`layer = light × 6 + face`）只有烘图侧知道，宿主拿到的是**数**并当场对账。
-    #[serde(default)]
-    pub cube_faces: Option<u32>,
+    ///
+    /// ⚠ 虚拟影图（§本轮）之后它展开的还是**六面**："每一面要画哪几页"是宿主侧的事
+    /// （页数由 `shadow_density` 与物体的包围球算出来，见 `px_render::vshadow`）——
+    /// 一页一笔 draw 落在**同一面这一条 pass** 上，靠 `MaterialInstance` + 动态偏移区分。
+    /// 所以这一栏一个字都不用改：**页不是 pass 的展开维，是 draw 的展开维**。
+    #[serde(default, alias = "cube_faces")]
+    pub shadow_faces: Option<u32>,
     /// 附件与固定功能状态：**`px_pass::RenderState` 的那串文本**，原样透传
     /// （协议与烘图侧都不解析它：解析器只有一份，住在 `px_pass`）。
     pub render: String,
@@ -470,6 +475,9 @@ pub fn build(
     frame: &FrameFile,
     objects: &[Object],
     sources: &Sources,
+    // 这一帧的灯表（文档那一边的次序）。**只为了拿灯的位置** —— 虚拟影图的分页
+    // 要知道"灯在哪"（物体相对灯的位置决定它落在哪一面、哪几页）。
+    lights: &[px_protocol::scene::Light],
     with_graph: bool,
 ) -> Result<Baked, String> {
     if !with_graph {
@@ -480,6 +488,11 @@ pub fn build(
             material_instances: Vec::new(),
         });
     }
+    // ---- 虚拟影图的分配：**在这里算**（页是 `.pxart` 的一部分，见模块那一节）----
+    //
+    // ⚠ 分配只依赖"物体 / 灯 / 密度"，而那些在这一步全都有 ⇒ 它是**烘图**的活。
+    //    宿主拿到的是"画哪几页、每页哪一块"，一个决定都不做。
+    let allocation = shadow_allocation(lights, objects)?;
     // ---- 中间目标：`layers` 那一栏写的是**来源**，在这里解成整数 ----
     //
     // ⚠ "一盏投影的灯都没有" ⇒ 整份 cube 影图**不烘**（连它带那些 pass 一起不烘）：
@@ -499,12 +512,12 @@ pub fn build(
             continue;
         };
         let layers = match source.as_str() {
-            // 每盏投影的点光一个 cube（六层）。
-            "shadow_cubes" => sources.shadow_lights * CUBE_FACES as usize,
+            // 每盏投影的点光一个 cube、**每面一层**（层号 = 灯 × 6 + 面）。
+            "shadow_faces" => sources.shadow_lights * CUBE_FACES as usize,
             other => {
                 return Err(format!(
-                    "帧图资源 '{}' 的 layers 来源是 '{other}'：这一版只认 'shadow_cubes'\
-                     （每盏投影的点光一个 cube）",
+                    "帧图资源 '{}' 的 layers 来源是 '{other}'：这一版只认 'shadow_faces'\
+                     （每盏投影的点光一个 cube，每面一层）",
                     resource.name
                 ))
             }
@@ -513,10 +526,33 @@ pub fn build(
             dropped.push(resource.name.clone());
             continue;
         }
+        // ⚠ **尺寸由分配算出来**，不抄配方里那个数：配方里写的 `4096x4096` 是**上限**
+        //    （"这一版最多用多大"），而实际要多大只有 `shadow_allocation` 知道
+        //    （页数按物体的包围球与密度算）。文档里必须落**真的**那一份 ——
+        //    执行器会拿它去建池子里的纹理，而对不上就是"绑定与附件不是同一张图"。
+        let mut size = resource.size.clone();
+        if source == "shadow_faces" {
+            let allocation = allocation.as_ref().ok_or_else(|| {
+                format!(
+                    "帧图资源 '{}' 要按分配定尺寸，而这一帧一盏投影灯都没有",
+                    resource.name
+                )
+            })?;
+            size = format!("{}x{}", allocation.atlas.0, allocation.atlas.1);
+            let declared = parse_fixed_size(&resource.size)?;
+            if allocation.atlas.0 > declared.0 || allocation.atlas.1 > declared.1 {
+                return Err(format!(
+                    "虚拟影图的 atlas 要 {}×{}，而帧图资源 '{}' 声明的是 {}：\
+                     把那一栏调大，或者把这一帧的 shadow_density 调小。\
+                     这一版**不降精度** —— 降了之后画面照样出得来，只是影比要求糊",
+                    allocation.atlas.0, allocation.atlas.1, resource.name, resource.size
+                ));
+            }
+        }
         resources.push(PassResource {
             name: resource.name.clone(),
             format: resource.format.clone(),
-            size: resource.size.clone(),
+            size,
             layers: layers as u32,
             usage: resource.usage.clone(),
         });
@@ -593,12 +629,16 @@ pub fn build(
         } else {
             Vec::new()
         };
-        // ---- 展开：`cube_faces = 6` 的那一条 → **每盏投影的灯 × 六面**各一条 ----
+        // ---- 展开：`shadow_faces = 6` 的那一条 → **每盏投影的灯 × 六面 × 每一页** ----
         //
         // ⚠ 只有点光的影子走这条路（§109：`light_id` 是 cube 的下标，层号 = light*6+face）。
         //    第 m 盏投影点光的 cube 下标恒为 m —— 因为宿主那一步排序（开影子的在前、
         //    同档稳定）把投影的那些灯**原样**排在最前面，不依赖那个不可实测的 entity 次序。
-        let Some(faces) = entry.cube_faces else {
+        //
+        // ⚠ **页是烘图侧算的**（`shadow_allocation`）：`.pxart` 本来就该是"一份展开好的
+        //    指令流"，而"画哪几页"只依赖物体 / 灯 / 密度 —— 那些在这里全都有。
+        //    宿主因此一个分配决定都不做（它只建纹理、发 draw）。
+        let Some(faces) = entry.shadow_faces else {
             passes.push(PassSpec {
                 kind: entry.kind.clone(),
                 shader,
@@ -613,61 +653,121 @@ pub fn build(
                 render: entry.render.clone(),
                 depth_target: entry.depth_target.clone(),
                 cube_face: None,
+                viewport: None,
             });
             continue;
         };
         if faces != CUBE_FACES {
             return Err(format!(
-                "{at} 的 cube_faces 是 {faces}：cube 只有 {CUBE_FACES} 面\
+                "{at} 的 shadow_faces 是 {faces}：cube 只有 {CUBE_FACES} 面\
                  （§109.1：Bevy 就是 6 个单层 pass）"
             ));
         }
+        let allocation = allocation.as_ref().ok_or_else(|| {
+            format!(
+                "{at} 要展开影子 pass，而这一帧没有分配出任何页 —— \
+                 帧图里不该出现这一条（一盏投影的灯都没有时它整条都不烘）"
+            )
+        })?;
         for light in 0..sources.shadow_lights as u32 {
+            // 每一面的名字：投影的每一笔 draw（哪个物体投影，由 `select` 挑）在这里
+            // **各起一个名字**（`<物体 id>@shadow_<灯>_<面名>`）。
+            //
+            // ⚠ 名字是**生成**的：人写的那一层（帧配方）仍然只有一份意图 ——
+            //    "这一条 pass 画投影的那些物体" + "影子要六面"。手写层长出 N 份材质
+            //    才是这个形状要避免的事；生成层里"每个 (pass, 灯, 面) 一个名字"
+            //    正是 `.pxart` 作为一种指令流该有的样子（§139 的用户裁决）。
+            //
+            // ⚠ **名字按 (物体, 灯, 面) 一份，不按页**：页是会变的（灯一动、物体一动，
+            //    页数就变），而"一个名字恰好一套组"这条契约不该跟着页数漂。页与页的差别
+            //    只有一块 viewport 与一个缩放后的投影 —— 前者是 pass 的一栏，后者由
+            //    宿主按那一块窗口现算。
             for face in 0..CUBE_FACES {
-                // 这一面的名字：投影的每一笔 draw（哪个物体投影，由 `select` 挑）
-                // 在这里**各起一个名字**（`<物体 id>@shadow_<灯>_<面名>`）。
-                //
-                // ⚠ 名字是**生成**的：人写的那一层（帧配方）仍然只有一份意图 ——
-                //    "这一条 pass 画投影的那些物体" + "影子要六面"。手写层长出 N 份材质
-                //    才是这个形状要避免的事；生成层里"每个 (pass, 灯, 面) 一个名字"
-                //    正是 `.pxart` 作为一种指令流该有的样子（§139 的用户裁决）。
                 let face_name = FACE_NAMES[face as usize];
-                let face_draws: Vec<DrawSpec> = draws
-                    .iter()
-                    .map(|draw| DrawSpec {
-                        geometry: draw.geometry.clone(),
-                        material: instance_name(&draw.material, light, face_name),
-                    })
-                    .collect();
-                // 每一笔改名后的 draw 都对应一份实例：名字是新的，材质照原来那一份。
-                for (original, renamed) in draws.iter().zip(&face_draws) {
+                for draw in &draws {
                     material_instances.push(MaterialInstance {
-                        name: renamed.material.clone(),
-                        base: original.material.clone(),
+                        name: instance_name(&draw.material, light, face_name),
+                        base: draw.material.clone(),
                     });
                 }
-                passes.push(PassSpec {
-                    kind: entry.kind.clone(),
-                    shader: shader.clone(),
-                    // 标签照 oracle 那一条路的形状：`shadow_point_light_{灯}_{面}`
-                    // （`light.rs:2107-2111`），面名与 `face_index_to_name` 同一套。
-                    label: format!("{}_{}_{}", entry.label, light, face_name),
-                    entry: entry.entry.clone(),
-                    reads: entry.reads.clone(),
-                    writes: entry.writes.clone(),
-                    params: params.clone(),
-                    draws: face_draws,
-                    vertex_shader: vertex_shader.clone(),
-                    vertex_entry: vertex_entry.clone(),
-                    render: entry.render.clone(),
-                    depth_target: entry.depth_target.clone(),
-                    cube_face: Some(PassCubeFace {
-                        light,
-                        face,
-                        // ⚠ 算式在这里、只有这里（`light.rs:2075`）；宿主拿到的是数并**对账**。
-                        layer: light * CUBE_FACES + face,
-                    }),
-                });
+                let face_label = format!("{}_{}_{}", entry.label, light, face_name);
+                let layer = light * CUBE_FACES + face;
+                // ---- 这一面的每一页：先清一格，再画**落在这一页上的那几个物体** ----
+                //
+                // ⚠ 一页一笔 draw（而不是一页里把该画的物体都画一遍）的理由：一笔 draw
+                //    只挂一份材质（一套组 1），而"每页只有少数几个物体落进去"是常态 ——
+                //    按 caster 拆开之后，每一笔的实例下标是唯一的一个，
+                //    而"这一页的 view"由这一笔自己的 `viewport` 说。
+                for patch in allocation
+                    .patches
+                    .iter()
+                    .filter(|patch| patch.light == light && patch.face == face)
+                {
+                    let window = patch.window;
+                    let clear = PassSpec {
+                        kind: entry.kind.clone(),
+                        shader: shader.clone(),
+                        label: page_label(&face_label, patch.page_y, patch.page_x),
+                        entry: entry.entry.clone(),
+                        reads: entry.reads.clone(),
+                        writes: entry.writes.clone(),
+                        params: params.clone(),
+                        draws: Vec::new(),
+                        vertex_shader: vertex_shader.clone(),
+                        vertex_entry: vertex_entry.clone(),
+                        render: entry.render.clone(),
+                        depth_target: entry.depth_target.clone(),
+                        cube_face: Some(PassCubeFace {
+                            light,
+                            face,
+                            layer,
+                        }),
+                        viewport: None,
+                    };
+                    passes.push(page_clear_pass(
+                        &clear,
+                        window,
+                        clear.label.clone(),
+                    ));
+                    // 这一页的几何：只画 `patch.casters` 里点名的那些物体。
+                    //
+                    // ⚠ **第一笔顺手清这一格**（`depth=clear(0)`），后面几笔 `load` ——
+                    //    atlas 是共享的，而每一页占的是**自己那一格**（互不重叠），
+                    //    所以"load"读到的一定是本页第一笔写下的东西。省掉一条专为清屏
+                    //    而存在的 pass（一页一条），而"清哪一格"这件事一次都没少。
+                    for (index, caster) in patch.casters.iter().enumerate() {
+                        // 这一页的那一笔：材质名照**这一面**那一份实例（它带着"哪一面"），
+                        // 几何是那个物体自己（`draws_of` 里 geometry == material == 物体 id）。
+                        let Some(draw) = draws.iter().find(|draw| &draw.geometry == caster) else {
+                            return Err(format!(
+                                "{at} 的第 {light} 盏灯第 {face_name} 面页 ({}, {}) 要画 '{}'，\
+                                 而这一条的 `select` 里没有它（内部不一致）",
+                                patch.page_x, patch.page_y, caster
+                            ));
+                        };
+                        let mut page = clear.clone();
+                        page.label = format!(
+                            "{}_c{}",
+                            page_label(&face_label, patch.page_y, patch.page_x),
+                            passes.len()
+                        );
+                        page.draws = vec![DrawSpec {
+                            geometry: draw.geometry.clone(),
+                            material: instance_name(&draw.material, light, face_name),
+                        }];
+                        page.viewport = Some([
+                            window[0] as f32,
+                            window[1] as f32,
+                            (window[2] - window[0]) as f32,
+                            (window[3] - window[1]) as f32,
+                        ]);
+                        if index > 0 {
+                            // 已经不是本页第一笔了：接着本页第一笔的深度，不清。
+                            page.render = load_state(&page.render);
+                        }
+                        passes.push(page);
+                    }
+                }
             }
         }
     }
@@ -677,6 +777,132 @@ pub fn build(
         materials,
         material_instances,
     })
+}
+
+/// `<宽>x<高>` → 两个数。**只认这一种写法**（与 `px_pass::SizeRule::parse` 的定长那一档
+/// 同一个口径）：虚拟影图的 atlas 尺寸上限必须是一个写死的数，否则"这一版最多用多大"
+/// 就成了一句要靠执行器去猜的话。
+fn parse_fixed_size(text: &str) -> Result<(u32, u32), String> {
+    let (width, height) = text
+        .split_once('x')
+        .ok_or_else(|| format!("帧图资源尺寸 '{text}' 不是 '<宽>x<高>'"))?;
+    let width = width
+        .trim()
+        .parse::<u32>()
+        .map_err(|err| format!("尺寸 '{text}' 的宽读不出来：{err}"))?;
+    let height = height
+        .trim()
+        .parse::<u32>()
+        .map_err(|err| format!("尺寸 '{text}' 的高读不出来：{err}"))?;
+    if width == 0 || height == 0 {
+        return Err(format!("尺寸 '{text}' 里有 0"));
+    }
+    Ok((width, height))
+}
+
+/// **虚拟影图的分配**（§本轮）：从这一帧的物体 + 投影灯算出稀疏页表与 atlas 布局。
+///
+/// 两条前置都按"说得出理由的拒绝"处理，而不是猜一个：
+/// - 要投影（`shadow_density > 0`）的物体必须有 `Geometry::bounding_radius` ——
+///   没有它就算不出"这个物体在灯看来张开多大的角"（而按 0 算就是**静默没有影**）；
+/// - 一盏投影灯一个正密度物体都没有 ⇒ 拒（那是"立了一盏空转的灯"，不是一种画法）。
+///
+/// ⚠ 返回 `None` = 这一帧没有投影灯（合法：整份资源与那些 pass 都不烘）。
+fn shadow_allocation(
+    lights: &[px_protocol::scene::Light],
+    objects: &[Object],
+) -> Result<Option<crate::vshadow::Allocation>, String> {
+    let casting: Vec<&px_protocol::scene::Light> =
+        lights.iter().filter(|light| light.shadows).collect();
+    if casting.is_empty() {
+        return Ok(None);
+    }
+    let mut per_light: Vec<Vec<crate::vshadow::Caster>> = Vec::with_capacity(casting.len());
+    for light in &casting {
+        let mut casters = Vec::new();
+        for object in objects {
+            if !object.cast_shadow || object.shadow_density <= 0.0 {
+                continue;
+            }
+            let radius = object.geometry.bounding_radius().ok_or_else(|| {
+                format!(
+                    "物体 '{}' 要投影（shadow_density {}），而它的几何没有 `bounding_radius`：\
+                     虚拟影图要按包围球分页，而没有半径就算不出它占多少页",
+                    object.id, object.shadow_density
+                )
+            })?;
+            casters.push(crate::vshadow::Caster {
+                id: object.id.clone(),
+                radius: radius * object.transform.scale[0].abs(),
+                position: [
+                    object.transform.translation[0] - light.position[0],
+                    object.transform.translation[1] - light.position[1],
+                    object.transform.translation[2] - light.position[2],
+                ],
+                density: object.shadow_density,
+            });
+        }
+        per_light.push(casters);
+    }
+    let allocation = crate::vshadow::allocate(&per_light)
+        .map_err(|err| format!("虚拟影图分配不出来：{err}"))?;
+    Ok(Some(allocation))
+}
+
+/// 一页影子 pass 的标签：`<面 pass 的标签>_<页行>_<页列>`。
+///
+/// ⚠ 页**不是** `cube_face` 那一维的展开（`layer` 仍然是 `灯 × 6 + 面`）：
+/// 一页一笔 draw 落在**同一层**里，靠 `PassPlan::viewport` 落在 atlas 的那一格上。
+fn page_label(face_label: &str, page_y: u32, page_x: u32) -> String {
+    format!("{face_label}_p{page_y}_{page_x}")
+}
+
+/// 一页要**清**（`depth=clear(0)`）的 pass：它不画几何，只把那一格压到最远。
+///
+/// 为什么需要它：atlas 是**共享**的（这一页的邻居会被别的物体写到），
+/// 而 `depth=load` 会把上一帧 / 上一笔留在那一格里的深度接着用 —— 那是"影子凭空多一块"。
+fn page_clear_pass(template: &PassSpec, window: [u32; 4], label: String) -> PassSpec {
+    let mut pass = template.clone();
+    pass.label = label;
+    pass.draws.clear();
+    pass.render = clear_state(&template.render);
+    pass.viewport = Some([
+        window[0] as f32,
+        window[1] as f32,
+        (window[2] - window[0]) as f32,
+        (window[3] - window[1]) as f32,
+    ]);
+    pass
+}
+
+/// 一页要**清**（`depth=clear(0)`）的状态：把 `depth` 那一栏换成 `clear(0)`。
+///
+/// 为什么需要它：atlas 是**共享**的（这一页的邻居会被别的物体写到），
+/// 而 `depth=load` 会把上一帧 / 上一笔留在那一格里的深度接着用 —— 那是"影子凭空多一块"。
+///
+/// ⚠ 只换 depth 那一栏：`color=none` / `depth_write` / `compare` / `winding` 照抄 ——
+/// 换多了就是"渲染器的形状"在烘图侧被改了一遍。
+fn clear_state(render: &str) -> String {
+    swap_depth(render, "depth=clear(0)")
+}
+
+/// 一页的**后续几笔**：接着本页第一笔那一格的深度（`depth=load`）。
+fn load_state(render: &str) -> String {
+    swap_depth(render, "depth=load")
+}
+
+fn swap_depth(render: &str, want: &str) -> String {
+    render
+        .split('|')
+        .map(|part| {
+            if part.starts_with("depth=") {
+                want.to_string()
+            } else {
+                part.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("|")
 }
 
 /// 生成出来的材质实例名：`<物体 id>@shadow_<灯>_<面名>`。
@@ -849,25 +1075,22 @@ pub fn frame_labels(frame: &FrameFile) -> Vec<String> {
         .collect()
 }
 
-/// 一张帧图**应当烘出哪些标签**（按 `shadow_lights` 把 `cube_faces` 那几条乘开）。
+/// 一张帧图**应当烘出哪些标签**（按 `shadow_lights` 把展开的那几条乘开）。
 ///
-/// ⚠ 这一步是"配方 → 标签"的唯一一份算式（`build` 与 `verify` 共用）：两处各写一遍，
-/// 漂开的那天就变成"自己烘的自己不认"。
+/// ⚠ 这个函数只用于**报错时列期望**（[`mismatch`]），所以对展开的那些条目它给的是一句
+/// **形状说明**而不是逐条列举：虚拟影图之后展开的不是"灯 × 面"而是"灯 × 面 × 页 × 物体"，
+/// 而页数由内容（包围球 / 密度 / 灯位）定 —— 在这里**猜**一个数出来只会给读者一个错的期望。
+/// 真正的对账由 [`verify`] 按形状走（它一行一行地读产物里的标签）。
 fn expanded_labels(frame: &FrameFile, shadow_lights: usize) -> Vec<String> {
     let mut labels: Vec<String> = Vec::new();
     for entry in frame.before.iter().chain(frame.after.iter()) {
-        match entry.cube_faces {
+        match entry.shadow_faces {
             None => labels.push(entry.label.clone()),
-            Some(_) => {
-                for light in 0..shadow_lights as u32 {
-                    for face in 0..CUBE_FACES {
-                        labels.push(format!(
-                            "{}_{}_{}",
-                            entry.label, light, FACE_NAMES[face as usize]
-                        ));
-                    }
-                }
-            }
+            Some(_) => labels.push(format!(
+                "{}_<灯>_<面>_p<页行>_<页列>（× {shadow_lights} 盏灯 × {CUBE_FACES} 面 × 该面分配到的页，\
+                 每页一笔 `<...>_c<序号>` 是那一页后续的物体）",
+                entry.label
+            )),
         }
     }
     labels
@@ -875,16 +1098,19 @@ fn expanded_labels(frame: &FrameFile, shadow_lights: usize) -> Vec<String> {
 
 /// 核对：这份产物是不是用这张帧图烘的。不是就**当场拒**，并说清期望什么、实际是什么。
 ///
-/// ⚠ 带 `cube_faces` 的那一条会按"投影的灯数 × 6"展开，而**展开几条由内容定**
-/// （一盏投影的灯都没有 ⇒ 一条都不展开，见 `build` 里那段）。所以这一档不能拿一张
-/// 写死的标签表去比 —— 它按 `cube_faces` 的形状走：非展开条目**逐个**对上，
-/// 展开条目允许出现 **0 或若干个完整的 cube**，但每一组必须是 `<标签>_<灯>_<面>`
-/// 且从 `0_+x` 起、按灯与面的次序排。
+/// ⚠ 展开的那些条目（影子）**不按写死的张数对**：虚拟影图之后它展开成
+/// "灯 × 面 × 页 × 物体"，而**页数由内容定**（物体的包围球、`shadow_density`、灯位）。
+/// 所以这一档按**形状**走：每一条影子的标签必须是
+/// `<标签>_<灯>_<面>_p<页行>_<页列>`，可选后缀 `_c<序号>`（同一页里的后续物体），
+/// 灯与面从 `0` / `+x` 起按次序排。
+///
+/// 为什么还是值得核：它拦的是"换成另一张帧图烘的产物"与"半截产物"这两件事 ——
+/// 而这两件事在运行期的表现都是**画面上少东西**，没有任何别的门会响。
 pub fn verify(spec: &SceneSpec, frame: &FrameFile, name: &str) -> Result<(), String> {
     let found: Vec<&str> = spec.passes.iter().map(|pass| pass.label.as_str()).collect();
     let mut at = 0_usize;
     for entry in frame.before.iter().chain(frame.after.iter()) {
-        match entry.cube_faces {
+        match entry.shadow_faces {
             None => {
                 if found.get(at) != Some(&entry.label.as_str()) {
                     return Err(mismatch(name, frame, &found, at, &entry.label));
@@ -894,29 +1120,31 @@ pub fn verify(spec: &SceneSpec, frame: &FrameFile, name: &str) -> Result<(), Str
             Some(faces) => {
                 if faces != CUBE_FACES {
                     return Err(format!(
-                        "帧图 '{name}' 的 '{}' 写了 cube_faces = {faces}：cube 只有 {CUBE_FACES} 面",
+                        "帧图 '{name}' 的 '{}' 写了 shadow_faces = {faces}：cube 只有 {CUBE_FACES} 面",
                         entry.label
                     ));
                 }
-                // 展开：0 个或若干个 cube，每个 cube 六面、次序照 `CUBE_MAP_FACES`。
+                // 展开：0 盏或若干盏灯；每盏灯六面；每面若干页；每页一至若干笔。
                 let mut light = 0_u32;
                 loop {
-                    let mut matched = 0_u32;
+                    let mut matched_faces = 0_u32;
                     for face in 0..CUBE_FACES {
-                        let want = format!("{}_{}_{}", entry.label, light, FACE_NAMES[face as usize]);
-                        if found.get(at) == Some(&want.as_str()) {
+                        let prefix =
+                            format!("{}_{}_{}", entry.label, light, FACE_NAMES[face as usize]);
+                        let start = at;
+                        while found.get(at).is_some_and(|label| label.starts_with(&prefix)) {
                             at += 1;
-                            matched += 1;
-                        } else {
-                            break;
+                        }
+                        if at > start {
+                            matched_faces += 1;
                         }
                     }
-                    if matched == 0 {
+                    if matched_faces == 0 {
                         break;
                     }
-                    if matched != CUBE_FACES {
+                    if matched_faces != CUBE_FACES {
                         return Err(format!(
-                            "帧图 '{name}' 的 '{}' 展开到第 {light} 盏灯时只找到 {matched} 面\
+                            "帧图 '{name}' 的 '{}' 展开到第 {light} 盏灯时只找到 {matched_faces} 面\
                              （应当是 {CUBE_FACES} 面）：要么产物是半截的，要么标签不是这一条烘的。\
                              实际标签：[{}]",
                             entry.label,
@@ -933,7 +1161,6 @@ pub fn verify(spec: &SceneSpec, frame: &FrameFile, name: &str) -> Result<(), Str
     }
     Ok(())
 }
-
 /// 对不上时那句话：说清期望什么、实际是什么、在第几个标签上分的岔。
 fn mismatch(name: &str, frame: &FrameFile, found: &[&str], at: usize, want: &str) -> String {
     format!(
@@ -1004,10 +1231,18 @@ mod tests {
         material.cull = CullMode::Back;
         Object {
             id: id.to_string(),
-            geometry: Geometry::primitive("icosphere", BTreeMap::new()),
+            // ⚠ 半径与密度都要给：这一档要烘出**真的**影子 pass，而页是按
+            //    "包围球多大、密度多少"分出来的（`shadow_allocation`）。
+            //    少了任一个，分配那一步会当场拒（那正是它该做的）。
+            geometry: Geometry::primitive(
+                "icosphere",
+                BTreeMap::from([("radius".to_string(), Value::Num(1.0))]),
+            )
+            .with_bounding_radius(1.0),
             material,
             transform: Transform::default(),
             cast_shadow: true,
+            shadow_density: 256.0,
         }
     }
 
@@ -1082,13 +1317,27 @@ mod tests {
         }
     }
 
+    /// 这一档的灯表：一盏在 `(-4.2, 1.15, 2.35)` 的点光，**开影子**。
+    ///
+    /// ⚠ 它必须真的开影子：`sources().shadow_lights == 1`，而虚拟影图的分配是**烘图侧**
+    /// 算的 —— 两处对不上（说了一盏投影灯、实际一盏都没有）就是当场拒。
+    fn lights() -> Vec<px_protocol::scene::Light> {
+        vec![px_protocol::scene::Light::point(
+            "sun",
+            [-4.2, 1.15, 2.35],
+            [1.0, 1.0, 1.0],
+            7.6e5,
+        )
+        .with_shadows(true)]
+    }
+
     /// 兼容逃生门：不给帧图 ⇒ 三节都空（产物逐字节回到老形状）。
     #[test]
     fn the_legacy_switch_emits_nothing_at_all() {
         ensure_shader_graph();
         let frame = load(DEFAULT_FRAME).expect("默认帧图要能读");
         let objects = vec![object("planet", AlphaMode::Opaque)];
-        let baked = build(&frame, &objects, &sources(), false).expect("老形状");
+        let baked = build(&frame, &objects, &sources(), &lights(), false).expect("老形状");
         assert!(baked.resources.is_empty(), "老形状不许有 resources");
         assert!(baked.passes.is_empty(), "老形状不许有 passes");
         assert!(
@@ -1096,33 +1345,49 @@ mod tests {
             "老形状不许有 frame_materials（多一节就改产物字节）"
         );
         // 反过来：开着就得真的出东西。
-        let baked = build(&frame, &objects, &sources(), true).expect("帧图");
+        let baked = build(&frame, &objects, &sources(), &lights(), true).expect("帧图");
         assert!(!baked.resources.is_empty(), "帧图要声明中间目标");
-        // ⚠ 标签序列是"配方条目按灯×面展开"之后的（§139）：`sources()` 给 1 盏投影的灯
-        //    ⇒ 那条 `point_shadow` 变成六个标签。算式只有一份（`expanded_labels`），
-        //    `verify` 用的也是它 —— 这里再抄一遍就等于给自己留一个"烘的与认的不是一套"。
-        assert_eq!(
-            baked
-                .passes
-                .iter()
-                .map(|p| p.label.as_str())
-                .collect::<Vec<_>>(),
-            expanded_labels(&frame, sources().shadow_lights)
-                .iter()
-                .map(String::as_str)
-                .collect::<Vec<_>>()
-        );
-        // 展开出来的那六条必须**真的**带 cube_face，而且层号是 灯×6 + 面。
+        // ⚠ 标签序列照**形状**核（`verify`）：虚拟影图之后展开的是"灯 × 面 × 页 × 物体"，
+        //    而页数由内容定 —— 逐条列举的期望只会变成一份会漂的手抄。
+        //    这里把这一份烘出来的标签装进一份最小文档，直接问 `verify` 认不认。
+        let mut document = SceneSpec {
+            schema: px_protocol::SCENE_SCHEMA,
+            name: "判据".to_string(),
+            environment: px_protocol::scene::Environment::default(),
+            cameras: Vec::new(),
+            expects: Vec::new(),
+            resources: baked.resources.clone(),
+            passes: baked.passes.clone(),
+            lights: lights(),
+            objects: objects.clone(),
+            frame_materials: Vec::new(),
+            material_instances: Vec::new(),
+        };
+        document.resources = baked.resources.clone();
+        document.passes = baked.passes.clone();
+        verify(&document, &frame, DEFAULT_FRAME).expect("自己烘出来的标签自己要认");
+        // 展开出来的那些必须**真的**带 cube_face，而且层号是 灯×6 + 面。
         let cubes: Vec<(u32, u32, u32)> = baked
             .passes
             .iter()
             .filter_map(|pass| pass.cube_face.map(|c| (c.light, c.face, c.layer)))
             .collect();
-        assert_eq!(
-            cubes,
-            (0..CUBE_FACES).map(|face| (0, face, face)).collect::<Vec<_>>(),
-            "一条 `cube_faces = 6` 的条目要展开成六个 (灯, 面, 层)"
+        assert!(
+            !cubes.is_empty(),
+            "一条 `shadow_faces = 6` 的条目要展开成若干页，每页都带 (灯, 面, 层)"
         );
+        for (light, face, layer) in &cubes {
+            assert_eq!(
+                *layer,
+                light * CUBE_FACES + face,
+                "层号必须是 灯 × 6 + 面（烘图侧那一份算式）"
+            );
+        }
+        // 六面都得有（页数可以不一样，但每一面至少一页）。
+        let mut faces_seen: Vec<u32> = cubes.iter().map(|(_, face, _)| *face).collect();
+        faces_seen.sort_unstable();
+        faces_seen.dedup();
+        assert_eq!(faces_seen.len(), CUBE_FACES as usize, "六面各要有页");
         // ⚠ 帧自有材质（§135）：配方里声明了几份，文档里就该有几份，而且**全文内联**。
         assert_eq!(baked.materials.len(), frame.materials.len());
         let skybox = baked
@@ -1309,7 +1574,7 @@ mod tests {
         ensure_shader_graph();
         let frame = load(DEFAULT_FRAME).expect("默认帧图");
         let objects = vec![object("planet", AlphaMode::Opaque)];
-        let baked = build(&frame, &objects, &sources(), true).expect("帧图");
+        let baked = build(&frame, &objects, &sources(), &lights(), true).expect("帧图");
         let spec = SceneSpec {
             schema: px_protocol::SCENE_SCHEMA,
             name: "夹具".to_string(),
@@ -1343,7 +1608,7 @@ mod tests {
         ensure_shader_graph();
         let frame = load(DEFAULT_FRAME).expect("默认帧图");
         let objects = vec![object("planet", AlphaMode::Opaque)];
-        let baked = build(&frame, &objects, &sources(), true).expect("帧图");
+        let baked = build(&frame, &objects, &sources(), &lights(), true).expect("帧图");
         let spec = SceneSpec {
             schema: px_protocol::SCENE_SCHEMA,
             name: "夹具".to_string(),

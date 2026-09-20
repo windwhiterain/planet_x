@@ -146,6 +146,10 @@ pub fn build(spec: &SceneSpec, pcg_root: &Path) -> Result<Plan, String> {
             layer: layer_of(pass, &label)?,
             vertex_shader: pass.vertex_shader.clone(),
             vertex_entry: pass.vertex_entry.clone(),
+            // ⚠ 文档不给它：虚拟影图的一页落在 atlas 的哪一块是**宿主侧**算的
+            //    （页数由 `shadow_density` 与包围球决定，见 `render::vshadow_of`）——
+            //    所以这一格在翻译这一步是空的，宿主在建 pass 计划时逐条填。
+            viewport: None,
         });
     }
 

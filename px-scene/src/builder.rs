@@ -156,6 +156,10 @@ impl SceneBuilder {
             },
             transform: Transform::default(),
             cast_shadow: true,
+            // ⚠ 这个构造器是"寻常引擎"那条路（`Registration` + 内建图元），不是场景配方的
+            // 那一条：它没有"配方"可以问密度。0 = 不进虚拟影图的分配 —— 要影请走
+            // `recipe::compile` 那条路（那里有 `shadow_density` 这一栏）。
+            shadow_density: 0.0,
         };
         self.add(registration, object)
     }
@@ -232,7 +236,7 @@ impl SceneBuilder {
         sources: &Sources,
     ) -> Result<SceneSpec, String> {
         let mut document = self.build()?;
-        let baked = frame::build(frame, &document.objects, sources, true)?;
+        let baked = frame::build(frame, &document.objects, sources, &document.lights, true)?;
         document.resources = baked.resources;
         document.passes = baked.passes;
         document.frame_materials = baked.materials;

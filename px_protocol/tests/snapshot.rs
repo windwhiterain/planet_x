@@ -277,6 +277,7 @@ fn canonical() -> String {
                 ),
                 transform: px_protocol::Transform::rotated([0.0, 0.0, 0.0, 1.0]),
                 cast_shadow: true,
+                shadow_density: 256.0,
             },
             px_protocol::Object {
                 id: "clouds".to_string(),
@@ -302,6 +303,7 @@ fn canonical() -> String {
                 ),
                 transform: px_protocol::Transform::default(),
                 cast_shadow: false,
+                shadow_density: 0.0,
             },
         ],
         // 帧自有材质（§135）：这一条夹具**故意留空** —— 空表不落盘，所以快照里
@@ -338,6 +340,7 @@ fn canonical() -> String {
         render: String::new(),
         depth_target: None,
         cube_face: None,
+        viewport: None,
     };
     let pass_geometry = px_protocol::scene::PassSpec {
         kind: "geometry".to_string(),
@@ -365,6 +368,7 @@ fn canonical() -> String {
         render: "color=clear(0,0,0,0)|depth=clear(0)|depth_write=true|compare=greater_equal|winding=ccw".to_string(),
         depth_target: Some("depth".to_string()),
         cube_face: None,
+        viewport: None,
     };
 
     let asset_kinds: Vec<&'static str> = [

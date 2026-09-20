@@ -14,7 +14,7 @@
 #
 # 烘：cargo run -p px_graphs --bin scene orbit-bare-shadow
 
-name = "orbit-bare-shadow"
+name = "probe-farsun5"
 ambient = 80.0
 cameras = "review"
 
@@ -24,7 +24,7 @@ kind = "planet"
 shader = "surface"
 graph = "planet"
 members = { height = "height", mesh = "surface", shader = "shaders::surface" }
-params = { palette = "rocky", displace = 0.06, sea_level = 0.52, radius = 1.0, spin = 0.0, rings = 0.0, shadows = 1, shadow_density = 256 }
+params = { palette = "rocky", displace = 0.06, sea_level = 0.52, radius = 1.0, spin = 0.0, rings = 0.0, shadows = 1, light_position = [-21.0, 5.75, 11.75], light_intensity = 1.9e7 }
 
 [[parts]]
 id = "atmosphere"

@@ -33,21 +33,25 @@ format = "depth32float"
 size = "view"
 usage = ["render_attachment", "texture_binding", "copy_src"]
 
-# ---- 点光 cube 影图（§109）：**一盏投影的点光一个 cube**（六层）----
+# ---- 点光**虚拟影图**的物理 atlas（§本轮）：**一盏投影灯一个 cube，每面一层** ----
 #
 # `layers` 写的是**来源**不是数：烘图侧按这一帧的灯表解出来（§133 同一条口径 ——
 # 配方里一个内容值都不写死），文档里落的是解出来的整数。一盏投影的灯都没有时，
-# **这份资源与写它的那六条 pass 都不烘**（oracle 那边也不渲染影子图）。
+# **这份资源与写它的那些 pass 都不烘**。
 #
-# ⚠ 1024 / `depth32float` 是 oracle 的策略，不是随便挑的：`PointLightShadowMap` 的缺省
-# 边长就是 1024，而 `px_render` 从不插那个资源（全仓 grep 0 命中）⇒ 缺省值就是实况；
-# 格式则来自 `CORE_3D_DEPTH_FORMAT = Depth32Float`。两个数在 group 0 那一侧还有第二处用处：
-# `shadow_normal_bias = 0.6 × (2/边长) × √2`。
+# ⚠ 它替掉了从前的 `point_shadow_textures`（每盏灯一张固定的 1024² cube）：
+# 那一版的"一个 texel 有多少世界大"是 `2d/1024`（d = 到灯的距离）⇒ **太阳拉远影就糊**；
+# 这一版按每个物体的 `shadow_density`（texel / 世界单位）分配，**与灯多远无关**。
+# 详见 `px_render/src/vshadow.rs` 那段模块头。
+#
+# ⚠ `4096x4096` 是**这一版的上限**，不是实况：物理页只占"真有投影物体落在上面"的那些格
+# （`vshadow::allocate` 按物体算），分配器够不着这个上限时它当场报错，**不降精度**。
+# 占用读数是：行星 ρ=256 ⇒ 每面 ≤ 25 页（1024×1024），加一颗卫星 ρ=2048 ⇒ 每面 ≤ 48 页。
 [[resources]]
-name = "point_shadow_textures"
+name = "point_shadow_atlas"
 format = "depth32float"
-size = "1024x1024"
-layers = "shadow_cubes"
+size = "4096x4096"
+layers = "shadow_faces"
 usage = ["render_attachment", "texture_binding"]
 
 # ---- 预通道深度的**快照**（§131）：给"既要拿它做深度测试、又要采样它"的那几方各一份 ----
@@ -70,11 +74,15 @@ writes = []
 depth_target = "scene_depth"
 render = "color=none|depth=clear(0)|depth_write=true|compare=greater_equal|winding=ccw"
 
-# ---- 点光 cube 影图：**六面各一条单层 pass**（§109.1）----
+# ---- 点光虚拟影图的**页栅格化**：**六面各一条 pass**（§109.1 的形状不变）----
 #
-# `cube_faces = 6` ⇒ 这一条**展开成**（投影的灯数 × 6）条：每面一条，各自 `cube_face =
+# `shadow_faces = 6` ⇒ 这一条**展开成**（投影的灯数 × 6）条：每面一条，各自 `cube_face =
 # { light, face, layer }`（层号 = light×6+face，算式只在烘图侧）。
 # 一盏投影的灯都没有 ⇒ 一条都不展开。
+#
+# ⚠ **页不是这一栏的展开维**：一层里要画哪几页由 `shadow_density` 与物体的包围球算出来
+# （`px_render::vshadow`），一页一笔 draw 靠 `MaterialInstance` + 动态偏移落在**同一条 pass**
+# 上（见 `EntryFile::shadow_faces` 那段注释）。六面仍然是六条 pass，一条不多。
 #
 # ⚠ **不许**用 multiview 把它"优化"成一条：那是行为差异，不是等价实现（§109.1）。
 # ⚠ `multiview_mask: None`、每面一个单层视图、`LoadOp::Clear(0.0)`、`depth_compare =
@@ -91,8 +99,8 @@ select = "shadow_casters"
 vertex_shader = "art/frame/vertex_mesh.wgsl"
 vertex_entry = "vertex"
 writes = []
-depth_target = "point_shadow_textures"
-cube_faces = 6
+depth_target = "point_shadow_atlas"
+shadow_faces = 6
 render = "color=none|depth=clear(0)|depth_write=true|compare=greater_equal|winding=ccw"
 
 # ---- 拷贝：把预通道的深度**搬**一份快照出来（§131）----

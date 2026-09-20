@@ -41,6 +41,12 @@ pub mod members;
 pub mod recipe;
 pub mod stage;
 pub mod vocab;
+/// **虚拟影图**（§本轮）：从"每个投影物体要多少 texel/世界单位"算出稀疏页表与 atlas 布局。
+///
+/// ⚠ 它住**场景图这一层**：分配要读的内容是"有哪些物体、多大、灯在哪、每个物体的
+/// `shadow_density`"—— 这些只有烘图侧全都有（半径还得从几何产物量）。
+/// 宿主只兑现已经算好的东西（建纹理、发 draw），一个分配决定都不做。
+pub mod vshadow;
 
 pub use baked::Baked;
 pub use builder::{SceneBuilder, MaterialBuilder};

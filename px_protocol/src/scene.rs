@@ -10,7 +10,14 @@ use crate::art::Camera;
 /// v2：从「行星配方」（part.kind = planet / clouds / atmosphere）改成**通用渲染文档** ——
 /// 物体表（几何 + 材质 + 变换）、光源表、相机表、环境。格式本身与渲染器都不认识
 /// 「行星 / 云 / 大气」：那些语义住在烘图侧的场景编译器里。
-pub const SCENE_SCHEMA: u32 = 2;
+///
+/// v3：物体的**阴影密度**（`Object::shadow_density`）。影子从"每盏投影灯一张固定
+/// 1024² cube"改成**虚拟影图**：密度决定虚拟面分辨率与页的分配，因此 v2 的产物
+/// **不该**再被当成同一份东西 —— 它里面没有那个数，而旧渲染器与它的默认值也已经不在了。
+/// ⚠ 这一栏是 `skip_serializing_if` 的，所以**老形状**（`--no-frame-graph` 那条逃生门产出的
+/// 六份冻产物）的字节仍然逐字节可复现；但那些产物 `schema` 是 2，读回来会在这条判据上被拒
+/// —— 那是**有意的**：逃生门判的是"字节还能不能被重现"，不是"旧产物还能不能被新渲染器读"。
+pub const SCENE_SCHEMA: u32 = 3;
 
 /// CAS 里一个内容键的落盘规则。烘图侧与渲染侧共用这一份 ——
 /// 两边各写一遍「键 → 路径」就是又一个「同一个键、不同内容」的入口。
@@ -159,32 +166,77 @@ impl Transform {
 ///
 /// 图元不是"行星"：球/环这种形状是任何渲染器都有的东西（`Sphere`、`Ring`），
 /// 而消融档（`orbit-soft-shell` 用一个细分球壳）要的正是"同一个球壳"。
+///
+/// ⚠ `bounding_radius`（§本轮加）：这份几何**以自身原点为中心**的包围球半径
+/// （局部系，还没乘物体的 `transform.scale`）。烘图侧从**网格顶点**（或图元的半径参数）
+/// 算出来填进去，因为**只有它拿得到网格产物** —— 虚拟影图的页分配要这个数
+/// （物体在灯看来张开多大的角），而分配是**烘图时**做的（`.pxart` 里就是一份
+/// 展开好的 pass 表）。
+///
+/// ⚠ 缺省 `None` 且 `skip_serializing_if`：老产物（六份冻形状）里没有这一栏，
+/// 加上它之后那些字节**仍然逐字节可复现**。`None` 的语义是"没量过" ——
+/// 要影的物体必须有它（没有就当场拒，不是按 0 算）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "source", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Geometry {
-    Mesh { member: Member },
+    Mesh {
+        member: Member,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bounding_radius: Option<f32>,
+    },
     Primitive {
         name: String,
         #[serde(default)]
         params: BTreeMap<String, Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bounding_radius: Option<f32>,
     },
 }
 
 impl Geometry {
     pub fn mesh(member: Member) -> Self {
-        Self::Mesh { member }
+        Self::Mesh {
+            member,
+            bounding_radius: None,
+        }
     }
 
     pub fn primitive(name: &str, params: BTreeMap<String, Value>) -> Self {
         Self::Primitive {
             name: name.to_string(),
             params,
+            bounding_radius: None,
+        }
+    }
+
+    /// 量过的那一份（烘图侧填）。见 [`Geometry`] 那段。
+    pub fn with_bounding_radius(mut self, radius: f32) -> Self {
+        let slot = match &mut self {
+            Self::Mesh {
+                bounding_radius, ..
+            } => bounding_radius,
+            Self::Primitive {
+                bounding_radius, ..
+            } => bounding_radius,
+        };
+        *slot = Some(radius);
+        self
+    }
+
+    pub fn bounding_radius(&self) -> Option<f32> {
+        match self {
+            Self::Mesh {
+                bounding_radius, ..
+            } => *bounding_radius,
+            Self::Primitive {
+                bounding_radius, ..
+            } => *bounding_radius,
         }
     }
 
     pub fn member(&self) -> Option<&Member> {
         match self {
-            Self::Mesh { member } => Some(member),
+            Self::Mesh { member, .. } => Some(member),
             Self::Primitive { .. } => None,
         }
     }
@@ -386,6 +438,24 @@ pub struct Object {
     /// 投不投阴影。云壳**不投**（它是一整颗球，进 shadow map 就是一颗球形硬影）。
     #[serde(default = "cast_shadow_default")]
     pub cast_shadow: bool,
+    /// 这个物体要求的最小**阴影密度**：每单位世界长度至少分到多少个影图 texel
+    /// （texel / 世界单位）。**它是烘图侧对分配器的要求，不是一条着色参数** ——
+    /// 0 = 这个物体不参与虚拟影图的分配。
+    ///
+    /// ⚠ 为什么要它，而不是把影图分辨率写成一个全局常数：全局常数把"要多少 texel"
+    /// 与**物体有多大**解耦了，于是分辨率只能按最坏情形给；而一个半径 0.093 的卫星
+    /// 与一个半径 1.75 的环要的 texel 数差一个量级。密度是"每单位长度"的量，
+    /// 乘上物体半径才是"它需要多少 texel"（`2·R·ρ`），**与光源多远无关** ——
+    /// 这正是旧的全局 1024² cube 做不到的那件事（太阳拉远 ⇒ texel 的世界尺寸按比例变大）。
+    ///
+    /// ⚠ 缺省 **0**，而且 `skip_serializing_if` 一起给：六份冻产物（`art/anchor/frozen/*.pxart`）
+    /// 里没有这一栏，加上它以后那些字节**仍然逐字节可复现**（逃生门那条判据）。
+    #[serde(default, skip_serializing_if = "is_zero_f32")]
+    pub shadow_density: f32,
+}
+
+fn is_zero_f32(value: &f32) -> bool {
+    *value == 0.0
 }
 
 fn cast_shadow_default() -> bool {
@@ -641,6 +711,17 @@ pub struct PassSpec {
     /// 而那正是 §109.2 那个 1 ulp 风险旁边的东西。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cube_face: Option<PassCubeFace>,
+    /// 这一条 pass 落在**它自己附件**里的哪一块：`[x, y, 宽, 高]`（texel）。
+    ///
+    /// 虚拟影图（§本轮）用它把**一页**画进 atlas 的一格：atlas 是每面一层、
+    /// 层里一格一格，而一页要用**它自己那一小块**的缩放投影 —— 执行器没有
+    /// per-draw 的 viewport，所以"一格一页"落在"一条 pass 一格 viewport"上。
+    ///
+    /// ⚠ 与"这一帧落在宿主目标里的哪一格"（`Frame::viewport`，多相机那一档）**是两件事**：
+    /// 这一栏说的是**附件内部**的落点，与多相机没有关系。
+    /// 缺省不落盘 ⇒ 老文档逐字节不变。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub viewport: Option<[f32; 4]>,
 }
 
 /// 一条 pass 的**点光 cube 面**：写第 `light` 个 cube 的第 `face` 面，落在第 `layer` 层。
@@ -787,6 +868,17 @@ impl SceneSpec {
                 return Err(format!("物体 id 重了：'{}'", object.id));
             }
             seen.push(&object.id);
+            // 阴影密度：0 = 不参与虚拟影图的分配；正数 = 每单位世界长度要多少 texel。
+            // ⚠ 负数与 NaN 在这里拒，而不是留给分配器去"处理"：分配器拿它当页数算，
+            //   一个负密度会算出负的页数，而那种数在画面上表现为"这个物体没有影"——
+            //   一个说得通的画面配一条错的输入，正是这个工程最想避免的那种故障。
+            if !object.shadow_density.is_finite() || object.shadow_density < 0.0 {
+                return Err(format!(
+                    "物体 '{}' 的阴影密度是 {}：它要么是 0（不参与虚拟影图的分配），\
+                     要么是一个正数（每单位世界长度要多少 texel）",
+                    object.id, object.shadow_density
+                ));
+            }
             let rotation = object.transform.rotation;
             let length = (rotation[0] * rotation[0]
                 + rotation[1] * rotation[1]
@@ -1214,8 +1306,8 @@ impl SceneSpec {
             ));
         }        for object in &self.objects {
             let geometry = match &object.geometry {
-                Geometry::Mesh { member } => format!("网格 {member}"),
-                Geometry::Primitive { name, params } => {
+                Geometry::Mesh { member, .. } => format!("网格 {member}"),
+                Geometry::Primitive { name, params, .. } => {
                     format!("图元 {name}（{}）", keys_of(params))
                 }
             };
@@ -1299,8 +1391,16 @@ mod tests {
     use super::*;
 
     /// 一份最小的合法文档：一个物体、一份材质、一盏灯。
+    ///
+    /// ⚠ `schema` 那一格**不写死数字**：它跟着 [`SCENE_SCHEMA`] 走。写死的话，
+    /// 每次升版本都会在这里多出一处"忘了改的夹具"，而症状是四条判据一起红
+    /// —— 归因不到"是夹具旧了"还是"是文档形状真的坏了"。
+    fn doc() -> String {
+        DOC.replace("\"schema\": 0", &format!("\"schema\": {SCENE_SCHEMA}"))
+    }
+
     const DOC: &str = r#"{
-        "schema": 2,
+        "schema": 0,
         "name": "夹具",
         "objects": [{
             "id": "planet",
@@ -1317,7 +1417,7 @@ mod tests {
 
     #[test]
     fn our_own_documents_parse() {
-        let spec: SceneSpec = serde_json::from_str(DOC).expect("自己的文档必须解析得动");
+        let spec: SceneSpec = serde_json::from_str(&doc()).expect("自己的文档必须解析得动");
         assert_eq!(spec.objects.len(), 1);
         assert_eq!(spec.objects[0].material.params.len(), 1);
         spec.check().expect("这份夹具是合法的");
@@ -1437,7 +1537,7 @@ mod tests {
 
     /// 一份**老形状**的文档：pass 表只有全屏那一档，新字段一个都不出现。
     fn old_pass_doc() -> String {
-        DOC.replace(
+        doc().replace(
             r#""lights": ["#,
             r#""passes": [{"kind": "fullscreen", "shader": {"graph": "shaders", "node": "grade", "key": "22"}, "writes": ["view"]}], "lights": ["#,
         )
@@ -1472,7 +1572,7 @@ mod tests {
     /// 只是当时没有门去问它。这条判据判的是"几何 pass 表达得出来、往返得回去"，
     /// 与那个名字是什么无关。
     fn geometry_doc() -> String {
-        DOC.replace(
+        doc().replace(
             r#""lights": ["#,
             r#""resources": [{"name": "depth", "format": "depth32float", "size": "view", "usage": ["render_attachment"]}],
                "passes": [{
@@ -1551,7 +1651,7 @@ mod tests {
 
     /// 一份带**帧自有材质**的文档：一条几何 pass 画 `skybox`，材质内联在 `frame_materials` 里。
     fn frame_material_doc() -> String {
-        DOC.replace(
+        doc().replace(
             r#""lights": ["#,
             r#""passes": [{
                  "kind": "geometry",
