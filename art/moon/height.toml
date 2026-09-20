@@ -1,0 +1,6 @@
+# 收口：打坑会把值推到 [0,1] 之外（`field.craters` 不钳制）⇒ 这里压回值域。
+in_min = 0.12
+in_max = 0.92
+out_min = 0.0
+out_max = 1.0
+smooth = true

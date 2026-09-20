@@ -1,0 +1,6 @@
+# 纬向条带（图侧实例 `field.remap/latbands`）：bands = 条带圈数、gain = 对比、bias = 抬落。
+# ⚠ 这三栏是 `RemapParams`（给图侧函数读的），不是预置 `field.remap` 那把尺子。
+# bands = 9 圈 ⇒ 球面上 18 条带（土星那一档的密度）；gain 压到 0.5 ⇒ 带与带之间是**渐变**。
+bands = 9.0
+gain = 0.50
+bias = 0.05

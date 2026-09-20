@@ -48,9 +48,9 @@ pub use px_graph_schema::{Cache, Cooked, Grid, blake3, fnv1a, fnv1a_sources};
 
 /// 驱动那一半（图的生命周期 + 清单 + 键）。图脚本只从这里拿机制，别处不用再开一扇门。
 pub use px_graph::{
-    Graph, GraphSpec, ManifestEntry, SHADER_VERSION, artifact_path_of, begin, cache_root, cameras,
-    graph_manifest, hex, hex_short, manifest_key_of, scene_key, shader_key, workspace_root,
-    write_graph_manifest, write_shader,
+    BakedShader, Graph, GraphSpec, ManifestEntry, SHADER_VERSION, artifact_path_of,
+    bake_shader_graph, begin, cache_root, cameras, graph_manifest, hex, hex_short, manifest_key_of,
+    scene_key, shader_key, workspace_root, write_graph_manifest, write_shader,
 };
 /// 各域的**算子表**：声明在这里，实现在 dylib 里。
 pub use px_field_schema::ops as field;

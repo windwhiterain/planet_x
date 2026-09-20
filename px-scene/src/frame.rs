@@ -955,6 +955,49 @@ mod tests {
     use super::*;
     use px_protocol::scene::{CullMode, Geometry, Material, Transform};
 
+    /// **这几条测试要的 `shaders` 图**：帧图的片元成员按**名字**去那张图的清单里查键
+    /// （`manifest_key_of("shaders", node)`），而清单与产物都是**盘上的**（`target/pcg/`）。
+    /// 干净 checkout（`target/` 被 gitignore）上它们不存在 ⇒ 这几条当场红
+    /// （实测三条：`the_legacy_switch_emits_nothing_at_all` / `the_baked_materials_…` /
+    /// `verify_names_the_expected_frame_…`，报"图 'shaders' 的清单读不到"）。
+    ///
+    /// ⚠ 对策**不是跳过**（本仓那条不变式："任何「跳过」都是判据的敌人"）：缺了就**当场烘**。
+    ///   `px_graph::bake_shader_graph()` 就是 `--bin shaders` 调的**同一个函数**，
+    ///   键是内容的纯函数 ⇒ 重复烘只是重写同一批字节，而这几条判据在任何 checkout 上都跑得起来。
+    fn ensure_shader_graph() {
+        if shader_graph_is_ready() {
+            return;
+        }
+        let baked = px_graph::bake_shader_graph().unwrap_or_else(|err| {
+            panic!("盘上没有 `shaders` 图的产物，现烘又失败（帧图按名字查它的成员）：{err}")
+        });
+        assert!(
+            shader_graph_is_ready(),
+            "现烘了 {} 份入口 shader，清单/产物还是不全",
+            baked.len()
+        );
+    }
+
+    /// 清单**与它点名的每一份产物**都在盘上。
+    ///
+    /// ⚠ 只查清单文件是不够的：`target/pcg/ab/` 被清过而清单还在（内容寻址的两半是两件事）
+    ///   —— 那时 `schema_of(member)` 会在"读不到产物"上红，而错误信息离现场很远。
+    fn shader_graph_is_ready() -> bool {
+        let root = px_graph::cache_root();
+        let Ok(text) = std::fs::read_to_string(root.join("shaders").join("manifest.json")) else {
+            return false;
+        };
+        let Ok(entries) = serde_json::from_str::<Vec<px_graph::ManifestEntry>>(&text) else {
+            return false;
+        };
+        !entries.is_empty()
+            && entries.iter().all(|entry| {
+                px_protocol::scene::cas_path(&root, &entry.key)
+                    .map(|path| path.is_file())
+                    .unwrap_or(false)
+            })
+    }
+
     fn object(id: &str, alpha: AlphaMode) -> Object {
         let mut material = Material::new(Member::new("shaders", "surface", &"a".repeat(64)));
         material.alpha = alpha;
@@ -1042,6 +1085,7 @@ mod tests {
     /// 兼容逃生门：不给帧图 ⇒ 三节都空（产物逐字节回到老形状）。
     #[test]
     fn the_legacy_switch_emits_nothing_at_all() {
+        ensure_shader_graph();
         let frame = load(DEFAULT_FRAME).expect("默认帧图要能读");
         let objects = vec![object("planet", AlphaMode::Opaque)];
         let baked = build(&frame, &objects, &sources(), false).expect("老形状");
@@ -1262,6 +1306,7 @@ mod tests {
     /// 核对基准产物：标签对不上就报出**期望什么**与**实际是什么**。
     #[test]
     fn verify_names_the_expected_frame_and_what_it_found() {
+        ensure_shader_graph();
         let frame = load(DEFAULT_FRAME).expect("默认帧图");
         let objects = vec![object("planet", AlphaMode::Opaque)];
         let baked = build(&frame, &objects, &sources(), true).expect("帧图");
@@ -1295,6 +1340,7 @@ mod tests {
     /// 而那时它只在宿主装载时才炸。
     #[test]
     fn the_baked_materials_satisfy_the_document_checks() {
+        ensure_shader_graph();
         let frame = load(DEFAULT_FRAME).expect("默认帧图");
         let objects = vec![object("planet", AlphaMode::Opaque)];
         let baked = build(&frame, &objects, &sources(), true).expect("帧图");

@@ -1,0 +1,8 @@
+# 基础地形：卫星没有板块运动，起伏靠撞击 ⇒ 低频、低幅度的一张底。
+frequency = 1.10
+octaves = 5
+lacunarity = 2.0
+gain = 0.50
+seed = 11
+aspect = 2.0
+spherical = true

@@ -11,17 +11,20 @@
 pub struct Waves;
 
 impl px_field_alg::field_fn::FieldFn for Waves {
+    /// ⚠ `params` 是**这个节点在 `art/field_remap/bands.toml` 里给的那一份**（图参数）。
+    ///   2026-09-20 之前这一栏不存在，本文件只能读 `RemapParams::default()` ⇒ 改 TOML
+    ///   **只换节点键、不换内容**（那是一处静默失效，见 `px_field_alg::field_fn::FieldFn`）。
     /// ⚠ `upstream` 是**算子在调这一行之前**归一化过的值（`[0,1]`），不是上游那张场的原值
     ///   —— "归一化 + 钳制"那一段住在 `px_field_alg` 里（共享路径），图侧函数只管"这一格
-    ///   的值怎么算"。`uv` 是这一格的**纹素中心**坐标（`[0,1]²`，与 `Field::uv` 同一口径）。
+    ///   的值怎么算"。`uv` 是这一格的**纹素中心**坐标（`[0,1]²`，与 `Field::uv` 同一口径）；
+    ///   `_direction` 用不上（径向条带按图像中心算就够）。
     fn value(
         &self,
+        params: &px_field_schema::params::RemapParams,
         upstream: f32,
         uv: [f32; 2],
+        _direction: [f32; 3],
     ) -> f32 {
-        // 图侧参数（`art/<图>/<节点名>.toml` 可改）：本实例单态化在一个 `Params` 上，
-        // 所以这里是编译期常量；改 TOML 进的是**节点键**，不必重编这一份实例库。
-        let params = px_field_schema::params::RemapParams::default();
         // 到 UV 中心的半径：`[0, ~0.707]`（角上）。
         let dx = uv[0] - 0.5;
         let dy = uv[1] - 0.5;

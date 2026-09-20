@@ -1,0 +1,6 @@
+# 立方球网格：位移比行星小（卫星的起伏就是坑缘那一档）。
+subdivisions = 160
+radius = 1.0
+displace = 0.045
+sea_level = 0.0
+flat_sea = false

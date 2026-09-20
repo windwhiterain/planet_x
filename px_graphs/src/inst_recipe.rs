@@ -79,11 +79,11 @@ fn is_word_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || byte == b'_'
 }
 
-/// 今天的两条现役实例（`cloud.coarse/band` 与 `field.remap/waves`）。
+/// 今天的三条现役实例（`cloud.coarse/band` / `field.remap/waves` / `field.remap/latbands`）。
 ///
-/// ⚠ key 由 `px_graphs/build.rs` 按这张表的几栏 + `px_decls` 的事实算出来；
-///   它与 `20-build-graph.md` §193 登记的那两个值**必须逐位相同**
-///   （`96d4feb75ec4` / `caa8318cda1b`）。
+/// ⚠ key 由 `px_graphs/build.rs` 按这张表的几栏 + `px_decls` 的事实算出来。
+///   ⚠ 改过一次口径（2026-09-20）：场侧的两栏（`FieldFn::value`）多了"节点参数"与"球面方向"
+///   —— 那是**算法那一侧**的事，表本身只跟着 `source` 的字节走。
 pub const INSTANCES: &[InstRecipe] = &[
     InstRecipe {
         op_id: "cloud.coarse/band",
@@ -99,6 +99,14 @@ pub const INSTANCES: &[InstRecipe] = &[
         type_name: "Waves",
         roots: &["px_field_alg"],
         source: "art/inst/waves.rs",
+        body: "px_field_alg::remap_with(&px_field_alg::identity(), p, i.input.value(), g, ARG)",
+    },
+    InstRecipe {
+        op_id: "field.remap/latbands",
+        decl: "FieldRemap",
+        type_name: "LatBands",
+        roots: &["px_field_alg"],
+        source: "art/inst/latbands.rs",
         body: "px_field_alg::remap_with(&px_field_alg::identity(), p, i.input.value(), g, ARG)",
     },
 ];

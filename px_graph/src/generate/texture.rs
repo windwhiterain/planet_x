@@ -287,10 +287,52 @@ pub fn coverage_cube(mask: &Field, slopes: [&Field; 3]) -> Result<TextureData, S
     ))
 }
 
+/// **一张 CubeMap 场 → 一张立方贴图**（6 层、1 级、RGBA16F；`R` = 场值，`A` = 1）。
+///
+/// 与 [`coverage_cube`] 的差别：**不掺梯度**。那一张是"云覆盖度 + 三轴梯度"（shader 里
+/// 用法线做细节），这一张是"**把一张场当数据贴图挂到材质上**" —— 任何球面数据都行
+/// （气态巨行星的条带场、极冠、气候图……）。
+///
+/// ⚠ 形状判据与 [`coverage_cube`] 同一条（CubeMap、`height = width × 6`）：挂到
+///   `texture_cube` 上的东西必须是六张面叠成的产物，否则采样出来的是六张不相干的图。
+pub fn field_cube(field: &Field) -> Result<TextureData, String> {
+    if field.projection != Domain::CubeMap {
+        return Err(format!(
+            "场当立方贴图需要 CubeMap 产物，这份是 {:?}",
+            field.projection
+        ));
+    }
+    let face = field.width.max(1);
+    if field.height != face * CUBE_FACES {
+        return Err(format!(
+            "场的行数应当是 {face} × {CUBE_FACES} = {}，实际 {}",
+            face * CUBE_FACES,
+            field.height
+        ));
+    }
+
+    let mut bytes = Vec::with_capacity(field.data.len() * 8);
+    for value in &field.data {
+        // R = 值；G / B 留 0、A = 1（与覆盖度那张同一个摆法：一个标量场占满 8 字节/texel）。
+        bytes.extend_from_slice(&half_from_f32(*value).to_le_bytes());
+        bytes.extend_from_slice(&0_u16.to_le_bytes());
+        bytes.extend_from_slice(&0_u16.to_le_bytes());
+        bytes.extend_from_slice(&half_from_f32(1.0).to_le_bytes());
+    }
+
+    Ok(TextureData::new(
+        face,
+        face,
+        CUBE_FACES,
+        1,
+        TextureFormat::Rgba16Float,
+        bytes,
+    ))
+}
+
 // ---------------------------------------------------------------------------
 // 星空
 // ---------------------------------------------------------------------------
-
 /// 星空：`face` 面的 6 层立方图（1 级 mip，与渲染器 `star_cube` 写进 `Image.data` 的相同）。
 pub fn stars(face: u32) -> TextureData {
     let size = face.max(4);

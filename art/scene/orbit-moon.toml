@@ -1,0 +1,28 @@
+# 场景配方：**无大气卫星**（`moon` 图）—— 陨坑地形 + 极薄的一层霾。
+#
+# 与 orbit-bare 的差别只有两处：成员指向 `moon` 图（三层陨坑的高度场），
+# 以及 `sea_level = 0.0`（整颗球都是"陆地"，rocky 色板不出海洋那一段）。
+#
+# 烘：px run moon --build      （先出高度场与网格）
+#     px run scene orbit-moon  （再出场景文档）
+# 渲：px_render --offline --scene <产物> --out x.png --width 960 --height 640
+
+name = "orbit-moon"
+ambient = 80.0
+cameras = "review"
+
+[[parts]]
+id = "planet"
+kind = "planet"
+shader = "surface"
+graph = "moon"
+members = { height = "height", mesh = "surface", shader = "shaders::surface" }
+params = { palette = "moon", displace = 0.045, sea_level = 0.38, radius = 1.0, spin = 0.0, rings = 0.0 }
+
+[[parts]]
+id = "atmosphere"
+kind = "atmosphere"
+shader = "atmosphere"
+graph = "shaders"
+members = { shader = "atmosphere" }
+params = { inner = 1.0, outer = 1.04, density = 0.06, softness = 0.70, tint = [0.62, 0.66, 0.74] }

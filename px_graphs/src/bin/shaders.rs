@@ -1,50 +1,18 @@
-use std::path::{Path, PathBuf};
-
-use px_cook::{GraphSpec, ManifestEntry};
-
-
-/// 要烘的槽 = `art/shaders/*.wgsl` 里**每一个入口 shader**（§80 第 2 步）。
-///
-/// 原来是一张写死的数组（`const SLOTS: [&str; 3] = [...]`）：加一种材质要改 Rust，
-/// 而「加一种材质 / 加一份 shader」正是美术要做的事 —— 那正是这一轮要拆掉的墙。
-///
-/// 判据「是不是入口」只有一条：**没有 `#define_import_path`**（那是模块的标记；
-/// 库住 `art/shaders/lib`，规则住在 `px_shader::import_path_of`）。
-/// 排在名字序上 ⇒ 同一棵树两次烘出来的清单逐字节相同。
-fn entry_slots() -> Result<Vec<String>, String> {
-    let dir: PathBuf = Path::new("art").join("shaders");
-    let entries = std::fs::read_dir(&dir)
-        .map_err(|err| format!("读不了 shader 目录 {}：{err}", dir.display()))?;
-    let mut slots: Vec<String> = Vec::new();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|value| value.to_str()) != Some("wgsl") {
-            continue;
-        }
-        let text = std::fs::read_to_string(&path)
-            .map_err(|err| format!("读不了 {}：{err}", path.display()))?;
-        if px_shader::import_path_of(&text).is_some() {
-            // 模块不是入口：库那一侧的 `.wgsl` 不在这里，扫到了也不烘。
-            continue;
-        }
-        let Some(name) = path.file_stem().and_then(|value| value.to_str()) else {
-            return Err(format!("{} 没有文件名", path.display()));
-        };
-        slots.push(name.to_string());
-    }
-    slots.sort();
-    if slots.is_empty() {
-        return Err(format!(
-            "{} 里一个入口 shader 都没有：槽表是从目录扫出来的，扫不到就没有东西可烘",
-            dir.display()
-        ));
-    }
-    Ok(slots)
-}
+//! `shaders` 图：`art/shaders/*.wgsl` 里**每一份入口**反射出契约、写进 CAS、写清单。
+//!
+//! ⚠ 这一支今天是**薄壳**：烘那一套搬进了 [`px_cook::bake_shader_graph`]
+//!   （2026-09-20）。理由不是"文件太长"，而是**下游也要能烘**：`px-scene` 的帧图编译
+//!   （与它的测试）按成员名去查这张图的清单 —— 从前那份清单只可能由某个人**先手动跑一次
+//!   这个 bin** 才有，于是干净 checkout（`target/` 被 gitignore）一跑测试就红
+//!   （实测 `px-scene` 的 `frame::tests` 三条全红："图 'shaders' 的清单读不到"）。
+//!   判据要的是"靶子在仓库里、产物可重跑" ⇒ "可重跑"必须是一个**能被调用的函数**。
+//!
+//! 槽表（哪些 `.wgsl` 是入口）也从这一支搬到了那里：判据是**没有 `#define_import_path`**
+//! （那是模块的标记，库住 `art/shaders/lib`），排序后烘 ⇒ 同一棵树两次烘出来的清单逐字节相同。
 
 fn main() {
     // ⚠ 这张图**一个节点都不 cook**：`begin` 只要它那一行摘要（图名 / 参数目录 / 缓存条数）。
-    let _graph = px_cook::begin(GraphSpec {
+    let _graph = px_cook::begin(px_cook::GraphSpec {
         name: "shaders".to_string(),
         width: 0,
         height: 0,
@@ -52,52 +20,35 @@ fn main() {
         cameras: Vec::new(),
     });
 
-    // 模块表读一次就够：所有入口共用同一批库（`planet_x::common / light / noise`）。
-    let modules = px_shader::workspace_modules(&px_cook::workspace_root())
-        .unwrap_or_else(|err| panic!("{err}"));
-
-    let slots = entry_slots().unwrap_or_else(|err| panic!("{err}"));
-    println!("入口 shader {} 份：{}", slots.len(), slots.join(" / "));
-
-    let mut entries: Vec<ManifestEntry> = Vec::new();
-    for slot in &slots {
-        let path = Path::new("art").join("shaders").join(format!("{slot}.wgsl"));
-        let text = std::fs::read_to_string(&path)
-            .unwrap_or_else(|err| panic!("读不了 {}：{err}", path.display()));
-        // include 闭包进键（§17.1、§52.3）：改一个被 import 的模块也得换键，否则
-        // 键不动、场景键不动、槽版本不动，而画出来的东西变了。
-        let closure = px_shader::closure(&text, &modules);
-        let (key, artifact, bytes) =
-            px_cook::write_shader(slot, &text, &closure, &modules).unwrap_or_else(|err| panic!("{err}"));
+    let baked = px_cook::bake_shader_graph().unwrap_or_else(|err| panic!("{err}"));
+    println!("入口 shader {} 份：{}", baked.len(), slots(&baked));
+    for shader in &baked {
         println!(
-            "产物 {slot} -> {}（{}，{} 字节 WGSL）",
-            artifact.display(),
-            px_cook::hex_short(&key),
-            text.len()
+            "产物 {} -> {}（{}，{} 字节 WGSL）",
+            shader.slot,
+            shader.artifact.display(),
+            px_cook::hex_short(&shader.key),
+            shader.wgsl_bytes,
         );
-        println!("  {}", closure.summary());
-        entries.push(ManifestEntry {
-            node: slot.to_string(),
-            op: "shader.wgsl".to_string(),
-            op_version: px_cook::SHADER_VERSION,
-            key: px_cook::hex(&key),
-            hit: false,
-            millis: 0,
-            bytes,
-            detail: format!("{} 字节 WGSL｜{}", text.len(), closure.summary()),
-        });
+        println!("  {}", shader.closure);
     }
-
-    let manifest = px_cook::write_graph_manifest("shaders", &entries)
-        .unwrap_or_else(|err| panic!("写清单失败：{err}"));
+    let manifest = px_cook::cache_root().join("shaders").join("manifest.json");
     println!(
         "共 {} 份 shader：{}；清单 {}",
-        entries.len(),
-        entries
+        baked.len(),
+        baked
             .iter()
-            .map(|entry| format!("{}={}", entry.node, &entry.key[..12]))
+            .map(|shader| format!("{}={}", shader.slot, &px_cook::hex(&shader.key)[..12]))
             .collect::<Vec<_>>()
             .join(" "),
         manifest.display()
     );
+}
+
+fn slots(baked: &[px_cook::BakedShader]) -> String {
+    baked
+        .iter()
+        .map(|shader| shader.slot.as_str())
+        .collect::<Vec<_>>()
+        .join(" / ")
 }

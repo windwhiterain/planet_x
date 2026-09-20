@@ -94,7 +94,10 @@ impl RaySteps {
 
 /// **编译器自己消化的结构键**（行星）：半径 / 色板 / 灯 / 消融档这些是拿来**造场景**的，
 /// 不是材质参数。
-pub const PLANET_KEYS: [&str; 15] = [
+///
+/// ⚠ `subdivisions`（2026-09-20 追加）只在 `primitive = "icosphere"` 那一支用：它是**内建球
+/// 的细分数**，与材质无关 ⇒ 必须是结构键，否则会被当成"shader 没声明的参数"当场拒。
+pub const PLANET_KEYS: [&str; 16] = [
     "palette",
     "displace",
     "sea_level",
@@ -110,6 +113,7 @@ pub const PLANET_KEYS: [&str; 15] = [
     "light_range",
     "atmo",
     "ablate",
+    "subdivisions",
 ];
 
 /// **编译器自己消化的结构键**（云）：形状档、消融档、风 —— 这些要么进几何、要么与云影同口径。

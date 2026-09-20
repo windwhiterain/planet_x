@@ -558,13 +558,42 @@ mod tests {
             "入口根应当是 art/shaders：{}",
             roots[1].display()
         );
-        // ⚠ 库根**不许**在入口根那一遍里再被收一次：两个根都只扫一层，
-        //   否则同一个模块会以"两个真本"的形式当场报错。
+        // ⚠ 这一条判的是**约定**，不是"今天有几份文件"（2026-09-20 改）：
+        //   原来这里写死 `10`（"库 3 份 + 入口 7 份"），于是**加一份 shader**
+        //   （`art/shaders/gasgiant.wgsl` 就是这么加的）会让一条与数量无关的测试红 ——
+        //   而它真正要守的两条是：① 一个根只扫一层 ⇒ 每个文件只被收一次
+        //   （同一个模块以"两个真本"的形式出现会当场报错）；② **库带 `#define_import_path`、
+        //   入口不带**（`--bin shaders` 判"是不是入口"用的就是这一条）。
+        let files = wgsl_files(&roots).expect("文件表");
+        let unique: std::collections::BTreeSet<&std::path::PathBuf> = files.iter().collect();
         assert_eq!(
-            wgsl_files(&roots).expect("文件表").len(),
-            10,
-            "库 3 份 + 入口 7 份；多出来的一定是某一个根被子目录又收了一遍"
+            files.len(),
+            unique.len(),
+            "同一个 .wgsl 被两个根都收了一遍（差 {}）：{files:?}",
+            files.len() - unique.len(),
         );
+        let library_files = wgsl_files(&roots[..1]).expect("库根的文件表");
+        assert!(
+            !library_files.is_empty(),
+            "库根一份 .wgsl 都没有：{}",
+            roots[0].display()
+        );
+        for path in &library_files {
+            let text = std::fs::read_to_string(path).expect("读库文件");
+            assert!(
+                import_path_of(&text).is_some(),
+                "库根下的 {} 没有 `#define_import_path`（它会被当成一份入口去烘）",
+                path.display()
+            );
+        }
+        for path in files.iter().filter(|path| !library_files.contains(path)) {
+            let text = std::fs::read_to_string(path).expect("读入口文件");
+            assert!(
+                import_path_of(&text).is_none(),
+                "入口根下的 {} 带着 `#define_import_path`（它会被当成模块，而不是一份入口）",
+                path.display()
+            );
+        }
         let modules = workspace_modules(workspace).expect("模块表");
         for name in ["planet_x::common", "planet_x::light", "planet_x::noise"] {
             assert!(modules.contains_key(name), "库里应当有 {name}");

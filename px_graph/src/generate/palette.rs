@@ -14,10 +14,16 @@ pub enum Palette {
     Ice,
     Lava,
     Desert,
+    /// **月球灰**：风化层（regolith）由暗到亮的灰，加一层偏蓝的**月海**（低处）。
+    ///
+    /// ⚠ 2026-09-20 加的这一档：`moon` 图（三层陨坑）配 rocky 会出绿——那是 LAND 色带里
+    ///   植被那一段（`[0.259, 0.435, 0.216]`）。无大气天体的地貌没有植被，所以它需要
+    ///   自己那一档色带，而不是去改 `Rocky`（改它会**换掉全部既有场景的贴图字节**）。
+    Moon,
 }
 
 impl Palette {
-    pub const NAMES: [&'static str; 5] = ["rocky", "gas", "ice", "lava", "desert"];
+    pub const NAMES: [&'static str; 6] = ["rocky", "gas", "ice", "lava", "desert", "moon"];
 
     pub fn parse(text: &str) -> Option<Self> {
         match text {
@@ -26,6 +32,7 @@ impl Palette {
             "ice" => Some(Self::Ice),
             "lava" => Some(Self::Lava),
             "desert" => Some(Self::Desert),
+            "moon" => Some(Self::Moon),
             _ => None,
         }
     }
@@ -37,6 +44,7 @@ impl Palette {
             Self::Ice => "ice",
             Self::Lava => "lava",
             Self::Desert => "desert",
+            Self::Moon => "moon",
         }
     }
 
@@ -52,6 +60,8 @@ impl Palette {
             Self::Ice => ([0.66, 0.87, 1.00], 0.270, 0.60),
             Self::Lava => ([1.00, 0.46, 0.20], 0.340, 0.45),
             Self::Desert => ([0.97, 0.79, 0.55], 0.340, 0.46),
+            // 几乎没有大气：一层很淡的灰蓝（缺省是"薄到只剩贴着地平线的那一圈"）。
+            Self::Moon => ([0.62, 0.66, 0.74], 0.060, 0.70),
         }
     }
 
@@ -62,6 +72,8 @@ impl Palette {
             Self::Ice => (0.055, 0.500, 0.0),
             Self::Lava => (0.095, 0.480, 0.0),
             Self::Desert => (0.085, 0.520, 0.0),
+            // 月海线 0.38：比这低的算月海（暗）、比这高的算高地（亮）。
+            Self::Moon => (0.045, 0.380, 0.0),
         }
     }
 }
@@ -154,4 +166,19 @@ pub(super) const DUNE: &[(f32, [f32; 3])] = &[
     (0.42, [0.706, 0.510, 0.290]),
     (0.70, [0.816, 0.663, 0.435]),
     (1.00, [0.882, 0.796, 0.651]),
+];
+
+/// **月海**（`Palette::Moon` 的低处）：暗、略偏蓝（玄武岩熔岩平原的观测色）。
+pub(super) const MARE: &[(f32, [f32; 3])] = &[
+    (0.00, [0.106, 0.110, 0.125]),
+    (0.55, [0.157, 0.161, 0.176]),
+    (1.00, [0.216, 0.220, 0.235]),
+];
+
+/// **风化层**（`Palette::Moon` 的高处）：中性灰，越亮越接近撞击溅射物的白。
+pub(super) const REGOLITH: &[(f32, [f32; 3])] = &[
+    (0.00, [0.259, 0.255, 0.247]),
+    (0.35, [0.412, 0.404, 0.392]),
+    (0.70, [0.596, 0.588, 0.573]),
+    (1.00, [0.804, 0.800, 0.792]),
 ];

@@ -1,4 +1,4 @@
-//! 七个场算子的**参数**：TOML 长什么样、默认值是多少。
+//! 场算子的**参数**：TOML 长什么样、默认值是多少。
 //! （算子 id 与接口形状住在同目录的 `ops.rs` 里 —— 一处定义。）
 //!
 //! ⚠ 参数住 schema 这一侧，是因为**两处都要它**：算子声明（`ops.rs`）与判据仪器 ——
@@ -198,6 +198,66 @@ pub mod warp {
                 lateral: 0.50,
                 probe: 0.07,
             }
+        }
+    }
+}
+
+/// **陨坑**（`field.craters`）：在一张地形场上按格点撒坑 —— 坑里凹、坑缘凸。
+///
+/// 它是"无大气天体"那张图的主角（`moon` 图）：先有一张基础地形，再用两层坑
+/// （大盆地 + 小坑）叠上去。**球面档**按 `direction` 取格点（3D 元胞噪声）⇒ 没有接缝、
+/// 两极也不会挤；平面档按 `(u × aspect, v)` 取格点。
+///
+/// ⚠ 每一层是**元胞距离**（到最近特征点的距离，格为单位）再套一个剖面：
+///   坑内是 `t²` 的碗（`t = 1 - d / radius`），坑缘是 `radius .. radius + rim` 上的半正弦凸起
+///   —— 两者在 `d = radius` 处**都是 0**，所以剖面连续、不会在坑边留下一条硬台阶。
+/// ⚠ `depth` / `height` 是**值域单位**（不是格）：一层最多把值往下压 `depth / 2`、往上抬
+///   `height / 2`，多层按 `gain` 加权后**用总权归一** ⇒ 叠多少层都不会把值顶出多少。
+///   算子**不钳制**输出（"算出来的值域"是图自己的事：要钳就在下游接一个 `field.remap`）。
+#[derive(Debug, Clone, Serialize, Deserialize, px_derive::PxParams)]
+#[serde(default, deny_unknown_fields)]
+pub struct CratersParams {
+    /// 格子密度：球面档是 `direction × frequency`，平面档是 `(u × aspect, v) × frequency`。
+    pub frequency: f32,
+    /// 叠几层坑（每层格点尺度不同 ⇒ 大盆地与小坑并存）。
+    pub octaves: u32,
+    /// 每层格子密度的倍率（与 `fbm` 同口径）。
+    pub lacunarity: f32,
+    /// 每层的权重衰减（与 `fbm` 同口径）。
+    pub gain: f32,
+    /// 特征点在它自己格子里的散布（`0` = 规则格点，`1` = 满格乱撒）。⚠ 大于 `1` 时
+    /// 27 邻域搜索不再保证找到最近点（会出现"本格的坑被邻居抢走"），算子把它钳在 `[0,1]`。
+    pub jitter: f32,
+    pub seed: u32,
+    /// 平面档的横比（与 `fbm` 同口径；球面档不用）。
+    pub aspect: f32,
+    /// 球面档（按 `direction` 取格点）；`false` = 平面档。
+    pub spherical: bool,
+    /// 坑半径（格为单位）。
+    pub radius: f32,
+    /// 坑缘半宽（格为单位）。
+    pub rim: f32,
+    /// 坑深（往下压多少，值域单位）。
+    pub depth: f32,
+    /// 坑缘高（往上抬多少，值域单位）。
+    pub height: f32,
+}
+
+impl Default for CratersParams {
+    fn default() -> Self {
+        Self {
+            frequency: 6.0,
+            octaves: 3,
+            lacunarity: 2.15,
+            gain: 0.55,
+            jitter: 0.85,
+            seed: 31,
+            aspect: 2.0,
+            spherical: true,
+            radius: 0.62,
+            rim: 0.18,
+            depth: 0.35,
+            height: 0.16,
         }
     }
 }

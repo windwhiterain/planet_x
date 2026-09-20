@@ -33,19 +33,38 @@ use px_graph_schema::Grid;
 
 use crate::field_fn::{FieldFn, Sampled};
 
-/// **这一格的值怎么算**：给"已经归一化过的上游值"与"这一格的纹素中心坐标"，回这一格的值。
+/// **这一格的值怎么算**：给"这个节点的参数"、"已经归一化过的上游值"、"这一格的纹素中心坐标"
+/// 与"这一格的球面方向"，回这一格的值。
 ///
 /// ⚠ 有它才有"**同一条计算路径**"：预设那一档与图侧现写的那一档都走 [`map_grid`]，
 ///   差别只在 `C` 是谁 —— 于是"同一份参数、同一个上游 ⇒ 同一个场"不靠人工同步两份循环，
 ///   而靠**只有一份循环**。`FieldFn` 自动就是 `Cell`（两者今天逐字同一件事，分开是为了让
 ///   "这一格的值怎么算"与"图侧那个接口叫什么"各自可以被替换）。
+///
+/// ⚠ `params` 是**节点的参数**（`art/<图>/<节点名>.toml` 那一份）：2026-09-20 之前它在共享路径
+///   里被丢掉（`let _ = params`），于是图侧函数只能读编译期默认值 ⇒ **改参数只换键、不换内容**。
+///   今天它是 `Cell` 的第一栏（见 [`crate::field_fn::FieldFn`]）。
+/// ⚠ `direction` 是**球面上的单位方向**：行星美术里"纬向条带 / 极冠 / 陨坑"这类函数
+///   只能拿它算（`uv` 在 `CubeMap` 投影下不是经纬度）。
 pub trait Cell {
-    fn value(&self, normalized_upstream: f32, uv: [f32; 2]) -> f32;
+    fn value(
+        &self,
+        params: &RemapParams,
+        normalized_upstream: f32,
+        uv: [f32; 2],
+        direction: [f32; 3],
+    ) -> f32;
 }
 
 impl<F: FieldFn> Cell for F {
-    fn value(&self, normalized_upstream: f32, uv: [f32; 2]) -> f32 {
-        FieldFn::value(self, normalized_upstream, uv)
+    fn value(
+        &self,
+        params: &RemapParams,
+        normalized_upstream: f32,
+        uv: [f32; 2],
+        direction: [f32; 3],
+    ) -> f32 {
+        FieldFn::value(self, params, normalized_upstream, uv, direction)
     }
 }
 
@@ -109,19 +128,28 @@ impl Scale {
     }
 }
 
-/// **唯一那条循环**：按格点遍历 `grid`，每一格问上游要 `(值, 坐标)`、问 [`Cell`] 要这一格的值，
-/// 再按尺子映到输出值域。
+/// **唯一那条循环**：按格点遍历 `grid`，每一格问上游要 `(值, 坐标, 方向)`、问 [`Cell`] 要这一格的
+/// 值，再按尺子映到输出值域。
 ///
 /// ⚠ 它不认识"这一格的值是什么"：`cell` 是个口子（预置那一档是"照抄上游"，实例那一档是
 ///   `art/inst/*.rs` 里那个函数）；"上游从哪来"也是 —— 但今天两条入口的上游**都是**那张
 ///   采样好的场（[`Sampled`]），这一条与体积域不同，见 [`crate::remap_with`] 的注释。
-pub fn map_grid<C: Cell>(scale: &Scale, upstream: &Field, cell: &C, grid: Grid) -> Field {
+/// ⚠ `params` 原样递给 `cell`：它是**节点参数到达图侧函数的唯一那条路**
+///   （2026-09-20 之前这条路是断的，见 [`crate::field_fn::FieldFn`]）。
+pub fn map_grid<C: Cell>(
+    scale: &Scale,
+    params: &RemapParams,
+    upstream: &Field,
+    cell: &C,
+    grid: Grid,
+) -> Field {
     let mut field = grid.filled(0.0);
     for y in 0..grid.height {
         for x in 0..grid.width {
             let t = scale.normalize(upstream.at(x, y));
             let (u, v) = upstream.uv(x, y);
-            field.set(x, y, scale.map(cell.value(t, [u, v])));
+            let direction = upstream.direction(x, y);
+            field.set(x, y, scale.map(cell.value(params, t, [u, v], direction)));
         }
     }
     field
@@ -134,13 +162,14 @@ pub fn map_grid<C: Cell>(scale: &Scale, upstream: &Field, cell: &C, grid: Grid) 
 ///
 /// ⚠ 它收 [`Scale`] 而**不收** `RemapParams`：预置那一档的尺子是它自己那份
 ///   `params::remap::Params` 给的，`RemapParams`（`gain` / `bias` / `bands`）是**给图侧函数
-///   读的**、在共享路径里不参与 —— 硬收一个"用不到的参数"只会让签名骗人。
+///   读的** —— 预置这一档没有图侧函数，所以递进去的是 `RemapParams::default()`（`Sampled`
+///   本来也不看它）。
 pub fn remap_sampled(scale: &Scale, input: &Field, grid: Grid) -> Field {
     remap_with(scale, &RemapParams::default(), input, grid, &Sampled { field: input })
 }
 
 /// **实例库入口**：用一个**图侧给的**场函数重映射上游那张场
-/// （`px_inst!` 的体模板里这样用：
+/// （实例的体模板里这样用：
 /// `px_field_alg::remap_with(&px_field_alg::identity(), p, i.input.value(), g, $arg)`）。
 ///
 /// ⚠ 它必须与 [`remap_sampled`] 走**同一条**路径（都是 [`map_grid`]），否则同一份参数会算出
@@ -153,6 +182,11 @@ pub fn remap_sampled(scale: &Scale, input: &Field, grid: Grid) -> Field {
 ///   来源，收 `coverage` 只为让模板逐字套上；场域的"重映射"语义本来就有**上游**，
 ///   图侧函数是**加在**上游之上的（它拿到 `upstream` 才能谈"对比度/条带"）。
 ///
+/// ⚠ `params` **递给场函数**（`art/<图>/<节点名>.toml` 那一份）：它是"这个节点怎么算"的另一半，
+///   与 `scale` 各管一摊 —— `scale` 管归一化/钳制（共享路径），`params` 管图侧函数怎么用它
+///   （`gain` / `bias` / `bands`）。⚠ 从前这里写的是 `let _ = params;`，于是**参数只进键、
+///   不进计算**（改 TOML 重算出一份逐字节相同的产物）—— 2026-09-20 修掉。
+///
 /// ⚠ `scale` 是**显式传**的，不从 `params` 推：`RemapParams` 那三栏没有值域的意思
 ///   （它们是给场函数读的），硬凑一个"参数 → 值域"的映射只会把两件事搅在一起。
 ///   恒等档就是 [`identity`]。
@@ -164,12 +198,7 @@ pub fn remap_with<F: Cell>(
     grid: Grid,
     field_fn: &F,
 ) -> Field {
-    // ⚠ `params` 今天**不参与**共享路径：归一化与钳制是尺子的事，`gain` / `bias` / `bands`
-    //   是场函数自己读的（`art/inst/*.rs` 里 `RemapParams::default()` 那一行）。
-    //   收它是为了两件事：① 让"这一档的图参数"在签名里明明白白（图侧 `cook` 给的就是它）；
-    //   ② 与被复用的那条声明（`FieldRemap` 的 `Params`）对齐。
-    let _ = params;
-    map_grid(scale, upstream, field_fn, grid)
+    map_grid(scale, params, upstream, field_fn, grid)
 }
 
 #[cfg(test)]
@@ -211,7 +240,8 @@ mod tests {
         assert_eq!(preset, generic, "同一条路径上两种入口算出了不同的场");
     }
 
-    /// 场函数拿到的那两栏就是**上游归一化后的值**与**这一格的纹素中心坐标**。
+    /// 场函数拿到的那三栏就是**上游归一化后的值**、**这一格的纹素中心坐标**与
+    /// **这一格的球面方向**。
     #[test]
     fn the_field_function_sees_the_normalized_upstream_and_the_texel_center() {
         let grid = grid();
@@ -221,11 +251,17 @@ mod tests {
 
         let seen = std::cell::RefCell::new(Vec::new());
         struct Record<'a> {
-            seen: &'a std::cell::RefCell<Vec<(f32, [f32; 2])>>,
+            seen: &'a std::cell::RefCell<Vec<(f32, [f32; 2], [f32; 3])>>,
         }
         impl FieldFn for Record<'_> {
-            fn value(&self, upstream: f32, uv: [f32; 2]) -> f32 {
-                self.seen.borrow_mut().push((upstream, uv));
+            fn value(
+                &self,
+                _params: &RemapParams,
+                upstream: f32,
+                uv: [f32; 2],
+                direction: [f32; 3],
+            ) -> f32 {
+                self.seen.borrow_mut().push((upstream, uv, direction));
                 upstream
             }
         }
@@ -233,7 +269,7 @@ mod tests {
 
         let seen = seen.into_inner();
         assert_eq!(seen.len(), (grid.width * grid.height) as usize);
-        // 坐标 = `Field::uv`（纹素中心），值 = 上游过了**同一把尺子**。
+        // 坐标 = `Field::uv`（纹素中心），值 = 上游过了**同一把尺子**，方向 = `Field::direction`。
         let sample = seen[(2 * grid.width + 3) as usize];
         let (u, v) = input.uv(3, 2);
         assert_eq!(sample.1, [u, v], "坐标不是纹素中心口径");
@@ -241,6 +277,59 @@ mod tests {
             sample.0,
             scale.normalize(input.at(3, 2)),
             "场函数拿到的值不是'上游过同一把尺子'之后的"
+        );
+        assert_eq!(
+            sample.2,
+            input.direction(3, 2),
+            "场函数拿到的方向不是这一格的球面方向（纬向条带这类函数只能拿它算）"
+        );
+    }
+
+    /// **节点参数必须到得了图侧函数**（2026-09-20 修的那个缺陷）。
+    ///
+    /// 病：`remap_with` 里那句 `let _ = params;` 把参数丢在了共享路径上，而图侧函数只能自己读
+    /// `RemapParams::default()` ⇒ 改 `art/<图>/<节点>.toml` **只换节点键、不换内容**
+    /// （实测 `bands = 3 / gain = 0` 与不写文件写出同一份字节）。
+    /// 这一条把那条路钉住：场函数回什么，输出就得是什么。
+    #[test]
+    fn the_node_params_reach_the_field_function() {
+        let grid = grid();
+        let scale = identity();
+        let input = input(grid);
+        let params = RemapParams {
+            gain: 0.0,
+            bias: 0.25,
+            bands: 5.0,
+        };
+
+        struct ReadsParams;
+        impl FieldFn for ReadsParams {
+            fn value(
+                &self,
+                params: &RemapParams,
+                _upstream: f32,
+                _uv: [f32; 2],
+                _direction: [f32; 3],
+            ) -> f32 {
+                params.bias
+            }
+        }
+
+        // 恒等尺子 ⇒ 输出就是场函数回的那个数（每一格都一样）。
+        let field = remap_with(&scale, &params, &input, grid, &ReadsParams);
+        assert!(
+            field.data.iter().all(|value| (value - 0.25).abs() < 1e-9),
+            "节点参数没到图侧函数（输出不是 `bias`）"
+        );
+        // 换一个值必须换内容 —— 键本来就跟着它换，两者不许再分家。
+        let other = RemapParams {
+            bias: 0.75,
+            ..params
+        };
+        let field = remap_with(&scale, &other, &input, grid, &ReadsParams);
+        assert!(
+            field.data.iter().all(|value| (value - 0.75).abs() < 1e-9),
+            "换了参数内容却没换"
         );
     }
 

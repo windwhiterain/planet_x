@@ -1,4 +1,5 @@
 pub mod constant;
+pub mod craters;
 pub mod fbm;
 pub mod gradient;
 pub mod mix;

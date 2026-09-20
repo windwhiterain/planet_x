@@ -4,7 +4,7 @@
 //!   运行时按身份装载。这里只说「一个算子是什么、吃什么、吐什么」——于是图侧接错一个上游、
 //!   少给一个字段，都是**编译错**，而且编译这一份不需要实现库在场。
 //!
-//! ⚠ 末尾那条 [`FieldRemap`] 是**泛型实例的声明**（`px_inst!` 复用它）：它甚至没有预置实现，
+//! ⚠ 末尾那条 [`FieldRemap`] 是**泛型实例的声明**（实例复用它）：它甚至没有预置实现，
 //!   "这一格的值怎么算"由 `art/inst/*.rs` 里那段图侧现写的函数决定。
 //!
 //! ⚠ 图参数的形状（`MixInput { a, b, mask }`）**是接口的一部分**，所以它住在声明旁边：
@@ -43,6 +43,15 @@ pub struct MixInput {
 #[derive(px_derive::PxInputs)]
 pub struct FieldRemapInput {
     pub input: Cooked<Field>,
+}
+
+/// 打坑（`Craters` 吃它）：要被打坑的那张地形。
+///
+/// ⚠ 名字是 `base` 而不是 `field`：这个算子的语义是"**在**这张场上打坑"（输出 = 输入 + 坑的
+///   剖面），不是"把它当成采样源"。字段名就是它吃的东西的名字。
+#[derive(px_derive::PxInputs)]
+pub struct CratersInput {
+    pub base: Cooked<Field>,
 }
 
 // ⚠ 不吃上游的那四个 ⇒ 形状是 `()`（它没有名字问题，住在契约里）。
@@ -91,5 +100,19 @@ px_op! {
     ///
     /// ⚠ 参数是 [`params::RemapParams`] —— 与预置的 [`Remap`]（`params::remap::Params`）
     ///   **不是**同一个东西：见那一份的文档注释。
+    /// ⚠ 那三栏**真的到得了图侧函数**（`px_field_alg::field_fn::FieldFn::value` 的第一栏）：
+    ///   2026-09-20 之前它们只进键、不进计算，见那一条的文档。
     FieldRemap, "field.remap", "px_field_op", params::RemapParams, FieldRemapInput, Field
+}
+
+px_op! {
+    /// **陨坑**：在一张地形场上按格点撒坑（坑里凹、坑缘凸）—— 无大气天体的主角。
+    ///
+    /// ⚠ 它**吃上游**（`CratersInput { base }`）而输出是"输入 + 坑的剖面"：地形艺术里
+    ///   "基底 + 叠一层细节"是**加法**，而值域里的加法在这个词汇表里只有这一条路
+    ///   （`field.mix` 是插值，插不出"坑缘高过基底"）。要叠几层就接几个 `Craters` 节点，
+    ///   每个节点自己那份 TOML 给频率与深度。
+    /// ⚠ 球面档按 `direction` 取格点 ⇒ 没有接缝（`uv` 不是球面坐标，见
+    ///   `px_field_alg::field_fn::FieldFn` 那一条）。
+    Craters, "field.craters", "px_field_op", params::CratersParams, CratersInput, Field
 }

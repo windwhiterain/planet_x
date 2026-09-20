@@ -390,16 +390,19 @@ impl Plan {
     ///
     /// ⚠ 命令里的**图名由调用方给**：`px run <图> …` 的第一个参数就是图名 —— 两种都写出来，
     ///   抄一条就能跑。⚠ 这两个词就是 bin `px` 的子命令（`20-build-graph.md` §182）。
+    /// ⚠ 命令前缀走 [`driver_command()`]：**直接跑 driver exe**，不绕 `cargo run`
+    ///   （理由在那一条的文档里）。
     pub fn hint(&self, graph: &str) -> String {
         let keys: Vec<&str> = self
             .missing
             .iter()
             .map(|absent| absent.key.as_str())
             .collect();
+        let driver = driver_command();
         format!(
             "缺 {} 条实例库（共 {} 条）：\n  {}\n  \
-             ⇒ 编它们（只跑 stage 1）：cargo run -q -p px_graphs --bin px -- build\
-             \n     或者两个 stage 连着跑：cargo run -q -p px_graphs --bin px -- run {graph} --build",
+             ⇒ 编它们（只跑 stage 1）：{driver} build\
+             \n     或者两个 stage 连着跑：{driver} run {graph} --build",
             self.missing.len(),
             self.total,
             keys.join("\n  "),
@@ -793,10 +796,30 @@ pub fn cargo_build(dir: &Path) -> Result<(), String> {
 /// 缺实例时那句"该跑什么命令"。
 pub fn missing_hint(key: &str) -> String {
     format!(
-        "\n  ⚠ 这条实例还没编：`cargo run -p px_graphs --bin px -- build`（只编缺的那几条）\
+        "\n  ⚠ 这条实例还没编：`{driver} build`（只编缺的那几条）\
          \n     实例 key：{key}\n     库：{}",
-        library_path(key).display()
+        library_path(key).display(),
+        driver = driver_command(),
     )
+}
+
+/// **该跑哪条命令**：优先给出**直接跑 driver exe** 的那一条（`<exe 同目录>/px[.exe]`）。
+///
+/// ⚠ 不推荐 `cargo run -p px_graphs --bin px -- …` 的原因不是"更短"，而是**它会改变量到的东西**：
+///   `cargo run` 会把 `px_graphs` 按另一套特性合并重链一遍（`19` §180 的量法坑），
+///   而本仓的口径一直是"**读 key 直接跑 `target/debug/px.exe`**"。
+/// ⚠ 回退到 `cargo run` 只在"exe 不在图 exe 旁边"时发生（比如从别处起的进程）——
+///   宁可给一条**能跑**的慢命令，也不要给一条指不到东西的快命令。
+pub fn driver_command() -> String {
+    let sibling = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(std::path::Path::to_path_buf))
+        .map(|dir| dir.join(format!("px{}", std::env::consts::EXE_SUFFIX)))
+        .filter(|path| path.is_file());
+    match sibling {
+        Some(path) => path.display().to_string(),
+        None => "cargo run -q -p px_graphs --bin px --".to_string(),
+    }
 }
 
 /// **错误映射**用：recipe 文件里第几行是这条体（1 开始；找不到就回 0）。

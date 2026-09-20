@@ -54,6 +54,11 @@ pub struct PartFile {
     /// 这个 part 的成员默认属于哪张图；跨图的成员写 `图名::节点名`。
     #[serde(default)]
     pub graph: Option<String>,
+    /// **本体的几何**（只对 `kind = "planet"` 有意义）：不写 = 用 `members` 里那个网格；
+    /// 写 `"icosphere"` = 用内建球（气态巨行星那种"可见面就是光球层"的天体）。
+    /// ⚠ 内建球之后 `mesh` 成员就不再需要 —— 见 `compile` 里那一段的理由。
+    #[serde(default)]
+    pub primitive: Option<String>,
     #[serde(default)]
     pub members: BTreeMap<String, String>,
     #[serde(default)]
@@ -260,16 +265,52 @@ pub fn compile(
     let world = math::orientation(spin, vocab::SYSTEM_TILT);
 
     // ---- 生成物：色板贴图 + 星空 ----
-    let height_member = planet.member("height")?;
-    let height_path = path_of(&height_member, &root)?;
-    let height = generate::load_field(&height_path.display().to_string())
-        .map_err(|err| format!("读场 {} 失败：{err}", height_path.display()))?;
-    let (color, glow, audit) = generate::surface_color(&height, palette, sea_level);
-    println!("{audit}");
-    let color_member = baked.texture("surface_color", color, "texture.palette")?;
-    let glow_member = match glow {
-        Some(glow) => Some(baked.texture("surface_glow", glow, "texture.palette")?),
+    // ⚠ 本体那份 shader 决定**要烘哪些生成物**（`contract::schema_of` 读它的贴图格）：
+    //   自写的 surface 要 `albedo@1` / `glow@3`，而气态巨行星那份（`gasgiant`）要的是
+    //   一张**条带立方图**（`bands@7`，成员由配方给、图烘出来）。
+    //   ⇒ "生成物只为消费者烘"：没有消费者的贴图不再白烘（也不再多出几 MB 的产物字节）。
+    let surface_shader = planet.shader_member()?;
+    let surface_layout = crate::contract::schema_of(&surface_shader, &root)?;
+    let wants_texture = |binding: u32| {
+        surface_layout
+            .textures
+            .iter()
+            .any(|slot| slot.binding == binding)
+    };
+
+    // ⚠ 高度场成员**只在色板那条路上要**：本体 shader 声明了 `@binding(1)`（albedo）才读它。
+    //   气态巨行星那份（次表面散射）没有 albedo 贴图 ⇒ 配方不必给 `height` —— 于是
+    //   "一份生成物只有一个消费者"这条也落到了成员上。
+    let height = match planet.optional_member("height")? {
+        Some(member) => {
+            let path = path_of(&member, &root)?;
+            Some(
+                generate::load_field(&path.display().to_string())
+                    .map_err(|err| format!("读场 {} 失败：{err}", path.display()))?,
+            )
+        }
         None => None,
+    };
+    let (color_member, glow_member) = if wants_texture(1) {
+        let height = height.as_ref().ok_or_else(|| {
+            format!(
+                "part '{}' 的本体 shader 声明了 albedo 贴图（@binding(1)）⇒ 配方的 members \
+                 里要给 `height`（色板贴图是从那张场烘的）",
+                planet.id
+            )
+        })?;
+        let (color, glow, audit) = generate::surface_color(height, palette, sea_level);
+        println!("{audit}");
+        let color_member = Some(baked.texture("surface_color", color, "texture.palette")?);
+        let glow_member = match glow {
+            Some(glow) if wants_texture(3) => {
+                Some(baked.texture("surface_glow", glow, "texture.palette")?)
+            }
+            _ => None,
+        };
+        (color_member, glow_member)
+    } else {
+        (None, None)
     };
     let stars_member = baked.texture("stars", generate::stars(STARS_FACE), "texture.stars")?;
 
@@ -304,8 +345,8 @@ pub fn compile(
     // ---- 物体 ----
     let mut objects: Vec<Object> = Vec::new();
 
-    // 行星本体：走自写的 surface 材质。云影那几个参数与云材质同一口径。
-    let surface_shader = planet.shader_member()?;
+    // 行星本体：走自写材质（`surface` 或别的自写本体 shader，如 `gasgiant`）。
+    // 云影那几个参数与云材质同一口径。
     let cloud_shadow = if coverage_member.is_some() {
         planet.number_or("cloud_shadow", 0.0)
     } else {
@@ -314,43 +355,51 @@ pub fn compile(
     let has_glow = glow_member.is_some();
     // 行星的材质参数**全是算出来的**（云影那几个量必须与云材质同口径）⇒ `computed` 就是全部；
     // 但配方里仍然可以按名字**补**这份 shader 声明过的其它参数（§80 第 2 步的透传）。
+    // ⚠ **算出来的那些按这份 shader 声明了什么过滤**：本体 shader 不只有 `surface` 一种
+    //   （气态巨行星那份 `gasgiant` 要的是 `wrap` / `absorption` / `thickness` 这一族，
+    //   没有 `inner` / `coverage` / `emissive`）—— 把用不到的名字塞进参数表就是"多给参数"，
+    //   会在 `pack` 那一关当场红。过滤掉不等于放过：**shader 声明了而没人给** 仍然会红。
+    let mut computed = BTreeMap::from([
+        ("orientation".to_string(), Value::Quad(world)),
+        (
+            "emissive".to_string(),
+            Value::Quad(if has_glow {
+                [3.0, 3.0, 3.0, 1.0]
+            } else {
+                [0.0, 0.0, 0.0, 0.0]
+            }),
+        ),
+        ("inner".to_string(), Value::Num(f64::from(cloud_inner))),
+        ("outer".to_string(), Value::Num(f64::from(cloud_outer))),
+        (
+            "coverage".to_string(),
+            Value::Num(f64::from(cloud_shape.coverage)),
+        ),
+        (
+            "shadow".to_string(),
+            Value::Num(f64::from(cloud_shadow)),
+        ),
+        (
+            "height".to_string(),
+            Value::Num(planet.number_or("shadow_height", CLOUD_SHADOW_HEIGHT) as f64),
+        ),
+        ("gain".to_string(), Value::Num(f64::from(CLOUD_SHADOW_GAIN))),
+    ]);
+    computed.retain(|name, _| surface_layout.param(name).is_some());
     let surface_params = material_params(
         planet,
         &surface_shader,
         &PLANET_KEYS,
-        BTreeMap::from([
-            ("orientation".to_string(), Value::Quad(world)),
-            (
-                "emissive".to_string(),
-                Value::Quad(if has_glow {
-                    [3.0, 3.0, 3.0, 1.0]
-                } else {
-                    [0.0, 0.0, 0.0, 0.0]
-                }),
-            ),
-            ("inner".to_string(), Value::Num(f64::from(cloud_inner))),
-            ("outer".to_string(), Value::Num(f64::from(cloud_outer))),
-            (
-                "coverage".to_string(),
-                Value::Num(f64::from(cloud_shape.coverage)),
-            ),
-            (
-                "shadow".to_string(),
-                Value::Num(f64::from(cloud_shadow)),
-            ),
-            (
-                "height".to_string(),
-                Value::Num(planet.number_or("shadow_height", CLOUD_SHADOW_HEIGHT) as f64),
-            ),
-            ("gain".to_string(), Value::Num(f64::from(CLOUD_SHADOW_GAIN))),
-        ]),
+        computed,
         &root,
     )?;
     let mut surface = Material::new(surface_shader).with_params(surface_params);
-    surface = surface.with_texture(
-        "albedo",
-        TextureRef::new(1, color_member.clone(), Sampler::repeat()),
-    );
+    if let Some(color) = &color_member {
+        surface = surface.with_texture(
+            "albedo",
+            TextureRef::new(1, color.clone(), Sampler::repeat()),
+        );
+    }
     if let Some(glow) = &glow_member {
         surface = surface.with_texture("glow", TextureRef::new(3, glow.clone(), Sampler::repeat()));
     }
@@ -360,10 +409,45 @@ pub fn compile(
             TextureRef::new(5, coverage.clone(), Sampler::clamped()),
         );
     }
+    // 条带立方图（气态巨行星那一档）：配方给一个 **CubeMap 场成员**，这里把它烘成
+    // 一张立方贴图挂到 `@binding(7)`（`TEXTURE_SLOTS` 里第二格 cube）。
+    // ⚠ 与覆盖度那张的差别：不掺梯度 —— 它是"把一张场当数据贴图"，不是云的细节场。
+    if let Some(band_member) = planet.optional_member("bands")? {
+        let field = generate::load_field(&path_of(&band_member, &root)?.display().to_string())
+            .map_err(|err| format!("读条带场失败：{err}"))?;
+        let cube = generate::field_cube(&field).map_err(|err| format!("条带立方图：{err}"))?;
+        let member = baked.texture("gas_bands", cube, "texture.bands")?;
+        surface = surface.with_texture("bands", TextureRef::new(7, member, Sampler::clamped()));
+    }
     check_stage(&file.name, "planet", &surface)?;
+    // 本体几何：默认是**图烘出来的网格**（`planet` / `moon` 那两张图的立方球）；
+    // 配方写 `primitive = "icosphere"` 时改用**内建球**。
+    // ⚠ 气态巨行星必须走这一支：它的可见面是**光球层**（一个球），不是有起伏的地形网格
+    //   —— 挂上岩石那张位移网格，地形起伏会从次表面散射材质里透出来（实测：一版渲染图上
+    //   那几块"海岸线"其实就是 `planet` 图的陆地，法线带着它 ⇒ 条带被采样歪了）。
+    let geometry = match planet.primitive.as_deref() {
+        None => Geometry::mesh(planet.member("mesh")?),
+        Some("icosphere") => Geometry::primitive(
+            "icosphere",
+            BTreeMap::from([
+                ("radius".to_string(), Value::Num(f64::from(radius))),
+                (
+                    "subdivisions".to_string(),
+                    Value::Num(f64::from(planet.number_or("subdivisions", 64.0))),
+                ),
+            ]),
+        ),
+        Some(other) => {
+            return Err(format!(
+                "part '{}' 的 primitive '{other}' 不认识（今天只有 icosphere；\
+                 不写这一栏就用 members 里那个网格）",
+                planet.id
+            ))
+        }
+    };
     objects.push(Object {
         id: "planet".to_string(),
-        geometry: Geometry::mesh(planet.member("mesh")?),
+        geometry,
         material: surface,
         transform: Transform::rotated(world),
         cast_shadow: true,

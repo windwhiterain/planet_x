@@ -18,8 +18,10 @@
 //!   （`type Params = <路径>;`）⇒ 名字改错/类型删掉是**图程序编译错**（当场可见），
 //!   不是运行期才发现。
 //!
-//! ⚠ **每加一个 `px_op!` 就要在 [`decl`] 里加一臂**：由 `tests/inst_gate.rs` 那道门看着
+//! ⚠ **每加一个 `px_op!` 就要在 [`TABLE`] 里加一行**：由 `tests/inst_gate.rs` 那道门看着
 //!   （"`px_op!` 的处数 == 表里条数"，且表里每个名字都查得到）。
+//!   ⚠ 2026-09-20 之前这里有**两份**会漂开的清单（`decl()` 的 match 臂 + `NAMES` 数组），
+//!   而门只能数条数 ⇒ 配错行（`"Fbm" => facts::<Ridged>()`）每一道门都过。今天只有 [`TABLE`] 一份。
 
 use px_graph_schema::PxOp;
 
@@ -46,58 +48,52 @@ pub struct DeclFacts {
     pub module: &'static str,
 }
 
+/// **声明表**：一行一个声明 —— **唯一**那份"有哪些声明"的清单。
+///
+/// ⚠ 2026-09-20 收口：从前这里有两份会漂开的清单（`decl()` 的 match 臂 + [`NAMES`] 那张字符串
+///   数组），而门只能数**条数**（`px_op!` 处数 == 表里条数）。条数对得上、配错行的那种写错
+///   （`"Fbm" => facts::<Ridged>()`）**每一道门都过**，直到某条实例拿它去编译才炸 —— 而且
+///   炸在"生成物里的类型与体对不上"这种离现场很远的地方。今天只有这一张表：
+///   [`decl`] / [`names`] / [`entries`] 全从它派生，**没有第二处可以写名字**。
+///   ⚠ 加一个声明就是**加一行**（`px_op!` 那处 + 这一行，门数条数）。
+pub const TABLE: &[(&str, fn() -> DeclFacts)] = &[
+    ("Constant", || facts::<px_field_schema::ops::Constant>()),
+    ("Fbm", || facts::<px_field_schema::ops::Fbm>()),
+    ("Ridged", || facts::<px_field_schema::ops::Ridged>()),
+    ("Remap", || facts::<px_field_schema::ops::Remap>()),
+    ("Gradient", || facts::<px_field_schema::ops::Gradient>()),
+    ("Mix", || facts::<px_field_schema::ops::Mix>()),
+    ("Warp", || facts::<px_field_schema::ops::Warp>()),
+    ("Craters", || facts::<px_field_schema::ops::Craters>()),
+    ("FieldRemap", || facts::<px_field_schema::ops::FieldRemap>()),
+    ("CloudCoarse", || facts::<px_volume_schema::ops::CloudCoarse>()),
+    ("CubeSphere", || facts::<px_mesh_schema::ops::CubeSphere>()),
+    ("Proxy", || facts::<px_mesh_schema::ops::Proxy>()),
+];
+
 /// **声明名 → 事实**。查不到回 `None`（生成器据此报错并点名是 recipe 第几条）。
 ///
 /// ⚠ 三个 schema 的命名空间是**同一个**（`FieldRemap` 与 `CloudCoarse` 都只是类型名）：
-///   重名在这里当场拒 —— 那说明生成器不知道该写哪个路径。
+///   重名在 [`TABLE`] 里当场看得见 —— 那说明生成器不知道该写哪个路径。
 /// ⚠ 它是**运行期**函数（不是 `const fn`）：`any::type_name` 与 `PxOp::interface()` 今天都不是
 ///   const（实测 `is not yet stable as a const fn` / "const traits are not yet supported"）。
 ///   调用它的是 **build script 与测试**，一次编译各跑一遍 ⇒ 这点开销无关紧要。
 pub fn decl(name: &str) -> Option<DeclFacts> {
-    let facts = match name {
-        "Constant" => facts::<px_field_schema::ops::Constant>(),
-        "Fbm" => facts::<px_field_schema::ops::Fbm>(),
-        "Ridged" => facts::<px_field_schema::ops::Ridged>(),
-        "Remap" => facts::<px_field_schema::ops::Remap>(),
-        "Gradient" => facts::<px_field_schema::ops::Gradient>(),
-        "Mix" => facts::<px_field_schema::ops::Mix>(),
-        "Warp" => facts::<px_field_schema::ops::Warp>(),
-        "FieldRemap" => facts::<px_field_schema::ops::FieldRemap>(),
-        "CloudCoarse" => facts::<px_volume_schema::ops::CloudCoarse>(),
-        "CubeSphere" => facts::<px_mesh_schema::ops::CubeSphere>(),
-        "Proxy" => facts::<px_mesh_schema::ops::Proxy>(),
-        _ => return None,
-    };
-    Some(facts)
+    TABLE
+        .iter()
+        .find(|(listed, _)| *listed == name)
+        .map(|(_, facts)| facts())
 }
 
 /// 表里全部声明名（门与工具用它，不必自己再抄一遍）。
-pub fn names() -> &'static [&'static str] {
-    NAMES
+pub fn names() -> Vec<&'static str> {
+    TABLE.iter().map(|(name, _)| *name).collect()
 }
 
-/// 表里全部登记（名字 + 事实）—— 由 [`NAMES`] 与 [`decl`] 派生（**没有第二份名字清单**）。
+/// 表里全部登记（名字 + 事实）—— 与 [`TABLE`] 逐行同序（**没有第二份名字清单**）。
 pub fn entries() -> Vec<(&'static str, DeclFacts)> {
-    names()
-        .iter()
-        .filter_map(|name| decl(name).map(|facts| (*name, facts)))
-        .collect()
+    TABLE.iter().map(|(name, facts)| (*name, facts())).collect()
 }
-
-/// 表里的名字（**一臂一个**，与 [`decl`] 的 match 一一对应；门数它们的条数）。
-pub const NAMES: &[&str] = &[
-    "Constant",
-    "Fbm",
-    "Ridged",
-    "Remap",
-    "Gradient",
-    "Mix",
-    "Warp",
-    "FieldRemap",
-    "CloudCoarse",
-    "CubeSphere",
-    "Proxy",
-];
 
 /// 三个 schema 的 crate 目录名（相对 workspace 根）。
 pub const SCHEMAS: &[&str] = &["px_field_schema", "px_volume_schema", "px_mesh_schema"];

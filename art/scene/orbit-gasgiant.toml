@@ -1,0 +1,39 @@
+# 场景配方：**气态巨行星**（`gasgiant` 图）—— 次表面散射的气体球，没有云。
+#
+# ⚠ 2026-09-20 用户口径：「不要用普通的云来处理气态行星 —— 气态巨星应当用次表面散射」。
+#   上一版把 `clouds` 那套软档（体积壳 + 等值面）套在它身上，出来的是一圈圈"贴在球上的
+#   云带"（带边像塑料环）。气态巨行星没有那个边界：它是一整球气体，看见的每条带都是
+#   「光穿过这一柱气体再散射回来」的颜色。
+#
+# 于是这一档的材质是 `art/shaders/gasgiant.wgsl`（自写的次表面散射）：
+#   ① 穿透深度：条带场（`gasgiant::mixed` 烘成的立方贴图）给"这一带多厚"，再乘视线掠射角；
+#   ② 每通道吸收 `exp(-σ·depth)`：蓝光吸得多 ⇒ 深带偏暖偏暗、亮带偏白；
+#   ③ 包裹漫反射：半透 ⇒ 照亮的一侧越过几何晨昏线（晨昏线是一条宽软带）；
+#   ④ 边缘散射：切向那一圈穿过的气体最厚 ⇒ 边缘自己发亮。
+#
+# 参数里的数就是那个模型的旋钮（`absorption` / `wrap` / `thickness` / `limb` / `band_*`）
+# —— 它们由这份 shader 的结构体声明，改这份 TOML 不改 Rust、不重编（§81 的透传）。
+#
+# 烘：px run gasgiant --build   （先出条带场）
+#     px run scene orbit-gasgiant
+# 渲：px_render --offline --scene <产物> --out x.png --width 960 --height 640
+
+name = "orbit-gasgiant"
+ambient = 80.0
+cameras = "review"
+
+[[parts]]
+id = "planet"
+kind = "planet"
+# 本体不是石头：这条 shader 自己就是整颗行星（次表面散射的气体球）。
+shader = "gasgiant"
+graph = "planet"
+# `bands` 是**图烘出来的条带场**（CubeMap 场成员）⇒ 场景把它烘成立方贴图挂进材质。
+# ⚠ `palette` / `sea_level` 是本体 part 的结构键（编译器要读）：这一档的 shader 没有
+#   albedo 贴图 ⇒ 色板贴图**不会**被烘（生成物只为消费者烘），这两个数只是把配方写全。
+# ⚠ 这一档**不给 `mesh`**：本体的可见面是光球层 ⇒ 用内建球（`primitive`），
+#   不挂 `planet` 图那张带位移的立方球（挂上去地形起伏会从散射材质里透出来）。
+#   也不给 `height`：这份 shader 没有 albedo 贴图 ⇒ 色板那条路不烘（成员是可选的）。
+members = { shader = "shaders::gasgiant", bands = "gasgiant::mixed" }
+primitive = "icosphere"
+params = { palette = "gas", displace = 0.010, sea_level = 0.45, radius = 1.0, subdivisions = 64, spin = 0.0, rings = 0.0, albedo = [0.870, 0.800, 0.660, 1.0], absorption = [0.20, 0.34, 0.70, 1.0], wrap = 0.50, thickness = 1.00, limb = 0.34, band_gain = 0.42, band_contrast = 0.85, sun_gain = 1.00, ambient = 1.00 }

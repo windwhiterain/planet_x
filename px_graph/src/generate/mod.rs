@@ -36,6 +36,6 @@ pub use store::{
     fingerprint_of, load_field, write_generated_mesh, write_generated_mesh_at, write_texture,
     write_texture_at, Generated,
 };
-pub use texture::{coverage_cube, ring_band, stars, TextureData};
+pub use texture::{coverage_cube, field_cube, ring_band, stars, TextureData};
 
 pub use px_protocol::art::{MeshData, TextureFormat};

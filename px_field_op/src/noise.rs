@@ -192,3 +192,82 @@ pub fn ridged_3(point: [f32; 3], settings: &FbmSettings, sharpness: f32) -> f32 
         0.0
     }
 }
+
+// ---------------------------------------------------------------------------
+// 元胞噪声（Worley / F1）—— `field.craters` 用的那一档
+//
+// ⚠ 与上面那两族（值噪声 / 梯度噪声）不是一回事：这里要的是"**到最近特征点的距离**"，
+//   而特征点是**每个格子里一个、位置由哈希决定**的。它是陨坑、裂纹、鳞片这类
+//   "以格点为骨架"的图形的底座。
+//
+// ⚠ 搜索范围是**27 邻域**（3D）/ **9 邻域**（2D）：特征点被 `jitter` 限制在自己的格子里
+//   （`jitter ≤ 1`）时，最近点必定落在相邻格里 —— 所以调用方**先钳 jitter**（`craters` 那句
+//   `jitter.clamp(0.0, 1.0)`）。`jitter > 1` 会让"本格的坑被邻居抢走"，图形上表现为
+//   偶尔多出/少掉一个坑，而**不是**崩溃。
+// ---------------------------------------------------------------------------
+
+/// 一个格子的**特征点**（3D）：格子中心 + 由哈希决定的抖动偏移。
+///
+/// 三个偏移取自**同一个哈希的三个十位段**（`lattice3` 是 32 位混合）：于是同一个格子只算一次
+/// 哈希，而三个轴互不相关。
+fn feature_point_3(cell: [i32; 3], seed: u32, jitter: f32) -> [f32; 3] {
+    let hash = lattice3(cell[0], cell[1], cell[2], seed);
+    let offset = |shift: u32| ((hash >> shift) & 0x3ff) as f32 / 1024.0;
+    [
+        cell[0] as f32 + 0.5 + (offset(0) - 0.5) * jitter,
+        cell[1] as f32 + 0.5 + (offset(10) - 0.5) * jitter,
+        cell[2] as f32 + 0.5 + (offset(20) - 0.5) * jitter,
+    ]
+}
+
+/// **3D 元胞距离（F1）**：到最近特征点的距离，单位是**格**（`1.0` = 一个格子）。
+pub fn worley_3(point: [f32; 3], seed: u32, jitter: f32) -> f32 {
+    let base = [
+        point[0].floor() as i32,
+        point[1].floor() as i32,
+        point[2].floor() as i32,
+    ];
+    let mut best = f32::MAX;
+    for dz in -1..=1 {
+        for dy in -1..=1 {
+            for dx in -1..=1 {
+                let feature = feature_point_3([base[0] + dx, base[1] + dy, base[2] + dz], seed, jitter);
+                let distance = ((point[0] - feature[0]).powi(2)
+                    + (point[1] - feature[1]).powi(2)
+                    + (point[2] - feature[2]).powi(2))
+                .sqrt();
+                if distance < best {
+                    best = distance;
+                }
+            }
+        }
+    }
+    best
+}
+
+/// 一个格子的**特征点**（2D，平面档用）。
+fn feature_point_2(cell: [i32; 2], seed: u32, jitter: f32) -> [f32; 2] {
+    let x = lattice(cell[0], cell[1], seed);
+    let y = lattice(cell[0], cell[1], seed ^ 0x9e37_79b9);
+    [
+        cell[0] as f32 + 0.5 + (x - 0.5) * jitter,
+        cell[1] as f32 + 0.5 + (y - 0.5) * jitter,
+    ]
+}
+
+/// **2D 元胞距离（F1）**：到最近特征点的距离，单位是**格**。
+pub fn worley_2(point: [f32; 2], seed: u32, jitter: f32) -> f32 {
+    let base = [point[0].floor() as i32, point[1].floor() as i32];
+    let mut best = f32::MAX;
+    for dy in -1..=1 {
+        for dx in -1..=1 {
+            let feature = feature_point_2([base[0] + dx, base[1] + dy], seed, jitter);
+            let distance =
+                ((point[0] - feature[0]).powi(2) + (point[1] - feature[1]).powi(2)).sqrt();
+            if distance < best {
+                best = distance;
+            }
+        }
+    }
+    best
+}

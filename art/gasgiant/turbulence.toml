@@ -1,0 +1,10 @@
+# 湍流：给条带边界挪相位的那一张场（球面 fbm）。
+# ⚠ 频率故意低（1.7）：它管的是"带边界怎么起伏"，不是细节 —— 细节由场景里的
+#   detail_scale / detail_strength 在 shader 里乘上去。
+frequency = 1.70
+octaves = 5
+lacunarity = 2.0
+gain = 0.55
+seed = 17
+aspect = 2.0
+spherical = true

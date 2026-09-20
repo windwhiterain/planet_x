@@ -1,0 +1,13 @@
+# 第一层：大盆地。octaves = 1（这一层只要一种尺度），半径大、坑浅。
+frequency = 2.20
+octaves = 1
+lacunarity = 2.15
+gain = 0.55
+jitter = 0.85
+seed = 101
+aspect = 2.0
+spherical = true
+radius = 0.58
+rim = 0.26
+depth = 0.30
+height = 0.09

@@ -522,3 +522,95 @@ fn shader_params(
 
 // 读一份 Shader 产物由渲染侧负责（`px_protocol::art::read_shader`）——
 // 渲染器不许依赖 PCG 这一侧（§10.1）。
+
+// ---------------------------------------------------------------------------
+// `shaders` 那张图（`art/shaders/*.wgsl` → CAS + 清单）
+// ---------------------------------------------------------------------------
+
+/// 一份烘好的入口 shader（读数用；写盘的事在 [`bake_shader_graph`] 里做完了）。
+pub struct BakedShader {
+    pub slot: String,
+    pub key: Key,
+    pub artifact: PathBuf,
+    pub bytes: u64,
+    pub wgsl_bytes: usize,
+    /// 闭包摘要（`px_shader::Closure::summary`）。
+    pub closure: String,
+}
+
+/// **烘整张 `shaders` 图**：`art/shaders/` 下**每一份入口**（没有 `#define_import_path`
+/// 的 `.wgsl`）反射出契约、写进 CAS，再写 `target/pcg/shaders/manifest.json`。
+///
+/// ⚠ 它从前**只住在 bin 里**（`px_graphs/src/bin/shaders.rs`），于是任何需要这张图的
+///   下游（`px-scene` 的帧图测试、场景编译）都只能**假设盘上已经有**那份清单：
+///   干净 checkout（`target/` 被忽略）一跑测试就红 —— 实测 `px-scene` 的
+///   `frame::tests` 三条全红（"图 'shaders' 的清单读不到"）。
+///   判据要的是"靶子在仓库里、产物可重跑"，所以这份"可重跑"必须是一个**能被调用的函数**，
+///   而不是一段只活在某个 bin 的 `main` 里的代码。
+/// ⚠ 路径一律从 [`workspace_root`] 起算（**不看 CWD**）：测试的 CWD 是 crate 目录，
+///   而 bin 的 CWD 是工作区根 —— 同一份逻辑在两个 CWD 下必须读到同一批文件。
+/// ⚠ 幂等：键是内容的纯函数，重复烘只是重写同一批字节（清单也逐字节相同）。
+pub fn bake_shader_graph() -> Result<Vec<BakedShader>, String> {
+    let root = workspace_root();
+    let dir = root.join("art").join("shaders");
+    let modules = px_shader::workspace_modules(&root)?;
+
+    let mut slots: Vec<String> = Vec::new();
+    let entries = std::fs::read_dir(&dir)
+        .map_err(|err| format!("读不了 shader 目录 {}：{err}", dir.display()))?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("wgsl") {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path)
+            .map_err(|err| format!("读不了 {}：{err}", path.display()))?;
+        // 「是不是入口」只有一条判据：**没有 `#define_import_path`**（那是模块的标记）。
+        if px_shader::import_path_of(&text).is_some() {
+            continue;
+        }
+        let Some(name) = path.file_stem().and_then(|value| value.to_str()) else {
+            return Err(format!("{} 没有文件名", path.display()));
+        };
+        slots.push(name.to_string());
+    }
+    slots.sort();
+    if slots.is_empty() {
+        return Err(format!(
+            "{} 里一个入口 shader 都没有：槽表是从目录扫出来的，扫不到就没有东西可烘",
+            dir.display()
+        ));
+    }
+
+    let mut baked = Vec::with_capacity(slots.len());
+    let mut manifest: Vec<ManifestEntry> = Vec::with_capacity(slots.len());
+    for slot in &slots {
+        let path = dir.join(format!("{slot}.wgsl"));
+        let text = std::fs::read_to_string(&path)
+            .map_err(|err| format!("读不了 {}：{err}", path.display()))?;
+        // include 闭包进键（§17.1、§52.3）：改一个被 import 的模块也得换键。
+        let closure = px_shader::closure(&text, &modules);
+        let (key, artifact, bytes) = write_shader(slot, &text, &closure, &modules)?;
+        let summary = closure.summary();
+        manifest.push(ManifestEntry {
+            node: slot.clone(),
+            op: "shader.wgsl".to_string(),
+            op_version: SHADER_VERSION,
+            key: hex(&key),
+            hit: false,
+            millis: 0,
+            bytes,
+            detail: format!("{} 字节 WGSL｜{summary}", text.len()),
+        });
+        baked.push(BakedShader {
+            slot: slot.clone(),
+            key,
+            artifact,
+            bytes,
+            wgsl_bytes: text.len(),
+            closure: summary,
+        });
+    }
+    write_graph_manifest("shaders", &manifest)?;
+    Ok(baked)
+}

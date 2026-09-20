@@ -1,0 +1,13 @@
+# 第二层：主要陨坑。两层尺度（octaves = 2）让"密"这件事自己出现。
+frequency = 5.50
+octaves = 2
+lacunarity = 2.10
+gain = 0.55
+jitter = 0.90
+seed = 202
+aspect = 2.0
+spherical = true
+radius = 0.60
+rim = 0.18
+depth = 0.26
+height = 0.15

@@ -37,7 +37,7 @@ pub mod generated {
 
 // ⚠ 生成物里的类型在本模块的**名字空间**里（`px_graphs::insts::Band`）——
 //   图程序与测试都从这一路径取它，别多一层 `generated::` 的噪音。
-pub use generated::{Band, Waves};
+pub use generated::{Band, LatBands, Waves};
 
 /// **stage 1 的声明**（`20-build-graph.md` §184/§189）：这里点名"要编哪些代码单元"。
 ///

@@ -9,7 +9,9 @@
 use px_field_schema::field::Field;
 use px_protocol::art::Domain;
 
-use super::palette::{mix, ramp, Palette, BASIN, DUNE, FROZEN, GAS, LAND, LAVA_ROCK, SHEET, WATER};
+use super::palette::{
+    mix, ramp, Palette, BASIN, DUNE, FROZEN, GAS, LAND, LAVA_ROCK, MARE, REGOLITH, SHEET, WATER,
+};
 use super::texture::{image_from, pole_cap_filter, TextureData};
 
 // ---------------------------------------------------------------------------
@@ -78,6 +80,22 @@ fn shade(
             color = mix(color, [0.529, 0.290, 0.196], strata * land_t * 0.16);
             let cap = ((latitude - 0.88) / 0.12).clamp(0.0, 1.0);
             color = mix(color, [0.902, 0.925, 0.941], cap * 0.45);
+            (color, [0.0, 0.0, 0.0])
+        }
+        Palette::Moon => {
+            // 月海（低处，暗）与风化层（高处，中性灰）。没有植被、没有水 ⇒ 不用 LAND/WATER。
+            let mut color = if height < sea {
+                ramp(MARE, water_t)
+            } else {
+                ramp(REGOLITH, land_t)
+            };
+            // 溅射纹（ejecta ray）：拿高度做一组很细的条纹，只在**高地**上淡淡压一点，
+            // 让陨坑密集的地方不至于平得像一块水泥。
+            let rays = (height * 61.0).sin() * 0.5 + 0.5;
+            color = mix(color, [0.867, 0.871, 0.878], rays * land_t * 0.10);
+            // 极区稍暗（观测上的极地阴影区），与 rocky 那条"极冠提亮"方向相反。
+            let cap = ((latitude - 0.86) / 0.14).clamp(0.0, 1.0);
+            color = mix(color, [0.318, 0.325, 0.345], cap * 0.30);
             (color, [0.0, 0.0, 0.0])
         }
     }

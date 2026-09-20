@@ -36,9 +36,9 @@ fn the_table_has_one_row_per_px_op_declaration() {
     assert_eq!(
         found,
         listed,
-        "三个 schema 里有 {found} 处 `px_op!`，而 `px_decls` 表里登记了 {listed} 条\
-         （差 {}）—— 每加一个声明就要在 `px_decls/src/lib.rs` 的 `decl()` 里加一臂、\
-         在 `NAMES` 里加一个名字",
+        "三个 schema 里有 {found} 处 `px_op!`，而 `px_decls::TABLE` 里登记了 {listed} 条\
+         （差 {}）—— 每加一个声明就要在 `px_decls/src/lib.rs` 的 `TABLE` 里加一行（\
+         `TABLE` 是唯一那份清单）",
         found as i64 - listed as i64
     );
 }
@@ -49,7 +49,7 @@ fn every_row_resolves_by_name() {
     assert_eq!(
         roots.len(),
         names().len(),
-        "`NAMES` 里有的名字在 `decl()` 里查不到（两处不同步）"
+        "`TABLE` 里的名字在 `decl()` 里查不到"
     );
     for name in names() {
         let facts = decl(name).unwrap_or_else(|| panic!("表里有 {name}，而 `decl({name})` 查不到"));
@@ -64,6 +64,18 @@ fn every_row_resolves_by_name() {
             facts.module, "ops",
             "{name} 的声明不在 `ops` 模块里（生成物的 `pub use` 会写错路径）"
         );
+    }
+}
+
+#[test]
+fn the_table_names_are_unique() {
+    // ⚠ 单表之后新长出来的一条判据：`decl()` 找的是**第一个**同名的行 ⇒ 重名会让后面那行
+    //   永远查不到（静默），而条数门照样绿（两行算两条）。三个 schema 的命名空间是同一个，
+    //   重名本来就是"生成器不知道该写哪个路径"。
+    let mut seen: Vec<&str> = Vec::new();
+    for (name, _) in entries() {
+        assert!(!seen.contains(&name), "`TABLE` 里有两行同名：{name}");
+        seen.push(name);
     }
 }
 
