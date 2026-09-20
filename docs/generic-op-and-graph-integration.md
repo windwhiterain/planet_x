@@ -655,8 +655,10 @@ px run planet --build         # stage 1 有缺就编那几条，再跑 stage 2
 
 ### 5.4 场域的泛型实例 —— 与体积域逐处同构（**能跑的最小例子**）
 
-体积域（`cloud.coarse/band` 那条 `Band`）与场域（`field.remap/waves` 那条 `Waves`）是同一套机制的
-两次落地，它们在 `px_graphs/src/inst_recipe.rs` 那张表里并排住着 —— 要抄就照这两条抄。
+体积域（`cloud.coarse/band` 那条 `Band`）与场域（`field.remap/waves` 的 `Waves`、
+`field.remap/latbands` 的 `LatBands`）是同一套机制的几次落地，它们在 `px_graphs/src/inst_recipe.rs`
+那张表里并排住着 —— 要抄就照这几条抄（2026-09-20 之前只有两条；`latbands` 是「同一张声明、
+另一种场函数」那一步，它顺手把 `band` 的**球面**档验了一遍）。
 图侧如今**一行数据**（不是宏、也不是手写类型）：
 
 ```rust
@@ -679,9 +681,9 @@ InstRecipe {
 
 | # | 落点 | 写什么 |
 |---|---|---|
-| 1 | **声明** `px_field_schema::ops` | `px_op! { FieldRemap, "field.remap", "px_field_op", params::RemapParams, FieldRemapInput, Field }` —— ⚠ 它**自己的 `Inputs`**（`FieldRemapInput`），而且**没有预置实现**（`px_field_op` 里没有它的 `px_body!`）：它存在的意义就是给实例当声明。⚠ 加了新声明还要在 `px_decls` 的声明表里加一臂（那道门数 `px_op!` 处数与表里条数） |
+| 1 | **声明** `px_field_schema::ops` | `px_op! { FieldRemap, "field.remap", "px_field_op", params::RemapParams, FieldRemapInput, Field }` —— ⚠ 它**自己的 `Inputs`**（`FieldRemapInput`），而且**没有预置实现**（`px_field_op` 里没有它的 `px_body!`）：它存在的意义就是给实例当声明。⚠ 加了新声明还要在 `px_decls::TABLE` 里加**一行**（那道门数 `px_op!` 处数与表里条数；2026-09-20 之前这里是两份会漂开的清单，见 `px_decls/src/lib.rs` 的注释） |
 | 2 | **参数** `px_field_schema::params::RemapParams` | `#[derive(…, px_derive::PxParams)]` ⇒ 每栏进键（`gain` / `bias` / `bands`） |
-| 3 | **图侧函数** `art/inst/waves.rs` | `impl px_field_alg::field_fn::FieldFn for Waves`：纯函数、只吃 `f32`、只认识 `px_field_alg`、自己保证落在 `[0,1]` |
+| 3 | **图侧函数** `art/inst/waves.rs` | `impl px_field_alg::field_fn::FieldFn for Waves`：纯函数、只认识 `px_field_alg`、自己保证落在 `[0,1]`。⚠ 它拿得到**节点参数**与**球面方向**（见下） |
 | 4 | **算法** `px_field_alg`（rlib） | `remap_with` 与预置 `remap_sampled` 走**同一条** `map_grid`（只有那一份循环） |
 
 三条口径（照体积域抄）：① 声明与 `type_name` 都**不带路径**（符号名按声明名拼、类型名要在
@@ -690,7 +692,7 @@ InstRecipe {
 **七个图 exe 一个字节不动**（R1）。
 
 ```bash
-px list                       # 应当看到两条实例：cloud.coarse/band 与 field.remap/waves
+px list                       # 应当看到三条实例：cloud.coarse/band、field.remap/waves、field.remap/latbands
 px build                      # 缺哪条编哪条
 px run field_remap            # 图侧自己的那张图（新图用 -Task run -Graph field_remap 走包装层）
 px run field_remap --build    # 缺实例库时先把 stage 1 跑了再跑图
@@ -702,11 +704,18 @@ px run field_remap --build    # 缺实例库时先把 stage 1 跑了再跑图
 冷：共 2 个节点：命中 0、重算 2
     输出 bands（field.remap/waves）：256×128｜值域 0.0000..1.0000｜均值 0.5603
 热：命中 2、重算 0
+（2026-09-20 复量：均值仍是 0.5603 —— `FieldFn` 多了两栏之后**算式一个字没动**，
+  这正是「接口变了、内容不许变」那条判据的读数）
 ```
 
-`uv` = 这一格的**纹素中心**坐标（`[0,1]²`，与 `Field::uv` 同口径）；`upstream` = 上游值
-**过了共享尺子（钳到 `[0,1]` + 可选平滑）之后**的值 —— 归一化与钳制在算子侧（一份），
-"这一格的值怎么算"在图侧函数里（可换）。
+图侧函数收到的四栏（2026-09-20 起；`px_field_alg::field_fn::FieldFn` 的文档是权威）：
+
+| 栏 | 是什么 | ⚠ 为什么是它 |
+|---|---|---|
+| `params: &RemapParams` | **这个节点在 `art/<图>/<节点名>.toml` 里给的那一份** | 在那之前 `remap_with` 把这栏丢掉了（`let _ = params`），图侧函数只能读 `RemapParams::default()` ⇒ **参数进键、不进计算**：改 TOML 会换节点键、会重算、写出来的产物**逐字节相同**（实测 `bands = 3 / gain = 0` 与不写文件内容都是 `bc8ab272f232`）。体积域从第一天起就把形状参数递给场函数（`CoverCloud` 由算子建）—— 场域这一档现在同一条规矩 |
+| `upstream: f32` | 上游值**过了共享尺子（钳到 `[0,1]` + 可选平滑）之后**的值 | 归一化与钳制在算子侧（一份），「这一格的值怎么算」在图侧函数里（可换） |
+| `uv: [f32; 2]` | 这一格的**纹素中心**坐标（`[0,1]²`，与 `Field::uv` 同口径） | 平面图案用它（径向波纹就是 `uv`） |
+| `direction: [f32; 3]` | 这一格的**球面单位方向**（与 `Field::direction` 同口径） | ⚠ **球面函数只能用它**：`uv` 是图像坐标，`CubeMap` 投影下 `v` 跨的是「六张面叠起来的那一条」（`height = 6 × face`）而不是纬度 —— 拿 `uv[1]` 当纬度会在面与面之间跳变。`latbands` 那条实例就靠它取纬度 |
 
 ⚠ **两条预置/泛型的差别，别记混**（同一个 op id `field.remap`，两个不同的 op）：
 

@@ -65,12 +65,12 @@ sheet                  = A94F9F2D1437C06C   3159948 B   3840x1920
 #   同一轮产物仍**逐字节 28/28**（planet 6/6、desert 8/8、clouds 14/14）、**J1 orbit-bare 一位没动**。
 #
 # 六格（冻结态连跑两次同值）：
-# orbit-bare             = EBCD0389BEADF809   （4126 B）
-# orbit-bare-nolight     = 56E9CCBD85E4F9AB   （4137 B）
-# orbit-bare-shadow      = 6EAC1B5F1696D192   （4138 B）
-# orbit-proxy-fine-bound = 6391F4AE8AABD440   （5750 B）
-# orbit-rings            = 4F716FC869DEA2CC   （4891 B）
-# orbit-soft             = 2C5D222D8FC60D41   （5720 B）
+# orbit-bare             = 1A2E12693D0920F0   （4125 B）
+# orbit-bare-nolight     = E20E4D26E1C341AA   （4136 B）
+# orbit-bare-shadow      = 25C09347635E8841   （4138 B）
+# orbit-proxy-fine-bound = BB819441572D4D31   （5749 B）
+# orbit-rings            = 0947DD126C5E3DAA   （4889 B）
+# orbit-soft             = 5E4B33C8E1DB889F   （5720 B）
 #
 # ⚠ **第五次重登记**（field 域泛型实例那一轮）。根因与第四次不同：这一轮把 field 的算法
 #   从 `px_field_op`（dylib）拆进新的 `px_field_alg`（rlib，泛型实例库要链它）⇒
@@ -80,6 +80,21 @@ sheet                  = A94F9F2D1437C06C   3159948 B   3840x1920
 #   那一版构建先把三张图的 28 份 `.pxart` 快照下来做对照 —— `target/baseline/*.json` 里
 #   clouds 那 14 个旧键的产物今天已经不在 `target/pcg/ab/` 里了，只能到 14/14）。
 #
+#
+# ⚠ **2026-09-20 第六次重登记**（本 worktree `planet-art`，`feature/planet-art-graph-pipelines`）。
+#   根因 A（这一轮自己的）：**新增场地算子 `field.craters`** ＋ **`FieldFn::value` 多了两栏**
+#   （节点参数、球面方向）⇒ `px_field_schema` / `px_field_op` / `px_field_alg` 的名册全变
+#   ⇒ 吃场算子的节点键全换 ⇒ 冻产物字节变（它们内嵌成员键与指纹）。
+#   判据（同轮实测）：**J1 六张逐字节一位没动**（§一 六格，含字节数 6/6）；
+#   **旧四张图的 30 个节点内容逐字节不变**（planet 6 / desert 8 / clouds 14 / field_remap 2，
+#   与 `target/baseline/pre.json` 那 37 份内容哈希对账：0 个不符）。
+#   ⚠ 根因 B（**与这一轮无关，但必须记下来**）：**登记的那六格本来就与这一份 worktree 对不上**。
+#   实测法：把改动前的旧键（`target/baseline/planet.json` / `clouds.json` 的快照）**写回**两份
+#   图清单、再用今天的代码重烘 ⇒ `orbit-bare = DF84B7EF92F7A84E（4126 B）`，
+#   **不是**登记的 `EBCD0389…`；而主工作副本自带的暖清单里躺着的是更早一代 `2795F948…`。
+#   ⇒ 登记值是在**第三份状态**（写它的那份副本、第五次重登记时）量的：§六 那条
+#   "行尾约定 ⇒ 键变 ⇒ §三 全红"正是这一格的机制。**按本副本重登记**是唯一可复现的做法。
+#   ⚠ 纪律照旧：先冻源码，再量 anchor（这一轮的六个值在同一冻结态下连跑两遍同值）。
 # ⚠ 更早七批（`2795F948…` … `D579241A…`）是**历史值**，留着是因为 §六 那一格要拿它们讲
 #   "换一份 checkout 的字节约定会当场全红"。**今天生效的是下面这六行。**
 #   ⚠ 行尾那一格也咬到本表：本 worktree 是**新 checkout**，`art/shaders/blit.wgsl` 这类
@@ -88,12 +103,12 @@ sheet                  = A94F9F2D1437C06C   3159948 B   3840x1920
 # ⚠ **纪律**：**先把源码冻住，再量 anchor**（这一轮我破了四次；`px_graph_schema` 与
 #   `px_fingerprint` 这种被所有实现库共享的源码，量完再动一行就当场全作废）。
 
-orbit-bare             = EBCD0389BEADF809
-orbit-bare-nolight     = 56E9CCBD85E4F9AB
-orbit-bare-shadow      = 6EAC1B5F1696D192
-orbit-proxy-fine-bound = 6391F4AE8AABD440
-orbit-rings            = 4F716FC869DEA2CC
-orbit-soft             = 2C5D222D8FC60D41
+orbit-bare             = 1A2E12693D0920F0
+orbit-bare-nolight     = E20E4D26E1C341AA
+orbit-bare-shadow      = 25C09347635E8841
+orbit-proxy-fine-bound = BB819441572D4D31
+orbit-rings            = 0947DD126C5E3DAA
+orbit-soft             = 5E4B33C8E1DB889F
 
 ## 四、J3 pass 表（判据图在 `art/passes/` 那七份配方上跑）
 
