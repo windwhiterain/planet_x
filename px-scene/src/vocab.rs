@@ -122,6 +122,13 @@ pub const PLANET_KEYS: [&str; 16] = [
 ///   "天上还有一颗小球"这件事**根本写不出来**（参考图上那颗凌日的卫星就是它）。
 ///   `radius` / `subdivisions` 进几何，`position` 进变换，`spin` 与行星同口径（`orientation()`）；
 ///   其余一律交给本 part 那份 shader 的契约去判（与 planet 同一条口径）。
+/// **灯**（`kind = "light"`）的结构键：位置 / 颜色 / 强度 / 射程 / 要不要投影。
+///
+/// ⚠ 2026-09-20 加：在这之前编译器**只建那一盏太阳**（`lights: vec![sun]`）—— 于是
+/// "行星把光反照到月球暗面"（地球反照）这种**第二光源**在场景里根本没法表达。
+/// ⚠ 它**没有 shader**：灯不是物体（`PartFile.shader` 因此是可选字段）。
+pub const LIGHT_KEYS: [&str; 5] = ["position", "color", "intensity", "range", "shadows"];
+
 pub const MOON_KEYS: [&str; 4] = ["radius", "subdivisions", "position", "spin"];
 
 /// **编译器自己消化的结构键**（云）：形状档、消融档、风 —— 这些要么进几何、要么与云影同口径。

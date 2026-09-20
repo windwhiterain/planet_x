@@ -81,6 +81,20 @@ pub struct ViewUniform {
 pub struct LightsUniform {
     /// 环境光的**线性**色 × 强度。这个场景是 `vec4(80, 80, 80, 80)`（`environment.ambient = 80`）。
     pub ambient_color: [f32; 4],
+    /// **场景里有几盏点光源**（2026-09-20 加，多光源）。
+    ///
+    /// ⚠ 为什么要有这一格：`clustered_lights` 是**定长**数组（长度反射自 shader），着色器没有
+    ///   任何"写到第几格"的记号（约定是"判颜色非零"）。有了盏数，材质才能**逐灯求和**，
+    ///   而不是只看第 0 盏（在那之前，场景里的第二盏灯是**完全看不见**的）。
+    /// **场景里有几盏点光源**（2026-09-20 加，多光源）：`.x` 是盏数，其余三格不用。
+    ///
+    /// ⚠ 为什么要有一格盏数：`clustered_lights` 是**定长**数组（长度反射自 shader），着色器没有
+    ///   任何"写到第几格"的记号（约定是"判颜色非零"）。有了盏数，材质才能**逐灯求和**，
+    ///   而不是只看第 0 盏（在那之前，场景里的第二盏灯是**完全看不见**的）。
+    /// ⚠ 为什么写成 `vec4<u32>` 而不是 `u32` + 垫字段：`bytemuck::Pod` **不许有隐式垫字节**，
+    ///   而 WGSL 那边补一个 `vec3<u32>` 垫字段会因为 16 字节对齐把结构体撑到 48
+    ///   （实测报"绑定 32 而 shader 要 48"）。一个 `vec4<u32>` 两边都是 32 字节、零垫字节。
+    pub n_point_lights: [u32; 4],
 }
 
 /// `globals`（group 0 binding 11）—— 对应桩里的 `GlobalsStub`。
@@ -223,7 +237,15 @@ impl LightsUniform {
     pub fn ambient(brightness: f32) -> LightsUniform {
         LightsUniform {
             ambient_color: [brightness; 4],
+            // ⚠ 缺省 **0 盏**：忘了设它就必须看得见（画面全黑），不许悄悄退回"只看第 0 盏"。
+            n_point_lights: [0; 4],
         }
+    }
+
+    /// 把灯数填进去（装配时是 `cluster.len()`）。
+    pub fn with_light_count(mut self, count: u32) -> LightsUniform {
+        self.n_point_lights[0] = count;
+        self
     }
 }
 
@@ -653,8 +675,8 @@ pub fn frame(
             array.stride
         ));
     }
-    // ⚠ 多出来的灯**当场拒**，不许截断：`sun_light()` 只读 `data[0]`，
-    //    而"第 5 盏灯被悄悄丢掉了"在画面上不会有任何症状。
+    // ⚠ 多出来的灯**当场拒**，不许截断：装不下的那些在画面上不会有任何症状
+    //    （2026-09-20 多光源之前，材质只读 `data[0]`，第二盏灯是**完全看不见**的）。
     if cluster.len() > array.count as usize {
         return Err(format!(
             "文档里有 {} 盏灯，而聚类缓冲只有 {} 格（长度写在 shader 的 \
@@ -666,7 +688,7 @@ pub fn frame(
     }
 
     let view = ViewUniform::from_camera(camera, viewport);
-    let lights = LightsUniform::ambient(ambient);
+    let lights = LightsUniform::ambient(ambient).with_light_count(cluster.len() as u32);
     let globals = globals_zero();
     // 长度与步长来自**反射**（`array`），不是写死的 64 / 80：能放几盏灯写在 shader 里。
     // 后面的格子**必须**留成全零：`light.wgsl` 判"这一格写没写过"看的就是颜色，
@@ -1111,8 +1133,18 @@ mod tests {
     }
 
     impl FieldLayout for LightsUniform {
-        const FIELDS: &'static [(&'static str, usize, &'static str)] =
-            &[("ambient_color", offset_of!(LightsUniform, ambient_color), "vec4<f32>")];
+        const FIELDS: &'static [(&'static str, usize, &'static str)] = &[
+            (
+                "ambient_color",
+                offset_of!(LightsUniform, ambient_color),
+                "vec4<f32>",
+            ),
+            (
+                "n_point_lights",
+                offset_of!(LightsUniform, n_point_lights),
+                "vec4<u32>",
+            ),
+        ];
     }
 
     impl FieldLayout for GlobalsUniform {
@@ -1430,7 +1462,7 @@ mod tests {
             &crate::camera::probe_camera(None, 1.5),
             [0.0, 0.0, 1.0, 1.0],
         )).len(), 288);
-        assert_eq!(to_uniform_bytes(&LightsUniform::ambient(80.0)).len(), 16);
+        assert_eq!(to_uniform_bytes(&LightsUniform::ambient(80.0)).len(), 32);
     }
 
     /// `ambient_color` 就是 `vec4(80, 80, 80, 80)`（这个场景 `environment.ambient = 80`）。

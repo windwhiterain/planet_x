@@ -26,3 +26,15 @@ shader = "atmosphere"
 graph = "shaders"
 members = { shader = "atmosphere" }
 params = { inner = 1.0, outer = 1.04, density = 0.06, softness = 0.70, tint = [0.62, 0.66, 0.74] }
+
+# **地球反照**（V6）：宇宙里没有"只有一盏灯"的场景 —— 月球暗面那层微光来自它绕的那颗行星
+# 把阳光反照回来。⚠ 2026-09-20 之前场景只能有一盏灯（材质的 `sun_light` 写死读 `data[0]`）
+# ⇒ 这一层光表达不出来；这一轮把**多光源**做进了渲染器（`lib/light.wgsl` 逐灯求和 +
+# `Lights.n_point_lights` 那一格盏数），配方这一档就是它的第一个消费者。
+# 位置取"行星该在的地方"（相机在 +z 一侧、太阳在 -x 一侧 ⇒ 行星在 +x 一侧偏后），
+# 强度只有太阳的百分之几（`7.6e5 × 0.02`），颜色偏冷白（岩石行星的反照光）。
+# ⚠ 不投影（省掉一整张 cube 影图）。
+[[parts]]
+id = "earthshine"
+kind = "light"
+params = { position = [3.4, 0.6, -1.2], color = [0.72, 0.80, 1.0], intensity = 8.0e4, shadows = 0.0 }

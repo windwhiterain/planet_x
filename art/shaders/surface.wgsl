@@ -1,4 +1,4 @@
-#import planet_x::light::sun_light
+#import planet_x::light::{light_count, point_light, sun_light}
 #import planet_x::noise::rotate_vector
 #import bevy_pbr::forward_io::VertexOutput
 #import bevy_pbr::mesh_view_bindings::{view, lights}
@@ -135,34 +135,46 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
 
     // 太阳由场景那盏灯说了算（§60）：点光源时 `sun` 逐片元不同、`principal.color` 已经
     // 含强度与距离衰减；方向光是同一套代码的另一个分支（`color` 就是照度）。
+    // ⚠ 2026-09-20 多光源之后，"主光"（第 0 盏）只剩两处用途：**云影的太阳方向**与下面
+    //   `sun` 的取用；**漫反射那一支改成了逐灯求和**（见 ②b）—— 在那之前第二盏灯是看不见的。
     let principal = sun_light(in.world_position.xyz, in.position.xy);
     let sun = principal.direction;
-    let facing = clamp(dot(normal, sun), 0.0, 1.0);
     let ndotv = max(dot(normal, view_vector), 0.0001);
-
-    // ① 别人的影（shadow map）。灯没开影子时（`shadow_maps == 0`）连采样都不发 ——
-    //    没开阴影的场景里那张贴图是兜底的 1×1，读它只会白花时间。
-    //    ⚠ 名字不能叫 `cast`：WGSL 的保留字。
-    var cast_shadow = 1.0;
-    if facing > 0.0 && principal.shadow_maps != 0u {
-        // ⚠ 只有点光源这一支：宇宙里没有平行光（§64.9）。
-        cast_shadow = fetch_point_shadow(
-            principal.shadow_id,
-            in.world_position,
-            normal,
-            in.position.xy,
-        );
-    }
 
     // ② 云影（覆盖度立方图 + 指定高度）。0.88 是换材质之前 `StandardMaterial` 的
     //    perceptual_roughness ⇒ 内建那套把 0.88² 当 roughness 用。
     let cloud = cloud_shadow(in.world_position.xyz, sun);
     let roughness = 0.88 * 0.88;
-    let direct = albedo
-        * (principal.color * diffuse_burley(roughness, dot(sun, view_vector), facing, ndotv))
-        * facing
-        * cast_shadow
-        * cloud;
+    // ---- ②b **逐灯求和**（2026-09-20 多光源）------------------------------------
+    // ⚠ 在这之前这里只算第 0 盏（`sun_light` 写死 `data[0]`）⇒ 场景里的第二盏灯**完全看不见**
+    //   （地球反照那种"行星反照到月球暗面"的第二光源因此表达不出来）。
+    // ⚠ 单光源时这一支必须与旧式子**逐位相同**：旧式子是
+    //   `albedo * (color*burley) * facing * cast_shadow * cloud`，
+    //   这里 `sum` 从 0 起、唯一一项照同样的次序乘（`0 + x == x` 是精确的）。
+    // ⚠ **云影只乘第 0 盏**（太阳）：云挡的是太阳，不是从旁边那颗行星来的反照光。
+    var direct = vec3<f32>(0.0);
+    let lamp_count = light_count();
+    for (var index = 0u; index < lamp_count; index = index + 1u) {
+        let lamp = point_light(index, in.world_position.xyz);
+        let lamp_facing = clamp(dot(normal, lamp.direction), 0.0, 1.0);
+        var lamp_shadow = 1.0;
+        if lamp_facing > 0.0 && lamp.shadow_maps != 0u {
+            lamp_shadow = fetch_point_shadow(
+                lamp.shadow_id,
+                in.world_position,
+                normal,
+                in.position.xy,
+            );
+        }
+        var term = albedo
+            * (lamp.color * diffuse_burley(roughness, dot(lamp.direction, view_vector), lamp_facing, ndotv))
+            * lamp_facing
+            * lamp_shadow;
+        if index == 0u {
+            term = term * cloud;
+        }
+        direct = direct + term;
+    }
     // 环境光：漫反射那一支 ＋ 介电高光那一支（`F0 = 0.08 × reflectance(0.5) = 0.04`），
     // 与 `bevy_pbr::ambient::ambient_light` 同一套算式。**不乘云影**：
     // 云挡的是太阳，不是天光。三支都不乘 `cloud`/`cast_shadow` 的只有这一支。

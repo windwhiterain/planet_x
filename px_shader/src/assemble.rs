@@ -74,6 +74,7 @@ pub fn bevy_stub(symbol: &str) -> Option<&'static str> {
         "bevy_pbr::mesh_view_bindings::lights" => Some(
             "struct LightsStub {\n\
              \x20   ambient_color: vec4<f32>,\n\
+             \x20   n_point_lights: vec4<u32>,\n\
              };\n\
              @group(0) @binding(1) var<uniform> lights: LightsStub;\n",
         ),

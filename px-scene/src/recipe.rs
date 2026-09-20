@@ -50,6 +50,10 @@ pub struct SceneFile {
 pub struct PartFile {
     pub id: String,
     pub kind: String,
+    /// 这一 part 用哪份 shader（成员名）。⚠ **可选**：`kind = "light"` 那一档**没有材质**
+    /// （灯不是物体）—— 2026-09-20 加第二光源（地球反照）时发现的：原先它是必填，
+    /// 于是"灯"这种 part 在配方里根本写不出来。要材质的那几档在装配时自己会报"没给 shader"。
+    #[serde(default)]
     pub shader: String,
     /// 这个 part 的成员默认属于哪张图；跨图的成员写 `图名::节点名`。
     #[serde(default)]
@@ -647,6 +651,28 @@ pub fn compile(
     let reach = planet.number_or("light_range", math::length(position) * SUN_RANGE_FACTOR);
     let mut sun = Light::point("sun", position, color, intensity as f32).with_range(reach as f32);
     sun.shadows = planet.number_or("shadows", 0.0) > 0.5;
+    // ---- 灯：**配方里额外声明的那些**（`kind = "light"`）----
+    // ⚠ 为什么需要：地球反照（行星反照到月球暗面那一层光）是**第二光源**，只有一盏灯时
+    //   根本表达不出来。它们按配方顺序跟在太阳后面；**默认不投影**（省掉一整张 cube 影图，
+    //   也不动帧图里 `shadow_cubes` 的数量）。
+    // ⚠ 灯**没有材质** ⇒ 不走"参数对 shader 契约"那条路；结构键是 `vocab::LIGHT_KEYS`。
+    let mut extra_lights: Vec<Light> = Vec::new();
+    for part in &file.parts {
+        if part.kind != "light" {
+            continue;
+        }
+        let position = part.triple("position")?;
+        let color = match part.params.get("color") {
+            Some(_) => part.triple("color")?,
+            None => [1.0, 1.0, 1.0],
+        };
+        let intensity = part.number_or("intensity", 1.0e4);
+        let reach = part.number_or("range", math::length(position) * SUN_RANGE_FACTOR);
+        let mut light = Light::point(&part.id, position, color, intensity as f32)
+            .with_range(reach as f32);
+        light.shadows = part.number_or("shadows", 0.0) > 0.5;
+        extra_lights.push(light);
+    }
 
     // ---- 相机：局部方向 → 世界系 ----
     let cameras: Vec<Camera> = match file.cameras.as_deref() {
@@ -710,7 +736,11 @@ pub fn compile(
         },
         resources: framebaked.resources,
         passes: framebaked.passes,
-        lights: vec![sun],
+        lights: {
+            let mut all = vec![sun];
+            all.extend(extra_lights);
+            all
+        },
         objects,
         frame_materials: framebaked.materials,
         material_instances: framebaked.material_instances,
@@ -755,7 +785,7 @@ fn check_stage(scene: &str, id: &str, material: &Material) -> Result<(), String>
 /// ⚠ 抽成函数不是为了好看：它是"场景里能放什么"这件事**唯一的门**，
 ///   一个 part 种类加进来而这里没放行，报错必须**点名它认哪些**（否则用户只能猜）。
 fn check_kind(part: &PartFile) -> Result<(), String> {
-    const KINDS: [&str; 4] = ["planet", "clouds", "atmosphere", "moon"];
+    const KINDS: [&str; 5] = ["planet", "clouds", "atmosphere", "moon", "light"];
     if KINDS.contains(&part.kind.as_str()) {
         return Ok(());
     }
