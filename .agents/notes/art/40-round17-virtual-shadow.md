@@ -489,3 +489,54 @@ mean=0.009  max=35  差>2 的 0.38%  差>8 的 0.079%
 ⇒ **"选级活着"有证据（§十二）；"读粗级让影边更对"没有证据**，而且这一轮试图量它时尺子
 又被表面自身明暗带偏了。两条修复路径都没做完，如实记下，不当结论用。
 
+## 十四、把 per pass 参数做成**与 per material 一样能随便装**（用户裁决，待施工）
+
+### 裁决原文
+
+> 让 per pass parameters 也能像 per material 一样随便装，**凡是一个 pass 的所有几何都需要
+> 使用的参数就统统放 per pass parameters**。
+
+### 现状：这条通道是**偏移式**的，所以装不了纹理
+
+| | 实例数 | 办法 | 能装什么 |
+|---|---|---|---|
+| per material（组 3） | 几个 | **一个材质一个组对象**（`ResolvedMaterial.groups` 里 `&binding.bind_group`） | 什么都行（含贴图） |
+| per pass（组 1） | **几千**（页 × 6 面） | **一份缓冲 + 动态偏移** | **只有 uniform** |
+
+理由写在 `px_render/src/render.rs:1750` 那份布局旁边：「一帧一份大缓冲 + 每笔一个偏移
+（页有几百个，"一页一份绑定组"是几百个对象）」。而**动态偏移只能在一份缓冲里选一格，
+它选不了纹理对象** —— 这就是"per pass 装不了纹理"的全部原因。不是 API 不许，是这条通道
+被刻意做成了偏移式的。
+
+### 好消息：模板现成，全屏 pass 早就是这么装的
+
+`px_pass/src/lib.rs:2210` 的 `fn layout`：参数块那一格 + **对每个 slot 声明两格** ——
+贴图在 `slot.binding`、采样器在 `slot.binding + 1`，资源名走 `PassPlan::reads`、
+落点走 `slots`。**几何 pass 缺的只是"把那一段也用上"**：`geometry_params_group`（`:2261`）
+今天只声明一格 uniform（那是刻意的：`:2252` 那段说"几何 pass 的参数只服务顶点阶段，
+多一格都会让它与宿主的管线布局对不上"）。
+
+### 施工清单（精确到行）
+
+1. **扩词汇**（`px_pass/src/lib.rs:741-767`）：`Dimension` 只有 `D2` / `Cube`，要加 `D2Array`；
+   `Slot`（`:771`）今天**写死了** `Float { filterable: true }` + `SamplerBindingType::Filtering`，
+   而影子要的是 **`Depth` + `Comparison`** ⇒ 加一栏（如 `depth: bool`）。
+   ⚠ 连带一处容易漏：`Dimension::layers()`（`:762`）只喂**兜底纹理**的 `depth_or_array_layers`
+   （`:2166`），而兜底那张是 `Rgba8UnormSrgb` —— 深度槽的兜底得换格式。
+2. **执行器**（`:2261`）`geometry_params_group` 增参：`layout.slots` + `pass.reads`
+   （从纹理池解析，与 `depth_target` 同一条路），把贴图/采样器格一起声明并绑上。
+   ⚠ 布局只有一份、`STAGE_LAYOUT_ID = 1` 不变 ⇒ **不进管线缓存键的分叉、不新增管线**。
+3. **宿主**（`px_render/src/render.rs:1750`）：`stage_layout` 加同样的格；**造 K+1 个组对象**
+   （影子页 pass ⇒ 哑纹理；降采样第 k 级 ⇒ `atlas[k-1]`；光照 ⇒ 真的），每条 pass 按用途选。
+   ⚠ 对象数是 K+1 而**不是**每条 pass 一个：动态偏移仍然负责"哪一条 pass 是哪一格"。
+4. **着色器**（`px_shader/src/host_stubs.rs`）：把 atlas / 采样器从组 0 的 binding 2/3 挪到
+   组 1 的 binding 1/2；重出 pinned 表。
+5. **删拷贝**：`art/frame/default.toml` 里那条 `copy_shadow_atlas` 可以整条删掉 ——
+   影子页 pass 不再绑它写的那张 ⇒ **24 MB/帧 消失**（这一步能单独验：成图应逐字节不变）。
+
+⚠ **落地顺序建议**：先只搬 **atlas 纹理 + 采样器**（页表 / 灯偏移 / 六面基那三份
+**storage 留在组 0** —— 它们本来就是全帧一份、也不造成任何附件冲突），删掉拷贝并验"成图不变"；
+再把那三份 storage 也搬过去（用户说的"统统放"）—— 那一步只是绑定搬家，缓冲还是全帧一份。
+
+⚠ 第 1 步的词汇扩展**单独可编译、行为中性**（没有任何东西用 `D2Array` 之前行为一个字节不变），
+适合当第一刀。
