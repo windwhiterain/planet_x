@@ -540,3 +540,41 @@ mean=0.009  max=35  差>2 的 0.38%  差>8 的 0.079%
 
 ⚠ 第 1 步的词汇扩展**单独可编译、行为中性**（没有任何东西用 `D2Array` 之前行为一个字节不变），
 适合当第一刀。
+
+## 十五、`bind_group` 那一份模板读全了（第 3 步的精确形状）
+
+`px_pass/src/lib.rs:2329` 的 `fn bind_group` 是全屏 pass 的组构造，也就是几何 pass 要照着
+扩的那一份。形状是：
+
+```rust
+fn bind_group(&mut self, device, encoder, layout, sampler: &Sampler,
+              params: &[u8], bound: &[(u32, TextureView)]) -> BindGroup
+```
+
+三条关键事实（都是"不看代码猜不到"的）：
+
+1. **一整条 pass 只用一把采样器**（`sampler` 是**单个** `&Sampler`，所有 slot 共用）。
+   ⇒ 深度那一档要的是 `Comparison` 采样器，而**颜色与深度混在同一条 pass 时这把共用采样器
+   就得二选一** —— 今天没有这样的 pass，但这是扩的时候必须写进注释的边界。
+2. **绑定表是 `(binding, TextureView)` 的数组**，按 `slot.binding` 查；**查不到就退到兜底纹理**
+   （`self.fallback(device, encoder, slot.dimension)`）—— 兜底那张今天写死 `Rgba8UnormSrgb`
+   （`:2171`），而深度槽要换成深度格式，否则"没绑的槽"这张兜底图与布局类型对不上。
+   ⚠ 这条与第 14 节里 `Dimension::layers()` 那条是**同一个坑的两头**。
+3. 参数块那一格在这个函数里是 `has_dynamic_offset: false`（全屏那份，`:2219`）；
+   几何那一份是 `true`（`:2277`）—— **两者不是同一份布局**，扩的时候别把动态偏移弄丢。
+
+### 所以第 3 步要动的四处（按依赖顺序）
+
+1. `Layout` 加 `geometry_slots: Vec<Slot>`（宿主说什么格、什么维度、是不是深度）；
+2. `px_render/src/plan.rs:41` 的 `layout()` 填它（今天是空的 ⇒ 行为逐字节不变）；
+3. `geometry_params_group`（`:2261`）接 `slots` / `bound` / `sampler`，按 `layout()` 那段
+   同一套规则声明并绑上（深度档 `Depth` + `Comparison`，已在本轮第 1 刀里做进 `Slot`）；
+4. 宿主 `stage_layout`（`px_render/src/render.rs:1750`）声明**同样的格** ——
+   ⚠ 两边必须同一刀改，否则就是那段注释记过的
+   `Expected entry with binding 1 not found in assigned bind group layout`。
+
+### 这一轮的状态
+
+第 1 刀（扩词汇 + 让 `depth` 表态）已提交 `a05a1a1`、行为中性。第 2 刀（上面四处）**没动** ——
+预算不足以在四个文件里改完并验证，而半途留一棵编译不过的树比晚一轮更糟（本 session 已经
+栽过两次：`host_stubs.rs` 按行号拼接、`px_pass` 锚点取到"第一个匹配"）。
