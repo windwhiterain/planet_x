@@ -35,8 +35,14 @@ impl px_field_alg::field_fn::FieldFn for LatBands {
         direction: [f32; 3],
     ) -> f32 {
         let bands = if params.bands > 0.0 { params.bands } else { 1.0 };
+        // ⚠ 2026-09-20 第 13 轮（用户一路要的"丰富"到最后一件：**独立特征**）：
+        //   前面几轮加的都是"层"（更细的噪声、更暖的带色），而真实的木星/土星上还有一种
+        //   完全不同的东西 —— **椭圆涡**（白卵、褐卵）：条带在那一小片里**绕着中心闭合**。
+        //   机制不是"贴一个斑"（贴片会像贴上去的，不跟着条带走），而是**把采样方向局部转一圈**：
+        //   越靠近涡心转得越多、到足迹边界平滑归零 ⇒ 条带绕着涡心闭合 ✓。
+        let bent = vortex_bend(direction);
         // 纬度：`direction.y`（球面上的 y 就是自转轴方向）⇒ `[-1, 1]`。
-        let latitude = direction[1].clamp(-1.0, 1.0);
+        let latitude = bent[1].clamp(-1.0, 1.0);
         // ⚠ 2026-09-20（用户："气态行星表面的纹理是很不规则的，你的那个像个西瓜"）：
         //   "纯纬度 + 一圈正弦"出来的就是**西瓜**。真实的气态行星条带：
         //     · 带的**宽窄沿纬度差得很远**，相邻的带会**挤在一起或分开**；
@@ -52,9 +58,9 @@ impl px_field_alg::field_fn::FieldFn for LatBands {
         //   但**没有任何周期** —— 实例库链的就是那个 crate，所以这一档现在两边都拿得到。
         let cell = |scale: f32, offset: f32| {
             [
-                direction[0] * scale + offset,
-                direction[1] * scale * 1.7 + offset,
-                direction[2] * scale - offset,
+                bent[0] * scale + offset,
+                bent[1] * scale * 1.7 + offset,
+                bent[2] * scale - offset,
             ]
         };
         let wobble = (px_field_alg::noise::value_noise3(cell(2.30, 0.0), 41) - 0.5) * 2.0
@@ -80,7 +86,7 @@ impl px_field_alg::field_fn::FieldFn for LatBands {
         let fiber = 0.5 + 0.5 * (phase * 5.0 + upstream * 9.0).sin();
         let ripple = 0.085 * fiber * (0.35 + 0.65 * upstream);
         // ③ 天气：沿经度分几段"带被洗淡"（`washed ∈ [0.65, 1]`）—— 同一颗球上不是每条带一样清楚。
-        let longitude = direction[2].atan2(direction[0]);
+        let longitude = bent[2].atan2(bent[0]);
         let weather = 0.5 + 0.5 * (longitude * 2.0 + upstream * 4.0).sin();
         let washed = 1.0 - 0.35 * (1.0 - weather);
         // ④ 按纬度的淡出：`fade ∈ [0,1]`，取 0 的那些纬度**整片没有带**（剩下一点基底起伏）。
@@ -100,4 +106,99 @@ impl px_field_alg::field_fn::FieldFn for LatBands {
         let contrasted = 0.5 + (band - 0.5) * (1.0 + local_gain) + params.bias;
         contrasted.clamp(0.0, 1.0)
     }
+}
+
+/// **独立椭圆涡**：把采样方向在若干"格点涡心"附近**局部转一圈**。
+///
+/// * 疏密由 `VORTEX_SCALE` 定（每单位方向上的格数），有涡的格点比例由 `VORTEX_DENSITY` 定；
+/// * 每个涡的**转向**（顺时针/逆时针）与**大小**都从一个哈希抽 ⇒ 同一颗球上涡各不相同；
+/// * 转角落到足迹边界平滑归零（`(1−t²)²`）⇒ 涡是**闭合的**，不会在边界上撕开。
+///
+/// ⚠ 相位偏移（把带平移一下）得到的是"拐一下"，**不是**闭合的涡 —— 必须真的转方向。
+/// ⚠ **转角要与"一个带的相位跨度"同量级**：`bands = 10` 时一个带只跨 `2π/10 ≈ 0.63 rad`，
+///   转角给到 1.95（三倍带距）时足迹内整片相位被搅乱 ⇒ 全盘卷曲（实测 `probe-gg-vortex3.png`）。
+///   0.78 rad ≈ 一个带距 ⇒ 条带在涡心周围**绕成一个闭合的圈**，而不是被搅碎。
+/// ⚠ **稀疏**是它的命门：足迹一旦比格距大，每个像素同时落在好几个涡里 ⇒ 条带被揉成大理石纹
+///   （实测那版 ：格距 0.32、足迹 0.62、密度 0.4 ⇒ 全盘皆涡）。
+///   现在的取法是"格距 0.53、足迹 0.26" ⇒ 涡是**孤立**的，条带只在涡附近绕着闭合。
+/// ⚠ 词汇来自 `px_field_alg::noise`（第 11 轮把它下放到实例能链的那个 crate）：
+///   `NEIGHBOURS_3` 枚举邻域、`cell_hash`/`unit` 抽随机数、`cell_centre` 给格心。
+fn vortex_bend(direction: [f32; 3]) -> [f32; 3] {
+    const VORTEX_SCALE: f32 = 2.60; // 涡的疏密（每单位方向的格数）
+    const VORTEX_DENSITY: f32 = 0.17; // 有涡的格点比例
+    const VORTEX_SIZE: f32 = 0.175; // 涡的角半径（**方向**单位，不是格）
+    const VORTEX_SPIN: f32 = 0.85; // 涡心处的最大转角（弧度）
+    const VORTEX_SEED: u32 = 0x5a17;
+
+    let point = [
+        direction[0] * VORTEX_SCALE,
+        direction[1] * VORTEX_SCALE,
+        direction[2] * VORTEX_SCALE,
+    ];
+    let base = [point[0].floor(), point[1].floor(), point[2].floor()];
+    let base = [base[0] as i32, base[1] as i32, base[2] as i32];
+
+    let mut bent = direction;
+    for cell in px_field_alg::noise::NEIGHBOURS_3 {
+        let cell = [base[0] + cell[0], base[1] + cell[1], base[2] + cell[2]];
+        let hash = px_field_alg::noise::cell_hash(VORTEX_SEED, cell);
+        // 硬币：只有一部分格点上有涡（不然整颗球都是涡，等于没有）。
+        if px_field_alg::noise::unit(hash, 3) > VORTEX_DENSITY {
+            continue;
+        }
+        let fate = px_field_alg::noise::cell_hash(VORTEX_SEED ^ 0x51ed_270b, cell);
+        // 涡心 = 格心 + 抖动（三个通道各一个）；再换回"方向"那一套坐标。
+        let centre = px_field_alg::noise::cell_centre(cell);
+        let jitter = 0.34;
+        let centre = [
+            (centre[0] + jitter * (px_field_alg::noise::unit(hash, 0) - 0.5)) / VORTEX_SCALE,
+            (centre[1] + jitter * (px_field_alg::noise::unit(hash, 1) - 0.5)) / VORTEX_SCALE,
+            (centre[2] + jitter * (px_field_alg::noise::unit(hash, 2) - 0.5)) / VORTEX_SCALE,
+        ];
+        let axis = normalize(centre);
+        // 足迹：方向距离（弦长）超过角半径就够不着。
+        let radius = VORTEX_SIZE * (0.45 + 1.10 * px_field_alg::noise::unit(fate, 0));
+        let distance = length([
+            bent[0] - axis[0],
+            bent[1] - axis[1],
+            bent[2] - axis[2],
+        ]);
+        if distance >= radius {
+            continue;
+        }
+        let t = distance / radius;
+        let falloff = (1.0 - t * t) * (1.0 - t * t);
+        let sign = if px_field_alg::noise::unit(fate, 1) > 0.5 { 1.0 } else { -1.0 };
+        bent = rotate_about(bent, axis, sign * VORTEX_SPIN * falloff);
+    }
+    bent
+}
+
+fn normalize(v: [f32; 3]) -> [f32; 3] {
+    let length = length(v);
+    if length <= 1e-6 {
+        return [0.0, 1.0, 0.0];
+    }
+    [v[0] / length, v[1] / length, v[2] / length]
+}
+
+fn length(v: [f32; 3]) -> f32 {
+    (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt()
+}
+
+/// 绕单位轴 `axis` 把 `v` 转 `angle`（罗德里格斯公式）。
+fn rotate_about(v: [f32; 3], axis: [f32; 3], angle: f32) -> [f32; 3] {
+    let (sin, cos) = angle.sin_cos();
+    let cross = [
+        axis[1] * v[2] - axis[2] * v[1],
+        axis[2] * v[0] - axis[0] * v[2],
+        axis[0] * v[1] - axis[1] * v[0],
+    ];
+    let dot = axis[0] * v[0] + axis[1] * v[1] + axis[2] * v[2];
+    let k = 1.0 - cos;
+    [
+        v[0] * cos + cross[0] * sin + axis[0] * dot * k,
+        v[1] * cos + cross[1] * sin + axis[1] * dot * k,
+        v[2] * cos + cross[2] * sin + axis[2] * dot * k,
+    ]
 }

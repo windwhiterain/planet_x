@@ -82,8 +82,13 @@ cargo run -q -p px_render -- --offline --scene <产物> --out x.png --width 960 
 
 # 逃生门：老形状产物的**文件字节**哈希
 cargo run -q -p px_graphs --bin scene orbit-bare --no-frame-graph
-# 拿到的 .pxart 的 sha256 前 16 应当 == DF58658E875368A5（orbit-bare；六格全部见 hashes.txt §三）
+# 拿到的 .pxart 的 sha256 前 16 应当 == 1E1C3A5AA2DBE56D（orbit-bare；六格全部见 hashes.txt §三）
 ```
+
+⚠ **2026-09-20：§三 那六格重登记过**十二次**。第十二次（第 13 轮）的根因是场域**共用模块**多了
+邻域/格号词汇（`px_field_alg::noise`）＋ `field.stamps` 改用它 ＋ 实例里的涡旋；
+内容 30/30 与 J1 6/6 都没变。⚠ 同一轮踩到一次**假绿**：改完 op 没重链图 exe ⇒ 键按旧二进制算，
+六格报"没变"。**动了 op/alg 之后要连图 exe 一起重链再量。**
 
 ⚠ **2026-09-20：§三 那六格重登记过**十一次**。第十一次（第 11 轮）的根因是哈希/值噪声从
 `px_field_op` 搬到 `px_field_alg`（实例库只链后者）⇒ 键全换、**内容 30/30 与 J1 6/6 都没变**。

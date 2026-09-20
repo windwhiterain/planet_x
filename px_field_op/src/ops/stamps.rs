@@ -67,14 +67,15 @@ pub fn eval(params: &params::StampsParams, inputs: &[&Field], grid: Grid) -> Fie
                 let cell = [point[0].floor(), point[1].floor(), point[2].floor()];
 
                 candidates.clear();
-                let span = if params.spherical { 1 } else { 0 };
-                for dz in -span..=span {
-                    for dy in -1..=1 {
-                        for dx in -1..=1 {
+                // ⚠ 邻域表来自 `px_field_alg::noise`（与实例里的涡旋共用同一份词汇）：
+                //   球面 27 格、平面 9 格。从前这段三重循环是本算子私有的。
+                for offset in noise::neighbours(params.spherical) {
+                    {
+                        {
                             let at = [
-                                cell[0] + dx as f32,
-                                cell[1] + dy as f32,
-                                cell[2] + dz as f32,
+                                cell[0] + offset[0] as f32,
+                                cell[1] + offset[1] as f32,
+                                cell[2] + offset[2] as f32,
                             ];
                             let Some(stamp) =
                                 stamp_of(at, seed, jitter, max_radius, min_radius, power)

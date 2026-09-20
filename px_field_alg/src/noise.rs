@@ -86,6 +86,75 @@ pub fn value_noise3(point: [f32; 3], seed: u32) -> f32 {
     total
 }
 
+/// **一个格点周围的 27 个格子**（含自己）—— 三维足迹筛选用。
+///
+/// ⚠ 为什么要有这一份：`field.stamps`（盖章式打坑）与实例里的"放涡旋"都要"看一圈邻居"，
+///   而这段循环从前是算子私有的 ⇒ 实例又要自己写一遍。**枚举邻域**与**取哈希**是同一族的词汇，
+///   都该放在这一档里（这一档的意义就是"实例也能用的那份算法"）。
+pub const NEIGHBOURS_3: [[i32; 3]; 27] = {
+    let mut table = [[0_i32; 3]; 27];
+    let mut i = 0;
+    let mut dz = -1;
+    while dz <= 1 {
+        let mut dy = -1;
+        while dy <= 1 {
+            let mut dx = -1;
+            while dx <= 1 {
+                table[i] = [dx, dy, dz];
+                i += 1;
+                dx += 1;
+            }
+            dy += 1;
+        }
+        dz += 1;
+    }
+    table
+};
+
+/// **平面档的 9 个邻居**（`z` 固定为 0）—— 平面档没有第三维，27 格里多出来的那 18 格够不着。
+pub const NEIGHBOURS_2: [[i32; 3]; 9] = {
+    let mut table = [[0_i32; 3]; 9];
+    let mut i = 0;
+    let mut dy = -1;
+    while dy <= 1 {
+        let mut dx = -1;
+        while dx <= 1 {
+            table[i] = [dx, dy, 0];
+            i += 1;
+            dx += 1;
+        }
+        dy += 1;
+    }
+    table
+};
+
+/// 按档位取邻域表（球面 27 / 平面 9）—— 调用点不必自己分支。
+pub fn neighbours(spherical: bool) -> &'static [[i32; 3]] {
+    if spherical {
+        &NEIGHBOURS_3
+    } else {
+        &NEIGHBOURS_2
+    }
+}
+
+/// **点 → 它落在哪个格**（`floor`）。⚠ 返回的是**格号**（`i32`），不是坐标。
+pub fn cell_of(point: [f32; 3]) -> [i32; 3] {
+    [
+        point[0].floor() as i32,
+        point[1].floor() as i32,
+        point[2].floor() as i32,
+    ]
+}
+
+/// **格号 → 格心**（`+0.5`）。⚠ 只对"点已经被某个频率缩放"的那套坐标有意义。
+pub fn cell_centre(cell: [i32; 3]) -> [f32; 3] {
+    [
+        cell[0] as f32 + 0.5,
+        cell[1] as f32 + 0.5,
+        cell[2] as f32 + 0.5,
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -120,6 +189,29 @@ mod tests {
             (0.35..0.65).contains(&share),
             "两个通道同号的占比 {share:.3} 不在「互相独立」的范围内"
         );
+    }
+
+    /// 邻域表：27 / 9 格、**互不重复**、都含自己 —— 少一格就漏掉一个够得着的特征。
+    #[test]
+    fn the_neighbourhood_tables_are_complete_and_distinct() {
+        use std::collections::BTreeSet;
+        let three: BTreeSet<[i32; 3]> = NEIGHBOURS_3.iter().copied().collect();
+        assert_eq!(three.len(), 27, "27 邻域里有重复格");
+        assert!(three.contains(&[0, 0, 0]), "27 邻域要含自己");
+        let two: BTreeSet<[i32; 3]> = NEIGHBOURS_2.iter().copied().collect();
+        assert_eq!(two.len(), 9, "9 邻域里有重复格");
+        assert!(two.iter().all(|cell| cell[2] == 0), "平面档的 z 必须固定");
+        assert_eq!(neighbours(true).len(), 27);
+        assert_eq!(neighbours(false).len(), 9);
+    }
+
+    /// `cell_of` / `cell_centre` 互逆（在格的内部）：格心一定落回同一个格号。
+    #[test]
+    fn a_cell_centre_falls_back_into_its_own_cell() {
+        for cell in [[0, 0, 0], [-3, 7, -1], [12, -5, 9]] {
+            assert_eq!(cell_of(cell_centre(cell)), cell);
+        }
+        assert_eq!(cell_of([0.2, -0.2, 1.9]), [0, -1, 1]);
     }
 
     /// **值噪声在 [0,1]、连续、无周期**：绕一圈（大范围）不会回到同一个值。

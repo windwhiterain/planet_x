@@ -76,7 +76,10 @@ pub fn ridged(x: f32, y: f32, settings: &FbmSettings, sharpness: f32) -> f32 {
 // ⚠ 2026-09-20：格点哈希与值噪声**搬到了 `px_field_alg`**（实例库只链那一个 crate，
 //   而"同一个格 → 同一个数"是全仓共用的一条约定）。这里 re-export 出去，调用点一字不改
 //   （`crate::noise::cell_hash`）。`lattice3` 也一并转出去（本文件里的梯度噪声要用它）。
-pub use px_field_alg::noise::{cell_hash, lattice3, unit, value_noise3};
+pub use px_field_alg::noise::{
+    NEIGHBOURS_2, NEIGHBOURS_3, cell_centre, cell_hash, cell_of, lattice3, neighbours, unit,
+    value_noise3,
+};
 
 const GRADIENTS: [[f32; 3]; 12] = [
     [1.0, 1.0, 0.0],
@@ -112,13 +115,24 @@ pub fn faded_gradient_noise_3<S: Scalar>(point: [S; 3], seed: u32) -> S {
         let step_y = (corner >> 1) as i32 & 1;
         let step_z = (corner >> 2) as i32 & 1;
         let offset = [step_x as f32, step_y as f32, step_z as f32];
-        let gradient = GRADIENTS[(lattice3(ix + step_x, iy + step_y, iz + step_z, seed) % 12) as usize];
+        let gradient =
+            GRADIENTS[(lattice3(ix + step_x, iy + step_y, iz + step_z, seed) % 12) as usize];
         let dot = S::from_f32(gradient[0]) * (tx - S::from_f32(offset[0]))
             + S::from_f32(gradient[1]) * (ty - S::from_f32(offset[1]))
             + S::from_f32(gradient[2]) * (tz - S::from_f32(offset[2]));
-        let weight = if step_x == 1 { tx } else { S::from_f32(1.0) - tx }
-            * if step_y == 1 { ty } else { S::from_f32(1.0) - ty }
-            * if step_z == 1 { tz } else { S::from_f32(1.0) - tz };
+        let weight = if step_x == 1 {
+            tx
+        } else {
+            S::from_f32(1.0) - tx
+        } * if step_y == 1 {
+            ty
+        } else {
+            S::from_f32(1.0) - ty
+        } * if step_z == 1 {
+            tz
+        } else {
+            S::from_f32(1.0) - tz
+        };
         total = total + dot * weight;
     }
     (total * S::from_f32(0.9) + S::from_f32(0.5)).clamp01()
@@ -223,7 +237,8 @@ pub fn worley_3(point: [f32; 3], seed: u32, jitter: f32) -> f32 {
     for dz in -1..=1 {
         for dy in -1..=1 {
             for dx in -1..=1 {
-                let feature = feature_point_3([base[0] + dx, base[1] + dy, base[2] + dz], seed, jitter);
+                let feature =
+                    feature_point_3([base[0] + dx, base[1] + dy, base[2] + dz], seed, jitter);
                 let distance = ((point[0] - feature[0]).powi(2)
                     + (point[1] - feature[1]).powi(2)
                     + (point[2] - feature[2]).powi(2))
