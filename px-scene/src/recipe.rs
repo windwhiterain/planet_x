@@ -407,6 +407,16 @@ pub fn compile(
     // 条带立方图（气态巨行星那一档）：配方给一个 **CubeMap 场成员**，这里把它烘成
     // 一张立方贴图挂到 `@binding(7)`（`TEXTURE_SLOTS` 里第二格 cube）。
     // ⚠ 与覆盖度那张的差别：不掺梯度 —— 它是"把一张场当数据贴图"，不是云的细节场。
+    // 第三层次（第 10 轮）：**第二张立方图**。成员名 `detail`，进 21 号格
+    // （`TEXTURE_SLOTS` 里那一对空着的 cube）。⚠ 可选：不给成员就吃渲染器的兜底贴图，
+    // 于是"没有这一层的场景"产物与从前逐字节相同。
+    if let Some(detail_member) = planet.optional_member("detail")? {
+        let field = generate::load_field(&path_of(&detail_member, &root)?.display().to_string())
+            .map_err(|err| format!("读细丝场失败：{err}"))?;
+        let cube = generate::field_cube(&field).map_err(|err| format!("细丝立方图：{err}"))?;
+        let member = baked.texture("gas_filaments", cube, "texture.filaments")?;
+        surface = surface.with_texture("detail", TextureRef::new(21, member, Sampler::clamped()));
+    }
     if let Some(band_member) = planet.optional_member("bands")? {
         let field = generate::load_field(&path_of(&band_member, &root)?.display().to_string())
             .map_err(|err| format!("读条带场失败：{err}"))?;

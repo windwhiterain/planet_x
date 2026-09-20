@@ -59,7 +59,7 @@ fn main() -> Result<(), Fault> {
         "warped",
         field::FieldPairInput {
             field: bands,
-            offset: swirl,
+            offset: swirl.clone(),
         },
     )?;
     // 第二级（更细的一档）：等值线是闭合团块的湍流 ⇒ 把条带在那些团块附近搅成**闭环**。
@@ -70,6 +70,17 @@ fn main() -> Result<(), Fault> {
         field::FieldPairInput {
             field: warped,
             offset: spots,
+        },
+    )?;
+    // 第三层次：**另一张独立的场**（不是"同一张图缩放"）——细丝。它也被同一个 `swirl` 推歪，
+    // 这样细丝跟着条带走，而不是铺一层无关的噪点。
+    let filaments_raw = cook::<field::Fbm>(&graph, "filaments_raw", ())?;
+    let filaments = cook::<field::Warp>(
+        &graph,
+        "filaments",
+        field::FieldPairInput {
+            field: filaments_raw,
+            offset: swirl,
         },
     )?;
     // 收口：**软**条带（宽过渡、低对比）—— 锐化是材质那一侧的事（`band_contrast`），

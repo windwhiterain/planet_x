@@ -60,12 +60,20 @@ struct GasParams {
     detail_scale: f32,
     /// 第二尺度加多少（`0` = 只有一层，与原行为等价）。
     detail_strength: f32,
+    /// **第三个层次**（独立的第二张立方图，21 号格）加多少。
+    /// ⚠ 与 `detail_strength` 的分工：那一栏是"同一套湍流的更细一档"（缩放采样），
+    ///   这一栏是**另一张图**（图侧独立烘的细丝场）—— 真正的"多一层"是这个。
+    filament_gain: f32,
 };
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(0) var<uniform> params: GasParams;
 // 格子与 `TEXTURE_SLOTS` 的表一致：1/3 是 2D（这一份不用），**5/7 是 cube**。
 @group(#{MATERIAL_BIND_GROUP}) @binding(7) var band_map: texture_cube<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(8) var band_sampler: sampler;
+// 第三个层次：**第二张立方图**（21/22 号格，`TEXTURE_SLOTS` 里空着的那一对 cube）。
+// 空着时吃渲染器的兜底贴图 ⇒ 一栏常数，`filament_gain` 再加也看不出（安全）。
+@group(#{MATERIAL_BIND_GROUP}) @binding(21) var filament_map: texture_cube<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(22) var filament_sampler: sampler;
 
 const PI: f32 = 3.141592653589793;
 
@@ -115,6 +123,11 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     if params.detail_strength > 0.0 {
         let detail = band_of(normalize(local * params.detail_scale));
         shaped = clamp(band + params.detail_strength * edge * (detail - 0.5) * 2.0, 0.0, 1.0);
+    }
+    // 第三层次：独立那张细丝场（跟着同一个扭曲走）——**乘在带的边缘上**，与第二尺度同一条分工。
+    if params.filament_gain > 0.0 {
+        let filament = textureSampleLevel(filament_map, filament_sampler, local, 0.0).r;
+        shaped = clamp(shaped + params.filament_gain * edge * (filament - 0.5) * 2.0, 0.0, 1.0);
     }
     let band_shaped = shaped;
 
