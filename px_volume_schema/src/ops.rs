@@ -73,12 +73,16 @@ px_op! {
 }
 
 px_op! {
-    /// **沿视线积分**：发射体积 → 天空（立方贴图场）。
+    /// **沿视线积分**：发射体积 + 星图 → **一条通道**的天空（立方贴图场）。
     ///
-    /// ⚠ 输出是**场**（`CubeMap`，一条通道），不是贴图：`px_volume_schema` 在 `px_graph`
-    ///   **下面**（驱动依赖算法），够不到 `TextureData`。三条通道由图脚本各积一遍再拼成贴图。
+    /// ⚠ 通道由**节点自己的参数**给（`SkyParams::channel`）：一条通道一个节点、一份缓存。
+    ///   三条通道要分别积，因为逐通道消光让它们本来就不同（尘埃染红就是这么来的）。
     ///
-    /// ⚠ 参数里的 `channel` 不存在 —— 通道由**节点自己**声明（`SkyInput` 一次只积一条），
-    ///   见 `params::sky::SkyParams`。三张同参数、不同通道的节点在图里是三个节点（三份缓存）。
+    /// ⚠ **它本该直接交出一张贴图**（那才是这个算子该有的形状），但今天交不了：
+    ///   `TextureData` 住在 `px_graph`（在 `px_volume_schema` **上面**），这一层够不到它。
+    ///   要让算子直接出贴图，得先把那个载荷类型搬到 `px_protocol::art`
+    ///   —— 与 `VolumeData` / `MeshData` 同住一处（`AssetKind::Texture` 本来就在那儿）。
+    ///   `TextureData` 的 `Build` 已经写好并判过了（`px_graph::generate::payload`），
+    ///   那一步做完之后，这一档的 `Payload` 换成 `TextureData`、图脚本里的手工拼图就能删。
     SkyNebula, "sky.nebula", "px_volume_op", params::sky::SkyParams, SkyInput, Field
 }

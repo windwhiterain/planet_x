@@ -18,7 +18,6 @@
 
 use px_field_schema::field::{CUBE_FACES, Field, Projection, art_direction_at, cube_face_of};
 use px_volume_schema::VolumeData;
-use px_volume_schema::params::emission::EmissionParams;
 use px_volume_schema::params::sky::SkyParams;
 
 /// 格子的确定性抖动：同一格永远同一个偏移。
@@ -203,25 +202,26 @@ pub fn raymarch_channel(
     field
 }
 
-/// 图脚本最顺手的入口：密度场 → （搬进体积 + 算光照）→ 积出一条通道。
+/// 图侧最顺手的入口：**发射体积 + 星图 → 一条通道的天空**。
 ///
-/// ⚠ 三个中间产物（密度体积、发射体积）**都不单独进键**：它们只是这一档内部的两步。
-pub fn raymarch_from_field(
-    density_params: &px_volume_schema::params::density::DensityParams,
-    emission_params: &EmissionParams,
+/// ⚠ 三条通道要**分别**积（`SkyParams::channel`）：逐通道消光让它们本来就不同，
+///   `exp(-σ_B·ds) / exp(-σ_R·ds)` 那个比值就是"尘埃染红"。
+///
+/// ⚠ **将来这一档该直接交出一张贴图**（那才是它该有的形状）—— 但 `TextureData` 住在
+///   `px_graph`，而本 crate 在它下面。等那个载荷类型搬到 `px_protocol::art`
+///   （与 `VolumeData` / `MeshData` 同住），这里改成"三条通道各积一遍 + 拼贴图"、
+///   图脚本里的手工拼图就能删掉。
+pub fn raymarch_sky(
+    emission: &VolumeData,
+    stars: &Field,
     sky_params: &SkyParams,
-    canvas_width: u32,
-    density_field: &Field,
-    stars: Option<&Field>,
-    channel: usize,
 ) -> Result<Field, String> {
-    let emission = crate::emission::emit_from_field(
-        density_params,
-        emission_params,
-        canvas_width,
-        density_field,
-    )?;
-    Ok(raymarch_channel(&emission, stars, sky_params, channel))
+    Ok(raymarch_channel(
+        emission,
+        Some(stars),
+        sky_params,
+        sky_params.channel as usize,
+    ))
 }
 
 #[cfg(test)]

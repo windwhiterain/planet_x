@@ -128,7 +128,7 @@ fn main() -> Result<(), Fault> {
         },
     )?;
 
-    // ── 图二：星点 + 三条通道（画布是立方贴图）────────────────────────────
+    // ── 图二：星点 + 整张天空（画布是立方贴图）────────────────────────────
     let sky_graph = begin(GraphSpec {
         name: "nebulasky".to_string(),
         width: face,
