@@ -21,12 +21,12 @@ impl ProjectionKind for Projection {
             Self::Octahedral => AssetKind::OctahedralField,
             Self::Cube => AssetKind::CubeField,
             Self::CubeMap => AssetKind::CubeMap,
-            // ⚠ 体网格落的**还是** `Field2D`：它对载荷是"一张 `[height, width]` 的 f32"，
-            //   与别的域**同一种**字节。资产种类说的是"这份载荷怎么解"，不是"它是什么形状"。
-            //   （`AssetKind::Volume` 是**立方球体网格**那一档，给等值面提取用：它的清单参数
-            //   里带着 `layers` / `inner` / `outer`，而场节点的清单里没有那几栏 ⇒ 借它会把
-            //   "形状"掰成两处。体网格的形状由 `px_field_schema::volume::VolumeShape` 带。）
-            Self::Volume => AssetKind::Field2D,
+            // ⚠ **必须有自己的资产种类**（不能借 `Field2D`）：`load_field` 是
+            //   "资产种类 → 域"的逆映射，两种域共用一个种类就读不回来了（体网格会被读成
+            //   `Equirect`）—— 而域决定"这一格在世界里的哪"，是影不影响像素的开关。
+            //   `AssetKind::Volume` 也不能借：那是**立方球体网格**（`VolumeData`，半径住在
+            //   清单参数里、blob 是四维的），与这一档的"二维 blob + 折叠的第三维"不同形。
+            Self::Volume => AssetKind::VoxelField,
         }
     }
 }

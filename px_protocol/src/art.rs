@@ -14,7 +14,19 @@ pub enum AssetKind {
     Instances,
     /// 立方球参数空间里的 3D 标量网格（等值面算子的输入）。
     /// **渲染器不读它**：烘代理 mesh 是 PCG 那一侧的事，渲染器只认 `Mesh`。
+    ///
+    /// ⚠ 它是**体积**（`VolumeData`：`res` / `layers` / `inner` / `outer` 住在清单参数里），
+    ///   与 [`Self::VoxelField`] 不是一回事 —— 见那一条。
     Volume,
+    /// **体网格当一张场**（`Domain::Volume`）：一张普通的 `[height, width]` f32 网格，
+    /// 第三维折进了 `height`（一面 = `res × (layers × res)` 行，见 `px_field_schema::volume`）。
+    ///
+    /// ⚠ 为什么它必须与 [`Self::Volume`] **分开**：两者的 blob 都是 f32，但**形状与含义不同**
+    ///   （体网格场是二维 blob，`VolumeData` 是四维 `[面, 层, t, s]`，且半径另存）。
+    ///   更要紧的是**域必须能从资产种类唯一还原**：`load_field` 是"资产种类 → 域"的逆映射，
+    ///   把体网格场并进 `Field2D` 就会读回 `Equirect`（静默错域），而域决定"这一格在世界里的哪"
+    ///   —— 那正是影不影响像素的开关。
+    VoxelField,
     /// 场景配方：这次要渲什么、用什么参数、用哪个 shader 槽。
     Scene,
     /// Shader 源码（U8 blob）。它和场、网格一样是内容寻址的资产。

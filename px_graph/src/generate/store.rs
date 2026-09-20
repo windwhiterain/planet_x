@@ -45,9 +45,12 @@ pub fn load_field(path: &str) -> Result<Field, String> {
         Some(AssetKind::OctahedralField) => Domain::Octahedral,
         Some(AssetKind::CubeField) => Domain::Cube,
         Some(AssetKind::CubeMap) => Domain::CubeMap,
+        // 体网格当一张场：域是 `Volume`，形状由行列推出来（`VolumeShape::of`）。
+        Some(AssetKind::VoxelField) => Domain::Volume,
         Some(other) => {
             return Err(format!(
-                "{path} 是 {other:?}，星球需要 Field2D / OctahedralField / CubeField / CubeMap 产物"
+                "{path} 是 {other:?}，星球需要 Field2D / OctahedralField / CubeField / \
+                 CubeMap / VoxelField 产物"
             ));
         }
         None => return Err(format!("{path} 里没有 Art 帧")),
