@@ -56,6 +56,47 @@ fn face_from_args() -> u32 {
     face.max(8)
 }
 
+/// **形状那一半的分辨率**（`--shape <n>`）。
+///
+/// ⚠ 它与天空贴图的分辨率**各是一个旋钮**，这不是留白而是必须的：
+///   三维场的格数是 `res² × layers × 6`（体网格布局），而 `layers` 是独立参数
+///   ⇒ 形状的分辨率涨一倍，场的格数涨**四倍**，而每个格都要算 7 个倍频的三维噪声。
+///   实测形状 80 要 **394 秒**，而压到 64 时同一张图只要几十秒。
+///
+/// ⚠ 更要紧的是：**这两件事本来无关**。天空贴图的分辨率决定"星点有多锐"，
+///   形状的分辨率决定"云和丝有多细"。把它们绑在一起，就只能用"云更细"来换"星更锐"
+///   —— 而星的锐度根本不需要更细的场（星是**点**，不是场的结构）。
+fn shape_from_args() -> u32 {
+    let args: Vec<String> = std::env::args().collect();
+    let mut shape = 64_u32;
+    let mut index = 1;
+    while index < args.len() {
+        if args[index] == "--shape" {
+            if let Some(value) = args.get(index + 1).and_then(|text| text.parse().ok()) {
+                shape = value;
+            }
+        }
+        index += 1;
+    }
+    shape.max(8)
+}
+
+/// `art/nebula/density_volume.toml` 里写的层数（读不到/解不开就 `Err`，不猜）。
+///
+/// ⚠ 必须读**文件里那一份**，不能用 `DensityParams::default()`：两者不一致时
+///   `cloud.density` 会走"重采样"那条路（允许，但白花一次采样），而症状只是"变慢"。
+fn volume_layers() -> Result<u32, Fault> {
+    let path = px_graph::workspace_root()
+        .join("art")
+        .join("nebula")
+        .join("density_volume.toml");
+    let text = std::fs::read_to_string(&path)
+        .map_err(|err| format!("读不到 {}：{err}", path.display()))?;
+    let params: px_volume_schema::params::density::DensityParams =
+        toml::from_str(&text).map_err(|err| format!("{} 解不开：{err}", path.display()))?;
+    Ok(params.layers)
+}
+
 /// 打印一张场的读数（形状对不对、值域有没有塌掉，一眼就能看出来）。
 fn report(name: &str, field: &Field) {
     let stats = field.stats();
@@ -67,13 +108,20 @@ fn report(name: &str, field: &Field) {
 
 fn main() -> Result<(), Fault> {
     let face = face_from_args();
+    let shape = shape_from_args();
     let started = Instant::now();
+    println!("形状 {shape}³ ｜ 天空面 {face}");
 
-    // ── 图一：形状 → 密度体积 → 发射体积（画布是体网格）────────────────────
+    // ── 图一：形状 → 密度体积 → 发射体积（画布是**体网格**）────────────────
+    // ⚠ 画布的形状必须与 `art/nebula/density_volume.toml` **逐字一致**：
+    //   `cloud.density` 只在"同网格"时走纯搬运，不同网格会按体素坐标重采样
+    //   （允许、但白花一次采样）。所以层数从**那份 toml** 读，不用默认值
+    //   —— 用默认值会在"文件里写的层数不是 64"时静默地变成重采样。
+    let layers = volume_layers()?;
     let shape_graph = begin(GraphSpec {
         name: "nebula".to_string(),
-        width: face,
-        height: face * face * (face / 2).max(8) * 6,
+        width: shape,
+        height: shape * shape * layers * 6,
         projection: Domain::Volume,
         cameras: Vec::new(),
     });

@@ -57,12 +57,57 @@ fn star_level(stars: &Field, direction: [f32; 3], params: &SkyParams) -> f32 {
     (raw - params.star_floor) / (1.0 - params.star_floor).max(1e-4)
 }
 
-/// 世界点 → 体网格的某个通道。
+/// **一次采样的几何**：世界点 → 体网格的八个角与三个权重。
 ///
-/// 通道布局（见 `cloud.emission` 的文件头）：**0 = 发射**，**1/2/3 = σ_R / σ_G / σ_B**。
-/// ⚠ 于是"某一条颜色通道的消光"是 `lane = 1 + channel`，不是"取 A" —— 第一版把消光压成
-///   一个数，三条通道就积成了同一张图。
-fn sample_lane(volume: &VolumeData, point: [f32; 3], lane: usize) -> f32 {
+/// ⚠⚠ **它存在的唯一理由是性能，而代价是三个数量级**：`sample_lane` 原来把这一整条链
+///   （开方 → 层号 → 方向 → `cube_face_of`）在每个**角**上走一遍 —— 八个角、而发射与消光
+///   各要一次 ⇒ **每个采样点 16 遍**。实测 `--face 128` 因此烘不完（10 分钟超时）。
+///   这条链与"读哪一条通道"无关 ⇒ 算一遍、两条通道各 gather 一次。
+#[derive(Clone, Copy)]
+struct Sample {
+    /// 八个角在 `data` 里的**下标**（已含 `* 4`，等通道再加 `lane`）。
+    corners: [usize; 8],
+    weights: [f32; 8],
+    inside: bool,
+}
+
+impl Sample {
+    /// 世界点落在壳外时 `inside = false`（读出来就是 0，方向那一套不必算）。
+    fn below_shell(volume: &VolumeData, point: [f32; 3]) -> Self {
+        let _ = (volume, point);
+        Self {
+            corners: [0; 8],
+            weights: [0.0; 8],
+            inside: false,
+        }
+    }
+
+    #[inline]
+    fn gather(&self, data: &[f32], lane: usize) -> f32 {
+        if !self.inside {
+            return 0.0;
+        }
+        let mut total = 0.0_f32;
+        for index in 0..8 {
+            total += self.weights[index] * data[self.corners[index] + lane];
+        }
+        total
+    }
+}
+
+#[inline]
+fn snap(fraction: f32) -> f32 {
+    if fraction < 1e-4 {
+        0.0
+    } else if fraction > 1.0 - 1e-4 {
+        1.0
+    } else {
+        fraction
+    }
+}
+
+/// 世界点 → **一次采样的几何**（见 [`Sample`] 那条性能说明）。
+fn sample_at(volume: &VolumeData, point: [f32; 3]) -> Sample {
     let radius = (point[0] * point[0] + point[1] * point[1] + point[2] * point[2]).sqrt();
     let span = volume.outer - volume.inner;
     // ⚠ 边界**闭 + 相对容差**（与 `density::sample_world` 同一个口径）：体网格的第一层与
@@ -73,12 +118,13 @@ fn sample_lane(volume: &VolumeData, point: [f32; 3], lane: usize) -> f32 {
         || radius > volume.outer + tolerance
         || span.abs() <= f32::EPSILON
     {
-        return 0.0;
+        return Sample::below_shell(volume, point);
     }
     let direction = [point[0] / radius, point[1] / radius, point[2] / radius];
     let (face, s, t) = cube_face_of(direction);
     let res = volume.res.max(2);
-    let last_layer = volume.layers.max(2) - 1;
+    let layers = volume.layers.max(2);
+    let last_layer = layers - 1;
     let altitude = ((radius - volume.inner) / span).clamp(0.0, 1.0);
     let sz = altitude * last_layer as f32;
     let nearest = sz.round();
@@ -86,15 +132,6 @@ fn sample_lane(volume: &VolumeData, point: [f32; 3], lane: usize) -> f32 {
         nearest
     } else {
         sz.floor()
-    };
-    let snap = |fraction: f32| {
-        if fraction < 1e-4 {
-            0.0
-        } else if fraction > 1.0 - 1e-4 {
-            1.0
-        } else {
-            fraction
-        }
     };
     let tz = snap(sz - layer0);
     let sx = s * res as f32 - 0.5;
@@ -109,16 +146,36 @@ fn sample_lane(volume: &VolumeData, point: [f32; 3], lane: usize) -> f32 {
     let (ya, yb) = (clamp_cell(y0), clamp_cell(y0 + 1.0));
     let layer_at = |step: f32| (layer0 + step).clamp(0.0, last_layer as f32) as u32;
     let (la, lb) = (layer_at(0.0), layer_at(1.0));
-    let lane = lane.min(3);
-    let corner = |cell_s: u32, cell_t: u32, layer: u32| {
-        let slot = (((face * volume.layers + layer) * res + cell_t) * res + cell_s) as usize;
-        volume.data[slot * 4 + lane]
+
+    let slot = |cell_s: u32, cell_t: u32, layer: u32| -> usize {
+        ((((face * layers + layer) * res + cell_t) * res + cell_s) * 4) as usize
     };
-    let top = (corner(xa, ya, la) * (1.0 - tx) + corner(xb, ya, la) * tx) * (1.0 - ty)
-        + (corner(xa, yb, la) * (1.0 - tx) + corner(xb, yb, la) * tx) * ty;
-    let bottom = (corner(xa, ya, lb) * (1.0 - tx) + corner(xb, ya, lb) * tx) * (1.0 - ty)
-        + (corner(xa, yb, lb) * (1.0 - tx) + corner(xb, yb, lb) * tx) * ty;
-    top * (1.0 - tz) + bottom * tz
+    let corners = [
+        slot(xa, ya, la),
+        slot(xb, ya, la),
+        slot(xa, yb, la),
+        slot(xb, yb, la),
+        slot(xa, ya, lb),
+        slot(xb, ya, lb),
+        slot(xa, yb, lb),
+        slot(xb, yb, lb),
+    ];
+    let (wx, wy) = (1.0 - tx, 1.0 - ty);
+    let weights = [
+        wx * wy * (1.0 - tz),
+        tx * wy * (1.0 - tz),
+        wx * ty * (1.0 - tz),
+        tx * ty * (1.0 - tz),
+        wx * wy * tz,
+        tx * wy * tz,
+        wx * ty * tz,
+        tx * ty * tz,
+    ];
+    Sample {
+        corners,
+        weights,
+        inside: true,
+    }
 }
 
 /// 一条视线的积分（出一条通道）。
@@ -138,6 +195,13 @@ fn march_channel(
     let steps = params.steps.max(1);
     let step = (exit - enter) / steps as f32;
     let seed = 0x51ed_270b_u32.wrapping_add(channel as u32);
+    // ⚠ 这一通道自己的消光（`1 + channel`）⇒ 蓝被吃得比红多 ⇒ 尘埃染红。
+    let sigma_lane = 1 + channel.min(2);
+
+    // ⚠ **壳外的那一段不必采样**：相机在壳心 ⇒ 每条视线的入射半径就是 `inner`，
+    //   所以从相机出发**整段都在壳内**，解析的入射/出射点没有意义。
+    //   但 `inner` 是"近处留的空"：`inner > 0` 时最里面那一小段也是空的。
+    //   真正的省法在别处（见 `Sample` 那条：几何只算一遍）。
 
     let mut transmittance = 1.0_f32;
     let mut radiance = 0.0_f32;
@@ -154,9 +218,10 @@ fn march_channel(
             direction[1] * distance,
             direction[2] * distance,
         ];
-        let emit = sample_lane(emission, point, 0);
-        // ⚠ 这一通道自己的消光（`1 + channel`）⇒ 蓝被吃得比红多 ⇒ 尘埃染红。
-        let sigma = sample_lane(emission, point, 1 + channel.min(2));
+        // ⚠ 几何**算一遍**，发射与消光各 gather 一次（见 [`Sample`]）。
+        let sample = sample_at(emission, point);
+        let emit = sample.gather(&emission.data, 0);
+        let sigma = sample.gather(&emission.data, sigma_lane);
         if emit > 0.0 {
             radiance += transmittance * emit * step;
         }
