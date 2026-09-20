@@ -46,10 +46,28 @@ impl px_field_alg::field_fn::FieldFn for LatBands {
         //   ① **相位摆动**：叠两个大振幅、低频的摆 —— 振幅与"一圈带"同量级（约 1.4 rad ≈
         //      半个周期），于是条纹会真实的**疏密不均、局部并拢**；
         //   ② **按纬度的淡出**：`fade` 让某些纬度带整体淡下去（那里就是"没有带"的区）。
-        let wobble = (latitude * 2.30 + upstream * 4.0).sin()
-            + 0.55 * (latitude * 5.10 - upstream * 7.0).cos();
+        // ⚠ 2026-09-20（第 11 轮）：这两条摆从前是**正弦**——而正弦在球面上**周期性重复**
+        //   （绕经度一圈回来是同一个样子，只是被"看不见的接缝"藏住了）。换成
+        //   `px_field_alg::noise::value_noise3`（格点哈希 + 三线性插值）：同一个方向永远同一个值，
+        //   但**没有任何周期** —— 实例库链的就是那个 crate，所以这一档现在两边都拿得到。
+        let cell = |scale: f32, offset: f32| {
+            [
+                direction[0] * scale + offset,
+                direction[1] * scale * 1.7 + offset,
+                direction[2] * scale - offset,
+            ]
+        };
+        let wobble = (px_field_alg::noise::value_noise3(cell(2.30, 0.0), 41) - 0.5) * 2.0
+            + 0.55 * (px_field_alg::noise::value_noise3(cell(5.10, 3.7), 97) - 0.5) * 2.0;
+        // ⚠ 2026-09-20（用户："band 的分布太均匀了，一般来说这些东西都在靠近赤道的地方"）：
+        //   相位的**纬度映射不是线性的**。线性（`phase ∝ 纬度`）意味着从赤道到极区带一样密
+        //   —— 而真实的条带/涡旋由**差动旋转的喷流**定，它们在低纬挤、往高纬被拉开成宽带。
+        //   `g(y) = y − 0.24·y³` 的斜率 `g' = 1 − 0.72·y²`：赤道处最陡（带最密），
+        //   两极处只有 0.28（带被拉宽约 3.6 倍）。⚠ 用三次项而不是 `|y|`：`|y|` 在赤道有个尖点，
+        //   会在赤道压出一条假的窄带。
+        let stretched = latitude - 0.24 * latitude * latitude * latitude;
         // 相位：纬度给"几圈带"，摆动与上游各给一部分"边界怎么歪"。
-        let phase = latitude * bands * std::f32::consts::PI + wobble * 0.75 - (upstream - 0.5) * 2.4;
+        let phase = stretched * bands * std::f32::consts::PI + wobble * 0.75 - (upstream - 0.5) * 2.4;
 
         // ① 相位 → **三角波**（等斜率、周期 2π）：`fract` 把它折回 `[0,1)`，再从 1 折回 0。
         //   ⚠ 相对正弦，这一条把"过渡"从"中点最陡"改成"全程同陡" ⇒ 同一条带看着宽得多。
@@ -67,7 +85,10 @@ impl px_field_alg::field_fn::FieldFn for LatBands {
         let washed = 1.0 - 0.35 * (1.0 - weather);
         // ④ 按纬度的淡出：`fade ∈ [0,1]`，取 0 的那些纬度**整片没有带**（剩下一点基底起伏）。
         let fade = 0.5 + 0.5 * (latitude * 2.7 + upstream * 2.2).sin();
-        let strength = 0.55 + 0.45 * fade;
+        // ④b **纬向能量**（同一条用户口径）：带的对比在低纬最强，往高纬淡下去 ——
+        //   极区剩下的是**平滑的宽带**，不是又一种细碎的图案。`0.30` = 极区的对比只剩三成。
+        let zonal = 1.0 - 0.45 * (latitude * latitude);
+        let strength = (0.55 + 0.45 * fade) * zonal;
 
         // ⑤ **对比度分层**（"有的带深、有的几乎看不见"）：`gain` 按一条**低频、与相位不同源**的
         //    曲线走 ⇒ 相邻的带深浅不一样。⚠ 用同一个相位去调对比会把深浅锁在位置上（那又变回单一层次）。

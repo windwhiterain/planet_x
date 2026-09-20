@@ -17,6 +17,7 @@
 
 #[allow(dead_code)]
 pub mod field_fn;
+pub mod noise;
 pub mod remap;
 
 pub use field_fn::{FieldFn, Sampled, Upstream};

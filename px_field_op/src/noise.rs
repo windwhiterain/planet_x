@@ -73,29 +73,10 @@ pub fn ridged(x: f32, y: f32, settings: &FbmSettings, sharpness: f32) -> f32 {
     }
 }
 
-fn lattice3(x: i32, y: i32, z: i32, seed: u32) -> u32 {
-    let mut h = (x as u32).wrapping_mul(0x27d4_eb2d)
-        ^ (y as u32).wrapping_mul(0x1656_67b1)
-        ^ (z as u32).wrapping_mul(0x9e37_79b9)
-        ^ seed;
-    h ^= h >> 15;
-    h = h.wrapping_mul(0x2c1b_3c6d);
-    h ^= h >> 12;
-    h = h.wrapping_mul(0x297a_2d39);
-    h ^= h >> 15;
-    h
-}
-
-/// **一个格子的 32 位哈希**（对外的那一扇门）—— 给"每格要抽好几个互相独立的随机数"的算子用。
-///
-/// ⚠ 第一个消费者是 `field.stamps`（盖章式打坑）：一个格子里要同时抽**位置**（三个十位段）、
-///   **半径**、**年龄**、**遮罩硬币**四样东西，而它们必须互不相关（同一个位段既当年龄又当硬币，
-///   画面里就会出现"年轻的更容易被盖上"这种系统性偏差）。⇒ 想要几样就调几次，`seed` 各不相同
-///   （比如 `seed` 与 `seed ^ 0x51ed270b`）。
-/// ⚠ 它是**纯函数**（同一格永远同一个数）：图重算两次逐字节相同、跨平台一致，也不需要存表。
-pub fn cell_hash(seed: u32, cell: [i32; 3]) -> u32 {
-    lattice3(cell[0], cell[1], cell[2], seed)
-}
+// ⚠ 2026-09-20：格点哈希与值噪声**搬到了 `px_field_alg`**（实例库只链那一个 crate，
+//   而"同一个格 → 同一个数"是全仓共用的一条约定）。这里 re-export 出去，调用点一字不改
+//   （`crate::noise::cell_hash`）。`lattice3` 也一并转出去（本文件里的梯度噪声要用它）。
+pub use px_field_alg::noise::{cell_hash, lattice3, unit, value_noise3};
 
 const GRADIENTS: [[f32; 3]; 12] = [
     [1.0, 1.0, 0.0],

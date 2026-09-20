@@ -82,8 +82,11 @@ cargo run -q -p px_render -- --offline --scene <产物> --out x.png --width 960 
 
 # 逃生门：老形状产物的**文件字节**哈希
 cargo run -q -p px_graphs --bin scene orbit-bare --no-frame-graph
-# 拿到的 .pxart 的 sha256 前 16 应当 == 9EE4F970C5BAE421（orbit-bare；六格全部见 hashes.txt §三）
+# 拿到的 .pxart 的 sha256 前 16 应当 == DF58658E875368A5（orbit-bare；六格全部见 hashes.txt §三）
 ```
+
+⚠ **2026-09-20：§三 那六格重登记过**十一次**。第十一次（第 11 轮）的根因是哈希/值噪声从
+`px_field_op` 搬到 `px_field_alg`（实例库只链后者）⇒ 键全换、**内容 30/30 与 J1 6/6 都没变**。
 
 ⚠ **2026-09-20：§三 那六格重登记过**十次**。第十次（第 9 轮）的根因是 `field.fbm` 多了一栏
 `zonal`（各向异性，默认 1.0 且默认值下逐点等价旧行为）⇒ 键全换、**内容 30/30 与 J1 6/6 都没变**。
