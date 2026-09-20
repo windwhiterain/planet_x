@@ -282,7 +282,15 @@ fn px_sample_shadow_page(\n\
 \x20   return select(1.0, 0.0, depth < stored);\n\
 }\n\
 \n\
-const PX_POINT_SHADOW_SCALE: f32 = 0.003;\n\
+// ⚠ **已删**：`PX_POINT_SHADOW_SCALE = 0.003`。它原来是 oracle 那条基向量的系数
+//   （`orthonormalize(...) × 0.003 × distance_to_light`），换到我们的 texel 相对量上
+//   之后恒等于 0.003 个 texel ⇒ 八个 tap 挤在一个 texel 里（见 `fetch_point_shadow`
+//   里那段长注释）。核半径现在由**像素在光空间的足迹**定。
+
+// 核半径的上限（texel）。那八个 D3D 点是按 1–2 texel 的核设计的：核再大，
+// 8 个点铺开就是**采样不足**，比点采样好不了多少。足迹更大的情形要靠「级」来解
+// （粗级的 texel 更大 ⇒ 同一个像素在那一级上只跨 ~1 个 texel）。
+const PX_SHADOW_KERNEL_MAX_TEXELS: f32 = 2.0;
 \n\
 fn px_sample_shadow_at_offset(\n\
 \x20   position: vec2<f32>,\n\
@@ -355,8 +363,35 @@ fn fetch_point_shadow(\n\
 \x20   let zw = -planar * (*light).light_custom_data.xy\n\
 \x20       + (*light).light_custom_data.zw;\n\
 \x20   let depth = zw.x / zw.y;\n\
+\x20   // ---- ⚠⚠ 核半径按**像素在光空间的足迹**定，不是一个常数 --------------------\n\
+\x20   //\n\
+\x20   // 从前的式子（§本轮改掉）：\n\
+\x20   //     basis = orthonormalize(...) * PX_POINT_SHADOW_SCALE * texel_world;\n\
+\x20   // 而 `texel_world` **就是**一个 texel 的世界尺寸 ⇒ 换算回 texel：\n\
+\x20   //     basis / texel_world = PX_POINT_SHADOW_SCALE = 0.003（与距离、密度全无关）\n\
+\x20   // 八个 D3D 点最大到 ±0.875 ⇒ 核半径 **0.0026 个 texel**，而八个系数和是 1\n\
+\x20   // ⇒ **八个 tap 落在同一个 texel 里 = 一次点采样**。滤波那一半根本不存在，\n\
+\x20   // 于是「影图越细、每像素跨过的 texel 越多、只取一个」⇒ **欠 filter（走样）** ——\n\
+\x20   // 这就是「越细越好会欠 filter」。\n\
+\x20   //\n\
+\x20   // 正确的量是「这个像素在灯看来盖住了多大一块」，即**光空间坐标的屏幕导数**：\n\
+\x20   //     核半径（texel）= footprint / texel_world\n\
+\x20   // 下限 1.0：一个 texel 一个 tap 是「至少真的有滤波」（否则退回点采样）。\n\
+\x20   // 上限见 PX_SHADOW_KERNEL_MAX_TEXELS：那八个 D3D 点是按 1–2 texel 的核设计的，\n\
+\x20   // 再大就是**采样不足**（8 个点铺在 7×7 个 texel 上比点采样好不了多少）。\n\
+\x20   // ⚠ **足迹超过上限的情形要靠「级」来解**（目标 ②③：粗级的 texel 更大，同一个\n\
+\x20   // 像素在那一级上只跨 ~1 个 texel）—— 在那之前，超过上限的足迹只能做到\n\
+\x20   // 「不比点采样更糟」，做不到「够」。\n\
+\x20   let light_dx = dpdx(light_local);\n\
+\x20   let light_dy = dpdy(light_local);\n\
+\x20   let footprint = max(length(light_dx), length(light_dy));\n\
+\x20   let kernel_texels = clamp(\n\
+\x20       footprint / max(texel_world, 1e-9),\n\
+\x20       1.0,\n\
+\x20       PX_SHADOW_KERNEL_MAX_TEXELS,\n\
+\x20   );\n\
 \x20   let basis = orthonormalize(normalize(light_local))\n\
-\x20       * PX_POINT_SHADOW_SCALE * texel_world;\n\
+\x20       * kernel_texels * texel_world;\n\
 \x20   var sum: f32 = 0.0;\n\
 \x20   sum += px_sample_shadow_at_offset(\n\
 \x20       PX_D3D_SAMPLE_POINT_POSITIONS[0], PX_D3D_SAMPLE_POINT_COEFFS[0],\n\
