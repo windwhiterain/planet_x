@@ -46,6 +46,12 @@ pub struct DeclFacts {
     /// 声明在它 crate 里的模块路径（`ops`）—— 生成物那句
     /// `pub use <schema>::<module>::<decl>;` 用它。
     pub module: &'static str,
+    /// 声明**自己的类型名**（`CloudCoarse` 这种，不带路径）。
+    ///
+    /// ⚠ 它**不参与生成物**：唯一的消费者是那道"这一行指的是不是它自己写的那个类型"的门
+    ///   （`tests/inst_gate.rs`）—— 表里配错一行（`("Fbm", || facts::<Ridged>())`）在别处
+    ///   是查不出来的（条数对得上、schema 也对得上），只有拿类型名对名字才当场红。
+    pub type_name: &'static str,
 }
 
 /// **声明表**：一行一个声明 —— **唯一**那份"有哪些声明"的清单。
@@ -66,7 +72,9 @@ pub const TABLE: &[(&str, fn() -> DeclFacts)] = &[
     ("Warp", || facts::<px_field_schema::ops::Warp>()),
     ("Craters", || facts::<px_field_schema::ops::Craters>()),
     ("FieldRemap", || facts::<px_field_schema::ops::FieldRemap>()),
-    ("CloudCoarse", || facts::<px_volume_schema::ops::CloudCoarse>()),
+    ("CloudCoarse", || {
+        facts::<px_volume_schema::ops::CloudCoarse>()
+    }),
     ("CubeSphere", || facts::<px_mesh_schema::ops::CubeSphere>()),
     ("Proxy", || facts::<px_mesh_schema::ops::Proxy>()),
 ];
@@ -113,13 +121,19 @@ pub fn workspace_root() -> std::path::PathBuf {
 
 /// 一个声明的全部事实 —— **全部取自真类型**。
 ///
-/// ⚠ `schema` / `module` 从**声明自己的全路径**（`px_volume_schema::ops::CloudCoarse`）里切出来：
-///   第一段是 crate、最后一段之前的那一段是模块。⇒ 表里没有一处"人写的路径"。
+/// ⚠ `schema` / `module` / `type_name` 从**声明自己的全路径**
+/// （`px_volume_schema::ops::CloudCoarse`）里切出来：第一段是 crate、最后一段是类型名、
+/// 中间那一段是模块。⇒ 表里没有一处"人写的路径"。
+/// ⚠ `type_name` 是 2026-09-20 补的：在那之前这张表**只数条数**，于是
+///   `("Fbm", || facts::<Ridged>())` 这种**配错行**每一道门都过（条数对得上、每条也都能
+///   指回自己的 schema crate），直到某条实例拿它去编译才炸 —— 而炸在离现场很远的地方。
+///   有了这一栏，门就能判"**这一行指的是不是它自己写的那个类型**"（`inst_gate` 那条门）。
 fn facts<O: PxOp>() -> DeclFacts {
     let path = ::core::any::type_name::<O>();
     let (schema, module) = split_schema_module(path).unwrap_or_else(|| {
         panic!("声明类型的全路径 `{path}` 不是 <crate>::<模块>::<类型> 形状（生成物写不出路径）")
     });
+    let type_name = path.rsplit_once("::").map(|(_, name)| name).unwrap_or(path);
     DeclFacts {
         interface: O::interface(),
         decl_hash: O::decl_hash(),
@@ -128,6 +142,7 @@ fn facts<O: PxOp>() -> DeclFacts {
         payload: ::core::any::type_name::<O::Payload>(),
         schema,
         module,
+        type_name,
     }
 }
 

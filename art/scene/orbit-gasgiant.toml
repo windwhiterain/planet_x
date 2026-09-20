@@ -36,4 +36,4 @@ graph = "planet"
 #   也不给 `height`：这份 shader 没有 albedo 贴图 ⇒ 色板那条路不烘（成员是可选的）。
 members = { shader = "shaders::gasgiant", bands = "gasgiant::mixed" }
 primitive = "icosphere"
-params = { palette = "gas", displace = 0.010, sea_level = 0.45, radius = 1.0, subdivisions = 64, spin = 0.0, rings = 0.0, albedo = [0.870, 0.800, 0.660, 1.0], absorption = [0.20, 0.34, 0.70, 1.0], wrap = 0.50, thickness = 1.00, limb = 0.34, band_gain = 0.42, band_contrast = 0.85, sun_gain = 1.00, ambient = 1.00 }
+params = { palette = "gas", displace = 0.010, sea_level = 0.45, radius = 1.0, subdivisions = 64, spin = 0.0, rings = 0.0, albedo = [0.870, 0.800, 0.660, 1.0], absorption = [0.20, 0.34, 0.70, 1.0], wrap = 0.50, thickness = 1.00, limb = 0.34, band_gain = 0.52, band_contrast = 0.85, sun_gain = 1.00, ambient = 1.00 }

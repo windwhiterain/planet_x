@@ -80,9 +80,26 @@ fn the_table_names_are_unique() {
 }
 
 #[test]
+fn every_row_resolves_to_the_type_it_names() {
+    // ⚠ 2026-09-20：这一条补的正是"配错行"那个洞 —— 条数门与"指回自己 schema"那道门都
+    //   拦不住 `("Fbm", || facts::<Ridged>())`。判定只用**类型自己报的名字**，不认人写的
+    //   注释、也不要第二份清单。
+    for (name, facts) in entries() {
+        assert_eq!(
+            facts.type_name, name,
+            "`px_decls::TABLE` 里 `{name}` 这一行指的是类型 `{}` ⇒ 名字与类型配错了",
+            facts.type_name
+        );
+    }
+}
+
+#[test]
 fn the_facts_are_alive() {
     for (name, facts) in entries() {
-        assert_ne!(facts.interface, 0, "{name} 的 interface 是 0（没编译过类型？）");
+        assert_ne!(
+            facts.interface, 0,
+            "{name} 的 interface 是 0（没编译过类型？）"
+        );
         assert!(
             !facts.decl_hash.is_empty(),
             "{name} 的 decl_hash 是空的（声明的 crate 没有 build.rs？）"

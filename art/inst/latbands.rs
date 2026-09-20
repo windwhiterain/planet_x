@@ -1,12 +1,21 @@
 /// 图侧给的**场函数**：**纬向条带**（气态巨行星那种横向云带）。
 ///
 /// 语义：拿这一格的**球面方向**取纬度（`direction.y ∈ [-1,1]`，两极 = ±1），按纬度撒 `bands`
-/// 圈正弦；上游（湍流场）拿去**挪相位** —— 于是条带边界跟着湍流起伏，而不是一圈死板的正弦。
+/// 圈带；上游（湍流场）拿去**挪相位**（带边界跟着湍流起伏）**并调制带里的细丝与强弱**
+/// —— 于是它既不是一圈死正弦，也不是一张均匀的梳子。
 /// `gain` 管对比（band 与 belt 的亮暗差）、`bias` 管整体抬落。
 ///
 /// ⚠ 纬度只能从 `direction` 取，**不能拿 `uv[1]`**：气态巨行星的覆盖度场是 `CubeMap` 投影
 ///   （六张面沿 `y` 叠成一条，`height = 6 × face`），`uv[1]` 在面与面之间会跳变。
 ///   `direction` 这一栏是 2026-09-20 才递到场函数的（在那之前球面函数写不进实例库）。
+///
+/// ⚠ **2026-09-20 第二轮（观感）**：三处改动都对着 `art/reference/gasgiant-saturn.png`
+///   （土星：带是**宽过渡**的，只有细丝状结构破坏规则性；天王星那张更极端 —— 几乎无特征）：
+///   ① 剖面从**正弦**换成**三角波**（等斜率）—— 正弦在中点斜率最大，看着就是"一条硬边"；
+///      三角波的过渡是**匀速**的，同样一圈带看着宽得多；
+///   ② 加**细丝**：高频小涟漪，振幅骑在上游场上（亮的地方丝明显）；
+///   ③ 加**天气**：沿经度分几个"带被洗淡"的段落（真实巨行星上那种扰动区），
+///      让同一颗球上不是每条带都一样清楚。
 ///
 /// ⚠ 这一份会被 `px build` 生成的实例库**原样 `include!`**（`19` §179.1）：
 ///   * `use` 一律写全路径（生成物里没有 `crate::` 那个前缀可指）；
@@ -28,10 +37,28 @@ impl px_field_alg::field_fn::FieldFn for LatBands {
         let bands = if params.bands > 0.0 { params.bands } else { 1.0 };
         // 纬度：`direction.y`（球面上的 y 就是自转轴方向）⇒ `[-1, 1]`。
         let latitude = direction[1].clamp(-1.0, 1.0);
-        // 上游挪相位：湍流亮的地方条带整体往北偏，于是带边界是**波浪形**而不是一圈死正弦。
-        let wave = 0.5 + 0.5 * (latitude * bands * std::f32::consts::PI - (upstream - 0.5) * 3.5).sin();
+        // 相位：纬度给"几圈带"，上游给"边界怎么起伏"（`× 3.5`：摆幅要大于一圈带的宽度，
+        // 边界才会真的起伏成波浪，否则看着还是一圈死正弦）。
+        let phase = latitude * bands * std::f32::consts::PI - (upstream - 0.5) * 3.5;
+
+        // ① 相位 → **三角波**（等斜率、周期 2π）：`fract` 把它折回 `[0,1)`，再从 1 折回 0。
+        //   ⚠ 相对正弦，这一条把"过渡"从"中点最陡"改成"全程同陡" ⇒ 同一条带看着宽得多。
+        let folded = (phase * (1.0 / (2.0 * std::f32::consts::PI)))
+            .fract()
+            .abs();
+        let wave = 1.0 - (2.0 * folded - 1.0).abs();
+
+        // ② 细丝：高频小涟漪，振幅骑在上游场上（湍流亮的地方丝更明显）—— 破坏"一圈光板"。
+        let fiber = 0.5 + 0.5 * (phase * 5.0 + upstream * 9.0).sin();
+        let ripple = 0.10 * fiber * (0.35 + 0.65 * upstream);
+        // ③ 天气：沿经度分几段"带被洗淡"（`washed ∈ [0.65, 1]`）—— 同一颗球上不是每条带一样清楚。
+        let longitude = direction[2].atan2(direction[0]);
+        let weather = 0.5 + 0.5 * (longitude * 2.0 + upstream * 4.0).sin();
+        let washed = 1.0 - 0.35 * (1.0 - weather);
+
         // 对比：以 0.5 为轴把落点推开（`gain = 0` ⇒ 不动）。
-        let contrasted = 0.5 + (wave - 0.5) * (1.0 + params.gain) + params.bias;
+        let band = 0.5 + (wave - 0.5) * washed + ripple;
+        let contrasted = 0.5 + (band - 0.5) * (1.0 + params.gain) + params.bias;
         contrasted.clamp(0.0, 1.0)
     }
 }
