@@ -238,7 +238,13 @@ const DEPTH_RESOURCES: [&str; 2] = ["scene_depth", "scene_depth_sample"];
 /// 那几个是同一类：**渲染器的形状**（哪一格绑哪张图）本来就住在宿主这一侧（§104 第 1 条）。
 /// 文档那边「有没有这份资源」是**内容/形状的合成结果**（一盏投影的点光都没有时它就不烘），
 /// 所以宿主必须自己判"有没有"，而不是假定它一定在。
-const SHADOW_TEXTURE_RESOURCE: &str = "point_shadow_textures";
+/// 影子 atlas 那个资源的名字。
+///
+/// ⚠ §本轮它从 `point_shadow_textures`（每盏灯一张 cube）改成 **`point_shadow_atlas`**
+/// （每面一层、每面一支稀疏页）。**名字必须与 `art/frame/default.toml` 里那一份一致** ——
+/// 不一致的后果是这一档**悄悄退回兜底 atlas**：采样侧照常跑、出图照常出，只有影没了
+/// （而"没影"在成图上看起来就像"这一版还没做影子"）。
+const SHADOW_TEXTURE_RESOURCE: &str = "point_shadow_atlas";
 
 /// 一份画好的图：紧凑 RGBA8 + 这一帧的审计文本。
 ///
@@ -1152,7 +1158,11 @@ impl Session {
                     sample_count: 1,
                     dimension: wgpu::TextureDimension::D2,
                     format: wgpu::TextureFormat::Depth32Float,
-                    usage: px_pass::texture_usage(resource),
+                    // ⚠ 多一格 `COPY_SRC`：影子 atlas 是**这台仪器唯一能看见"里面到底
+                    //    写了什么"的地方**（`PX_AUDIT_SHADOW` 那一档整层读回）。
+                    //    不加它，探针那句 `copy_texture_to_buffer` 会被 wgpu 拒，
+                    //    而"拒"离"影为什么不对"还很远。
+                    usage: px_pass::texture_usage(resource) | wgpu::TextureUsages::COPY_SRC,
                     view_formats: &[],
                 });
                 // ⚠ 和深度预通道那两张一样：**一张纹理**，`seed` 进池子 —— 六条影子 pass 的
@@ -1201,6 +1211,34 @@ impl Session {
         };
         // ⚠ 纹理要活到这一帧画完（`wgpu::BindGroup` 持的是视图、视图持的是纹理 ——
         //    引用计数保证它不会先死；这里留一个绑定只是让"谁活着"这件事看得见）。
+        // ---- 影子 atlas 的读数（**仪器**，§本轮）----
+        //
+        // ⚠ 为什么要有它：这一轮的三种病 —— "页表没查到" / "查到了但那一页是空的" /
+        //    "深度比较方向反了" —— 在成图上都表现为"有点暗"，而均值分不出来。读回几个数
+        //    立刻分辨：`0.0` = 清屏值（没画进去东西或没查到页），非 0 = 那一笔真写进去了。
+        if std::env::var_os("PX_AUDIT_SHADOW").is_some() {
+            let texture = shadow_texture.as_ref().expect("有投影的灯才有 atlas");
+            let layers = scene.shadow.as_ref().map(|plan| plan.layers).unwrap_or(0);
+            let mut lines = Vec::new();
+            for layer in 0..layers.min(6) {
+                // 一张 atlas 里，第 `layer` 层的第 0 号页格（左上角）那一块的中心。
+                let side = scene
+                    .shadow
+                    .as_ref()
+                    .map(|plan| plan.atlas_side)
+                    .unwrap_or(1024);
+                let points = [(64, 64), (64, 192), (192, 64), (side / 2, side / 2)];
+                match read_depth_stats(&gpu.device, &gpu.queue, texture, layer) {
+                    Some((max, nonzero, total, corner)) => lines.push(format!(
+                        "层 {layer}｜最大深度 {max:.6}｜非零 {nonzero} / {total}（左上 256² 里 {corner}）",
+                    )),
+                    None => lines.push(format!("层 {layer}｜读不回来")),
+                }
+            }
+            for line in lines {
+                println!("影子 atlas 探针：{line}");
+            }
+        }
         let _shadow_texture = shadow_texture;
 
         // ---- group 0 的契约：从**某一份物体 shader** 反射（五格超集的那份布局）----
@@ -2850,6 +2888,170 @@ fn describe_views(
         ));
     }
     audit
+}
+
+/// 读回一张 `depth32float` 纹理的**整层统计**（**仪器**，只在 `PX_AUDIT_SHADOW` 时调）：
+/// `(最大深度, 非零格数, 总格数, 左上角那一块非零格数)`。
+///
+/// ⚠ 为什么要统计而不是取几个点：这一轮的病是"整层都是 0"与"只有某一页有值"长得一样，
+/// 而取点恰好落在空格上时两者都读成 0。统计一次就把"有没有东西"与"东西在哪一片"分开。
+fn read_depth_stats(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    texture: &wgpu::Texture,
+    layer: u32,
+) -> Option<(f32, usize, usize, usize)> {
+    let side = texture.width();
+    let bytes_per_row = side * 4;
+    let size = u64::from(bytes_per_row) * u64::from(side);
+    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("影子 atlas 统计"),
+        size,
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("影子 atlas 统计"),
+    });
+    encoder.copy_texture_to_buffer(
+        wgpu::TexelCopyTextureInfo {
+            texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d {
+                x: 0,
+                y: 0,
+                z: layer,
+            },
+            aspect: wgpu::TextureAspect::DepthOnly,
+        },
+        wgpu::TexelCopyBufferInfo {
+            buffer: &buffer,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(bytes_per_row),
+                rows_per_image: Some(side),
+            },
+        },
+        wgpu::Extent3d {
+            width: side,
+            height: side,
+            depth_or_array_layers: 1,
+        },
+    );
+    queue.submit(Some(encoder.finish()));
+    let slice = buffer.slice(..);
+    let (sender, receiver) = std::sync::mpsc::channel();
+    slice.map_async(wgpu::MapMode::Read, move |result| {
+        let _ = sender.send(result);
+    });
+    device
+        .poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: Some(std::time::Duration::from_secs(60)),
+        })
+        .ok()?;
+    receiver.recv().ok()?.ok()?;
+    let data = slice.get_mapped_range();
+    let mut max = 0.0_f32;
+    let mut nonzero = 0_usize;
+    let mut corner = 0_usize;
+    let total = (side * side) as usize;
+    for y in 0..side {
+        for x in 0..side {
+            let at = (y * bytes_per_row + x * 4) as usize;
+            let value = f32::from_le_bytes([data[at], data[at + 1], data[at + 2], data[at + 3]]);
+            if value > 0.0 {
+                nonzero += 1;
+                if value > max {
+                    max = value;
+                }
+                if x < 256 && y < 256 {
+                    corner += 1;
+                }
+            }
+        }
+    }
+    drop(data);
+    buffer.unmap();
+    Some((max, nonzero, total, corner))
+}
+
+/// 读回一张 `depth32float` 纹理的几格（**仪器**，只在 `PX_AUDIT_SHADOW` 时调）。
+///
+/// ⚠ 它存在的原因是这一轮踩到的坑：影子"开着与不开只差一点"时，肉眼与均值都分不清
+/// "页表没查到" / "查到了但里面是空的" / "比较方向反了"三种病。**读回几个数**立刻分辨。
+///
+/// ⚠ `Depth32Float` **只能整层搬**（wgpu 那句 "Partial copy … is not supported for the
+/// Source texture format Depth32Float"）：所以一次读回一整层，再在里面取点。
+fn read_depth_probe(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    texture: &wgpu::Texture,
+    layer: u32,
+    points: &[(u32, u32)],
+) -> Option<Vec<f32>> {
+    let side = texture.width();
+    // ⚠ `copy_texture_to_buffer` 的 `bytes_per_row` 必须是 64 的整数倍：
+    //    1024 × 4 = 4096 正好是。
+    let bytes_per_row = side * 4;
+    let size = u64::from(bytes_per_row) * u64::from(side);
+    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("影子 atlas 探针"),
+        size,
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("影子 atlas 探针"),
+    });
+    encoder.copy_texture_to_buffer(
+        wgpu::TexelCopyTextureInfo {
+            texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d {
+                x: 0,
+                y: 0,
+                z: layer,
+            },
+            aspect: wgpu::TextureAspect::DepthOnly,
+        },
+        wgpu::TexelCopyBufferInfo {
+            buffer: &buffer,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(bytes_per_row),
+                rows_per_image: Some(side),
+            },
+        },
+        wgpu::Extent3d {
+            width: side,
+            height: side,
+            depth_or_array_layers: 1,
+        },
+    );
+    queue.submit(Some(encoder.finish()));
+    let slice = buffer.slice(..);
+    let (sender, receiver) = std::sync::mpsc::channel();
+    slice.map_async(wgpu::MapMode::Read, move |result| {
+        let _ = sender.send(result);
+    });
+    device
+        .poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: Some(std::time::Duration::from_secs(60)),
+        })
+        .ok()?;
+    receiver.recv().ok()?.ok()?;
+    let data = slice.get_mapped_range();
+    let mut out = Vec::with_capacity(points.len());
+    for (x, y) in points {
+        let at = ((*y * bytes_per_row) + (*x * 4)) as usize;
+        let bytes = data.get(at..at + 4)?;
+        out.push(f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]));
+    }
+    drop(data);
+    buffer.unmap();
+    Some(out)
 }
 
 /// 一格的材质表：名字 → 那几套组（`zero` 与 `camera_stage` 是**这一格**的那两份）。
