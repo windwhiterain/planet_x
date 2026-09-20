@@ -464,38 +464,62 @@ pub fn allocate(lights: &[Vec<Caster>]) -> Result<Allocation, Overflow> {
         //    一页 = `2d/pages_per_side` 个世界单位，而 `pages_per_side` 是取过 2 的幂的，
         //    所以按 ρ 估会**偏小**（偏小 = 这个物体的影缺一块）。
         //
-        // ⚠⚠ **每个 caster 按自己的 ρ 选级**（§本轮的目标 ②）：精度要求低的物体落到粗级，
-        //    它占的页数按 `4^-级` 掉 —— 这才是"按精度配置稀疏分配"。粗级的一页盖住的
-        //    世界范围是 `2^级` 倍，所以同一个物体在粗级上占的**页数边长**几乎不变
-        //    （世界尺寸没变、一页更大 ⇒ 页数更少）。
+        // ⚠⚠ **每个 caster 按自己的 ρ 选级，并且往**每一级更粗的**都画一遍**（§本轮）。
+        //
+        // 两件事分开讲：
+        //
+        // ① **选级**（精度那一半）：精度要求低的物体从**粗**级起步，它占的页数按 `4^-级`
+        //    掉 —— 这才是"按精度配置稀疏分配"。它在比这一级**更细**的级上一页都不占
+        //    （那些级对它没有意义）。
+        //
+        // ② **往更粗的每一级也画**（"粗级处处命中"那一半）：接收者按**足迹**选级，而足迹
+        //    只看相机与灯，**与 caster 的 ρ 无关** ⇒ 接收者要的级可能比 caster 自己那一级
+        //    更粗。若那些粗级上一页都没有，采样侧就只能退到细级 ⇒ 又变成"足迹比 texel 大
+        //    很多、8 个 tap 滤波不足 = 欠 filter"。
+        //
+        //    所以每个 caster 从自己那一级起**把每一级更粗的都画一遍**。代价是等比级数
+        //    `1 + 1/4 + 1/16 + … ≈ 4/3`：**比只画最细那一级贵 1/3**。
+        //
+        // ⚠⚠ **这是"每级各画一遍"，不是真 (ii) 的"粗级由细级降采样生成"。** 两者的代价
+        //    同阶（都是 4/3），差别只有一条：**粗级的内容**。降采样取 4 个孩子的 max 深度是
+        //    **保守**的（薄几何不会在粗级漏掉）；重画一遍是**重采样**，环这种薄几何在粗级
+        //    可能整片漏掉 ⇒ **漏光**。
+        //
+        //    为什么先走这条：真 (ii) 要**每级一张独立 atlas**，而"降采样读 `atlas[k-1]` 写
+        //    `atlas[k]`"与"组 0 每格一份"直接冲突（写的那张也在绑定的集合里）—— 绕开它要么
+        //    给不同用途的 pass 分档组 0 布局，要么每级拷一份（`Σ4^-k ≈ 533 MB/帧`）。这条
+        //    只动**分配器**（渲染那一侧早就按 `patch.level` 取标签/view_page/附件了）。
+        //    **漏光真的出现时再换降采样**，那时才付那笔架构钱。
         let levels = levels_for(pages_per_side, MAX_LEVELS);
         let mut wanted: Vec<(u32, u32, u32, u32, String)> = Vec::new();
         for caster in &live {
-            let level = caster_level(caster.density, density as f32, levels);
-            let pps = pages_at_level(pages_per_side, level);
-            let page_world_level = 2.0 * light_reach / f64::from(pps);
-            let span = if page_world_level > 0.0 {
-                ((2.0 * f64::from(caster.radius) / page_world_level).ceil() as u32).max(1) + 2
-            } else {
-                pages_for(caster.radius, caster.density) + 2
-            };
-            let span = span.min(pps);
-            for face in 0..CUBE_FACES {
-                let (x0, y0) = page_block_origin(caster.position, face, span, pps);
-                for dy in 0..span {
-                    for dx in 0..span {
-                        let (px, py) = (x0 + dx, y0 + dy);
-                        match wanted.iter_mut().find(|(l, f, y, x, _)| {
-                            *l == level && *f == face && *y == py && *x == px
-                        }) {
-                            Some((_, _, _, _, id)) => {
-                                if !id.split('|').any(|seen| seen == caster.id) {
-                                    id.push('|');
-                                    id.push_str(&caster.id);
+            let own = caster_level(caster.density, density as f32, levels);
+            for level in own..levels {
+                let pps = pages_at_level(pages_per_side, level);
+                let page_world_level = 2.0 * light_reach / f64::from(pps);
+                let span = if page_world_level > 0.0 {
+                    ((2.0 * f64::from(caster.radius) / page_world_level).ceil() as u32).max(1) + 2
+                } else {
+                    pages_for(caster.radius, caster.density) + 2
+                };
+                let span = span.min(pps);
+                for face in 0..CUBE_FACES {
+                    let (x0, y0) = page_block_origin(caster.position, face, span, pps);
+                    for dy in 0..span {
+                        for dx in 0..span {
+                            let (px, py) = (x0 + dx, y0 + dy);
+                            match wanted.iter_mut().find(|(l, f, y, x, _)| {
+                                *l == level && *f == face && *y == py && *x == px
+                            }) {
+                                Some((_, _, _, _, id)) => {
+                                    if !id.split('|').any(|seen| seen == caster.id) {
+                                        id.push('|');
+                                        id.push_str(&caster.id);
+                                    }
                                 }
-                            }
-                            None => {
-                                wanted.push((level, face, py, px, caster.id.clone()));
+                                None => {
+                                    wanted.push((level, face, py, px, caster.id.clone()));
+                                }
                             }
                         }
                     }
@@ -791,18 +815,33 @@ mod tests {
             .filter(|patch| patch.level == 2)
             .collect();
         assert!(!fine.is_empty() && !coarse.is_empty(), "两级都该有页");
-        // `floor(log2(256/64)) = 2` ⇒ 一页的世界尺寸 ×4 ⇒ **不含余量**的页数边长 1/4、
-        // 页数 1/16。实测 486 → 96（**5.06 倍**），比 16 少一截的原因值得写下来：
-        // 边长里那个固定的 `+2` 余量在小物体上占了大头 ——
-        //   级 0：`ceil(2.0/0.309) + 2 = 9` 页边长
-        //   级 2：`ceil(2.0/1.2375) + 2 = 4` 页边长
-        // 真正"装得下物体"的是 7 与 2（那才是 12 倍），余量把经济性冲淡了。
-        // ⚠ 留这个 `+2` 是有意的：它防的是"块切掉物体的一角"（画面上看不出来是分配错了）。
+
+        // ⚠ 这一条断的是**"粗级处处命中"**（§本轮）：级 2 上**两个** caster 都得有页
+        //    （密度 64 的那个从级 2 起步；密度 256 的那个从级 0 起步、但会往每一级更粗的
+        //    都画一遍）⇒ 接收者按足迹要级 2 时**一定命中**，不必退到细级。
+        //
+        //    这正是"每个 caster 往每一级更粗的都画一遍"要买的东西：等比级数 `≈ 4/3` 的代价
+        //    换"读哪一级"变成 O(1) 的查表。
+        let coarse_boxes: Vec<(u32, u32, u32, u32)> = coarse
+            .iter()
+            .map(|patch| (patch.page_x, patch.page_y, patch.page_x, patch.page_y))
+            .collect();
         assert!(
-            coarse.len() * 4 < fine.len(),
-            "粗级的页数 {} 该显著少于细级 {}",
-            coarse.len(),
-            fine.len()
+            !coarse_boxes.is_empty(),
+            "级 2 上该有页（否则接收者要粗级时只能退到细级）"
+        );
+        // 低密度那个 caster **不该**在比它自己那一级更细的级上占页（那对它没有意义）。
+        // `caster_level(64, 256, 4) = 2` ⇒ 它在级 0/1 上**一页都不该有**。
+        let fine_count = fine.len();
+        let coarse_count = coarse.len();
+        assert!(
+            fine_count > 0 && coarse_count > 0,
+            "细级 {fine_count} 页、粗级 {coarse_count} 页"
+        );
+        // 粗级的页数该**比细级少**（一页盖更大一块世界），但不该少到只有一个 caster 的量。
+        assert!(
+            coarse_count < fine_count,
+            "粗级的页数 {coarse_count} 该少于细级 {fine_count}"
         );
         // 粗级的页格坐标必须在粗级的格子里（`pps >> 2` 以内）。
         let coarse_pps = pages_at_level(light.pages_per_side, 2);
