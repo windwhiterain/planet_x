@@ -49,7 +49,7 @@ impl px_field_alg::field_fn::FieldFn for LatBands {
         let wobble = (latitude * 2.30 + upstream * 4.0).sin()
             + 0.55 * (latitude * 5.10 - upstream * 7.0).cos();
         // 相位：纬度给"几圈带"，摆动与上游各给一部分"边界怎么歪"。
-        let phase = latitude * bands * std::f32::consts::PI + wobble * 1.4 - (upstream - 0.5) * 3.5;
+        let phase = latitude * bands * std::f32::consts::PI + wobble * 0.75 - (upstream - 0.5) * 2.4;
 
         // ① 相位 → **三角波**（等斜率、周期 2π）：`fract` 把它折回 `[0,1)`，再从 1 折回 0。
         //   ⚠ 相对正弦，这一条把"过渡"从"中点最陡"改成"全程同陡" ⇒ 同一条带看着宽得多。
@@ -60,14 +60,14 @@ impl px_field_alg::field_fn::FieldFn for LatBands {
 
         // ② 细丝：高频小涟漪，振幅骑在上游场上（湍流亮的地方丝更明显）—— 破坏"一圈光板"。
         let fiber = 0.5 + 0.5 * (phase * 5.0 + upstream * 9.0).sin();
-        let ripple = 0.10 * fiber * (0.35 + 0.65 * upstream);
+        let ripple = 0.055 * fiber * (0.35 + 0.65 * upstream);
         // ③ 天气：沿经度分几段"带被洗淡"（`washed ∈ [0.65, 1]`）—— 同一颗球上不是每条带一样清楚。
         let longitude = direction[2].atan2(direction[0]);
         let weather = 0.5 + 0.5 * (longitude * 2.0 + upstream * 4.0).sin();
         let washed = 1.0 - 0.35 * (1.0 - weather);
         // ④ 按纬度的淡出：`fade ∈ [0,1]`，取 0 的那些纬度**整片没有带**（剩下一点基底起伏）。
         let fade = 0.5 + 0.5 * (latitude * 2.7 + upstream * 2.2).sin();
-        let strength = 0.45 + 0.55 * fade;
+        let strength = 0.55 + 0.45 * fade;
 
         // 对比：以 0.5 为轴把落点推开（`gain = 0` ⇒ 不动）。
         let band = 0.5 + (wave - 0.5) * washed * strength + ripple;
