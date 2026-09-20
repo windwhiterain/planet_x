@@ -61,7 +61,15 @@ pub fn bake_emission(density: &VolumeData, params: &EmissionParams) -> VolumeDat
     let step = total / steps as f32;
 
     // ⚠ **四通道**（RGB 发射 + A 消光）⇒ 分配要乘 4。少乘就是"写到下一格"的越界。
-    let mut data = vec![0.0_f32; (CUBE_FACES * layers * res * res * 4) as usize];
+    // ⚠ **六通道**：`[发射 R, G, B, σ_R, σ_G, σ_B]` ⇒ 分配要乘 6。
+    //
+    // ⚠⚠ 发射为什么必须**逐通道**（而不是一个标量）：
+    //   单标量时 `每通道辐射 = 同一个 emit × 各通道透过率`，而透过率只随**总消光**走
+    //   ⇒ **浓处与薄处的色相必然相同**（只是亮度不同）。
+    //   于是"核白蓝 + 边玫红"（参考图的定义性特征）**根本给不出来** ——
+    //   把 `σ_G` 调大能让薄处玫红、浓处也跟着变紫（前几轮"要么全灰、要么全紫"的根因）。
+    //   逐通道之后，**底光**可以带自己的色相（`glow_tint`）⇒ 核里那层蓝白就有了。
+    let mut data = vec![0.0_f32; (CUBE_FACES * layers * res * res * 6) as usize];
     let mut position = [0.0_f32; 3];
     for face in 0..CUBE_FACES {
         for layer in 0..layers {
@@ -91,28 +99,22 @@ pub fn bake_emission(density: &VolumeData, params: &EmissionParams) -> VolumeDat
                     }
                     let lit = (-optical_depth * params.shadow_gain).exp();
 
-                    // ⚠ **两份发射**：主项（`power` 高 ⇒ 只有浓的地方亮）+ **中性底光**
-                    //   （`power` 低 ≈1 ⇒ 浓处相对更强，形成核里那层白蓝）。
-                    //   见 `EmissionParams::glow_gain` 的文档：单标量发射给不出
-                    //   "核白蓝、边玫红"，因为颜色只来自消光、而消光只按**总量**染色。
-                    let emit = d.powf(params.emission_power) * params.emission_gain * lit
-                        + d.powf(params.glow_power) * params.glow_gain * lit;
+                    // ---- 两份发射，逐通道 ----
+                    // 主项（高幂 ⇒ 只有浓的地方亮）是**中性**的，它的颜色由消光给
+                    // （薄处自然被染成玫红）；底光（低幂 ⇒ 浓处相对更强）带自己的色相。
+                    let main = d.powf(params.emission_power) * params.emission_gain * lit;
+                    let glow = d.powf(params.glow_power) * params.glow_gain * lit;
 
                     // ---- 消光：逐通道 + 尘埃那一笔 ----
                     let base = d.powf(params.extinction_power);
                     let dust = ((d - params.dust_threshold).max(0.0)) * params.dust_bias;
-                    let mut extinction = [0.0_f32; 3];
-                    for channel in 0..3 {
-                        extinction[channel] = base * params.extinction[channel] + dust;
-                    }
 
                     let slot = (((face * layers + layer) * res + t) * res + s) as usize;
-                    // ⚠ 布局：`[发射, σ_R, σ_G, σ_B]`。取平均会把三条通道积成同一张图
-                    //   （见本模块文件头那条实测）。
-                    data[slot * 4] = emit;
-                    data[slot * 4 + 1] = extinction[0];
-                    data[slot * 4 + 2] = extinction[1];
-                    data[slot * 4 + 3] = extinction[2];
+                    for channel in 0..3 {
+                        let emit = main + glow * params.glow_tint[channel];
+                        data[slot * 6 + channel] = emit;
+                        data[slot * 6 + 3 + channel] = base * params.extinction[channel] + dust;
+                    }
                 }
             }
         }
@@ -219,9 +221,10 @@ mod tests {
         let emit_of = |face: u32| -> f32 {
             let layer = density.layers - 1;
             let mid = density.res / 2;
+            // ⚠ 布局是六通道 ⇒ 发射在 lane 0..3（这里是 R）。
             emission.data[((((face * density.layers + layer) * density.res + mid) * density.res
                 + mid)
-                * 4) as usize]
+                * 6) as usize]
         };
         let facing = emit_of(0); // 面 0 的法线朝 +X，光源就在 +X
         let away = emit_of(1); // 面 1 朝 −X
@@ -252,7 +255,7 @@ mod tests {
         let mean_alpha = |volume: &VolumeData| -> f64 {
             volume.data.chunks(4).map(|c| c[3] as f64).sum::<f64>()
                 / volume.data.len().max(4) as f64
-                * 4.0
+                * 6.0
         };
         assert!(
             mean_alpha(&thick) > mean_alpha(&thin),
@@ -276,20 +279,21 @@ mod tests {
         // 先确认密度真的读到了（阳性对照）：读不到的话下面那条测的是"0 的平均"。
         assert!(
             emission.data[3] > 1e-6,
-            "格心该读到密度 0.5，A 却是 {}（密度没读到）",
+            "格心该读到密度 0.5，σ_R 却是 {}（密度没读到）",
             emission.data[3]
         );
-        // A 存的是**B 通道的消光**（布局 `[发射, σ_R, σ_G, σ_B]`）⇒ 0.5 × 3.0 = 1.5。
-        let alpha = emission.data[3];
+        // ⚠ 布局是**六通道** `[发射 R, G, B, σ_R, σ_G, σ_B]` ⇒ `data[5]` 才是 σ_B。
+        //   0.5 密度 × 3.0 = 1.5。
+        let alpha = emission.data[5];
         assert!(
             (alpha - 1.5).abs() < 1e-3,
             "0.5 密度 × B 通道系数 3 应当是 1.5，实际 {alpha}"
         );
-        // 顺带钉住三格确实是**三个不同的数**（取平均会让它们逐字相同）。
+        // 顺带钉住三条消光通道确实是**三个不同的数**（取平均会让它们逐字相同）。
         assert!(
-            emission.data[1] < emission.data[2] && emission.data[2] < emission.data[3],
+            emission.data[3] < emission.data[4] && emission.data[4] < emission.data[5],
             "三个消光通道必须逐格不同：{:?}",
-            &emission.data[0..4]
+            &emission.data[3..6]
         );
     }
 

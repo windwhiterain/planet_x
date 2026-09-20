@@ -65,7 +65,7 @@ fn star_level(stars: &Field, direction: [f32; 3], params: &SkyParams) -> f32 {
 ///   这条链与"读哪一条通道"无关 ⇒ 算一遍、两条通道各 gather 一次。
 #[derive(Clone, Copy)]
 struct Sample {
-    /// 八个角在 `data` 里的**下标**（已含 `* 4`，等通道再加 `lane`）。
+    /// 八个角在 `data` 里的**下标**（已含 `* 6`，等通道再加 `lane`）。
     corners: [usize; 8],
     weights: [f32; 8],
     inside: bool,
@@ -148,7 +148,7 @@ fn sample_at(volume: &VolumeData, point: [f32; 3]) -> Sample {
     let (la, lb) = (layer_at(0.0), layer_at(1.0));
 
     let slot = |cell_s: u32, cell_t: u32, layer: u32| -> usize {
-        ((((face * layers + layer) * res + cell_t) * res + cell_s) * 4) as usize
+        ((((face * layers + layer) * res + cell_t) * res + cell_s) * 6) as usize
     };
     let corners = [
         slot(xa, ya, la),
@@ -196,7 +196,7 @@ fn march_channel(
     let step = (exit - enter) / steps as f32;
     let seed = 0x51ed_270b_u32.wrapping_add(channel as u32);
     // ⚠ 这一通道自己的消光（`1 + channel`）⇒ 蓝被吃得比红多 ⇒ 尘埃染红。
-    let sigma_lane = 1 + channel.min(2);
+    let sigma_lane = 3 + channel.min(2);
 
     // ⚠ **壳外的那一段不必采样**：相机在壳心 ⇒ 每条视线的入射半径就是 `inner`，
     //   所以从相机出发**整段都在壳内**，解析的入射/出射点没有意义。
@@ -220,7 +220,8 @@ fn march_channel(
         ];
         // ⚠ 几何**算一遍**，发射与消光各 gather 一次（见 [`Sample`]）。
         let sample = sample_at(emission, point);
-        let emit = sample.gather(&emission.data, 0);
+        // ⚠ **逐通道的发射**：lane c 是这一条通道自己的发射（见 cloud.emission 的六通道布局）。
+        let emit = sample.gather(&emission.data, channel.min(2));
         let sigma = sample.gather(&emission.data, sigma_lane);
         if emit > 0.0 {
             radiance += transmittance * emit * step;
@@ -326,12 +327,17 @@ mod tests {
 
     /// 同上，但三通道消光可以不同（用来判"尘埃染红"）。
     fn uniform_channels(res: u32, layers: u32, emit: f32, alpha: [f32; 3]) -> VolumeData {
-        let mut data = vec![0.0_f32; (CUBE_FACES * layers * res * res * 4) as usize];
-        for chunk in data.chunks_mut(4) {
+        // ⚠ 布局：`[发射 R, G, B, σ_R, σ_G, σ_B]`（六通道）。
+        //   发射给成三条通道**相同**（中性）⇒ 色相全由消光决定，
+        //   于是这些"消光越大越暗"的判据仍然只测消光那一件事。
+        let mut data = vec![0.0_f32; (CUBE_FACES * layers * res * res * 6) as usize];
+        for chunk in data.chunks_mut(6) {
             chunk[0] = emit;
-            chunk[1] = alpha[0];
-            chunk[2] = alpha[1];
-            chunk[3] = alpha[2];
+            chunk[1] = emit;
+            chunk[2] = emit;
+            chunk[3] = alpha[0];
+            chunk[4] = alpha[1];
+            chunk[5] = alpha[2];
         }
         VolumeData {
             res,
