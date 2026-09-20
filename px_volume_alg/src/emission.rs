@@ -1,20 +1,26 @@
 //! `cloud.emission`：**密度体积 → 逐体素的发射与消光**（体渲染的"材质"）。
 //!
-//! 输出体积的四个通道：
+//! 输出体积的四个通道（**交错**）：
 //!
 //! ```text
-//! RGB = 发射（每单位长度的辐射）
-//! A   = 消光（每单位长度的吸收系数）
+//! R = 发射强度（标量）
+//! G = 逐通道消光 σ_R
+//! B = 逐通道消光 σ_G
+//! A = 逐通道消光 σ_B
 //! ```
+//!
+//! ⚠ **消光必须逐通道存**（这是第一版写错的地方）：原来把三通道消光取**平均**塞进一个 A，
+//!   于是三条通道积出来**逐字相同** —— 图像是灰的，"尘埃把光染红"整个没有发生
+//!   （实测 `sky_0/1/2` 的最大值 0.4537 / 0.4536 / 0.4528，只差在第四位）。
+//!   逐通道消光是"星云照片为什么偏红"的**唯一**来路，不能压成一个数。
+//!
+//! ⚠ 发射只存**一个标量**（三格不各存一份）：这一档不建模"不同波长发不同光"，
+//!   颜色由**消光**造成（蓝先被吃掉 ⇒ 透出来的偏红）。要多色发射是另一档事。
 //!
 //! ⚠ **为什么光照要在这里算完**（而不是留给步进）：阴影是"从这一点朝光源看，中间有多少气"
 //!   —— 它**只与这一点有关**，与看它的视线无关。按体素算一遍是 `体素数 × 阴影步数`；
 //!   塞进步进就是 `射线数 × 步数 × 阴影步数`，那正是"渲染期步进"做不到的原因。
 //!   烘图时算得完，是因为体素数（几十万）比"射线数 × 步数"（上亿）小三个数量级。
-//!
-//! ⚠ 逐通道消光（`extinction: [f32; 3]`）是"尘埃让东西**变红**"的唯一来路：
-//!   同一个 τ 乘上三档不同的系数 ⇒ 蓝光先被吃掉 ⇒ 透过尘埃的那部分偏红。
-//!   写成单档（三个数一样）尘埃就只会把东西变暗，不会变色。
 
 use px_field_schema::field::{CUBE_FACES, cube_direction};
 use px_volume_schema::VolumeData;
@@ -96,13 +102,12 @@ pub fn bake_emission(density: &VolumeData, params: &EmissionParams) -> VolumeDat
                     }
 
                     let slot = (((face * layers + layer) * res + t) * res + s) as usize;
+                    // ⚠ 布局：`[发射, σ_R, σ_G, σ_B]`。取平均会把三条通道积成同一张图
+                    //   （见本模块文件头那条实测）。
                     data[slot * 4] = emit;
-                    data[slot * 4 + 1] = emit;
-                    data[slot * 4 + 2] = emit;
-                    // ⚠ 消光取三通道的**平均**塞进 A：步进按 A 算总透过率，而逐通道的
-                    //   差异靠"每步各通道各乘一次"体现不了（一张体积只有一个 A）。
-                    //   ⇒ 这里给平均，逐通道的偏色由 `sky.nebula` 侧的 `extinction` 再补。
-                    data[slot * 4 + 3] = (extinction[0] + extinction[1] + extinction[2]) / 3.0;
+                    data[slot * 4 + 1] = extinction[0];
+                    data[slot * 4 + 2] = extinction[1];
+                    data[slot * 4 + 3] = extinction[2];
                 }
             }
         }
@@ -125,9 +130,10 @@ pub fn bake_emission(density: &VolumeData, params: &EmissionParams) -> VolumeDat
 pub fn emit_from_field(
     density_params: &DensityParams,
     emission_params: &EmissionParams,
+    canvas_width: u32,
     density_field: &px_field_schema::field::Field,
 ) -> Result<VolumeData, String> {
-    let density = bake_density(density_params, density_field)?;
+    let density = bake_density(density_params, canvas_width, density_field)?;
     Ok(bake_emission(&density, emission_params))
 }
 
@@ -268,11 +274,17 @@ mod tests {
             "格心该读到密度 0.5，A 却是 {}（密度没读到）",
             emission.data[3]
         );
-        // A 存的是三通道平均 ⇒ 应当是 `d × (1+2+3)/3 = d × 2`。
+        // A 存的是**B 通道的消光**（布局 `[发射, σ_R, σ_G, σ_B]`）⇒ 0.5 × 3.0 = 1.5。
         let alpha = emission.data[3];
         assert!(
-            (alpha - 1.0).abs() < 1e-3,
-            "0.5 密度 × 平均系数 2 应当是 1.0，实际 {alpha}"
+            (alpha - 1.5).abs() < 1e-3,
+            "0.5 密度 × B 通道系数 3 应当是 1.5，实际 {alpha}"
+        );
+        // 顺带钉住三格确实是**三个不同的数**（取平均会让它们逐字相同）。
+        assert!(
+            emission.data[1] < emission.data[2] && emission.data[2] < emission.data[3],
+            "三个消光通道必须逐格不同：{:?}",
+            &emission.data[0..4]
         );
     }
 
@@ -286,6 +298,7 @@ mod tests {
             emit_from_field(
                 &DensityParams::default(),
                 &EmissionParams::default(),
+                shape.res,
                 &field
             )
             .is_err(),

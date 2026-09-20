@@ -23,11 +23,18 @@ use px_volume_schema::params::sky::SkyParams;
 
 /// 格子的确定性抖动：同一格永远同一个偏移。
 ///
+/// ⚠ **必须逐格逐步都不同**（`texel` 与 `step` 一起进哈希）：第一版写成
+///   `jitter_at(texel * 1024 + step)`，而 `texel = (y * face + x) ^ (face << 20)`
+///   —— 同一个 `y` 上 `texel * 1024` 的低位被 `+ step` 主导，于是**整行拿到同一个偏移**
+///   ⇒ 画面上一道道**横向条纹**（实测：六面平铺图上明显的等距横线）。
+///   抖动的本意是"打散层状条纹"，写错反而造出另一种条纹。
+///
 /// ⚠ **不许**用时间或真随机：那会让同一份参数烘出两张不同的图，而缓存键是"键 = 内容"
 ///   ——"同参数同产物"是全仓的地基。
-fn jitter_at(index: u32, seed: u32) -> f32 {
-    let mut hash = index
+fn jitter_at(texel: u32, step: u32, seed: u32) -> f32 {
+    let mut hash = texel
         .wrapping_mul(0x9e37_79b9)
+        .wrapping_add(step.wrapping_mul(0x85eb_ca6b))
         .wrapping_add(seed.wrapping_mul(0x27d4_eb2d));
     hash ^= hash >> 15;
     hash = hash.wrapping_mul(0x2c1b_3c6d);
@@ -51,11 +58,11 @@ fn star_level(stars: &Field, direction: [f32; 3], params: &SkyParams) -> f32 {
     (raw - params.star_floor) / (1.0 - params.star_floor).max(1e-4)
 }
 
-/// 世界点 → 三条通道的值。`lane` 取 `0..=3`（0/1/2 = 发射的 RGB、3 = 消光）。
+/// 世界点 → 体网格的某个通道。
 ///
-/// ⚠ **一份实现，两个调用点**（发射那一趟与消光那一趟都走这里）：体积的四个通道是交错的，
-///   而"跨面取邻居 / 边界返回 0"这套规则只能有一份 —— 分开写两遍迟早会漂，而漂了的表现
-///   是"发射与消光不在同一个位置"，画面上是雾与暗带错开一格，极难归因。
+/// 通道布局（见 `cloud.emission` 的文件头）：**0 = 发射**，**1/2/3 = σ_R / σ_G / σ_B**。
+/// ⚠ 于是"某一条颜色通道的消光"是 `lane = 1 + channel`，不是"取 A" —— 第一版把消光压成
+///   一个数，三条通道就积成了同一张图。
 fn sample_lane(volume: &VolumeData, point: [f32; 3], lane: usize) -> f32 {
     let radius = (point[0] * point[0] + point[1] * point[1] + point[2] * point[2]).sqrt();
     let span = volume.outer - volume.inner;
@@ -138,7 +145,7 @@ fn march_channel(
     for index in 0..steps {
         // ⚠ 抖动只挪**格内**的采样点（不跨格）⇒ 期望值不变，而层状条纹被打散。
         let offset = if params.jitter > 0.0 {
-            jitter_at(texel.wrapping_mul(1024).wrapping_add(index), seed) * params.jitter
+            jitter_at(texel, index, seed) * params.jitter
         } else {
             0.5
         };
@@ -148,8 +155,9 @@ fn march_channel(
             direction[1] * distance,
             direction[2] * distance,
         ];
-        let emit = sample_lane(emission, point, channel);
-        let sigma = sample_lane(emission, point, 3);
+        let emit = sample_lane(emission, point, 0);
+        // ⚠ 这一通道自己的消光（`1 + channel`）⇒ 蓝被吃得比红多 ⇒ 尘埃染红。
+        let sigma = sample_lane(emission, point, 1 + channel.min(2));
         if emit > 0.0 {
             radiance += transmittance * emit * step;
         }
@@ -185,6 +193,8 @@ pub fn raymarch_channel(
         let face_index = (y / face).min(CUBE_FACES - 1);
         for x in 0..field.width {
             let direction = art_direction_at(Projection::CubeMap, face, face * CUBE_FACES, x, y);
+            // ⚠ 逐格唯一：`y * face + x` **必须**带上 x（行号 y 一样的格会拿到同一个抖动
+            //   ⇒ 横向条纹）。`face_index << 20` 只是把六个面分开。
             let texel = (y * face + x) ^ (face_index << 20);
             let value = march_channel(emission, stars, params, channel, direction, texel);
             field.set(x, y, value);
@@ -200,12 +210,17 @@ pub fn raymarch_from_field(
     density_params: &px_volume_schema::params::density::DensityParams,
     emission_params: &EmissionParams,
     sky_params: &SkyParams,
+    canvas_width: u32,
     density_field: &Field,
     stars: Option<&Field>,
     channel: usize,
 ) -> Result<Field, String> {
-    let emission =
-        crate::emission::emit_from_field(density_params, emission_params, density_field)?;
+    let emission = crate::emission::emit_from_field(
+        density_params,
+        emission_params,
+        canvas_width,
+        density_field,
+    )?;
     Ok(raymarch_channel(&emission, stars, sky_params, channel))
 }
 
@@ -214,14 +229,22 @@ mod tests {
     use super::*;
     use px_field_schema::field::Field;
 
-    /// 一份均匀的发射体积：发射 `emit`、消光 `alpha`。
+    /// 一份均匀的发射体积：发射 `emit`、三通道消光都是 `alpha`。
+    ///
+    /// ⚠ 布局与 `cloud.emission` **逐字一致**（`[发射, σ_R, σ_G, σ_B]`）：判据用的假数据
+    ///   一旦与真布局不同，测的就是另一个算子。
     fn uniform(res: u32, layers: u32, emit: f32, alpha: f32) -> VolumeData {
+        uniform_channels(res, layers, emit, [alpha, alpha, alpha])
+    }
+
+    /// 同上，但三通道消光可以不同（用来判"尘埃染红"）。
+    fn uniform_channels(res: u32, layers: u32, emit: f32, alpha: [f32; 3]) -> VolumeData {
         let mut data = vec![0.0_f32; (CUBE_FACES * layers * res * res * 4) as usize];
         for chunk in data.chunks_mut(4) {
             chunk[0] = emit;
-            chunk[1] = emit;
-            chunk[2] = emit;
-            chunk[3] = alpha;
+            chunk[1] = alpha[0];
+            chunk[2] = alpha[1];
+            chunk[3] = alpha[2];
         }
         VolumeData {
             res,
@@ -319,6 +342,28 @@ mod tests {
         assert_eq!(one.data, two.data);
     }
 
+    /// **逐通道消光真的分得开**：蓝吃得比红多 ⇒ 同一份体积积出来的蓝通道必须比红通道暗。
+    ///
+    /// ⚠ 这条钉的是"消光通道写在哪个 lane"。第一版把三通道消光取平均塞进一个 A，
+    ///   于是三条通道**逐字相同**（实测最大值只差第四位）—— 图像是灰的，
+    ///   而"尘埃染红"这件事在画面上完全没发生。
+    #[test]
+    fn per_channel_extinction_makes_blue_darker_than_red() {
+        // 红光几乎不吃、蓝光吃得多（与 `EmissionParams::default` 同一个方向）。
+        let volume = uniform_channels(8, 5, 0.5, [0.2, 1.2, 2.6]);
+        let red = raymarch_channel(&volume, None, &params(), 0);
+        let green = raymarch_channel(&volume, None, &params(), 1);
+        let blue = raymarch_channel(&volume, None, &params(), 2);
+        let mean = |field: &Field| -> f64 {
+            field.data.iter().map(|v| *v as f64).sum::<f64>() / field.data.len() as f64
+        };
+        let (r, g, b) = (mean(&red), mean(&green), mean(&blue));
+        assert!(
+            r > g && g > b,
+            "消光越大该越暗，实际 R {r:.4} / G {g:.4} / B {b:.4}（分不开说明读错了通道）"
+        );
+    }
+
     /// **消光与发射读的是同一个位置**：给一份"发射只在半边、消光只在另半边"的体积，
     /// 两者的空间分布必须各自正确（这一条钉的是 `sample_lane` 的那一份实现）。
     #[test]
@@ -326,18 +371,17 @@ mod tests {
         let res = 8;
         let layers = 6;
         let mut volume = uniform(res, layers, 0.0, 0.0);
-        // 按半径把体积分成内外两半：内半有发射，外半有消光。
-        let span = volume.outer - volume.inner;
+        // 按半径把体积分成内外两半：内半有发射，外半有消光（三通道都给）。
         for face in 0..CUBE_FACES {
             for layer in 0..layers {
-                let altitude = layer as f32 / (layers - 1) as f32;
-                let _ = span * altitude;
                 for t in 0..res {
                     for s in 0..res {
                         let slot = (((face * layers + layer) * res + t) * res + s) as usize;
                         if layer < layers / 2 {
                             volume.data[slot * 4] = 0.3;
                         } else {
+                            volume.data[slot * 4 + 1] = 0.3;
+                            volume.data[slot * 4 + 2] = 0.3;
                             volume.data[slot * 4 + 3] = 0.3;
                         }
                     }

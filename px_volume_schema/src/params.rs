@@ -224,12 +224,17 @@ pub mod density {
     #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, px_derive::PxParams)]
     #[serde(default, deny_unknown_fields)]
     pub struct DensityParams {
-        /// 每个面 `s` / `t` 两个轴的采样点数（`res × res` 个格）。
+        /// **径向层数与面内分辨率的比**（`res` 从画布取，见 [`Self::shape_of`]）。
         ///
-        /// ⚠ 它就是上游体网格场的 `width`：两边必须一致（上游场是照这张画布造的）。
-        pub res: u32,
-        /// 径向层数。⚠ 同样要与上游场一致（行数 = `res² × layers × 6`）。
-        pub layers: u32,
+        /// ⚠ 这里**故意不给 `res`**：体网格的分辨率必须等于上游那张三维场的 `width`，
+        ///   而那张场是照画布造的（`field.fbm3` 用 `grid.width`）⇒ 参数再写一遍 `res`
+        ///   只是多一个"两处必须一致"的地方，而它**只能**一致。
+        ///   更要紧的是：`--face` 是唯一该动分辨率的旋钮，而参数文件是静态的 ——
+        ///   写死 `res` 会让 `--face` 改不动体积的粗细（"快速迭代形状"就废了一半）。
+        ///
+        /// ⚠ `layers = res × 这个`：径向给得比面内稀是省算力的常规做法（视线在径向走得长，
+        ///   而径向的细节靠 `reach` 保守化兜住）。
+        pub layers_ratio: f32,
         /// 壳的内外半径（世界点 = 方向 × 半径）。
         ///
         /// ⚠ 它**只在这一档有定义**：上游那张三维场活在体素坐标 `(s, t, altitude)` 里、
@@ -249,8 +254,7 @@ pub mod density {
     impl Default for DensityParams {
         fn default() -> Self {
             Self {
-                res: 64,
-                layers: 32,
+                layers_ratio: 0.5,
                 inner: 1.0,
                 outer: 1.6,
                 reach: 1,
@@ -262,6 +266,15 @@ pub mod density {
         /// 壳的厚度。⚠ 步进要按它算步长，所以两处必须是同一个数。
         pub fn span(&self) -> f32 {
             self.outer - self.inner
+        }
+
+        /// 这份参数 + 画布宽度 ⇒ 体网格的形状 `(res, layers)`。
+        ///
+        /// ⚠ 分辨率取自**画布宽度**（见 [`Self::layers_ratio`] 的文档）。
+        pub fn shape_of(&self, canvas_width: u32) -> (u32, u32) {
+            let res = canvas_width.max(2);
+            let layers = ((res as f32 * self.layers_ratio).round() as u32).max(2);
+            (res, layers)
         }
     }
 }

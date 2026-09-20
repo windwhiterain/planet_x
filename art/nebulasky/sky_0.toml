@@ -1,0 +1,14 @@
+# `sky.nebula`：沿视线积分，出一条通道。
+#
+# ⚠ `face` 必须与图脚本的 `--face` 一致：它是**输出**立方贴图的分辨率
+#   （画布也是这个数 ⇒ 对不上会在形状检查那里当场报）。
+face = 64
+channel = 0
+steps = 96
+jitter = 1.0
+star_gain = 1.0
+background = [0.0, 0.0, 0.0]
+star_size = 0.8
+star_halo = 2.2
+star_halo_gain = 0.10
+star_floor = 0.4

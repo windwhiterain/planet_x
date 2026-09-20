@@ -8,7 +8,7 @@
 //! `px_render/src/planet.rs` 的口径，别拿"看起来等价"的写法替。
 
 use px_field_schema::field::Field;
-use px_protocol::art::{Domain, TextureFormat, TextureShape, CUBE_COLUMNS, CUBE_FACES};
+use px_protocol::art::{CUBE_COLUMNS, CUBE_FACES, Domain, TextureFormat, TextureShape};
 
 use super::shade::{half_from_f32, push_color};
 
@@ -221,14 +221,7 @@ pub(super) fn image_from(width: u32, height: u32, data: Vec<u8>, cube: bool) -> 
     } else {
         mip_chain(width, height, &data)
     };
-    TextureData::new(
-        width,
-        height,
-        1,
-        levels,
-        TextureFormat::Rgba8Srgb,
-        chain,
-    )
+    TextureData::new(width, height, 1, levels, TextureFormat::Rgba8Srgb, chain)
 }
 
 // ---------------------------------------------------------------------------
@@ -253,14 +246,13 @@ pub fn coverage_cube(mask: &Field, slopes: [&Field; 3]) -> Result<TextureData, S
         ));
     }
     for slope in slopes {
-        if slope.projection != Domain::CubeMap || slope.width != face || slope.height != field.height
+        if slope.projection != Domain::CubeMap
+            || slope.width != face
+            || slope.height != field.height
         {
             return Err(format!(
                 "云的梯度场必须和覆盖度同形（{face}×{}），这份是 {:?} {}×{}",
-                field.height,
-                slope.projection,
-                slope.width,
-                slope.height
+                field.height, slope.projection, slope.width, slope.height
             ));
         }
     }
@@ -275,6 +267,52 @@ pub fn coverage_cube(mask: &Field, slopes: [&Field; 3]) -> Result<TextureData, S
         ] {
             bytes.extend_from_slice(&half_from_f32(value).to_le_bytes());
         }
+    }
+
+    Ok(TextureData::new(
+        face,
+        face,
+        CUBE_FACES,
+        1,
+        TextureFormat::Rgba16Float,
+        bytes,
+    ))
+}
+
+/// **三条通道 → 一张 `Rgba16Float` 立方贴图**（HDR）。
+///
+/// ⚠ 与 [`field_cube`] 的差别：那一档把**一个标量**塞进 R、G/B 留 0（"把场当数据贴图"），
+///   这一档把**三条通道**各自塞进 R/G/B。星云那类"自己会发光"的背景要的是后者 ——
+///   它的颜色就是它积出来的颜色，而**亮度可以超过 1** ⇒ 用半精度浮点，不是 8 位 sRGB
+///   （8 位会把高光砍在 1.0，而"亮核"正是靠超过 1 的那一段）。
+///
+/// ⚠ 三张场必须是**同一张立方贴图**的形状：错一张就会把六面拼歪（判据与
+///   [`coverage_cube`] / [`field_cube`] 同一条）。
+pub fn color_cube(red: &Field, green: &Field, blue: &Field) -> Result<TextureData, String> {
+    let face = red.width.max(1);
+    for (name, field) in [("R", red), ("G", green), ("B", blue)] {
+        if field.projection != Domain::CubeMap {
+            return Err(format!(
+                "颜色立方贴图的 {name} 通道需要 CubeMap 产物，这份是 {:?}",
+                field.projection
+            ));
+        }
+        if field.width != face || field.height != face * CUBE_FACES {
+            return Err(format!(
+                "颜色立方贴图的 {name} 通道形状应当是 {face}×{}（`width × 6`），实际 {}×{}",
+                face * CUBE_FACES,
+                field.width,
+                field.height,
+            ));
+        }
+    }
+
+    let mut bytes = Vec::with_capacity(red.data.len() * 8);
+    for index in 0..red.data.len() {
+        for value in [red.data[index], green.data[index], blue.data[index]] {
+            bytes.extend_from_slice(&half_from_f32(value).to_le_bytes());
+        }
+        bytes.extend_from_slice(&half_from_f32(1.0).to_le_bytes());
     }
 
     Ok(TextureData::new(
@@ -398,10 +436,7 @@ pub fn ring_band(width: u32, height: u32) -> TextureData {
             let edge = (t / 0.07).clamp(0.0, 1.0) * ((1.0 - t) / 0.10).clamp(0.0, 1.0);
             let alpha = (density * edge).clamp(0.0, 1.0);
             let shade = 0.70 + 0.30 * (0.5 + 0.5 * (t * 61.0).sin());
-            push_color(
-                &mut data,
-                [0.878 * shade, 0.827 * shade, 0.729 * shade],
-            );
+            push_color(&mut data, [0.878 * shade, 0.827 * shade, 0.729 * shade]);
             let last = data.len() - 1;
             data[last] = (alpha * 240.0) as u8;
         }

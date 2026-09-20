@@ -147,11 +147,13 @@ pub fn sample_world(volume: &VolumeData, point: [f32; 3]) -> f32 {
 /// 值的含义就是**密度本身**（不是 `(场-τ)/L` 那一档）：步进要按它算消光与发射，
 /// 所以这里**不许**做阈值或归一化 —— 那是下游调参的事（同 `params` 里那句：
 /// "算子不钳制输出，要钳就在下游接一个 `field.remap`"）。
-pub fn bake_density(params: &DensityParams, field: &Field) -> Result<VolumeData, String> {
-    let shape = VolumeShape {
-        res: params.res.max(2),
-        layers: params.layers.max(2),
-    };
+pub fn bake_density(
+    params: &DensityParams,
+    canvas_width: u32,
+    field: &Field,
+) -> Result<VolumeData, String> {
+    let (res, layers) = params.shape_of(canvas_width);
+    let shape = VolumeShape { res, layers };
     if !shape.matches(field) {
         return Err(format!(
             "cloud.density 的上游必须是 res {} × layers {} 的体网格场（域 volume、\
@@ -201,6 +203,17 @@ mod tests {
         VolumeShape { res: 4, layers: 3 }
     }
 
+    /// 让 `DensityParams` 正好落在这个形状上（`res` 从画布取 ⇒ 只调比值）。
+    ///
+    /// ⚠ 判据都按具体的 `(res, layers)` 写，而参数里只有比值 ⇒ 这个助手是"两者之间那一根
+    ///   线"，它错了会让**每一条**判据都在测别的东西。
+    fn params_for(shape: &VolumeShape) -> DensityParams {
+        DensityParams {
+            layers_ratio: shape.layers as f32 / shape.res as f32,
+            ..Default::default()
+        }
+    }
+
     fn grid_field(shape: &VolumeShape, fill: impl Fn(u32, u32) -> f32) -> Field {
         let mut field = Field::filled_with(shape.res, shape.height(), 0.0, Projection::Volume);
         for y in 0..field.height {
@@ -220,16 +233,7 @@ mod tests {
         let shape = VolumeShape { res: 4, layers: 3 };
         // 值 = 坐标的可逆编码（每一格都不一样，重排一点点都看得出来）。
         let field = grid_field(&shape, |x, y| (x as f32 + 1.0) + (y as f32 + 1.0) * 100.0);
-        let volume = bake_density(
-            &DensityParams {
-                res: shape.res,
-                layers: shape.layers,
-                reach: 0,
-                ..Default::default()
-            },
-            &field,
-        )
-        .expect("烘密度");
+        let volume = bake_density(&params_for(&shape), shape.res, &field).expect("烘密度");
 
         let mut checked = 0;
         for face in 0..CUBE_FACES {
@@ -289,13 +293,12 @@ mod tests {
         let shape = shape();
         let field = grid_field(&shape, |_, _| 0.37);
         let params = DensityParams {
-            res: shape.res,
-            layers: shape.layers,
+            layers_ratio: shape.layers as f32 / shape.res as f32,
             inner: 2.0,
             outer: 5.0,
             reach: 0,
         };
-        let volume = bake_density(&params, &field).expect("烘密度");
+        let volume = bake_density(&params, shape.res, &field).expect("烘密度");
         assert_eq!(volume.res, shape.res);
         assert_eq!(volume.layers, shape.layers);
         assert_eq!(volume.inner, 2.0);
@@ -319,12 +322,11 @@ mod tests {
         // 值 = 坐标的可逆编码（每一格都不一样）。
         let field = grid_field(&shape, |x, y| (x as f32 + 1.0) + (y as f32 + 1.0) * 100.0);
         let params = DensityParams {
-            res: shape.res,
-            layers: shape.layers,
+            layers_ratio: shape.layers as f32 / shape.res as f32,
             reach: 0,
             ..Default::default()
         };
-        let volume = bake_density(&params, &field).expect("烘密度");
+        let volume = bake_density(&params, shape.res, &field).expect("烘密度");
         let mut checked = 0;
         for face in 0..CUBE_FACES {
             for layer in 0..shape.layers {
@@ -364,21 +366,19 @@ mod tests {
         });
         let plain = bake_density(
             &DensityParams {
-                res: shape.res,
-                layers: shape.layers,
                 reach: 0,
-                ..Default::default()
+                ..params_for(&shape)
             },
+            shape.res,
             &field,
         )
         .expect("不保守");
         let dilated = bake_density(
             &DensityParams {
-                res: shape.res,
-                layers: shape.layers,
                 reach: 1,
-                ..Default::default()
+                ..params_for(&shape)
             },
+            shape.res,
             &field,
         )
         .expect("保守");
@@ -417,17 +417,17 @@ mod tests {
         let shape = shape();
         let wrong_columns = Field::filled_with(8, shape.height(), 0.0, Projection::Volume);
         assert!(
-            bake_density(&DensityParams::default(), &wrong_columns).is_err(),
+            bake_density(&DensityParams::default(), shape.res, &wrong_columns).is_err(),
             "列数不对的场必须被拒"
         );
         let wrong_rows = Field::filled_with(shape.res, shape.height() + 1, 0.0, Projection::Volume);
         assert!(
-            bake_density(&DensityParams::default(), &wrong_rows).is_err(),
+            bake_density(&DensityParams::default(), shape.res, &wrong_rows).is_err(),
             "行数不对的场必须被拒"
         );
         let flat = Field::filled_with(shape.res, shape.height(), 0.0, Projection::CubeMap);
         assert!(
-            bake_density(&DensityParams::default(), &flat).is_err(),
+            bake_density(&DensityParams::default(), shape.res, &flat).is_err(),
             "域不对的场必须被拒"
         );
     }

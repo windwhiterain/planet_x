@@ -22,6 +22,11 @@ px_verify = { path = "../px_verify" }
 # ⚠ 这里**不许出现任何 `px_*_op`**：实现库是运行时按身份装载的，一旦成了 cargo 依赖，
 #   「改一行实现不重编图程序」立刻没了（见 tests/crate_graph.rs 那道门）。
 px_cook = { path = "../px_cook" }
+# ⚠ **只给"写一张自己拼的贴图"用**（星云的三条通道要拼成一张 HDR 立方贴图 →
+#   `px_graph::generate::{color_cube, store::write_texture}`）。
+#   ⚠ 这条依赖**不许**把 `px_*_op` 带进来：`tests/crate_graph.rs` 那道门的原话是
+#   "图脚本不许静态链算子库"（算子只在运行期按身份装载）。
+px_graph = { path = "../px_graph" }
 px_shader = { path = "../px_shader" }
 px_protocol = { path = "../px_protocol" }
 serde = { version = "1", features = ["derive"] }

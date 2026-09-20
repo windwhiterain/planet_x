@@ -27,7 +27,7 @@
 //!   搭成一个 [`Scale`] 再交给同一个 [`map_grid`]。planet/desert 那 14 份产物与搬出去之前
 //!   **逐字节相同**，就是这条的判据。
 
-use px_field_schema::field::{Field, GridField};
+use px_field_schema::field::{Field, GridField, Projection};
 use px_field_schema::params::RemapParams;
 use px_graph_schema::Grid;
 
@@ -144,11 +144,24 @@ pub fn map_grid<C: Cell>(
     grid: Grid,
 ) -> Field {
     let mut field = grid.filled(0.0);
+    // ⚠ **体网格没有"一个方向"这回事**（`Domain::Volume` 的每一格多一维径向层）⇒
+    //   `uv` / `direction` 在工作量上是"逐格白算"，在契约上是**当场炸**。
+    //   这一档是**逐格值域映射**（点态）：它根本用不到这两个量 ⇒ 体网格上给 (0,0)/+Y 占位。
+    //   球面那几个域照旧（行星美术里"纬向条带 / 极冠"那类函数只能拿方向算）。
+    let spherical = upstream.projection != Projection::Volume;
     for y in 0..grid.height {
         for x in 0..grid.width {
             let t = scale.normalize(upstream.at(x, y));
-            let (u, v) = upstream.uv(x, y);
-            let direction = upstream.direction(x, y);
+            let (u, v) = if spherical {
+                upstream.uv(x, y)
+            } else {
+                (0.0, 0.0)
+            };
+            let direction = if spherical {
+                upstream.direction(x, y)
+            } else {
+                [0.0, 1.0, 0.0]
+            };
             field.set(x, y, scale.map(cell.value(params, t, [u, v], direction)));
         }
     }
@@ -165,7 +178,13 @@ pub fn map_grid<C: Cell>(
 ///   读的** —— 预置这一档没有图侧函数，所以递进去的是 `RemapParams::default()`（`Sampled`
 ///   本来也不看它）。
 pub fn remap_sampled(scale: &Scale, input: &Field, grid: Grid) -> Field {
-    remap_with(scale, &RemapParams::default(), input, grid, &Sampled { field: input })
+    remap_with(
+        scale,
+        &RemapParams::default(),
+        input,
+        grid,
+        &Sampled { field: input },
+    )
 }
 
 /// **实例库入口**：用一个**图侧给的**场函数重映射上游那张场

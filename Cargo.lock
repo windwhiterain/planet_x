@@ -1490,6 +1490,7 @@ dependencies = [
  "px_derive",
  "px_field_schema",
  "px_fingerprint",
+ "px_graph",
  "px_graph_schema",
  "px_mesh_schema",
  "px_protocol",
