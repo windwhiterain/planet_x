@@ -60,6 +60,20 @@ struct GasParams {
     detail_scale: f32,
     /// 第二尺度加多少（`0` = 只有一层，与原行为等价）。
     detail_strength: f32,
+    /// **带色 ↔ 区色**（2026-09-20 加，用户："颜色也丰富一点吧，看看参考图，很微妙的"）。
+    /// ⚠ 参考图上的色差**不是**"加饱和"：亮区偏奶白、暗带偏**琥珀/鲑**，两者的 RGB 只差几个百分点。
+    ///   这一栏是**暗带**那一端乘的色（`zone_tint` 是亮区那一端），取 `band_shaped` 作混合权重。
+    belt_tint: vec4<f32>,
+    /// 亮区（薄、亮）那一端乘的色。⚠ 别给成纯白加饱和 —— 参考图的亮区是**奶白偏暖**。
+    zone_tint: vec4<f32>,
+    /// **极区的冷暖**：`|纬度| → 1` 那一带乘上它 —— 参考图（土星）是**两端偏冷、赤道最暖**
+    /// （北端淡蓝白、南端青灰、中间奶黄/琥珀）。
+    /// ⚠ 第一版写成"某一半球"（`-纬度`）⇒ 实测**画面上几乎看不出**：这个机位下可见盘面
+    ///   以另一半球为主（夸张档 `[0.45, 0.60, 1.45]` 渲染出来几乎没变，`target/probe-gg-hemi-exaggerated.png`）
+    ///   —— 参考图那种冷本来就是**按 |纬度|** 来的，不是按半球。
+    /// ⚠ 与 `hemi_depth` 的分工：那一栏改的是**厚度**（经吸收改色，只能往暖里走），
+    ///   这一栏直接给冷暖 —— 参考图那种"冷"靠吸收是做不到的（吸收只会偏暖）。
+    polar_tint: vec4<f32>,
     /// **第三个层次**（独立的第二张立方图，21 号格）加多少。
     /// ⚠ 与 `detail_strength` 的分工：那一栏是"同一套湍流的更细一档"（缩放采样），
     ///   这一栏是**另一张图**（图侧独立烘的细丝场）—— 真正的"多一层"是这个。
@@ -141,7 +155,16 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
 
     // ---- ② 每通道吸收：气体自己把光吃掉一部分，吃多少随波长 ----
     let transmittance = exp(-max(params.absorption.rgb, vec3<f32>(0.0)) * max(depth, 0.0));
-    let gas = params.albedo.rgb * transmittance;
+    // ---- ②b 色相分层：带色 ↔ 区色 ↔ 半球冷暖（三档都"很微妙"）----------------
+    // ⚠ 三档都在 `gas` 这一支上乘：它们改的是"这柱气体自己是什么颜色"，
+    //   与后面那几支（直射/边缘/霾）无关 —— 那些乘的是光的颜色。
+    let zonal_hue = mix(params.belt_tint.rgb, params.zone_tint.rgb, clamp(band_shaped, 0.0, 1.0));
+    let polar_hue = mix(
+        vec3<f32>(1.0),
+        params.polar_tint.rgb,
+        smoothstep(0.45, 1.0, abs(latitude)),
+    );
+    let gas = params.albedo.rgb * zonal_hue * polar_hue * transmittance;
 
     // ---- ③ 包裹漫反射：半透 ⇒ 照亮的一侧越过晨昏线 ----
     // ① 别人的影（shadow map）：环挡住的太阳。⚠ 只挡**直射**那一支；天光（ambient）不该被挡。
