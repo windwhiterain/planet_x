@@ -39,8 +39,8 @@ shadow_gain = 2.0
 # 2.3 的**均值与色相几乎正中参考图**（R/B 1.06 对 1.10），而局域对比也是三档里最好的。
 # ⇒ 亮度这一维**已经调到位了**，剩下的差距是**结构**（局域对比仍差 2.4~6 倍）。
 emission_power = 4.5
-emission_gain = 1.4
-glow_gain = 0.16
+emission_gain = 0.85
+glow_gain = 0.09
 glow_power = 1.0
 
 # 消光：**逐通道**（R, G, B）。
