@@ -579,7 +579,11 @@ pub fn build(
     }
 
     let mut passes: Vec<PassSpec> = Vec::new();
-    let mut material_instances: Vec<MaterialInstance> = Vec::new();
+    // ⚠ §本轮起**空的**：从前影子靠"每面一材质实例"把那一面的 `PassView` 塞给 pass，
+    //    现在页的视图走 `PassSpec.params`（几何 pass 的参数块）⇒ 实例那一维没了。
+    //    这一栏留着（协议里还有它）是因为"一个名字恰好一套组"那条契约还在 ——
+    //    它将来服务的是**运行时参数按需迁移**那一类东西，不是影子。
+    let material_instances: Vec<MaterialInstance> = Vec::new();
     for entry in frame.before.iter().chain(frame.after.iter()) {
         let at = format!("帧图 pass '{}'", entry.label);
         // ⚠ 写的是**没烘出来的那份资源**（一盏投影的灯都没有）⇒ 这条 pass 也不烘：
@@ -687,14 +691,7 @@ pub fn build(
             //    只有一块 viewport 与一个缩放后的投影 —— 前者是 pass 的一栏，后者由
             //    宿主按那一块窗口现算。
             for face in 0..CUBE_FACES {
-                let face_name = FACE_NAMES[face as usize];
-                for draw in &draws {
-                    material_instances.push(MaterialInstance {
-                        name: instance_name(&draw.material, light, face_name),
-                        base: draw.material.clone(),
-                    });
-                }
-                let face_label = format!("{}_{}_{}", entry.label, light, face_name);
+                let face_label = format!("{}_{}_{}", entry.label, light, FACE_NAMES[face as usize]);
                 let layer = light * CUBE_FACES + face;
                 // ---- 这一面的每一页：先清一格，再画**落在这一页上的那几个物体** ----
                 //
@@ -736,9 +733,9 @@ pub fn build(
                         // 几何是那个物体自己（`draws_of` 里 geometry == material == 物体 id）。
                         let Some(draw) = draws.iter().find(|draw| &draw.geometry == caster) else {
                             return Err(format!(
-                                "{at} 的第 {light} 盏灯第 {face_name} 面页 ({}, {}) 要画 '{}'，\
+                                "{at} 的第 {light} 盏灯第 {} 面页 ({}, {}) 要画 '{}'，\
                                  而这一条的 `select` 里没有它（内部不一致）",
-                                patch.page_x, patch.page_y, caster
+                                FACE_NAMES[face as usize], patch.page_x, patch.page_y, caster
                             ));
                         };
                         let mut page = clear.clone();
@@ -749,7 +746,11 @@ pub fn build(
                         );
                         page.draws = vec![DrawSpec {
                             geometry: draw.geometry.clone(),
-                            material: instance_name(&draw.material, light, face_name),
+                            // ⚠ 不加 `@shadow_<灯>_<面>` 那个实例后缀：**这一页的视图不再
+                            //    从材质那条路走**（§本轮）。页与页的差别是"这一条 pass 落在
+                            //    atlas 的哪一格、用的是哪一小块投影"，两样都是 **pass 自己的
+                            //    参数**（`viewport` + `params`），与材质无关。
+                            material: draw.material.clone(),
                         }];
                         page.viewport = Some([
                             window[0] as f32,
@@ -757,6 +758,22 @@ pub fn build(
                             (window[2] - window[0]) as f32,
                             (window[3] - window[1]) as f32,
                         ]);
+                        // 这一页在**面 NDC** 里的矩形：`(中心 x, 中心 y, 半宽, 半高)`，
+                        // 四个数都在 `[-1, 1]`。
+                        //
+                        // ⚠ 传它、而不是传整个 `view_proj`：面的视图（灯位 × 六面朝向 ×
+                        //    π/2 投影）今天由宿主按 `cube_face` 算，而那一串是**逐位复刻
+                        //    glam/Bevy** 的（§110.1.1，1 ulp 敏感）—— 搬一遍就是再引入一处
+                        //    1 ulp 风险。这一页相对那一面只多了"缩到哪一小块"，而那完全由
+                        //    `window` 与虚拟面尺寸定，正是这四个数。顶点阶段把面的裁剪坐标
+                        //    映射进这一块，等价于给那一页一个缩放后的投影。
+                        page.params = BTreeMap::from([(
+                            "view_page".to_string(),
+                            px_protocol::scene::Value::Quad(page_rect_in_face(
+                                window,
+                                allocation.lights[light as usize].pages_per_side,
+                            )),
+                        )]);
                         if index > 0 {
                             // 已经不是本页第一笔了：接着本页第一笔的深度，不清。
                             page.render = load_state(&page.render);
@@ -845,6 +862,19 @@ fn shadow_allocation(
     Ok(Some(allocation))
 }
 
+/// 一页在**面 NDC** 里的矩形：`(中心 x, 中心 y, 半宽, 半高)`，四个数都在 `[-1, 1]`。
+///
+/// 面 NDC ↔ 虚拟页格的关系是线性的（一面 `[-1,1]` 摊成 `pages_per_side²` 个页格）：
+/// 第 `px` 列占 `[-1 + 2·px/n, -1 + 2·(px+1)/n]`。于是中心与半宽各一条算式 ——
+/// 而**这一份算式与采样侧那份必须一致**（那边要从面的方向反算出虚拟 texel 坐标）。
+fn page_rect_in_face(window: [u32; 4], pages_per_side: u32) -> [f32; 4] {
+    let n = pages_per_side as f32;
+    let span = 2.0 / n;
+    let x0 = -1.0 + span * (window[0] as f32 / crate::vshadow::PAGE_SIZE as f32);
+    let y0 = -1.0 + span * (window[1] as f32 / crate::vshadow::PAGE_SIZE as f32);
+    [x0 + span * 0.5, y0 + span * 0.5, span * 0.5, span * 0.5]
+}
+
 /// 一页影子 pass 的标签：`<面 pass 的标签>_<页行>_<页列>`。
 ///
 /// ⚠ 页**不是** `cube_face` 那一维的展开（`layer` 仍然是 `灯 × 6 + 面`）：
@@ -899,16 +929,6 @@ fn swap_depth(render: &str, want: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join("|")
-}
-
-/// 生成出来的材质实例名：`<物体 id>@shadow_<灯>_<面名>`。
-///
-/// ⚠ 它只是一根**给绑定状态起的名字**（§139）：宿主不认识这个格式，它只按
-/// `material_instances` 那张表查"这个名字照的是哪一份材质"，再按用到它的那条 pass
-/// 的 `cube_face` 决定「哪一面的 `PassView`」（§148）。所以这个格式**不进任何契约** ——
-/// 改它一个字都不会动画面（改的是文档里的字符串，两边一起改）。
-fn instance_name(base: &str, light: u32, face_name: &str) -> String {
-    format!("{base}@shadow_{light}_{face_name}")
 }
 
 /// 烘帧材质时组装 WGSL 用的桩表：**宿主那一张**（`bevy_stub` + 宿主自己的 `view`）。
