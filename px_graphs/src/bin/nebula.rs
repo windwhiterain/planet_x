@@ -169,6 +169,28 @@ fn main() -> Result<(), Fault> {
             offset_c: flow_third,
         },
     )?;
+    // ⚠⚠ **打破球对称的那一刀**（这一条是量出来的，不是风格偏好）。
+    //
+    // `cloud.emission` 的壳是**均匀包住观察者**的 ⇒ 每条视线都穿过等量的气
+    // ⇒ 画面上每一处都有底噪，**黑色不存在**。实测：
+    //
+    // | | p10 | p50 | p90 | p90/p50 |
+    // |---|---|---|---|---|
+    // | 参考 | 0.0051 | 0.0171 | 0.0972 | **5.7** |
+    // | 只有均匀壳 | 0.0110 | 0.0199 | 0.0341 | **1.7** |
+    //
+    // 两边"亮于 0.02 的面积"都是 ~45%（总能量相当），差的是**动态范围**：
+    // 我的暗部亮一倍、亮部暗三倍。⇒ 需要一大块**真正空掉的**方向，
+    // 气只聚在**一片**里（参考图正是"一团云 + 大片黑"）。
+    //
+    // 这一档把低频的团块场**二值化**成"有气 / 没气"，再乘进密度里。
+    let extent = cook::<field::Remap>(
+        &shape_graph,
+        "extent",
+        field::FieldInput {
+            field: warped.clone(),
+        },
+    )?;
     let weight = cook::<field::Remap>(
         &shape_graph,
         "weight",
@@ -185,13 +207,26 @@ fn main() -> Result<(), Fault> {
             mask: weight,
         },
     )?;
-    report("density", density.value());
+    // ⚠ 密度 × 包络 ⇒ 包络为 0 的地方**连消光都是 0**（那才是真空），
+    //   不只是"暗一点" —— 这一条决定了暗部能不能真的压到 0 附近。
+    //   常数 0 走 `vacuum.toml`（`field.constant` 的参数只有 `value`）。
+    let vacuum = cook::<field::Constant>(&shape_graph, "vacuum", ())?;
+    let shaped = cook::<field::Mix>(
+        &shape_graph,
+        "shaped",
+        field::MixInput {
+            a: vacuum,
+            b: density,
+            mask: extent,
+        },
+    )?;
+    report("shaped", shaped.value());
 
     let density_volume = cook::<volume::Density>(
         &shape_graph,
         "density_volume",
         volume::DensityInput {
-            density: density.clone(),
+            density: shaped.clone(),
         },
     )?;
     let emission = cook::<volume::Emission>(
