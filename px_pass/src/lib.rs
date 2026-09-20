@@ -3064,11 +3064,6 @@ impl Executor {
                 render_pass.set_bind_group(layout.group, bind_group, &[]);
                 render_pass.draw(0..3, 0..1);
             } else {
-                if let Some(group) = &geometry_params {
-                    // ⚠ 偏移 0 与"不带偏移"在 wgpu 里**不是同一件事**：布局声明了动态偏移
-                    //    之后必须给一个数（给空切片是"少给了一个动态偏移"，当场校验失败）。
-                    render_pass.set_bind_group(layout.geometry_group, group, &[pass.params_offset]);
-                }
                 for (pipeline, geometry, material) in &draws {
                     render_pass.set_pipeline(pipeline);
                     if let Some(material) = material {
@@ -3087,6 +3082,27 @@ impl Executor {
                                 render_pass.set_bind_group(group.group, group.bind_group, &[]);
                             }
                         }
+                    }
+                    // ⚠⚠ **这一格必须绑在材质的组之后**（`px_pass` 本轮最贵的一个教训）。
+                    //
+                    // 同一条 pass 的**同一个组号**上有两个来源：宿主随材质给的那一份
+                    // （"回退视图" —— 相机那一份 `PassView`）与这一条 pass 自己的参数块。
+                    // wgpu 的规矩是**后绑的赢**，所以次序就是"谁说了算"：
+                    // 从前这一段在 `set_pipeline` **之前**，于是材质那一份把它盖掉 ——
+                    // 后果不是"少一个参数"，而是**每一页影子都拿相机的视图去画**：
+                    //   · atlas 里装的是**主相机**看到的深度（换相机会变、换灯距不变）；
+                    //   · 于是影子在与不在取决于相机，而 1× 那档"看起来有影"纯属巧合；
+                    //   · 症状是"太阳拉远影就没了"——因为灯距根本没进那张图。
+                    // 判据在 `px_render`：同一份场景换 `--cam` 会让 atlas 的读数变，
+                    // 而换灯距不会 —— 那正是这一条写反的指纹。
+                    if let Some(group) = &geometry_params {
+                        // ⚠ 偏移 0 与"不带偏移"在 wgpu 里**不是同一件事**：布局声明了动态偏移
+                        //    之后必须给一个数（给空切片是"少给了一个动态偏移"，当场校验失败）。
+                        render_pass.set_bind_group(
+                            layout.geometry_group,
+                            group,
+                            &[pass.params_offset],
+                        );
                     }
                     if let Some((buffer, _)) = &geometry.vertices {
                         render_pass.set_vertex_buffer(0, buffer.slice(..));

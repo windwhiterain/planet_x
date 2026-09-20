@@ -674,6 +674,10 @@ pub struct Session {
     shadow_view: wgpu::TextureView,
     #[allow(dead_code)]
     shadow_sampler: wgpu::Sampler,
+    /// 采样那张影子 atlas 的**纹理本身**（`shadow_view` 是它的视图）。
+    /// 只服务 `PX_AUDIT_SHADOW` 那一档的整层读回 —— 见 [`read_depth_stats`]。
+    #[allow(dead_code)]
+    shadow_probe: Option<wgpu::Texture>,
     /// 开这一份用的那两个入参。**只为一件事**：换尺寸/换格数时**重开**一份
     /// （见 [`Session::draw`] 里那条判断）。
     scene_path: std::path::PathBuf,
@@ -1257,7 +1261,8 @@ impl Session {
         };
         // ⚠ 纹理要活到这一帧画完（`wgpu::BindGroup` 持的是视图、视图持的是纹理 ——
         //    引用计数保证它不会先死；这里留一个绑定只是让"谁活着"这件事看得见）。
-        let _shadow_texture = shadow_texture;
+        // ⚠ 保留态持有它（`shadow_probe`）—— 见那个字段那段。
+        let _shadow_texture = shadow_texture.clone();
 
         // ---- group 0 的契约：从**某一份物体 shader** 反射（五格超集的那份布局）----
         let contract = scene
@@ -1711,16 +1716,14 @@ impl Session {
                         },
                         count: None,
                     },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 1,
-                        visibility: wgpu::ShaderStages::VERTEX,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Storage { read_only: true },
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
+                    // ⚠ **第 1 格（每实例数据）已经删掉了**（§本轮）。它从前在这里，只为了
+                    //    "把布局填满"（真正的实例数组搬去组 0 binding 21 之后没人读它）。
+                    //    而它有一个**很贵**的副作用：执行器为带参数块的 pass 建的
+                    //    `geometry_params_group` 只声明 binding 0，一旦它**后绑**（本该如此 ——
+                    //    后绑的赢）并与这个管线布局对账，wgpu 当场拒：
+                    //    `Expected entry with binding 1 not found in assigned bind group layout`。
+                    //    留一格"没人读的绑定"就是留一条"谁能赢"的暗规则 ⇒ 删掉它，
+                    //    组 1 从此**只有一格**，而那一格就是"这一条 pass 的参数"。
                 ],
             });
 
@@ -1786,15 +1789,9 @@ impl Session {
                             size: wgpu::BufferSize::new(crate::plan::GEOMETRY_PARAMS_SIZE as u64),
                         }),
                     },
-                    // ⚠ binding 1（每实例数据）**宿主照样绑**：布局里声明了两格，
-                    //    而 `create_bind_group` 要求"描述符里的格数 = 布局里的格数"。
-                    //    影子页那一路 binding 0 会被执行器**再绑一次**（后绑的赢），
-                    //    而 binding 1 这一份谁都没读 —— 它只是把布局填满。
+                    // ⚠ 组 1 从此**只有一格**（§本轮）：每实例数据那一格删了 ——
+                    //    没人读它，而它会把执行器后绑的参数组挡在门外（见上面布局那一段）。
                     //    ⚠ 顶点阶段真正读的那一份在**组 0 binding 21**（同一个缓冲）。
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: instance_buffer.as_entire_binding(),
-                    },
                 ],
             });
             Stage {
@@ -1858,6 +1855,42 @@ impl Session {
                 "页 pass 的视图：{filled} 条参数块的 `view_proj` 由宿主按 `cube_face` 那一面填上\
                  （烘图侧只写了 `view_page`，矩阵那 64 字节是占位 0）"
             ));
+            // ⚠ **诊断**（`PX_AUDIT_SHADOW=1`）：把第一条填过的页 pass 的**矩阵前四个数**
+            //    与那一面的灯位打出来。为什么要这一行：atlas 的读数在"同方向、5× 距离"
+            //    两档下**逐字节相同**，而那在"矩阵真的是灯的面相机"时不可能 ——
+            //    这一行把"填进去的是不是距离相关的矩阵"变成可以看的事实。
+            if std::env::var_os("PX_AUDIT_SHADOW").is_some() {
+                if let Some(pass) = executed_plan
+                    .passes
+                    .iter()
+                    .find(|pass| pass.params.len() >= 64 && pass.layer.is_some())
+                {
+                    // ⚠ 取**第四列**（`w_axis`）：平移住在那一列，而旋转那三列与灯位无关。
+                    let mut first = [0.0_f32; 4];
+                    for (index, slot) in first.iter_mut().enumerate() {
+                        let at = 48 + index * 4;
+                        *slot = f32::from_le_bytes([
+                            pass.params[at],
+                            pass.params[at + 1],
+                            pass.params[at + 2],
+                            pass.params[at + 3],
+                        ]);
+                    }
+                    let layer = pass.layer.unwrap_or(0);
+                    let light = faces
+                        .iter()
+                        .find(|face| face.light * group0::SHADOW_CUBE_FACES + face.face == layer)
+                        .map(|face| face.light);
+                    audit.push(format!(
+                        "  · 页 pass '{}'（层 {layer}）的 `view_proj` 第一列 = {first:?}｜\
+                         那一面的灯位 = {:?}",
+                        pass.label,
+                        light
+                            .and_then(|index| cluster.get(index as usize))
+                            .map(|light| light.position_radius[0..3].to_vec()),
+                    ));
+                }
+            }
             // ⚠ **诊断**：把前三条影子页 pass 的计划原样打出来。影"一条都没画进去"时，
             //    要分辨的是"这一笔没被执行器当成几何 pass" / "没有 viewport" /
             //    "draw 是空的" / "附件不是那张 atlas" —— 这四个在成图上是同一件事。
@@ -2051,6 +2084,11 @@ impl Session {
             instance_buffer,
             shadow_view,
             shadow_sampler,
+            // ⚠ 采样那张的**纹理**本身（`shadow_view` 只是它的视图）：留着只为 `PX_AUDIT_SHADOW`
+            //    那一档的整层读回。为什么读"采样那张"而不是"写的那张"：着色器采的就是它
+            //    （`copy_shadow_atlas` 之后两者内容相同），而"影到底按什么深度判"这个问题
+            //    的答案就在它里面。
+            shadow_probe: shadow_texture,
             scene_path: scene_path.to_path_buf(),
             pcg_root: pcg_root.to_path_buf(),
             audit_head,
@@ -2402,6 +2440,30 @@ impl Session {
         gpu.queue.submit(Some(encoder.finish()));
         // 这一层从此"被画过"了：池子里的纹理带着这一帧的内容（见 `Layer::used`）。
         layer.used = true;
+
+        // ---- 影子 atlas 的整层读数（**仪器**，§本轮）----
+        //
+        // ⚠ **必须在这一帧提交之后**（见 `read_depth_stats` 那段：放在准备阶段读到的是
+        //    一张还没画过的纹理，"全 0"与"一笔没画"分不开）。
+        if std::env::var_os("PX_AUDIT_SHADOW").is_some() {
+            if let Some(texture) = &self.shadow_probe {
+                println!(
+                    "影子 atlas 探针：{}×{} × {} 层（**这一帧画完之后**的读数）",
+                    texture.width(),
+                    texture.height(),
+                    texture.depth_or_array_layers()
+                );
+                for layer in 0..texture.depth_or_array_layers().min(6) {
+                    match read_depth_stats(&gpu.device, &gpu.queue, texture, layer) {
+                        Some((max, nonzero, total, corner)) => println!(
+                            "影子 atlas 探针：层 {layer}｜最大深度 {max:.8}｜非零 {nonzero} / {total}\
+                             （左上 256² 里 {corner}）"
+                        ),
+                        None => println!("影子 atlas 探针：层 {layer}｜读不回来"),
+                    }
+                }
+            }
+        }
 
         let pixels = shot::read_back(&gpu.device, &gpu.queue, &layer.host_target)?;
         Ok(Rendered {
@@ -2983,6 +3045,96 @@ fn describe_views(
 /// ⚠ 它存在的原因是这一轮踩到的坑：影子"开着与不开只差一点"时，肉眼与均值都分不清
 /// "页表没查到" / "查到了但里面是空的" / "比较方向反了"三种病。**读回几个数**立刻分辨。
 ///
+
+/// 读回一张 `depth32float` 纹理的**整层统计**（仪器，只在 `PX_AUDIT_SHADOW` 时调）：
+/// `(最大深度, 非零格数, 总格数, 左上 256² 里的非零格数)`。
+///
+/// ⚠ **必须在 `queue.submit` 之后调**：放在准备阶段读到的是**刚建出来、什么都没画**的纹理，
+///    六层全 0 —— 而"六层全 0"与"页 pass 一笔没画"长得一模一样，我为这一个数追错过两轮。
+///    `Session::shadow_probe` 与这一条判据是配套的。
+///
+/// ⚠ `Depth32Float` **只能整层搬**（wgpu：`Partial copy … is not supported for the Source
+///    texture format Depth32Float`），所以一次读回一整层、再在里面取点/统计。
+fn read_depth_stats(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    texture: &wgpu::Texture,
+    layer: u32,
+) -> Option<(f32, usize, usize, usize)> {
+    let side = texture.width();
+    let bytes_per_row = side * 4;
+    let size = u64::from(bytes_per_row) * u64::from(side);
+    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("影子 atlas 统计"),
+        size,
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("影子 atlas 统计"),
+    });
+    encoder.copy_texture_to_buffer(
+        wgpu::TexelCopyTextureInfo {
+            texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d {
+                x: 0,
+                y: 0,
+                z: layer,
+            },
+            aspect: wgpu::TextureAspect::DepthOnly,
+        },
+        wgpu::TexelCopyBufferInfo {
+            buffer: &buffer,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(bytes_per_row),
+                rows_per_image: Some(side),
+            },
+        },
+        wgpu::Extent3d {
+            width: side,
+            height: side,
+            depth_or_array_layers: 1,
+        },
+    );
+    queue.submit(Some(encoder.finish()));
+    let slice = buffer.slice(..);
+    let (sender, receiver) = std::sync::mpsc::channel();
+    slice.map_async(wgpu::MapMode::Read, move |result| {
+        let _ = sender.send(result);
+    });
+    device
+        .poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: Some(std::time::Duration::from_secs(60)),
+        })
+        .ok()?;
+    receiver.recv().ok()?.ok()?;
+    let data = slice.get_mapped_range();
+    let mut max = 0.0_f32;
+    let mut nonzero = 0_usize;
+    let mut corner = 0_usize;
+    let total = (side * side) as usize;
+    for y in 0..side {
+        for x in 0..side {
+            let at = (y * bytes_per_row + x * 4) as usize;
+            let value = f32::from_le_bytes([data[at], data[at + 1], data[at + 2], data[at + 3]]);
+            if value > 0.0 {
+                nonzero += 1;
+                if value > max {
+                    max = value;
+                }
+                if x < 256 && y < 256 {
+                    corner += 1;
+                }
+            }
+        }
+    }
+    drop(data);
+    buffer.unmap();
+    Some((max, nonzero, total, corner))
+}
 
 /// 一格的材质表：名字 → 那几套组（`zero` 与 `camera_stage` 是**这一格**的那两份）。
 ///
