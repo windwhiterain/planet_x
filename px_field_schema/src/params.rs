@@ -290,6 +290,18 @@ pub mod remap {
         pub out_min: f32,
         pub out_max: f32,
         pub smooth: bool,
+        /// **强度非线性**（`1.0` = 不弯）。
+        ///
+        /// ⚠ 为什么这一栏是**必须**的（而不是靠把 `in_min`/`in_max` 收窄来凑）：
+        ///   收窄窗口是**线性**拉伸，它只能把"中灰"搬成"中灰的另一个值"；而星云要的是
+        ///   **大片接近 0 + 少数尖峰**（参考图的线性均值/最亮 1% 只有 0.112）。
+        ///   这个形状只能靠非线性拿到。实测 fbm 的均值挤在 0.51 附近（这一档的上游
+        ///   实到 0.4085）⇒ 收窄窗口之后仍是一片中灰，画面上是"均匀的雾"。
+        ///
+        /// ⚠ 作用位置在 `out_*` **之后**（把在 `[out_min, out_max]` 上的值取 `gamma` 次幂）
+        ///   —— 于是 `out_*` 依旧管"值域"、`gamma` 只管"形状"，两者各是一件事。
+        ///   负数会取幂到 `NaN` ⇒ 非正数一律不弯（`NaN` 顺着管线传下去极难归因）。
+        pub gamma: f32,
     }
 
     impl Default for Params {
@@ -300,9 +312,24 @@ pub mod remap {
                 out_min: 0.0,
                 out_max: 1.0,
                 smooth: true,
+                gamma: 1.0,
             }
         }
     }
+}
+
+/// **强度非线性**：`value^gamma`（`gamma` 非正 ⇒ 原样返回）。
+///
+/// ⚠ 独立成一个函数是为了让"两条入口（预置 `Remap` 与 `px_inst!` 实例）**同一把尺子**"
+///   这件事仍然是唯一一条路径 —— 弯折写在循环里、只有一处。
+pub fn bend(value: f32, gamma: f32) -> f32 {
+    if !(gamma > 0.0) || (gamma - 1.0).abs() < f32::EPSILON {
+        return value;
+    }
+    if value <= 0.0 {
+        return 0.0;
+    }
+    value.powf(gamma)
 }
 
 pub mod ridged {

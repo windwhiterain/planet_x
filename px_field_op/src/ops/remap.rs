@@ -21,5 +21,5 @@ pub fn eval(params: &params::remap::Params, inputs: &[&Field], grid: Grid) -> Fi
         out_max: params.out_max,
         smooth: params.smooth,
     };
-    remap_sampled(&scale, inputs[0], grid)
+    remap_sampled(&scale, params.gamma, inputs[0], grid)
 }

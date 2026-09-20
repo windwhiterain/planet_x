@@ -139,6 +139,7 @@ impl Scale {
 pub fn map_grid<C: Cell>(
     scale: &Scale,
     params: &RemapParams,
+    gamma: f32,
     upstream: &Field,
     cell: &C,
     grid: Grid,
@@ -162,7 +163,14 @@ pub fn map_grid<C: Cell>(
             } else {
                 [0.0, 1.0, 0.0]
             };
-            field.set(x, y, scale.map(cell.value(params, t, [u, v], direction)));
+            field.set(
+                x,
+                y,
+                px_field_schema::params::bend(
+                    scale.map(cell.value(params, t, [u, v], direction)),
+                    gamma,
+                ),
+            );
         }
     }
     field
@@ -177,10 +185,11 @@ pub fn map_grid<C: Cell>(
 ///   `params::remap::Params` 给的，`RemapParams`（`gain` / `bias` / `bands`）是**给图侧函数
 ///   读的** —— 预置这一档没有图侧函数，所以递进去的是 `RemapParams::default()`（`Sampled`
 ///   本来也不看它）。
-pub fn remap_sampled(scale: &Scale, input: &Field, grid: Grid) -> Field {
+pub fn remap_sampled(scale: &Scale, gamma: f32, input: &Field, grid: Grid) -> Field {
     remap_with(
         scale,
         &RemapParams::default(),
+        gamma,
         input,
         grid,
         &Sampled { field: input },
@@ -213,11 +222,12 @@ pub fn remap_sampled(scale: &Scale, input: &Field, grid: Grid) -> Field {
 pub fn remap_with<F: Cell>(
     scale: &Scale,
     params: &RemapParams,
+    gamma: f32,
     upstream: &Field,
     grid: Grid,
     field_fn: &F,
 ) -> Field {
-    map_grid(scale, params, upstream, field_fn, grid)
+    map_grid(scale, params, gamma, upstream, field_fn, grid)
 }
 
 #[cfg(test)]
@@ -231,6 +241,53 @@ mod tests {
             height: 23,
             projection: Projection::Equirect,
         }
+    }
+
+    /// **`gamma` 把中灰压下去、把尖峰留住**（"大片空 + 少数浓"那个形状）。
+    ///
+    /// ⚠ 这条判的是"非线性真的接上了"，而不是"参数被读了"：`gamma > 1` 必须让**低值掉得
+    ///   比高值多**（`0.5³ = 0.125` 掉了 4 倍，而 `0.9³ = 0.729` 只掉 1.2 倍）。
+    ///   线性拉伸做不到这件事 —— 那正是为什么单靠收窄 `in_*` 窗口出不来星云
+    ///   （实测 fbm 的均值挤在 0.5 附近，收窄之后仍是一片中灰）。
+    #[test]
+    fn gamma_pushes_the_middle_down_and_keeps_the_peaks() {
+        let mut input = Field::filled_with(6, 6, 0.0, Projection::Equirect);
+        for x in 0..6 {
+            for y in 0..6 {
+                input.set(x, y, (x as f32 + y as f32) / 10.0);
+            }
+        }
+        let scale = Scale {
+            in_min: 0.0,
+            in_max: 1.0,
+            out_min: 0.0,
+            out_max: 1.0,
+            smooth: false,
+        };
+        // ⚠ 画布必须与输入那张场**同形**（map_grid 按画布逐格读上游）。
+        let small = Grid {
+            width: 6,
+            height: 6,
+            projection: Projection::Equirect,
+        };
+        let plain = remap_sampled(&scale, 1.0, &input, small);
+        let bent = remap_sampled(&scale, 3.0, &input, small);
+        let mut worst_low = f32::INFINITY;
+        let mut worst_high = 0.0_f32;
+        for index in 0..plain.data.len() {
+            let (p, b) = (plain.data[index], bent.data[index]);
+            assert!(b <= p + 1e-6, "弯折不该把值抬高：{p} → {b}");
+            if p > 0.02 && p < 0.5 {
+                worst_low = worst_low.min(b / p);
+            }
+            if p > 0.55 {
+                worst_high = worst_high.max(b / p);
+            }
+        }
+        assert!(
+            worst_high > worst_low + 0.2,
+            "低值该掉得更多：低值最大比值 {worst_low:.3}，高值最大比值 {worst_high:.3}"
+        );
     }
 
     /// `(值, 坐标)` 的**对照输入**：故意让值越过 `[0,1]` 的边界。
@@ -254,8 +311,15 @@ mod tests {
         let params = RemapParams::default();
         let input = input(grid);
 
-        let preset = remap_sampled(&scale, &input, grid);
-        let generic = remap_with(&scale, &params, &input, grid, &Sampled { field: &input });
+        let preset = remap_sampled(&scale, 1.0, &input, grid);
+        let generic = remap_with(
+            &scale,
+            &params,
+            1.0,
+            &input,
+            grid,
+            &Sampled { field: &input },
+        );
         assert_eq!(preset, generic, "同一条路径上两种入口算出了不同的场");
     }
 
@@ -284,7 +348,7 @@ mod tests {
                 upstream
             }
         }
-        let _ = remap_with(&scale, &params, &input, grid, &Record { seen: &seen });
+        let _ = remap_with(&scale, &params, 1.0, &input, grid, &Record { seen: &seen });
 
         let seen = seen.into_inner();
         assert_eq!(seen.len(), (grid.width * grid.height) as usize);
@@ -335,7 +399,7 @@ mod tests {
         }
 
         // 恒等尺子 ⇒ 输出就是场函数回的那个数（每一格都一样）。
-        let field = remap_with(&scale, &params, &input, grid, &ReadsParams);
+        let field = remap_with(&scale, &params, 1.0, &input, grid, &ReadsParams);
         assert!(
             field.data.iter().all(|value| (value - 0.25).abs() < 1e-9),
             "节点参数没到图侧函数（输出不是 `bias`）"
@@ -345,7 +409,7 @@ mod tests {
             bias: 0.75,
             ..params
         };
-        let field = remap_with(&scale, &other, &input, grid, &ReadsParams);
+        let field = remap_with(&scale, &other, 1.0, &input, grid, &ReadsParams);
         assert!(
             field.data.iter().all(|value| (value - 0.75).abs() < 1e-9),
             "换了参数内容却没换"
