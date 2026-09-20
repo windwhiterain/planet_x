@@ -837,10 +837,20 @@ pub struct PassPlan {
     pub reads: Vec<String>,
     pub writes: Vec<String>,
     /// 参数块的字节：宿主按**这份 shader 自己声明的结构体**打好了（与材质同一条路）。
-    /// ⚠ 只有全屏 pass 用它（绑定组由执行器造）；几何 pass 的绑定组由宿主解析，
-    /// 所以那两栏必须空着，给了就当场拒 —— "给了没人用"就是"说了没做"。
+    ///
+    /// ⚠ **几何 pass 与全屏 pass 都走这一栏**（§本节修正）：几何那一支的绑定组由宿主解析，
+    /// 但**参数块**由执行器造（`execute` 里 `if !fullscreen && !pass.params.is_empty()`），
+    /// 落点由宿主说（`layout.geometry_group` / `geometry_params_binding`），
+    /// 每条 pass 用 `params_offset` 这个动态偏移选自己那一格。
+    ///
+    /// ⚠⚠ 这里原来写着「只有全屏 pass 用它……几何 pass 那两栏必须空着，给了就当场拒」——
+    /// **那是几何参数块打通之前的状态，没跟着改**。它已经害人一次：照它读会得出
+    /// "几何 pass 没有 per-pass 参数通道"的结论，而那段代码就在下面几十行的地方。
+    /// **注释与代码矛盾时，以代码为准，并当场把注释改对**（本工程对"说了没做"的容忍度是零，
+    /// 而"做了没说"同样会把下一个人带沟里）。
     pub params: Vec<u8>,
-    /// `reads[k]` 落在哪一格（`layout.slots` 里的 `binding`）。同样只有全屏 pass 用。
+    /// `reads[k]` 落在哪一格（`layout.slots` 里的 `binding`）。**这一栏才是全屏 pass 独有**：
+    /// 几何 pass 的 `reads` 由宿主解析成材质那几组，不走这里。
     pub slots: Vec<u32>,
     /// 附件与固定功能状态。缺省 = 这一版之前写在执行器里的那一套（见 [`RenderState`]）。
     pub render: RenderState,
