@@ -69,7 +69,7 @@ sheet                  = A94F9F2D1437C06C   3159948 B   3840x1920
 # orbit-bare-nolight     = 56594EDAC57A9313   （4137 B）
 # orbit-bare-shadow      = EA74796EF7CDE686   （4137 B）
 # orbit-proxy-fine-bound = 59211AC50371EF6F   （5750 B）
-# orbit-rings            = 3C603527DEDD34A5   （4891 B）
+# orbit-rings            = F3E25606488ADC1F   （4904 B）
 # orbit-soft             = EBF570334D895524   （5720 B）
 #
 # ⚠ **第五次重登记**（field 域泛型实例那一轮）。根因与第四次不同：这一轮把 field 的算法
@@ -115,6 +115,15 @@ sheet                  = A94F9F2D1437C06C   3159948 B   3840x1920
 #   **J1 六张逐字节 6/6**（重出图）。⇒ 又一次"键 = 身份 + 内容"：身份换了要重算，内容没换就不会变。
 #   这一轮换来的东西：`field.stamps`（印章式打坑：幂律尺寸 + 年龄序挖掘式压盖 + 上游场当密度遮罩），
 #   月球的坑从"均匀的小凹点"变成"大小不一、互相压盖、月海处稀疏"。
+#
+# ⚠ **2026-09-20 第九次重登记**（本 worktree `planet-art`，第 8 轮：**环接受阴影**）。
+#   根因：**`art/shaders/ring.wgsl` 的源码变了** —— 环从"不受光、不采影"改成"采一次点光
+#   shadow map + 影里留一档 `ambient`"（用户："星环没接受影子吗"）。这份 shader 的键变
+#   （`fcf9f5f88282` → `2d0e50144f2a`）⇒ **`orbit-rings` 那一格**引用的成员换了 ⇒ 文档字节变
+#   （+13 B：材质多了一栏 `ambient`）。**其余五格一字未动**（它们不吃这份 shader）。
+#   判据（同轮实测）：**J1 六张逐字节 6/6**——包括 `orbit-rings`：那一档 `shadows = 0`，
+#   关影时新代码正好退化成原行为（`mix(ambient, 1.0, 1.0) = 1`）⇒ 像素一位没动。
+#   ⇒ 又一次"**键 = 身份 + 内容**"，而且这一回连"内容"都只是**加了一栏**，画面在关影档不变。
 # ⚠ 更早七批（`2795F948…` … `D579241A…`）是**历史值**，留着是因为 §六 那一格要拿它们讲
 #   "换一份 checkout 的字节约定会当场全红"。**今天生效的是下面这六行。**
 #   ⚠ 行尾那一格也咬到本表：本 worktree 是**新 checkout**，`art/shaders/blit.wgsl` 这类
@@ -127,7 +136,7 @@ orbit-bare             = 1845BAEE444D1DB3
 orbit-bare-nolight     = 56594EDAC57A9313
 orbit-bare-shadow      = EA74796EF7CDE686
 orbit-proxy-fine-bound = 59211AC50371EF6F
-orbit-rings            = 3C603527DEDD34A5
+orbit-rings            = F3E25606488ADC1F
 orbit-soft             = EBF570334D895524
 
 ## 四、J3 pass 表（判据图在 `art/passes/` 那七份配方上跑）

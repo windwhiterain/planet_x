@@ -571,7 +571,12 @@ pub fn compile(
             "texture.ring",
         )?;
         let ring_shader = ring_shader()?;
-        let ring_params = BTreeMap::from([("tint".to_string(), Value::Quad([1.0, 1.0, 1.0, 1.0]))]);
+        // ⚠ `ambient`（2026-09-20 加）：环**受光也接受影**之后，"影里剩多少"是一栏观感旋钮。
+        //   0.18 = 影里留一点星光/天光（参考图里行星投在环上的那道影是深灰，不是纯黑）。
+        let ring_params = BTreeMap::from([
+            ("tint".to_string(), Value::Quad([1.0, 1.0, 1.0, 1.0])),
+            ("ambient".to_string(), Value::Num(0.18)),
+        ]);
         validate_material("环", &ring_shader, &ring_params, &root)?;
         let mut material = Material::new(ring_shader).with_params(ring_params);
         material.alpha = AlphaMode::Blend;
