@@ -784,6 +784,19 @@ pub struct Layout {
     pub params_align: u32,
     /// 贴图能落在哪几格。
     pub slots: Vec<Slot>,
+    /// **几何 pass 的参数块**落在哪一组、哪一格。
+    ///
+    /// ⚠ 与上面 `group` / `params_binding` **不是同一件事**，别合并（§本轮）：
+    /// 两者的参数块是同一件事（"这一条 pass 的参数"），但它们住在 shader 的不同组里 ——
+    /// 全屏 pass 的参数在第 3 组（`MATERIAL_BIND_GROUP`，因为它只有自己那一段 WGSL）；
+    /// 而几何 pass 的**顶点阶段**是宿主的 `vertex_mesh.wgsl`，参数在第 1 组 binding 0
+    /// （`PassView` 那一格）。合并会让几何 pass 的参数跑去材质那一组，
+    /// 而顶点阶段声明的是第 1 组 ⇒ wgpu 在管线校验处停下。
+    ///
+    /// ⚠ 这一对数**由宿主说**（"顶点阶段把它的参数声明在第几组"是宿主的 WGSL 与管线
+    /// 布局说的事实）：执行器只认组号与格位，它不认识"第 1 组是 PassView"这种话。
+    pub geometry_group: u32,
+    pub geometry_params_binding: u32,
 }
 
 impl Layout {
@@ -898,6 +911,10 @@ impl Default for Layout {
             params_binding: 0,
             params_align: 16,
             slots: Vec::new(),
+            // ⚠ 缺省与全屏那一组**相同**（0/0）：`Layout::default` 是判据与最小计划用的
+            //    那一份，而"几何 pass 的参数在第 1 组"是**宿主**说的事实（它建那份布局）。
+            geometry_group: 0,
+            geometry_params_binding: 0,
         }
     }
 }
@@ -2188,6 +2205,50 @@ impl Executor {
     }
 
     #[allow(clippy::too_many_arguments)]
+    /// **几何 pass 的参数块**：只一格 `var<uniform>`，落在宿主说的那一组那一格。
+    ///
+    /// ⚠ 它不复用 `layout()` 那份缓存布局（那是全屏 pass 的，带一堆贴图格），而是
+    /// 当场按"一格 uniform"建一份 —— 几何 pass 的参数只服务**顶点阶段**，
+    /// 多一格都会让它与宿主的管线布局对不上。
+    ///
+    /// ⚠ 调用方要保证 `params.len()` 是设备的
+    /// `min_uniform_buffer_offset_alignment` 的整数倍（宿主建那份缓冲时按 256 对齐）。
+    /// 执行器不认识设备对齐，也不该假装认识。
+    fn geometry_params_group(
+        &self,
+        device: &Device,
+        group: u32,
+        binding: u32,
+        params: &[u8],
+    ) -> BindGroup {
+        let layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+            label: Some("px_pass_geometry_params_layout"),
+            entries: &[BindGroupLayoutEntry {
+                binding,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: BindingType::Buffer {
+                    ty: BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+        let buffer = device.create_buffer_init(&BufferInitDescriptor {
+            label: Some("px_pass_geometry_params"),
+            usage: BufferUsages::UNIFORM,
+            contents: params,
+        });
+        device.create_bind_group(&BindGroupDescriptor {
+            label: Some("px_pass_geometry_params"),
+            layout: &layout,
+            entries: &[BindGroupEntry {
+                binding,
+                resource: buffer.as_entire_binding(),
+            }],
+        })
+    }
+
     fn bind_group(
         &mut self,
         device: &Device,
@@ -2845,8 +2906,16 @@ impl Executor {
             //    （材质名 → 组），凭空多绑一格会让那些 pass 的管线布局跟着变。
             let mut geometry_params: Option<BindGroup> = None;
             if !fullscreen && !pass.params.is_empty() {
-                geometry_params =
-                    Some(self.bind_group(device, encoder, &layout, &sampler, &pass.params, &bound));
+                // ⚠ 落点由**宿主**说（`layout.geometry_group` / `geometry_params_binding`）：
+                //    几何 pass 的参数只服务顶点阶段，而"顶点阶段把它的参数声明在第几组"
+                //    是宿主的 `vertex_mesh.wgsl` 与管线布局说的事实 —— 执行器不认识
+                //    "第 1 组是 PassView"这种话（它只认组号与格位）。
+                geometry_params = Some(self.geometry_params_group(
+                    device,
+                    layout.geometry_group,
+                    layout.geometry_params_binding,
+                    &pass.params,
+                ));
             }
             if fullscreen {
                 let pipeline = self.pipeline_fullscreen(
@@ -2960,7 +3029,7 @@ impl Executor {
                 render_pass.draw(0..3, 0..1);
             } else {
                 if let Some(group) = &geometry_params {
-                    render_pass.set_bind_group(layout.group, group, &[]);
+                    render_pass.set_bind_group(layout.geometry_group, group, &[]);
                 }
                 for (pipeline, geometry, material) in &draws {
                     render_pass.set_pipeline(pipeline);
@@ -3234,6 +3303,9 @@ mod tests {
                     binding: 1,
                     dimension: Dimension::D2,
                 }],
+                // 判据夹具走缺省那一档（几何 pass 的参数落点由宿主说，见 `Layout` 那段）。
+                geometry_group: 0,
+                geometry_params_binding: 0,
             },
             resources: Vec::new(),
             passes,

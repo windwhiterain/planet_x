@@ -32,6 +32,12 @@ use crate::shader;
 /// 为什么全屏 pass 与材质共用：内容 shader 的绑定契约只有一份（§79 的 C 案），
 /// `blit.wgsl` 声明的就是 `#{MATERIAL_BIND_GROUP}` 那几格。执行器按 `layout` 建它自己的
 /// 绑定组，所以这一份必须是**契约表**推出来的那一份，不是另写一张更小的。
+///
+/// ⚠ 下面两个数是**几何 pass 的参数落点**：第 1 组的第 0 格。
+/// 值必须与 `art/frame/vertex_mesh.wgsl` 里那句话对上（宿主建的管线布局也是照它建的）。
+pub const STAGE_BIND_GROUP: u32 = 1;
+pub const STAGE_PARAMS_BINDING: u32 = 0;
+
 pub fn layout() -> Layout {
     Layout {
         group: MATERIAL_BIND_GROUP,
@@ -47,6 +53,12 @@ pub fn layout() -> Layout {
                 },
             })
             .collect(),
+        // ⚠ **几何 pass 的参数在第 1 组 binding 0**（§本轮）：那一格是顶点阶段
+        //    （`art/frame/vertex_mesh.wgsl`）声明 `PassView` 的地方，而"这一条 pass 的
+        //    视图"正是它 —— 影子的每一页把**自己那一小块的视图**当参数传下来。
+        //    全屏那一组（上面那两栏）不动：它服务的是 `blit.wgsl` 自己声明的组。
+        geometry_group: STAGE_BIND_GROUP,
+        geometry_params_binding: STAGE_PARAMS_BINDING,
     }
 }
 
