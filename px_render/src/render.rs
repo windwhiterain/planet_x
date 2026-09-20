@@ -1293,10 +1293,35 @@ impl Session {
             //    （例如一个是 16、一个是 7）时，查页会整体错位，而成图上只表现为"影是错的"。
             if std::env::var_os("PX_AUDIT_SHADOW").is_some() && contents.len() >= 4 {
                 let head = u32::from_le_bytes([contents[0], contents[1], contents[2], contents[3]]);
+                // ⚠ 顺手把 `levels` 与那张**前缀表**也读出来：级这一维落地之后，
+                //    "表头说几级、每级的段首在哪"是新的可错点，而它是**静默**的
+                //    （错位的症状只是"影不对"）。这里多打一行，省下一轮从零猜。
+                let levels = if contents.len() >= 8 {
+                    u32::from_le_bytes([contents[4], contents[5], contents[6], contents[7]])
+                        & 0xFFFF
+                } else {
+                    0
+                };
+                let prefix: Vec<u32> = (0..levels as usize)
+                    .filter_map(|j| {
+                        let at = 8 + j * 4;
+                        (contents.len() >= at + 4).then(|| {
+                            u32::from_le_bytes([
+                                contents[at],
+                                contents[at + 1],
+                                contents[at + 2],
+                                contents[at + 3],
+                            ])
+                        })
+                    })
+                    .collect();
                 println!(
-                    "影子页表头：pages_per_side={}｜atlas 页格={} 个/边｜（atlas {}² ⇒ 页格 {} 个/边）",
+                    "影子页表头：pages_per_side={}｜atlas 页格={} 个/边｜levels={}｜前缀表={:?}｜\
+                     （atlas {}² ⇒ 页格 {} 个/边）",
                     head & 0xFFFF,
                     head >> 16,
+                    levels,
+                    prefix,
                     scene
                         .shadow
                         .as_ref()
