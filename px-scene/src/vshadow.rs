@@ -51,15 +51,15 @@ pub const PAGE_SIZE: u32 = 128;
 ///
 /// ⚠ 它是上限不是实况：实况是这一盏灯的 `pages_per_side`，表里每一行只存
 /// `ceil(pages_per_side / 32)` 个字。
-pub const PAGES_PER_ROW: u32 = 256;
+pub const PAGES_PER_ROW: u32 = 512;
 /// 每行掩码的字数上限。
 pub const WORDS_PER_ROW: u32 = PAGES_PER_ROW / 32;
 /// 每面最多几行页（= 每面最多几页）。
-pub const ROWS_PER_FACE: u32 = 256;
+pub const ROWS_PER_FACE: u32 = 512;
 /// 每面最多分配多少页。
 pub const MAX_PAGES_PER_FACE: u32 = ROWS_PER_FACE * PAGES_PER_ROW;
 /// 每面页格的边长上限。
-pub const MAX_PAGES_PER_SIDE: u32 = 256;
+pub const MAX_PAGES_PER_SIDE: u32 = 512;
 
 /// 一个 cube 的面数（次序照 `px_render::camera::CUBE_MAP_FACES`：`+X −X +Y −Y +Z −Z`）。
 pub const CUBE_FACES: u32 = 6;
@@ -67,8 +67,8 @@ pub const CUBE_FACES: u32 = 6;
 /// 一盏灯那一页表段的**头**字数。
 ///
 /// ```text
-///   [0] virtual_size（低 16 位）| pages_per_side（高 16 位）
-///   [1] 低 16 位 words_per_row｜高 16 位 **物理 atlas 的页格边长**
+///   [0] pages_per_side（低 16 位）| **物理 atlas 的页格边长**（高 16 位）
+///   [1] words_per_row（低 16 位）
 ///   [2] 每一面那一段的字数（= rows × (1 + words_per_row)）
 ///   [3..] 面 0 的行段（每行：基址 1 字 + 掩码 words_per_row 字），接着面 1 ……
 /// ```
@@ -444,12 +444,12 @@ pub fn allocate(lights: &[Vec<Caster>]) -> Result<Allocation, Overflow> {
         // ---- 装箱：每面一条扫描线，槽位在面内连续 ----
         let table_offset = out.table_words;
         let mut table = vec![0_u32; table_words_per_light(pages_per_side) as usize];
-        let virtual_size = pages_per_side * PAGE_SIZE;
-        table[0] = virtual_size | (pages_per_side << 16);
+        // ⚠ `virtual_size = pages_per_side × PAGE_SIZE` **不落盘**：`pages_per_side`
+        //    到 512 时它是 65536，塞不进 16 位。采样侧由 `pages_per_side` 现算 ——
+        //    反正两者差一个常数因子。
+        table[0] = pages_per_side | (atlas_pages << 16);
         let words_per_row = pages_per_side.div_ceil(32);
-        // ⚠ 低 16 位 = 掩码字数（≤ 8），**高 16 位 = 物理 atlas 的页格边长**。
-        //    槽位解码要后者、页索引要前者，两个数都得让采样侧拿到。
-        table[1] = words_per_row | (atlas_pages << 16);
+        table[1] = words_per_row;
         table[2] = pages_per_side * (1 + words_per_row);
 
         let mut patches: Vec<PagePatch> = Vec::with_capacity(wanted.len());
@@ -525,7 +525,7 @@ pub fn allocate(lights: &[Vec<Caster>]) -> Result<Allocation, Overflow> {
         out.table_words += table.len() as u32;
         out.table.extend_from_slice(&table);
         out.lights.push(VirtualShadowMap {
-            virtual_size,
+            virtual_size: pages_per_side * PAGE_SIZE,
             pages_per_side,
             atlas_pages_per_side: atlas_pages,
             table_offset,

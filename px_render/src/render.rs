@@ -1294,7 +1294,7 @@ impl Session {
             if std::env::var_os("PX_AUDIT_SHADOW").is_some() && contents.len() >= 4 {
                 let head = u32::from_le_bytes([contents[0], contents[1], contents[2], contents[3]]);
                 println!(
-                    "影子页表头：virtual_size={}｜pages_per_side={}｜（atlas {}² ⇒ 页格 {} 个/边）",
+                    "影子页表头：pages_per_side={}｜atlas 页格={} 个/边｜（atlas {}² ⇒ 页格 {} 个/边）",
                     head & 0xFFFF,
                     head >> 16,
                     scene

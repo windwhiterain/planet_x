@@ -205,15 +205,14 @@ fn px_shadow_face_texel(d: vec3<f32>, face_side: f32) -> vec3<f32> {\n\
 \n\
 // 虚拟页坐标 → 物理槽位。返回 `-1` = 这一页没分配（采样侧照\"不在影里\"处理）。\n\
 fn px_shadow_page_slot(light_id: u32, face: u32, page_x: u32, page_y: u32) -> i32 {\n\
+\x20   // ⚠ 两套网格，**分开读**（§本轮）：`pages_per_side` 是**虚拟**格子（精度要求定的、\n\
+\x20   //    随灯距变细），`atlas_pages` 是**物理 atlas** 的页格边长（分出去的页数定的）。\n\
+\x20   //    混用 ⇒ 格子一变细 atlas 就爆（5× 那一档要 6.4 GB）。\n\
 \x20   let head = px_shadow_pages[px_shadow_light_offsets[light_id]];\n\
-\x20   let pages_per_side = head >> 16u;\n\
+\x20   let pages_per_side = head & 0xFFFFu;\n\
+\x20   let atlas_pages = head >> 16u;\n\
 \x20   if (page_x >= pages_per_side || page_y >= pages_per_side) { return -1; }\n\
-\x20   // ⚠ 两套网格，**分开读**（§本轮）：`pages_per_side` 是**虚拟**格子（精度要求定的、
-\x20   //    随灯距变细），而槽位解码要的是**物理 atlas** 的页格边长（分出去的页数定的）。
-\x20   //    混用 ⇒ 格子一变细 atlas 就爆（5× 那一档要 6.4 GB）。
-\x20   let packed = px_shadow_pages[px_shadow_light_offsets[light_id] + 1u];\n\
-\x20   let words_per_row = packed & 0xFFFFu;\n\
-\x20   let atlas_pages = packed >> 16u;\n\
+\x20   let words_per_row = px_shadow_pages[px_shadow_light_offsets[light_id] + 1u] & 0xFFFFu;\n\
 \x20   let face_words = px_shadow_pages[px_shadow_light_offsets[light_id] + 2u];\n\
 \x20   let row_words = 1u + words_per_row;\n\
 \x20   let base = px_shadow_light_offsets[light_id] + 3u\n\
@@ -248,10 +247,10 @@ fn px_sample_shadow_page(\n\
 \x20   depth: f32,\n\
 ) -> f32 {\n\
 \x20   let head = px_shadow_pages[px_shadow_light_offsets[light_id]];\n\
-\x20   let pages_per_side = head >> 16u;\n\
 \x20   // ⚠ **物理 atlas 的页格边长**（槽位解码用它 —— 行内压缩出来的槽位是按它折行的）。\n\
 \x20   //    与 `pages_per_side`（虚拟格子）**是两个数**，见 `px_shadow_page_slot` 那段。\n\
-\x20   let atlas_pages = px_shadow_pages[px_shadow_light_offsets[light_id] + 1u] >> 16u;\n\
+\x20   let pages_per_side = head & 0xFFFFu;\n\
+\x20   let atlas_pages = head >> 16u;\n\
 \x20   // 面内 texel → 虚拟页格 + 页内余数。**与烘图侧 `page_block_origin` 同一套换算**\n\
 \x20   // （那边也是先 `face_texel` 再折成页格），否则页会整体错开若干格。\n\
 \x20   let page_f = texel_in_face / f32(PX_PAGE_SIZE);\n\
@@ -321,7 +320,9 @@ fn fetch_point_shadow(\n\
 \x20   //    现在 `shadow_normal_bias` 只说\"偏移几个 texel\"，而 texel 的世界尺寸\n\
 \x20   //    = `2 · distance / N_virt`（虚拟面边长由页表头给）⇒ 与\"灯多远\"无关。\n\
 \x20   let head = px_shadow_pages[px_shadow_light_offsets[light_id]];\n\
-\x20   let virtual_size = f32(head & 0xFFFFu);\n\
+\x20   // ⚠ `virtual_size` **现算**（= 虚拟格子边长 × 每页的 texel 数）：它到 512 页/边时是
+\x20   //    65536，塞不进 16 位，所以文档里只落 `pages_per_side`（见 `vshadow` 的表头那段）。\n\
+\x20   let virtual_size = f32(head & 0xFFFFu) * f32(PX_PAGE_SIZE);\n\
 \x20   let texel_world = 2.0 * distance_to_light / max(virtual_size, 1.0);\n\
 \x20   let normal_offset = (*light).shadow_normal_bias * texel_world * surface_normal.xyz;\n\
 \x20   let depth_offset = (*light).shadow_depth_bias * normalize(surface_to_light.xyz);\n\
@@ -333,7 +334,10 @@ fn fetch_point_shadow(\n\
 \x20   //    **世界方向**本身。翻一次就是「影子按镜像找面」。\n\
 \x20   let light_local = frag_ls;\n\
 \x20   // 一面的边长（texel）= `pages_per_side × PX_PAGE_SIZE`；面内 texel 按它折算。\n\
-\x20   let face_side = f32((head >> 16u) * PX_PAGE_SIZE);\n\
+\x20   // ⚠ 用**低 16 位**（虚拟格子）：`head >> 16` 现在是**物理 atlas** 的页格边长 ——\n\
+\x20   //    拿它当「这一面有多少 texel」就会在 `atlas_pages ≠ pages_per_side` 时整体错位\n\
+\x20   //    （5× 那一档：32 vs 128，影子直接没了）。\n\
+\x20   let face_side = f32((head & 0xFFFFu) * PX_PAGE_SIZE);\n\
 \x20   let face_texel = px_shadow_face_texel(light_local, face_side);\n\
 \x20   let face = u32(face_texel.z);\n\
 \x20   // ---- ⚠⚠ 深度必须按**那一面相机真正的 w** 算，不是按 Chebyshev 距离 ----------\n\

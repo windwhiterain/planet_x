@@ -740,20 +740,20 @@ mod tests {
             ),
             (
                 "clouds.wgsl",
-                64047,
-                0xde34_27ed_d947_cbe7,
+                64503,
+                0x4d7d_91e6_3c02_97b8,
                 0x26d9_7a07_2b26_9596,
             ),
             (
                 "ring.wgsl",
-                25086,
-                0x60ef_de35_1fe2_30a2,
+                25542,
+                0xf6af_0822_93ce_92bd,
                 0x8c39_408d_fc5e_5e7b,
             ),
             (
                 "surface.wgsl",
-                38055,
-                0xf272_79c2_1e5b_9f59,
+                38511,
+                0xceb4_b16e_2c87_3b7e,
                 0x8865_fd2a_ed6d_4b64,
             ),
         ];
