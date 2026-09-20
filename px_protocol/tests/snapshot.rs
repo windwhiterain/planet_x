@@ -253,6 +253,9 @@ fn canonical() -> String {
             px_protocol::Light::point("sun", [-4.2, 1.15, 2.35], [1.0, 1.0, 1.0], 7.6e5)
                 .with_shadows(true),
         ],
+        // ⚠ 快照里这一份是**没有影子**的场景骨架 ⇒ `None`（加了它，快照就多两个字节，
+        //    而那正是"协议长了新字段"该在快照里看得见的那一刻）。
+        shadow: None,
         objects: vec![
             px_protocol::Object {
                 id: "planet".to_string(),

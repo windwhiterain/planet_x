@@ -101,6 +101,9 @@ pub const POINT_SHADOW_STUB: &str = "\
 @group(0) @binding(2) var point_shadow_textures: texture_depth_2d_array;\n\
 @group(0) @binding(3) var point_shadow_textures_comparison_sampler: sampler;\n\
 @group(0) @binding(4) var<storage, read> px_shadow_pages: array<u32>;\n\
+// ⚠ 每一盏灯那一段**从第几个字开始**（前缀和）：段长跟着 `pages_per_side` 变，\n\
+// 所以采样侧只做一次查表，不在 shader 里假设「所有灯段长相同」。\n\
+@group(0) @binding(5) var<storage, read> px_shadow_light_offsets: array<u32>;\n\
 \n\
 // `bevy_render::maths::copysign`（`maths.wgsl:66-68`）：把 b 的符号位抄到 a 上。\n\
 //\n\
@@ -153,7 +156,7 @@ const PX_CUBE_FACES: u32 = 6u;\n\
 // 一盏灯的页表段**最多**多少字（`px-scene/src/vshadow.rs::TABLE_HEAD_WORDS` +\n\
 // `CUBE_FACES × ROWS_PER_FACE × (1 + WORDS_PER_ROW)`）—— 数组下标的上界；\n\
 // 而这一盏灯实际用了多少，由头里的 `pages_per_side` 说。\n\
-const PX_SHADOW_TABLE_WORDS: u32 = 3u + PX_CUBE_FACES * 256u * (1u + 8u);\n\
+
 \n\
 // Bevy 的 `cube_face_index`（`shadows.wgsl`）那六条：`+X −X +Y −Y +Z −Z`。\n\
 //\n\
@@ -174,13 +177,13 @@ fn px_shadow_face_uv(light_local: vec3<f32>) -> vec3<f32> {\n\
 \n\
 // 虚拟页坐标 → 物理槽位。返回 `-1` = 这一页没分配（采样侧照\"不在影里\"处理）。\n\
 fn px_shadow_page_slot(light_id: u32, face: u32, page_x: u32, page_y: u32) -> i32 {\n\
-\x20   let head = px_shadow_pages[light_id * PX_SHADOW_TABLE_WORDS];\n\
+\x20   let head = px_shadow_pages[px_shadow_light_offsets[light_id]];\n\
 \x20   let pages_per_side = head >> 16u;\n\
 \x20   if (page_x >= pages_per_side || page_y >= pages_per_side) { return -1; }\n\
-\x20   let words_per_row = px_shadow_pages[light_id * PX_SHADOW_TABLE_WORDS + 1u];\n\
-\x20   let face_words = px_shadow_pages[light_id * PX_SHADOW_TABLE_WORDS + 2u];\n\
+\x20   let words_per_row = px_shadow_pages[px_shadow_light_offsets[light_id] + 1u];\n\
+\x20   let face_words = px_shadow_pages[px_shadow_light_offsets[light_id] + 2u];\n\
 \x20   let row_words = 1u + words_per_row;\n\
-\x20   let base = light_id * PX_SHADOW_TABLE_WORDS + 3u\n\
+\x20   let base = px_shadow_light_offsets[light_id] + 3u\n\
 \x20       + face * face_words + page_y * row_words;\n\
 \x20   let row_base = px_shadow_pages[base];\n\
 \x20   // 这一行里位于我前面（含我）的占用位数 - 1 ⇒ 我在这一行里的第几个。\n\
@@ -211,7 +214,7 @@ fn px_sample_shadow_page(\n\
 \x20   uv: vec2<f32>,\n\
 \x20   depth: f32,\n\
 ) -> f32 {\n\
-\x20   let head = px_shadow_pages[light_id * PX_SHADOW_TABLE_WORDS];\n\
+\x20   let head = px_shadow_pages[px_shadow_light_offsets[light_id]];\n\
 \x20   let pages_per_side = head >> 16u;\n\
 \x20   // `uv` 在 `[-1, 1]` ⇒ 虚拟页格坐标。\n\
 \x20   let page_f = (uv * 0.5 + 0.5) * f32(pages_per_side);\n\
@@ -231,7 +234,12 @@ fn px_sample_shadow_page(\n\
 \x20           - f32(page_y) * f32(PX_PAGE_SIZE), 0.0, f32(PX_PAGE_SIZE) - 1.0)),\n\
 \x20   );\n\
 \x20   let stored = textureLoad(point_shadow_textures, texel, i32(light_id * PX_CUBE_FACES + face), 0);\n\
-\x20   return select(1.0, 0.0, depth > stored);\n\
+\x20   // ⚠ **无限 reverse-Z**：近处是 1.0、远处是 0.0（`camera.rs` 那条\n\
+\x20   //    `perspective_infinite_reverse_rh`）。所以我在影里 = 我比影图里记的更近\n\
+\x20   //    ⇒ `depth < stored`。\n\
+\x20   //    这一条写反过的症状不是「影没了」，而是**整颗行星发暗**（`depth > stored` 在\n\
+\x20   //    这个方向上几乎恒真）—— 实测：写反那一版行星几乎全黑，只剩边缘一条亮。\n\
+\x20   return select(0.0, 1.0, depth < stored);\n\
 }\n\
 \n\
 const PX_POINT_SHADOW_SCALE: f32 = 0.003;\n\
@@ -270,7 +278,7 @@ fn fetch_point_shadow(\n\
 \x20   //    ⇒ 太阳拉远时偏移按距离涨，整颗行星被自己的影压暗一档（实测平均通道差 4.43）。\n\
 \x20   //    现在 `shadow_normal_bias` 只说\"偏移几个 texel\"，而 texel 的世界尺寸\n\
 \x20   //    = `2 · distance / N_virt`（虚拟面边长由页表头给）⇒ 与\"灯多远\"无关。\n\
-\x20   let head = px_shadow_pages[light_id * PX_SHADOW_TABLE_WORDS];\n\
+\x20   let head = px_shadow_pages[px_shadow_light_offsets[light_id]];\n\
 \x20   let virtual_size = f32(head & 0xFFFFu);\n\
 \x20   let texel_world = 2.0 * distance_to_light / max(virtual_size, 1.0);\n\
 \x20   let normal_offset = (*light).shadow_normal_bias * texel_world * surface_normal.xyz;\n\

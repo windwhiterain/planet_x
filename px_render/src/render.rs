@@ -1216,20 +1216,63 @@ impl Session {
         //    （`view.viewport` 是绝对矩形，见 `group0::frame`）。其余六格（灯 / 聚类 /
         //    globals / 影图 / 采样器 / 深度快照）内容一样，但绑定组是每格一个 ——
         //    "一份组给 12 格用"这件事在 wgpu 里不存在（组里的 uniform 就是那一格的）。
-        // ⚠ 页表（§本轮）：内容由**烘图侧**算（页的分配在那儿），落到文档里。
-        //    这一笔先把那一格接上（空表 ⇒ 采样侧一格都查不到），把文档那一栏接进来是下一步。
-        let shadow_page_table = gpu
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("组 0：虚拟影图页表（烘图侧算，见 px-scene::vshadow）"),
-                usage: wgpu::BufferUsages::STORAGE,
-                contents: &[0_u8; 4],
+        // ⚠ 页表（§本轮）：内容由**烘图侧**算（页的分配在那儿），落在文档的 `shadow` 那一栏。
+        //    宿主只做一件事：把那些字节原样搬上 GPU。没有影子（或那一栏是空的）就给出一张
+        //    **说得清的空表** —— 空表下采样侧一个页都查不到（`fetch_point_shadow` 给 1.0 =
+        //    不受影），而不是"读到一段垃圾然后影子乱贴"。
+        let shadow_page_table = {
+            let contents: &[u8] = match &scene.shadow {
+                Some(plan) if !plan.table.is_empty() => plan.table.as_slice(),
+                _ => &[0_u8; 4],
+            };
+            audit.push(match &scene.shadow {
+                Some(plan) if !plan.table.is_empty() => format!(
+                    "虚拟影图页表：{} 字节（{} 盏灯，段起点 {:?}）｜采样侧按\
+                     「段起点 + 行基址 + 掩码 popcount 排名」查页｜atlas {} 层 × {}²",
+                    plan.table.len(),
+                    plan.light_offsets.len(),
+                    plan.light_offsets,
+                    plan.layers,
+                    plan.atlas_side,
+                ),
+                _ => {
+                    "虚拟影图页表：**空**（这一份产物没有投影的灯）⇒ 采样侧一格都查不到".to_string()
+                }
             });
+            gpu.device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("组 0：虚拟影图页表（烘图侧算，见 px-scene::vshadow）"),
+                    usage: wgpu::BufferUsages::STORAGE,
+                    contents,
+                })
+        };
+        // 每一盏灯那一段的起点（前缀和）：与页表同住文档，这里原样搬上去。
+        let shadow_page_offsets = {
+            let mut bytes = Vec::new();
+            for offset in scene
+                .shadow
+                .as_ref()
+                .map(|plan| plan.light_offsets.as_slice())
+                .unwrap_or_default()
+            {
+                bytes.extend_from_slice(&offset.to_le_bytes());
+            }
+            if bytes.is_empty() {
+                bytes.extend_from_slice(&0_u32.to_le_bytes());
+            }
+            gpu.device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("组 0：页表段起点（每盏灯一个 u32）"),
+                    usage: wgpu::BufferUsages::STORAGE,
+                    contents: &bytes,
+                })
+        };
 
         let build_zero = |camera: &crate::camera::Camera,
                           view: &wgpu::TextureView,
                           viewport: [f32; 4],
-                          mesh_instances: &wgpu::Buffer|
+                          mesh_instances: &wgpu::Buffer,
+                          shadow_page_offsets: &wgpu::Buffer|
          -> Result<group0::GroupZero, String> {
             group0::frame(
                 &gpu.device,
@@ -1245,6 +1288,7 @@ impl Session {
                 // ⚠ 每实例数据（§本轮从组 1 搬到组 0）：`vertex_mesh.wgsl` 按
                 //    `instance_index` 选格，而"长度 = 物体数"那份数组由这里建一次、全帧共用。
                 mesh_instances,
+                &shadow_page_offsets,
                 &shadow_note,
             )
         };
@@ -1830,7 +1874,13 @@ impl Session {
         let mut cells: Vec<Cell> = Vec::with_capacity(placements.len());
         for placement in &placements {
             let viewport = placement.uniform_viewport((width, height));
-            let zero = build_zero(&placement.camera, &sampled_view, viewport, &instance_buffer)?;
+            let zero = build_zero(
+                &placement.camera,
+                &sampled_view,
+                viewport,
+                &instance_buffer,
+                &shadow_page_offsets,
+            )?;
             // 这一格的 `PassView`：`view_proj` 是"每一条 pass 一份"的 super，而它是每格一份的。
             let camera_stage = make_stage(
                 &format!("组 1：PassView（相机，第 {} 格）", placement.index),

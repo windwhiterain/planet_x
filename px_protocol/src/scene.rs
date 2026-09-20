@@ -94,6 +94,38 @@ pub enum Value {
     Quad([f32; 4]),
 }
 
+/// **虚拟影图**那一份：页表 + 那几张 atlas 的形状（§本轮）。
+///
+/// 排法（`px-scene/src/vshadow.rs` 的模块头是**同一份契约的另一处转写**）：
+///
+/// ```text
+/// 每一盏灯一段，段内：
+///   [0] virtual_size（低 16 位）| pages_per_side（高 16 位）
+///   [1] words_per_row
+///   [2] 每一面那一段的字数
+///   [3..] 面 0 的行段（每行：基址 1 字 + 掩码 words_per_row 字），接着面 1 …… 面 5
+/// ```
+///
+/// ⚠ 段长固定（`table_words_per_light`），所以"第几盏灯的段从哪开始"是乘法 ——
+/// 采样侧因此不需要在文档里查偏移。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ShadowPlan {
+    /// 页表本体（`u32` 的小端字节；空 = 一盏投影的灯都没有）。
+    pub table: Vec<u8>,
+    /// **每一盏灯那一段从第几个字开始**（前缀和）。
+    ///
+    /// ⚠ 必须是数组而不是"段长 × 灯号"：段长 = `3 + 6 · pages_per_side · (1 + ⌈pps/32⌉)`
+    /// 是**跟着 `pages_per_side` 变的**，而那是每一盏灯自己的数 —— 今天所有灯相同，
+    /// 但把"相同"写进契约就是留一颗雷（将来真出现两盏密度不同的灯，影子会整体错位，
+    /// 而画面上只表现为"影贴歪了"）。采样侧因此只做一次查表。
+    pub light_offsets: Vec<u32>,
+    /// atlas 的边长（texel）。
+    pub atlas_side: u32,
+    /// atlas 的层数（= 投影灯数 × 6）。
+    pub layers: u32,
+}
+
 fn keys_of<T>(map: &BTreeMap<String, T>) -> String {
     if map.is_empty() {
         return "（空）".to_string();
@@ -790,6 +822,15 @@ pub struct SceneSpec {
     pub passes: Vec<PassSpec>,
     #[serde(default)]
     pub lights: Vec<Light>,
+    /// **虚拟影图的页表**（§本轮）：页 → 物理槽位的映射，由**烘图侧**算出来落在这里。
+    ///
+    /// ⚠ 为什么在文档里而不是渲染器算：分页是"物体包围球 × `shadow_density` × 灯位"的函数
+    /// （`px-scene/src/vshadow.rs`），**只有烘图侧同时有这三样**。渲染器拿到的是结果 ——
+    /// 它不认识"密度"，只认识"这一页在第几格"。
+    ///
+    /// ⚠ 空表不落盘 ⇒ 没影子的场景（与六份冻产物）**逐字节不变**。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shadow: Option<ShadowPlan>,
     pub objects: Vec<Object>,
     /// **帧自有**的材质（§135）：天空盒那种"属于这颗渲染器、不是可换内容"的材质。
     /// 名字由 `draws[].material` 引用；全文内联，因为改它要重烘（见 [`FrameMaterial`]）。

@@ -206,6 +206,9 @@ impl SceneBuilder {
             resources: Vec::new(),
             passes: Vec::new(),
             lights: self.lights,
+            // ⚠ 由 `frame::build` 在烘图时填（分页要物体 / 灯 / 密度三样齐全，
+            //    而builder 这一步只有作者写下的东西）。见 `SceneSpec::shadow` 那段。
+            shadow: None,
             objects: self.objects,
             frame_materials: Vec::new(),
             material_instances: Vec::new(),

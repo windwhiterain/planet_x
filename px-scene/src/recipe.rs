@@ -731,6 +731,7 @@ pub fn compile(file: &SceneFile, baked: &mut Baked, with_graph: bool) -> Result<
             passes: Vec::new(),
             materials: Vec::new(),
             material_instances: Vec::new(),
+            shadow: None,
         }
     };
 
@@ -751,6 +752,8 @@ pub fn compile(file: &SceneFile, baked: &mut Baked, with_graph: bool) -> Result<
         resources: framebaked.resources,
         passes: framebaked.passes,
         lights,
+        // 页表（§本轮）：**烘图侧**算出来的那一份，原样落盘（采样侧按同一份排法查页）。
+        shadow: framebaked.shadow,
         objects,
         frame_materials: framebaked.materials,
         material_instances: framebaked.material_instances,

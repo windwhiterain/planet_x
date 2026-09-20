@@ -463,6 +463,11 @@ pub struct Baked {
     /// **生成出来的材质实例**（§139）：点光 cube 影子六面各要**各自的名字**
     /// （一个名字恰好一套组，执行器那边没有覆盖、没有优先级）。
     pub material_instances: Vec<MaterialInstance>,
+    /// **虚拟影图那一份**（页表 + atlas 形状）。
+    ///
+    /// ⚠ 它是分配器的输出**原样**落进文档（`u32` 转小端字节）：采样侧按同一份排法查页，
+    /// 而"排法"这件事只有一处定义（`vshadow.rs` 的模块头 + 那边的判据）。
+    pub shadow: Option<px_protocol::scene::ShadowPlan>,
 }
 
 /// 帧图 → 文档里的 `resources` + `passes` + `frame_materials`。
@@ -490,6 +495,7 @@ pub fn build(
             passes: Vec::new(),
             materials: Vec::new(),
             material_instances: Vec::new(),
+            shadow: None,
         });
     }
     // ---- 虚拟影图的分配：**在这里算**（页是 `.pxart` 的一部分，见模块那一节）----
@@ -789,6 +795,32 @@ pub fn build(
         passes,
         materials,
         material_instances,
+        // ---- 页表落进文档（§本轮）：采样侧拿它查"这一页在第几格" ----
+        //
+        // ⚠ 一盏投影的灯都没有 ⇒ `None`（不落这一节 ⇒ 那些场景的产物**逐字节不变**）。
+        shadow: allocation.as_ref().map(|allocation| {
+            let mut table = Vec::with_capacity(allocation.table.len() * 4);
+            for word in &allocation.table {
+                table.extend_from_slice(&word.to_le_bytes());
+            }
+            px_protocol::scene::ShadowPlan {
+                table,
+                // 每一盏灯那一段的起点（**前缀和**，不是段长 × 灯号）：
+                // 段长 = `table_words_per_light(pps)`，而 `pps` 是每盏灯自己的数 ——
+                // 把"所有灯段长相同"写进契约就是留一颗雷（见协议里 `light_offsets` 那段）。
+                light_offsets: {
+                    let mut offsets = Vec::with_capacity(allocation.lights.len());
+                    let mut at = 0_u32;
+                    for light in &allocation.lights {
+                        offsets.push(at);
+                        at += crate::vshadow::table_words_per_light(light.pages_per_side);
+                    }
+                    offsets
+                },
+                atlas_side: allocation.atlas.0,
+                layers: allocation.atlas.2,
+            }
+        }),
     })
 }
 
@@ -1378,6 +1410,7 @@ mod tests {
             resources: baked.resources.clone(),
             passes: baked.passes.clone(),
             lights: lights(),
+            shadow: None,
             objects: objects.clone(),
             frame_materials: Vec::new(),
             material_instances: Vec::new(),
@@ -1608,6 +1641,7 @@ mod tests {
             resources: baked.resources,
             passes: baked.passes,
             lights: Vec::new(),
+            shadow: None,
             objects,
             frame_materials: baked.materials,
             material_instances: baked.material_instances,
@@ -1642,6 +1676,7 @@ mod tests {
             resources: baked.resources,
             passes: baked.passes,
             lights: Vec::new(),
+            shadow: None,
             objects,
             frame_materials: baked.materials,
             material_instances: baked.material_instances,

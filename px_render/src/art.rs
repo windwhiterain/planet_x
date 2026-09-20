@@ -228,6 +228,11 @@ pub struct LoadedScene {
     pub skybox: Option<Skybox>,
     pub skybox_brightness: f32,
     pub objects: Vec<LoadedObject>,
+    /// **虚拟影图的页表**（§本轮）：烘图侧算好落进文档的那一份，宿主原样搬上 GPU。
+    ///
+    /// ⚠ 它在这里是**数据**，不是决定：渲染器不认识"密度 / 包围球"，只认识
+    /// "这一页在第几格"（见 `SceneSpec::shadow` 那段）。
+    pub shadow: Option<px_protocol::scene::ShadowPlan>,
 }
 
 impl LoadedScene {
@@ -333,6 +338,8 @@ pub fn load_scene(scene_path: &Path, pcg_root: &Path) -> Result<LoadedScene, Str
         skybox,
         skybox_brightness: spec.environment.skybox_brightness,
         objects,
+        // 页表原样带走（谁用谁搬上 GPU，见 `render.rs` 那一节）。
+        shadow: spec.shadow.clone(),
     })
 }
 

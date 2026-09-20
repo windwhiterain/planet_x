@@ -160,6 +160,12 @@ pub const DEPTH_PREPASS_BINDING: (u32, u32) = (0, 20);
 /// 而 `vertex_mesh.wgsl` 声明了这一格 ⇒ 每一份内容 shader 的组 0 都得有它。
 pub const MESH_INSTANCES_BINDING: (u32, u32) = (0, 21);
 
+/// **每一盏投影灯那一段页表从第几个字开始**（前缀和）—— group 0 binding 5（§本轮）。
+///
+/// ⚠ 为什么不是"段长 × 灯号"：段长 = `3 + 6 · pages_per_side · (1 + ⌈pps/32⌉)` 跟着
+/// `pages_per_side` 走，而那是每盏灯自己的数 ⇒ 采样侧只做一次查表。
+pub const SHADOW_PAGE_OFFSETS_BINDING: (u32, u32) = (0, 5);
+
 // ---------------------------------------------------------------------------
 // 值 → 字节
 // ---------------------------------------------------------------------------
@@ -603,6 +609,10 @@ pub fn bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
                 wgpu::BufferBindingType::Storage { read_only: true },
             ),
             buffer(
+                SHADOW_PAGE_OFFSETS_BINDING.1,
+                wgpu::BufferBindingType::Storage { read_only: true },
+            ),
+            buffer(
                 CLUSTERED_LIGHTS_BINDING.1,
                 wgpu::BufferBindingType::Storage { read_only: true },
             ),
@@ -700,6 +710,7 @@ pub fn frame(
     shadow_sampler: &wgpu::Sampler,
     shadow_page_table: &wgpu::Buffer,
     mesh_instances: &wgpu::Buffer,
+    shadow_page_offsets: &wgpu::Buffer,
     shadow_note: &str,
 ) -> Result<GroupZero, String> {
     // ⚠ `mesh_instances` 那一格（binding 21，**每实例数据**）是 §本轮从组 1 搬来的：
@@ -796,6 +807,10 @@ pub fn frame(
             wgpu::BindGroupEntry {
                 binding: MESH_INSTANCES_BINDING.1,
                 resource: mesh_instances.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: SHADOW_PAGE_OFFSETS_BINDING.1,
+                resource: shadow_page_offsets.as_entire_binding(),
             },
             wgpu::BindGroupEntry {
                 binding: CLUSTERED_LIGHTS_BINDING.1,
