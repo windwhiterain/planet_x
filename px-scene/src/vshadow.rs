@@ -315,21 +315,56 @@ pub fn allocate(lights: &[Vec<Caster>]) -> Result<Allocation, Overflow> {
             return Err(Overflow::NoCasters { light });
         }
 
-        // ---- 共享的虚拟格子：页数边长取最大的那个 span，向上取到 2 的幂 ----
+        // ---- 共享的虚拟格子：**由精度要求决定，所以它随灯距变**（§本轮的用户口径）----
         //
-        // ⚠ **与灯的距离无关**（见模块头）：所以太阳拉远不会让分配变大。
+        // ⚠⚠ 这一栏从前是"页数边长取最大的那个 span、向上取到 2 的幂"——那是个**错的模型**，
+        //    而它错的方式正好等于用户报的那个症状。推导：
+        //
+        //      一面是 90° 视锥 ⇒ 在距灯 `d` 处，这一面横跨 **2d** 个世界单位。
+        //      这一面有 `pages_per_side × 128` 个 texel。
+        //      ⇒ 一个 texel 的世界尺寸 = 2d / (pages_per_side × 128)。
+        //
+        //    要 1 个 texel = 1/ρ 个世界单位（ρ = texel/世界单位，用户给的精度要求），
+        //    就必须 `pages_per_side = 2dρ/128 = dρ/64` —— **与 d 成正比**。
+        //    从前它是"某个 caster 的 span + 2 取 2 的幂"，与 d **无关** ⇒
+        //    实际的 texel 世界尺寸 = 2d/虚拟边长 ∝ d ⇒ **太阳拉远，精度就按比例变差**。
+        //
+        //    而"页稀疏"这件事一分都没少：网格变细，但**只有 caster 盖到的那几页**
+        //    被分配（下面的 `wanted`），atlas 的尺寸只跟分出去的页数有关。
+        //    ⇒ 变细的是**格子**，不是 atlas。
+        //
+        // ⚠ 取整到 2 的幂：槽位的行内解码用 `slot % pages_per_side`，而 atlas 每层的页格
+        //    边长是 2 的幂（`atlas_side_for`）—— 两者不相等时"页格 → 物理槽位"会错位。
+        //    向上取到 2 的幂只会让精度**比要求的更细**（128/110 ≈ 1.16 倍），是安全的一侧。
+        let light_reach = live
+            .iter()
+            .map(|caster| {
+                let [x, y, z] = caster.position;
+                f64::from(x) * f64::from(x)
+                    + f64::from(y) * f64::from(y)
+                    + f64::from(z) * f64::from(z)
+            })
+            .fold(0.0_f64, f64::max)
+            .sqrt();
+        let density = live
+            .iter()
+            .map(|caster| f64::from(caster.density))
+            .fold(0.0_f64, f64::max);
+        // `pages_per_side = dρ/64`，向上取整，再向上取到 2 的幂。
+        let wanted_pages = (light_reach * density / (PAGE_SIZE as f64 / 2.0))
+            .ceil()
+            .max(4.0);
         let mut pages_per_side = 4_u32;
-        for caster in &live {
-            pages_per_side = pages_per_side.max(pages_for(caster.radius, caster.density) + 2);
-        }
-        pages_per_side = pages_per_side.next_power_of_two();
-        if pages_per_side > MAX_PAGES_PER_SIDE {
-            return Err(Overflow::PerFace {
-                light,
-                face: 0,
-                wanted: pages_per_side,
-                limit: MAX_PAGES_PER_SIDE,
-            });
+        while f64::from(pages_per_side) < wanted_pages {
+            pages_per_side *= 2;
+            if pages_per_side > MAX_PAGES_PER_SIDE {
+                return Err(Overflow::PerFace {
+                    light,
+                    face: 0,
+                    wanted: pages_per_side,
+                    limit: MAX_PAGES_PER_SIDE,
+                });
+            }
         }
 
         // ---- 落页 ----
@@ -338,9 +373,19 @@ pub fn allocate(lights: &[Vec<Caster>]) -> Result<Allocation, Overflow> {
         //    的），所以"它落在哪几面"不影响格数，只影响哪些页存在。保守地六面都建是
         //    **确定的**；而"只建朝向它的那几面"要靠一个半空间判据，那个判据错了的症状是
         //    "某一面缺一块影"（难查），收益却只是页数减半 —— 页数本来就只有几十。
+        //
+        // ⚠ 块的大小**按这一格真的有多少世界单位**算，不照 `pages_for` 那个按 ρ 估的数：
+        //    一页 = `2d/pages_per_side` 个世界单位，而 `pages_per_side` 是取过 2 的幂的，
+        //    所以按 ρ 估会**偏小**（偏小 = 这个物体的影缺一块）。
+        let page_world = 2.0 * light_reach / f64::from(pages_per_side);
         let mut wanted: Vec<(u32, u32, u32, String)> = Vec::new();
         for caster in &live {
-            let span = pages_for(caster.radius, caster.density) + 2;
+            let span = if page_world > 0.0 {
+                ((2.0 * f64::from(caster.radius) / page_world).ceil() as u32).max(1) + 2
+            } else {
+                pages_for(caster.radius, caster.density) + 2
+            };
+            let span = span.min(pages_per_side);
             for face in 0..CUBE_FACES {
                 let (x0, y0) = page_block_origin(caster.position, face, span, pages_per_side);
                 for dy in 0..span {
@@ -501,31 +546,62 @@ mod tests {
         allocate(&[vec![caster]]).expect("分得出来")
     }
 
-    /// **这一轮的核心判据**：灯拉远不改变"物体处一个 texel 有多少世界大"，
-    /// 也**不改变分配**。
+    /// **这一轮的核心判据**：物体处"一个 texel 有多少世界"与灯距**无关**。
     ///
-    /// 旧的 1024² cube 在这一点上是红的（texel 世界尺寸 = `2d/1024`，灯远 20 倍就粗 20 倍）。
+    /// 推导（`allocate` 里那段注释的定点对照）：一面 90° ⇒ 距灯 `d` 处这一面横跨 `2d`
+    /// 个世界单位，而它有 `pages_per_side × 128` 个 texel ⇒ 一个 texel 的世界尺寸
+    /// = `2d / (pages_per_side × 128)`。要它 = `1/ρ` 就必须 `pages_per_side = dρ/64`
+    /// ⇒ **格子随 d 变细**。
+    ///
+    /// ⚠ 这条判据**从前写反了**：旧版断的是"灯拉远**不改变分配**"（把整个
+    /// `LightLayout` 逐字段相等当成功），而那条恰好**就是**用户报的那个病 ——
+    /// 格子不随距离变 ⇒ texel 世界尺寸 ∝ d ⇒ 太阳拉远精度按比例变差。
+    /// 判据把一个 bug 当成不变量钉住，比没有判据更糟：它会挡住修复。
+    ///
+    /// ⚠ 取整到 2 的幂 ⇒ 实际比要求**更细**（最多细一倍），永远不会更粗。
     #[test]
-    fn density_is_independent_of_how_far_the_light_is() {
+    fn the_texel_world_size_is_independent_of_how_far_the_light_is() {
         let (radius, density) = (1.07_f32, 256.0_f32);
-        let mut layouts = Vec::new();
-        for factor in [1.0_f32, 5.0, 20.0, 100.0] {
-            let allocation = one(at(4.92 * factor, radius, density));
-            // 物体占的 texel 数 = `2Rρ` ⇒ 一个 texel 的世界尺寸 = `1/ρ`。
-            let texel_world = 1.0 / density;
-            let got = 1.0 / texel_world;
+        let mut sizes = Vec::new();
+        for factor in [1.0_f32, 2.0, 5.0, 10.0] {
+            let distance = 4.92 * factor;
+            let allocation = one(at(distance, radius, density));
+            let light = &allocation.lights[0];
+            let texel_world = 2.0 * distance / (light.pages_per_side * PAGE_SIZE) as f32;
             assert!(
-                got >= density - 1e-3,
-                "灯拉远 {factor} 倍后密度掉到 {got}，要求 ≥ {density}"
+                texel_world <= 1.0 / density * 1.001,
+                "灯在 {distance} 处一个 texel 有 {texel_world} 个世界单位，要求 ≤ {}（1/ρ）—— \
+                 比要求粗就是「太阳拉远精度变差」那一条",
+                1.0 / density
             );
-            layouts.push(allocation.lights[0].clone());
+            sizes.push(texel_world);
         }
-        for other in &layouts[1..] {
-            assert_eq!(
-                other, &layouts[0],
-                "灯拉远不该改变分配：旧版把虚拟面绑在灯的距离上"
-            );
-        }
+        let min = sizes.iter().cloned().fold(f32::MAX, f32::min);
+        let max = sizes.iter().cloned().fold(0.0, f32::max);
+        assert!(
+            max / min <= 2.001,
+            "四档的 texel 世界尺寸 {sizes:?} 差得超过一倍（2 的幂取整的余量）"
+        );
+    }
+
+    /// 精度要求越高、灯越远，**格子越细**（这是上一条判据的另一面）：
+    /// `pages_per_side` 随 `d × ρ` 涨，而**分出去的页数不跟着涨**（稀疏那一半没丢）。
+    #[test]
+    fn the_grid_grows_with_distance_while_the_pages_stay_sparse() {
+        let near = one(at(4.92, 1.07, 256.0));
+        let far = one(at(49.2, 1.07, 256.0));
+        assert!(
+            far.lights[0].pages_per_side > near.lights[0].pages_per_side,
+            "灯远十倍，格子该更细：近 {} vs 远 {}",
+            near.lights[0].pages_per_side,
+            far.lights[0].pages_per_side
+        );
+        // 物体没变大 ⇒ 它占的**页数**该差不多（成比例地涨一点点，因为块按世界尺寸算）。
+        let ratio = far.patches.len() as f64 / near.patches.len() as f64;
+        assert!(
+            ratio < 4.0,
+            "灯远十倍而分出去的页数涨了 {ratio} 倍 —— 稀疏那一半丢了"
+        );
     }
 
     /// 密度越高、物体越大，页块越大；而**页数远小于格子数**（稀疏）。
@@ -544,8 +620,14 @@ mod tests {
             "页数 {} 该小于格子数 {grid}",
             allocation.patches.len()
         );
-        // 半径 1.75、密度 256 ⇒ `ceil(2·1.75·256/128) = 7` 页边长，加余量 2 ⇒ 9×9。
-        assert!(allocation.patches.len() <= 6 * 9 * 9);
+        // ⚠ 这里从前断的是"页数 ≤ 6×9×9"（一个**绝对**上界）—— 那个数绑在
+        //    "格子不随灯距变"的旧模型上，格子一变细就假红。稀疏这件事的正确说法是
+        //    **比例**：分出去的页要远小于格子总数。
+        assert!(
+            allocation.patches.len() * 4 <= grid,
+            "页数 {} 该远小于格子数 {grid}（至少稀 4 倍）",
+            allocation.patches.len()
+        );
     }
 
     /// 表里的"基址 + 掩码"说得出一页的物理槽位 —— 采样侧 rank 的定点对照。
