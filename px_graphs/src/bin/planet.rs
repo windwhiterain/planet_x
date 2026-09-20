@@ -3,29 +3,24 @@
 //! ⚠ 这里原来是老写法（`node(params::FBM, "continents", &[])`：字符串 id + 一个
 //! `&[&Artifact]` 字节边界，类型全擦除）。现在接错一个输入、少给一个上游都是**编译错**。
 
-use px_cook::cook;
-use px_field_op::typed as field;
-use px_graph::{GraphSpec, begin, finish};
-use px_mesh_op::typed as mesh;
-use px_protocol::art::Domain;
+use px_cook::{Domain, GraphSpec, artifact_path_of, begin, cameras, cook, field, mesh};
 
 type Fault = Box<dyn std::error::Error>;
 
 fn main() -> Result<(), Fault> {
-    begin(GraphSpec {
+    let graph = begin(GraphSpec {
         name: "planet".to_string(),
         width: 780,
         height: 520,
         projection: Domain::Cube,
-        cameras: px_graph::cameras::review(),
+        cameras: cameras::review(),
     });
-    let cache = px_graph::driver();
 
-    let continents = cook::<field::Fbm>(&cache, "continents", ())?;
-    let mountains = cook::<field::Ridged>(&cache, "mountains", ())?;
-    let weight = cook::<field::Constant>(&cache, "weight", ())?;
+    let continents = cook::<field::Fbm>(&graph, "continents", ())?;
+    let mountains = cook::<field::Ridged>(&graph, "mountains", ())?;
+    let weight = cook::<field::Constant>(&graph, "weight", ())?;
     let terrain = cook::<field::Mix>(
-        &cache,
+        &graph,
         "terrain",
         field::MixInput {
             a: continents,
@@ -34,7 +29,7 @@ fn main() -> Result<(), Fault> {
         },
     )?;
     let height = cook::<field::Remap>(
-        &cache,
+        &graph,
         "height",
         field::FieldInput {
             field: terrain.clone(),
@@ -42,7 +37,7 @@ fn main() -> Result<(), Fault> {
     )?;
 
     let surface = cook::<mesh::CubeSphere>(
-        &cache,
+        &graph,
         "surface",
         mesh::CubeSphereInput {
             height: height.clone(),
@@ -60,8 +55,8 @@ fn main() -> Result<(), Fault> {
     );
     println!(
         "输出 surface：{} 顶点 / {} 三角形",
-        surface.mesh().vertices(),
-        surface.mesh().triangles()
+        surface.value().vertices(),
+        surface.value().triangles()
     );
 
     println!(
@@ -70,10 +65,10 @@ fn main() -> Result<(), Fault> {
     );
     println!(
         "  这一趟烘的成员（要在 art/scene/ 里自己接上）：height {}｜surface {}",
-        px_graph::artifact_path_of(&height.key).display(),
-        px_graph::artifact_path_of(&surface.key).display(),
+        artifact_path_of(&height.key).display(),
+        artifact_path_of(&surface.key).display(),
     );
 
-    finish();
+    graph.finish();
     Ok(())
 }

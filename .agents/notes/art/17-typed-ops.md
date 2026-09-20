@@ -3,6 +3,13 @@
 > 起因（2026-09-19，用户口径）：**「不显式建图，只是普通 Rust 逻辑加缓存辅助函数，类型检查最大化」**。
 > § 号接 `16-graph-split.md`（§159/§160 是拆分那一轮）。
 > 这一篇是**决议 + 事实 + 读数 + 未做**，代码已落（提交 `7feaecf`，分支 `feature/typed-graph`）。
+>
+> ⚠ 本篇是**那一轮**的记录。之后两轮的落地形状以 `18-operator-libraries.md`（算子实现回 dylib、
+> 运行期按身份装载）与 `19-generic-inst.md` + `20-build-graph.md`（`px_inst!` / build graph）为准。
+> 本篇里这些具体东西**已经不在了**：§166 那套「每图自建 `mono-gen` + `mono.rs` 配料清单」的
+> 生成器（连同 `px_graphs/src/mono.rs` 的 `INGREDIENTS`）、描述符表（`OpLibrary`/`OpTable`）、
+> 老 `node()` 路径、以及 `px_cook/src/field_fn.rs` 那个位置（`FieldFn` 搬去 `px_volume_alg::field_fn`）。
+> §166/§167 各自另有就地过期标记。
 
 ---
 
@@ -152,18 +159,19 @@ let proxy    = cook_mesh::<mesh::Proxy>(&cache, "proxy", &coarse, canvas)?;
 **要的是泛型方法，不是 `dyn`。** 落成的形状：
 
 ```rust
-// px_cook/src/field_fn.rs —— 算子唯一需要的那个抽象
+// px_volume_alg/src/field_fn.rs —— 算子唯一需要的那个抽象
+// （⚠ 2026-09-20 更正：它今天住 `px_volume_alg::field_fn`，不是 `px_cook/src/field_fn.rs`；
+//   那个路径已随"泛型算法搬进 alg rlib"一并删掉 —— 见 `19` §178 的 S1）
 pub type CoverCloud = px_verify::cloud_field::CloudFieldParams;
 pub trait FieldFn {
     fn cover(&self, cloud: &CoverCloud, direction: [f32; 3]) -> f32;
 }
 pub struct SampleField<'a> { pub field: &'a Field }     // 上游采样场当函数（老路径）
-pub struct ClosedForm<F> { pub f: F }                    // 闭包：图脚本现算
-
-// px_volume_op/src/lib.rs —— 泛型方法
+// ⚠ `ClosedForm<F>`（图脚本现写的闭式场）已删：今天那一档走 `px_inst!`（§174–§180）。
+// px_volume_alg/src/lib.rs —— 泛型方法
 pub fn bake<F: FieldFn>(params: &params::Params, cover: &F) -> VolumeData
 pub fn eval_sampled(params, &Field) -> VolumeData        // = bake::<SampleField>
-pub fn eval_closed<F: FieldFn>(params, &F) -> VolumeData // = bake::<F>
+pub fn coarse_with<F: FieldFn>(params, &Field, &F) -> VolumeData  // = 泛型实例那一档的入口
 ```
 
 ⚠ **一处接口设计上的坑**（记下来，别重犯）：第一版把云参数放进 `SampleField` 的字段里，
@@ -198,6 +206,16 @@ pub fn eval_closed<F: FieldFn>(params, &F) -> VolumeData // = bake::<F>
 ---
 
 ## §166 生成单态化实例 + 动态链接（这一级终于做了）
+
+> ⚠ 已过期（2026-09-20）：本节描述的**具体机制整套已删** —— `px_graphs/src/bin/mono-gen.rs`、
+> `px_graphs/src/bin/<图>/mono.rs` + `mono/` 模板、`px_mono_<图>_op` 这些**今天都不存在**；
+> `px_graphs/src/mono.rs` 的 `INGREDIENTS` 配料清单（§167 第 3 条）也没了。
+> ⚠ 但本节要的**性质**（改一行泛型参数 ⇒ 图 exe 字节不变、键必变、动态装载）**今天成立了**，
+> 只是换了形状：**`px_inst!` + build graph**（`19-generic-inst.md` §174–§180、
+> `20-build-graph.md` §183/§184），另有图侧现写的 `px_local_op!`（`18` §173）；
+> 产物落在 `target/pcg/inst/<key>.dll`。本节留下的是"这一级存在的理由"与那几条构建卫生的教训
+> （§166.3/§166.4/§166.5 的"`px_` 导入为零、别往 `target/debug/` 拷兄弟 DLL、两份构建图各有各的
+> `target/`"——这些**仍然有效**）。
 
 **要的是「自动生成单态化 → 编成 dylib → 动态装载」，不是把实例静态烘进图程序。**
 ⚠ 而且**两个 stage 都必须住在 graph scripts 底下**（用户裁定：不是在 `tools/` 那种通用位置）。
@@ -319,6 +337,17 @@ cargo 对 **path 依赖**选的是 `rlib` ⇒ 上游被**静态链**进这一份
 
 ## §167 未做 / 下一步（按价值排）
 
+> ⚠ 已过期（2026-09-20）：这是**那一轮**的待办清单。逐条今天的状态：
+> ① "另外三张图没迁" —— 老 `node()` 路径**整体已删**，不存在这条迁移了；
+> ② "生成的实例只接进 `--closed-cover` 演示分支" —— 那套生成器已删，今天实例那条路是
+> `px_inst!`（`19`/`20`），并且有 `inst_gate` 端到端在调；
+> ③ "生成器的配料清单仍是手维护的（`px_graphs/src/mono.rs` 的 `INGREDIENTS` 15 条）" ——
+> **形状整个换了**：`catalogue()` 和 `INGREDIENTS` 都不在了，节点由 `insts::build()` 这一处派生；
+> ④ "§166.4 那条 dylib 依赖（上游 DLL 递归）没解决" —— 那条结论本身已在 §166.5 **更正**（cdylib 自足）；
+> ⑤ "`source_hash.rs` 那道门没覆盖 `typed.rs`" —— `typed.rs` 已删；
+> ⑥ "`node()` 与 `cook_*` 的键坐标系不同" —— `node()` 已删，这条随之消失。
+> 保留本节是为了记住"那一轮还欠什么"。
+
 1. **另外三张图没迁**（`planet` / `desert` / `scene` 仍是老 `node()` 路径）。纯机械活。
 2. **生成的实例只接进 `--closed-cover` 这个演示分支**，没进任何一张图的正路。
 3. **生成器的配料清单仍是手维护的**（`px_graphs/src/mono.rs` 的 `INGREDIENTS` 那 15 条，
@@ -339,7 +368,7 @@ cargo 对 **path 依赖**选的是 `rlib` ⇒ 上游被**静态链**进这一份
 | 图脚本不许静态依赖任何 `*_op` | **改口径**：允许（那是类型检查的手段）；替代门见 §162 |
 | `xxx_op` 是动态链接 | **仍成立**，而且**生成的实例也走这条路**（§166） |
 | 算子之间只走 schema 的序列化数据 | **仍成立**：跨边界仍是 `PayloadBundle`；**载荷仍逐字节相同**（§163.1 / §164.1） |
-| 需要单态化的算子由图自建的 `xxx_op` 并着用 | ✅ **样本有了，而且是生成 + 动态链接那一支**（§166） |
+| 需要单态化的算子由图自建的 `xxx_op` 并着用 | ✅ **样本有了**；但**形状换过**：§166 那版生成器已删，今天是 `px_local_op!`（`18` §173）与 `px_inst!`（`19`/`20`） |
 | 键 = 内容 | **加强**：算子的源码哈希现在也进键（§166.2，⚠ 老键全失效一次） |
 
 ⇒ 一句话：**这一级把「生成的单态化实例」变成了一个可装载的 dylib ——

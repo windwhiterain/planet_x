@@ -25,9 +25,20 @@ use isosurface::sampler::Sampler;
 use isosurface::source::ScalarSource;
 use isosurface::MarchingCubes;
 
+use px_mesh_schema::ops::Proxy;
 use px_mesh_schema::params;
 use px_protocol::art::MeshData;
 use px_volume_schema::{PATCHES, VolumeSampler};
+
+px_graph_schema::px_body! {
+    Proxy,
+    |p, i, _g| {
+        // ⚠ 与老路径同一个采样器：`VolumeGrid` 只在**同一个面内**插值，
+        // 换成 `VolumeData` 直接当 sampler 会把面缝焊法换掉。
+        let grid = px_volume_schema::VolumeGrid::new(i.volume.value());
+        crate::proxy::surface(p, &grid)?
+    }
+}
 
 /// 把「本面参数」接到「参数空间」上：面号单独传，面内坐标就是 marching cubes 的域。
 struct Face<'a> {

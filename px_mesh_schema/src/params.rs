@@ -1,10 +1,5 @@
 //! 两个网格算子的参数：立方球网格（`mesh.cubesphere`）与等值面代理（`mesh.proxy`）。
-
-use serde::Serialize;
-use serde::de::DeserializeOwned;
-
-pub const CUBESPHERE: &str = "mesh.cubesphere";
-pub const PROXY: &str = "mesh.proxy";
+//! （算子 id 与接口形状住在同目录的 `ops.rs` 里 —— 一处定义。）
 
 pub mod cubesphere {
     use serde::{Deserialize, Serialize};
@@ -72,22 +67,3 @@ pub mod proxy {
     }
 }
 
-/// TOML 原文 → 键用的规范 JSON（`None` = 文件不存在 ⇒ 默认值）。
-pub fn canonical(op_id: &str, toml_text: Option<&str>) -> Result<String, String> {
-    match op_id {
-        CUBESPHERE => one::<cubesphere::Params>(toml_text),
-        PROXY => one::<proxy::Params>(toml_text),
-        other => Err(format!("px_mesh_schema 不认识算子 {other}")),
-    }
-}
-
-pub fn parse<P: Serialize + DeserializeOwned + Default>(toml_text: Option<&str>) -> Result<P, String> {
-    match toml_text {
-        Some(text) => toml::from_str(text).map_err(|err| err.to_string()),
-        None => Ok(P::default()),
-    }
-}
-
-fn one<P: Serialize + DeserializeOwned + Default>(toml_text: Option<&str>) -> Result<String, String> {
-    Ok(px_graph_schema::canonical_params(&parse::<P>(toml_text)?))
-}

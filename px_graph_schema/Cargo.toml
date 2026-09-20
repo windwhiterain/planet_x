@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-# 只有协议类型（`Domain` / `Camera` / `Blob` / `stream`）与两个纯工具：
+# 协议类型（`Domain` / `Camera` / `Blob` / `stream`）+ 两个纯工具：
 # 这一层没有算子实现、没有 CAS 驱动、不认识 `art/`。
 px_protocol = { path = "../px_protocol" }
 serde = { version = "1", features = ["derive"] }
@@ -14,3 +14,11 @@ serde = { version = "1", features = ["derive"] }
 # 而文档只有几 KB。五个 crate 都写一遍：别靠特性合并的偶然。
 serde_json = { version = "1", features = ["float_roundtrip"] }
 blake3 = "1"
+# 算子实现的**装载**（`ops::body`）：实现在 `px_*_op` 的 dylib 里，
+# 图程序不 cargo 依赖它们（依赖了就会"改一行实现 ⇒ 重编重链图程序"）。
+libloading = "0.8"
+
+[build-dependencies]
+# `build.rs` 算**契约这一份**的源码指纹（`SOURCE_HASH`）：装载实现库时用它握手。
+# ⚠ 与运行期（`px_cook::inst` 算泛型实例的 key）共用**同一份**算法（§177 / §179.2）。
+px_fingerprint = { path = "../px_fingerprint" }

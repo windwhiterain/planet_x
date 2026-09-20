@@ -1,6 +1,12 @@
 use px_field_schema::field::{Field, GridField, normalize, tangent_frame};
+use px_field_schema::ops::Warp;
 use px_field_schema::params;
 use px_graph_schema::Grid;
+
+px_graph_schema::px_body! {
+    Warp,
+    |p, i, g| crate::ops::warp::eval(p, &[i.field.value(), i.offset.value()], g)
+}
 
 pub fn eval(params: &params::warp::Params, inputs: &[&Field], grid: Grid) -> Field {
     let (input, warp) = (inputs[0], inputs[1]);

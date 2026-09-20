@@ -27,8 +27,10 @@
 
 pub mod art;
 pub mod client;
+pub mod fnv;
 pub mod frame;
 pub mod material;
+pub mod payload;
 pub mod render;
 pub mod scene;
 pub mod stream;
@@ -44,6 +46,7 @@ pub use scene::{
     Object, SCENE_SCHEMA, Sampler, SceneSpec, TextureRef, Transform, Value,
 };
 pub use stream::Frame;
+pub use payload::{Build, PayloadBundle};
 pub use wire::{Blob, BlobHeader, DType, WireError};
 
 pub const PROTOCOL_SNAPSHOT: &str = include_str!("../snapshots/protocol.snapshot.json");

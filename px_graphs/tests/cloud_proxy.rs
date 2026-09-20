@@ -3,31 +3,31 @@
 //! 覆盖图是**造**出来的一张小 cube map（不是 `mixed` 那句真场），这样测试不依赖 CAS 里
 //! 有没有烘过 `clouds` 图；真数据上的同一条断言在 `px_graphs --bin clouds` 的 `check` 里跑。
 //!
-//! ⚠ 这里**静态**调算子的函数体（`px_volume_op` / `px_mesh_op` 是 dev-dependency）：判的是数值。
-//! 「算子真的从 dylib 里被装载、被调用」由 `px_graphs/src/bin/*` 那一趟端到端走 —— 它的
-//! 产物键就是判据（键相同 ⇒ 走的是同一条路）。
+//! ⚠ 算子走的是**声明那条真路**（`PxOp::render` → 运行时装载实现库 → 调它的符号）：
+//! 于是"算子真的从 dylib 里被叫起来"在这个测试里也有实证，而图程序不必链接实现库
+//! （那是 `tests/crate_graph.rs` 那道门看着的）。
 
 use std::collections::HashMap;
 
 use px_field_schema::field::{Field, Projection};
-use px_field_schema::noise::FbmSettings;
-use px_field_op::noise::fbm_3;
-use px_mesh_schema::params as mesh_params;
+use px_graph_schema::{Cooked, Grid, PxOp};
 use px_graphs::cloud_proxy;
-use px_volume_schema::VolumeGrid;
+use px_mesh_schema::ops as mesh_ops;
+use px_mesh_schema::params as mesh_params;
+use px_mesh_schema::MeshData;
+use px_volume_schema::ops as volume_ops;
 use px_volume_schema::params::{self as volume_params, Params};
+use px_volume_schema::{PATCHES, VolumeData};
 use px_verify::cloud_field::CloudFieldParams;
 
 const FACE: u32 = 64;
 
+/// 一张**造出来的**覆盖度场。
+///
+/// ⚠ 从前这里调 `px_field_op::noise::fbm_3`（实现库里的函数）—— 现在实现库是运行时装载的，
+///   图侧不再链接它。判据量的是"闭合 / 包住 / 可复现 / 梯度有界"，与覆盖度具体长什么样无关，
+///   所以换成几段不同频率的正弦叠加（粗糙度与 fbm 那一档相当，梯度上界那条判据才有意义）。
 fn coverage() -> Field {
-    let settings = FbmSettings {
-        frequency: 2.0,
-        octaves: 3,
-        lacunarity: 2.0,
-        gain: 0.5,
-        seed: 11,
-    };
     let mut field = Field::with_projection(
         FACE,
         FACE * 6,
@@ -36,11 +36,24 @@ fn coverage() -> Field {
     );
     for y in 0..field.height {
         for x in 0..field.width {
-            let direction = field.direction(x, y);
-            field.set(x, y, fbm_3(direction, &settings));
+            let [cx, cy, cz] = field.direction(x, y);
+            let value = 0.5
+                + 0.18 * (3.0 * cx).sin() * (2.0 * cy).cos()
+                + 0.12 * (5.0 * cz).sin() * (4.0 * cx).cos()
+                + 0.08 * (9.0 * cy).sin() * (7.0 * cz).cos();
+            field.set(x, y, value.clamp(0.0, 1.0));
         }
     }
     field
+}
+
+/// 测试用的画布：算子签名要一个 `Grid`（体积那一档不用它，但**不许**两处口径不同）。
+fn grid() -> Grid {
+    Grid {
+        width: FACE,
+        height: FACE * 6,
+        projection: Projection::CubeMap,
+    }
 }
 
 fn params() -> Params {
@@ -61,13 +74,23 @@ fn surface_params() -> mesh_params::proxy::Params {
     }
 }
 
-fn bake(params: &Params, coverage: &Field) -> px_volume_schema::VolumeData {
-    px_volume_op::eval_sampled(params, coverage)
+fn bake(params: &Params, coverage: &Field) -> VolumeData {
+    // ⚠ 一条假键：这里的输入不是缓存里的节点，只是把值包成"已经拿到手的节点"那个形状。
+    let input = volume_ops::CloudCoarseInput {
+        coverage: Cooked::new([0; 32], coverage.clone(), false, 0, 0),
+    };
+    volume_ops::CloudCoarse
+        .render(params, &input, grid())
+        .expect("烘体积失败")
 }
 
-fn surface(params: &mesh_params::proxy::Params, volume: &px_volume_schema::VolumeData) -> px_mesh_schema::MeshData {
-    let grid = VolumeGrid::new(volume);
-    px_mesh_op::proxy::surface(params, &grid).expect("出等值面失败")
+fn surface(params: &mesh_params::proxy::Params, volume: &VolumeData) -> MeshData {
+    let input = mesh_ops::ProxyInput {
+        volume: Cooked::new([0; 32], volume.clone(), false, 0, 0),
+    };
+    mesh_ops::Proxy
+        .render(params, &input, grid())
+        .expect("出等值面失败")
 }
 
 fn audit(mesh: &px_mesh_schema::MeshData) -> (usize, usize) {
@@ -187,8 +210,7 @@ fn the_final_field_makes_a_tighter_proxy() {
 
     // 网格也必须照样闭合：缺几何是硬失败。
     let mesh = surface(&surface_params(), &final_volume);
-    let (open, nonmanifold) = audit(&mesh);
-    println!(
+    let (open, nonmanifold) = audit(&mesh);    println!(
         "真场代理：{} 顶点 / {} 三角形｜开口边 {open}、非流形边 {nonmanifold}",
         mesh.vertices(),
         mesh.triangles(),

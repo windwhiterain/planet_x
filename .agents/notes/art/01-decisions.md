@@ -1,5 +1,7 @@
 这篇讲什么：这个美术栈为什么长这样、哪些路线被否掉了、否掉的理由是什么。
 
+> ⚠ 后续（算子改回实现库、运行期按身份装载）：见 `18-operator-libraries.md`。
+
 ## §2 PCG DAG 的形态：脚本 / DSL / TS / QuickJS 全否
 - **没有任何现成框架同时满足**「纯文本图 + headless CLI + 强制确定性 + 亚秒热重载 + 无 bundler / 无 node_modules」，每一个都要写同样多的胶水还要背它的额外重量。**只借失效语义，不采用**：Ninja `restat`（early cutoff 的最小实现）、Bazel action cache、Salsa red-green（Rust / `ra_ap_salsa`）、Houdini PDG 的 expand/cook 两阶段 + work-item 文件缓存、fogleman/sdf 的 `~/.sdf` 内容寻址缓存、Minecraft density function（真实工业先例：地形就是一棵纯 JSON 的密度函数 DAG）。
 - **Houdini**（`.hip` 二进制不可 diff、商业许可与 Indie 格式不通）、**Blender Geometry Nodes + bpy**（`-b` 下 `bpy.app.timers` 不触发）、**Substance `.sbs` / Material Maker `.ptex`**（要它们的运行时）、**通用编排器**（Dagster / Prefect / Snakemake / Ninja / Bazel，多数要 server + DB + daemon，图在 Python、产出是文件）—— 全部不采用。SDF/CSG 小 DSL 的共同选择是「宿主语言 + 少量语法糖 + 一个 CLI」，**不发明新语言**。

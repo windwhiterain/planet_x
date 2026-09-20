@@ -1,6 +1,9 @@
 use px_field_schema::field::{Field, GridField, normalize, tangent_frame};
+use px_field_schema::ops::Gradient;
 use px_field_schema::params;
 use px_graph_schema::Grid;
+
+px_graph_schema::px_body! { Gradient, |p, i, g| crate::ops::gradient::eval(p, &[i.field.value()], g) }
 
 pub fn eval(params: &params::gradient::Params, inputs: &[&Field], grid: Grid) -> Field {
     let input = inputs[0];

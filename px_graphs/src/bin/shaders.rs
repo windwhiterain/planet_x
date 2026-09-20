@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use px_graph::{GraphSpec, ManifestEntry};
+use px_cook::{GraphSpec, ManifestEntry};
 
 
 /// 要烘的槽 = `art/shaders/*.wgsl` 里**每一个入口 shader**（§80 第 2 步）。
@@ -43,7 +43,8 @@ fn entry_slots() -> Result<Vec<String>, String> {
 }
 
 fn main() {
-    px_graph::begin(GraphSpec {
+    // ⚠ 这张图**一个节点都不 cook**：`begin` 只要它那一行摘要（图名 / 参数目录 / 缓存条数）。
+    let _graph = px_cook::begin(GraphSpec {
         name: "shaders".to_string(),
         width: 0,
         height: 0,
@@ -52,7 +53,7 @@ fn main() {
     });
 
     // 模块表读一次就够：所有入口共用同一批库（`planet_x::common / light / noise`）。
-    let modules = px_shader::workspace_modules(&px_graph::workspace_root())
+    let modules = px_shader::workspace_modules(&px_cook::workspace_root())
         .unwrap_or_else(|err| panic!("{err}"));
 
     let slots = entry_slots().unwrap_or_else(|err| panic!("{err}"));
@@ -67,29 +68,27 @@ fn main() {
         // 键不动、场景键不动、槽版本不动，而画出来的东西变了。
         let closure = px_shader::closure(&text, &modules);
         let (key, artifact, bytes) =
-            px_graph::write_shader(slot, &text, &closure, &modules).unwrap_or_else(|err| panic!("{err}"));
+            px_cook::write_shader(slot, &text, &closure, &modules).unwrap_or_else(|err| panic!("{err}"));
         println!(
             "产物 {slot} -> {}（{}，{} 字节 WGSL）",
             artifact.display(),
-            px_graph::hex_short(&key),
+            px_cook::hex_short(&key),
             text.len()
         );
         println!("  {}", closure.summary());
         entries.push(ManifestEntry {
             node: slot.to_string(),
             op: "shader.wgsl".to_string(),
-            op_version: px_graph::SHADER_VERSION,
-            key: px_graph::hex(&key),
+            op_version: px_cook::SHADER_VERSION,
+            key: px_cook::hex(&key),
             hit: false,
             millis: 0,
             bytes,
-            min: 0.0,
-            max: 0.0,
-            mean: text.len() as f32,
+            detail: format!("{} 字节 WGSL｜{}", text.len(), closure.summary()),
         });
     }
 
-    let manifest = px_graph::write_graph_manifest("shaders", &entries)
+    let manifest = px_cook::write_graph_manifest("shaders", &entries)
         .unwrap_or_else(|err| panic!("写清单失败：{err}"));
     println!(
         "共 {} 份 shader：{}；清单 {}",

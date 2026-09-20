@@ -1,6 +1,12 @@
 use px_field_schema::field::{Field, GridField};
+use px_field_schema::ops::Mix;
 use px_field_schema::params;
 use px_graph_schema::Grid;
+
+px_graph_schema::px_body! {
+    Mix,
+    |p, i, g| crate::ops::mix::eval(p, &[i.a.value(), i.b.value(), i.mask.value()], g)
+}
 
 pub fn eval(params: &params::mix::Params, inputs: &[&Field], grid: Grid) -> Field {
     let (a, b, mask) = (inputs[0], inputs[1], inputs[2]);

@@ -5,7 +5,8 @@
 //! ```text
 //! px_protocol ─ 类型与 [px-scene ⇄ px-pass] 的交换格式
 //! px_graph    ─ 图库本体：驱动 + 键 + 清单 + 内容寻址 CAS + 参数装载
-//!               （算子**不住这里**：按描述符表从 `px_*_op` 的 dylib 装载，§159）
+//!               （算子**不住这里**：声明在 `px_*_schema::ops`，实现由 `px_graph_schema::ops`
+//!                 按**身份**从 `px_*_op` 的 dylib 装载）
 //! px_shader   ─ WGSL 组装与反射（参数的**名字 ↔ 字节**那一份真源）
 //!      ↓
 //! px_scene    ─ 场景语义 + **帧图编译器**（这一层）

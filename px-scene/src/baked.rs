@@ -43,7 +43,12 @@ impl Baked {
         };
         let written = generate::write_texture(node, data.shape(), &data.bytes, dtype)
             .map_err(|err| format!("写贴图产物 {node} 失败：{err}"))?;
-        self.register(node, op, &written, data.bytes.len() as u64);
+        self.register(
+            node,
+            op,
+            &written,
+            format!("{} 字节贴图", data.bytes.len()),
+        );
         Ok(px_protocol::scene::Member::new(
             GENERATED,
             node,
@@ -60,7 +65,12 @@ impl Baked {
     ) -> Result<px_protocol::scene::Member, String> {
         let written = generate::write_generated_mesh(node, mesh)
             .map_err(|err| format!("写网格产物 {node} 失败：{err}"))?;
-        self.register(node, op, &written, 0);
+        self.register(
+            node,
+            op,
+            &written,
+            format!("{} 顶点 / {} 三角形", mesh.vertices(), mesh.triangles()),
+        );
         Ok(px_protocol::scene::Member::new(
             GENERATED,
             node,
@@ -68,7 +78,7 @@ impl Baked {
         ))
     }
 
-    fn register(&mut self, node: &str, op: &str, written: &Generated, payload: u64) {
+    fn register(&mut self, node: &str, op: &str, written: &Generated, detail: String) {
         println!(
             "{} {node:<16} {op:<20} {}  {:>9} B{}",
             if written.hit { "命中" } else { "重算" },
@@ -84,9 +94,7 @@ impl Baked {
             hit: written.hit,
             millis: written.millis,
             bytes: written.bytes,
-            min: 0.0,
-            max: 0.0,
-            mean: payload as f32,
+            detail,
         });
     }
 

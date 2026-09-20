@@ -3,26 +3,21 @@ name = "px_field_op"
 version = "0.1.0"
 edition = "2024"
 
-# `dylib` 是给运行时装载的那个（`px_graph_schema::OpLibrary`）；
-# `rlib` 只是为了让测试与 dev-dependency 能把这一份编出来（产品 exe 不链它，
-# 判据是 `px_graphs` 的依赖门）。
+# ⚠ **只有 dylib**：这一份是**运行时按身份装载**的实现库（`px_graph_schema::ops`），
+#   不是任何人的 cargo 依赖 —— 一旦被图程序依赖，"改一行实现不重编图程序"就没了
+#   （那条性质由 `px_graphs/tests/crate_graph.rs` 看着）。
 [lib]
-# ⚠ **只要 rlib**：算子现在是图程序**静态链**进来的一个 Rust 库。
-#   从前那个 `dylib` 是给"驱动按描述符表装载"用的，那条路已经删掉
-#   （连同描述符、OpTable、loader、生成的单态化实例）。
-crate-type = ["rlib"]
+crate-type = ["dylib"]
 
 [dependencies]
-# 图参数 struct 的 `PxInputs` 由它生成（字段名进键、按位置解字节）。
-px_derive = { path = "../px_derive" }
-px_protocol = { path = "../px_protocol" }
+# 契约（`PxOp` / 装载 / `Build`）+ 场域的数据与**声明**（算法不吃声明，但符号签名要用它）。
 px_graph_schema = { path = "../px_graph_schema" }
 px_field_schema = { path = "../px_field_schema" }
-# ⚠ 类型化契约那一层（`src/typed.rs`）：图脚本静态链接的是**它**，不是本 crate 的 dylib。
-px_cook = { path = "../px_cook" }
-serde = { version = "1", features = ["derive"] }
-serde_json = { version = "1", features = ["float_roundtrip"] }
+# ⚠ **算法在这里**（rlib）：这一份壳只把它接到声明上（格点遍历 + 值域映射/钳制）。
+#   搬出去的理由见 `src/lib.rs` 顶上那条：泛型实例（`px_inst!`）的 key 要覆盖 alg crate 的
+#   源码名册（`19-generic-inst.md` §177），而名册要的是一个能被从盘上收的目录。
+px_field_alg = { path = "../px_field_alg" }
 
 [build-dependencies]
-#  里的源码指纹用它（与键里的哈希同一个算法）。
-blake3 = "1"
+# 源码指纹（身份的那一半：进键的"实现是哪一份"）用它，与键里的哈希同一个算法。
+px_fingerprint = { path = "../px_fingerprint" }

@@ -82,8 +82,15 @@ cargo run -q -p px_render -- --offline --scene <产物> --out x.png --width 960 
 
 # 逃生门：老形状产物的**文件字节**哈希
 cargo run -q -p px_graphs --bin scene orbit-bare --no-frame-graph
-# 拿到的 .pxart 的 sha256 前 16 应当 == 2795F948E6987E11
+# 拿到的 .pxart 的 sha256 前 16 应当 == EBCD0389BEADF809
 ```
+
+⚠ **2026-09-19：§三 那六格重登记过**五次****（旧值 `2795F948…` / `2A7B42A7…` / `34B17990…` /
+`5D120324…` / `B49C4262…` 那几批作废）。理由都在"身份的覆盖面"上：指纹跳过 path 依赖、
+指纹漏 proc-macro、以及最近这一次（契约加装载入口与工具链握手 + 体积域算法搬进 `px_volume_alg`
++ 指纹算法搬进 `px_fingerprint`，最后又修了 `ops::open` 的一条路径口径缺陷）。
+量法与"为什么 J1 六张一位没动"写在 `hashes.txt` §三 与
+`.agents/notes/art/18-operator-libraries.md` §168/§171、`19-generic-inst.md` §180。
 
 ⚠ **还有一格前提：盘上那些字节的行尾约定。** 产品键哈希的是**盘上的源码文本**（闭包指纹，
 `hashes.txt` §六），所以"换一份 checkout 约定不同的副本"能**一个像素都不动而换掉所有键**

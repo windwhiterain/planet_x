@@ -3,24 +3,18 @@ name = "px_cook"
 version = "0.1.0"
 edition = "2024"
 
-# ⚠ 它**一个算子实现都不依赖**：这里只有「一个算子长什么样、怎么叫」的**类型化契约**，
-# 实现住在 `px_*_op` 的 dylib 里。图脚本静态链接本 crate ⇒ 类型检查拿得到；
-# 改算子实现只重编那个 dylib，图脚本与图程序一动不动（判据见 tests/）。
+# ⚠ 它**一个算子实现都不依赖**：这里只有「一个算子怎么调」的那条缓存路径、图的生命周期，
+# 以及各域**算子表**的 re-export（声明在 schema 里，实现在 `px_*_op` 的 dylib 里）。
+# ⇒ 图脚本一行 `use px_cook::…` 就够；而实现库只链 `px_graph_schema` + 各域 schema，
+#   不链驱动（一个进程里两份驱动是 §162 那条线要挡的）。
 [dependencies]
 px_graph = { path = "../px_graph" }
 px_graph_schema = { path = "../px_graph_schema" }
+# 泛型实例的 key 要**从盘上**数 alg crate 的源码名册（不能 cargo 依赖 alg crate，否则丢 R1）。
+px_fingerprint = { path = "../px_fingerprint" }
 px_protocol = { path = "../px_protocol" }
 px_field_schema = { path = "../px_field_schema" }
 px_volume_schema = { path = "../px_volume_schema" }
 px_mesh_schema = { path = "../px_mesh_schema" }
-# 参照场（`SampleField` 用的那几个 helper：`to_local` / `cover_from_mask`）。
-px_verify = { path = "../px_verify" }
 serde = { version = "1", features = ["derive"] }
-serde_json = { version = "1", features = ["float_roundtrip"] }
 toml = "0.8"
-blake3 = "1"
-
-[dev-dependencies]
-px_field_op = { path = "../px_field_op" }
-px_volume_op = { path = "../px_volume_op" }
-px_mesh_op = { path = "../px_mesh_op" }

@@ -3,25 +3,24 @@ name = "px_mesh_op"
 version = "0.1.0"
 edition = "2024"
 
+# ⚠ **只有 dylib**：这一份是**运行时按身份装载**的实现库（`px_graph_schema::ops`），
+#   不是任何人的 cargo 依赖 —— 一旦被图程序依赖，"改一行实现不重编图程序"就没了
+#   （那条性质由 `px_graphs/tests/crate_graph.rs` 看着）。
 [lib]
-# ⚠ **只要 rlib**：算子现在是图程序**静态链**进来的一个 Rust 库。
-#   从前那个 `dylib` 是给"驱动按描述符表装载"用的，那条路已经删掉
-#   （连同描述符、OpTable、loader、生成的单态化实例）。
-crate-type = ["rlib"]
+crate-type = ["dylib"]
 
 [dependencies]
-# 图参数 struct 的 `PxInputs` 由它生成（字段名进键、按位置解字节）。
-px_derive = { path = "../px_derive" }
-px_protocol = { path = "../px_protocol" }
+# 契约（`PxOp` / 装载 / `Build`）+ 网格域的数据与**声明**（算法不吃声明，但符号签名要用它）。
 px_graph_schema = { path = "../px_graph_schema" }
-px_field_schema = { path = "../px_field_schema" }
-px_volume_schema = { path = "../px_volume_schema" }
 px_mesh_schema = { path = "../px_mesh_schema" }
-# ⚠ 类型化契约那一层（`src/typed.rs`）：图脚本静态链接的是**它**，不是本 crate 的 dylib。
-px_cook = { path = "../px_cook" }
+# ⚠ 它读体积载荷的**参数空间约定**（`VolumeGrid` 只在同一个面内插值）：换掉采样器会把面缝焊法换掉。
+px_volume_schema = { path = "../px_volume_schema" }
+# 立方球那一路的输入就是一张场。
+px_field_schema = { path = "../px_field_schema" }
+# 线格式类型（`MeshData` / 立方球的采样约定）：算法直接用它。
+px_protocol = { path = "../px_protocol" }
 isosurface = "=0.1.0-alpha.0"
-serde_json = { version = "1", features = ["float_roundtrip"] }
 
 [build-dependencies]
-#  里的源码指纹用它（与键里的哈希同一个算法）。
-blake3 = "1"
+# 源码指纹（身份的那一半：进键的"实现是哪一份"）用它，与键里的哈希同一个算法。
+px_fingerprint = { path = "../px_fingerprint" }

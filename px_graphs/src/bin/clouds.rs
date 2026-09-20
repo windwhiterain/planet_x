@@ -6,13 +6,8 @@
 //!   `field.fbm` 在别的图里叫别的名字，算子不该知道；
 //! * 键里多了算子的源码哈希 ⇒ 改算子体必然重算，不靠人记得升版本。
 
-use px_cook::cook;
-use px_field_op::typed as field;
+use px_cook::{Domain, Graph, GraphSpec, begin, cameras, cook, field, mesh, volume};
 use px_field_schema::field::cube_map_extent;
-use px_graph::{GraphSpec, begin, finish, params_text};
-use px_mesh_op::typed as mesh;
-use px_protocol::art::Domain;
-use px_volume_op::typed as volume;
 use px_volume_schema::PATCHES;
 
 const FACE: u32 = 256;
@@ -23,72 +18,71 @@ type Fault = Box<dyn std::error::Error>;
 
 fn main() -> Result<(), Fault> {
     let (width, height) = cube_map_extent(FACE);
-    begin(GraphSpec {
+    let graph = begin(GraphSpec {
         name: "clouds".to_string(),
         width,
         height,
         projection: Domain::CubeMap,
-        cameras: px_graph::cameras::review(),
+        cameras: cameras::review(),
     });
-    let cache = px_graph::driver();
 
     // ── 场：七步，每一步都是「普通函数调用 + 隐式缓存」 ───────────────────────
     // ⚠ 上游是**具名字段的普通 Rust 值**（`Unary1/2/3`），漏一个、接错域都是编译错。
     // ⚠ 共享的上游（`mixed` 被 6 处用）克隆一次就好 —— `Cooked` 里是值，不是引用。
-    let clusters = cook::<field::Fbm>(&cache, "clusters", ())?;
-    let billows = cook::<field::Fbm>(&cache, "billows", ())?;
-    let flow = cook::<field::Fbm>(&cache, "flow", ())?;
+    let clusters = cook::<field::Fbm>(&graph, "clusters", ())?;
+    let billows = cook::<field::Fbm>(&graph, "billows", ())?;
+    let flow = cook::<field::Fbm>(&graph, "flow", ())?;
     let carved = cook::<field::Warp>(
-        &cache,
+        &graph,
         "carved",
         field::FieldPairInput { field: billows, offset: flow },
     )?;
-    let weight = cook::<field::Constant>(&cache, "weight", ())?;
+    let weight = cook::<field::Constant>(&graph, "weight", ())?;
     let mixed = cook::<field::Mix>(
-        &cache,
+        &graph,
         "mixed",
         field::MixInput { a: clusters, b: carved, mask: weight },
     )?;
 
     let coverage = cook::<field::Remap>(
-        &cache,
+        &graph,
         "coverage",
         field::FieldInput { field: mixed.clone() },
     )?;
     let slope_x = cook::<field::Gradient>(
-        &cache,
+        &graph,
         "slope_x",
         field::FieldInput { field: mixed.clone() },
     )?;
     let slope_y = cook::<field::Gradient>(
-        &cache,
+        &graph,
         "slope_y",
         field::FieldInput { field: mixed.clone() },
     )?;
     let slope_z = cook::<field::Gradient>(
-        &cache,
+        &graph,
         "slope_z",
         field::FieldInput { field: mixed.clone() },
     )?;
 
     // ── 体积：粗场（包住真场）与含细节的真场，参数文件不同、算子同一个 ─────────
     let coarse = cook::<volume::CloudCoarse>(
-        &cache,
+        &graph,
         "coarse",
         volume::CloudCoarseInput { coverage: mixed.clone() },
     )?;
     let proxy = cook::<mesh::Proxy>(
-        &cache,
+        &graph,
         "proxy",
         mesh::ProxyInput { volume: coarse.clone() },
     )?;
     let fine = cook::<volume::CloudCoarse>(
-        &cache,
+        &graph,
         "coarse_fine",
         volume::CloudCoarseInput { coverage: mixed.clone() },
     )?;
     let proxy_fine = cook::<mesh::Proxy>(
-        &cache,
+        &graph,
         "proxy_fine",
         mesh::ProxyInput { volume: fine.clone() },
     )?;
@@ -101,10 +95,10 @@ fn main() -> Result<(), Fault> {
         &fine,
     );
 
-    check("coarse", &mixed, &coarse, &proxy);
-    check("coarse_fine", &mixed, &fine, &proxy_fine);
+    check(&graph, "coarse", &mixed, &coarse, &proxy);
+    check(&graph, "coarse_fine", &mixed, &fine, &proxy_fine);
 
-    finish();
+    graph.finish();
     Ok(())
 }
 
@@ -115,7 +109,7 @@ fn report(
     coarse: &volume::VolumeOut,
     fine: &volume::VolumeOut,
 ) {
-    let stats = coverage.stats();
+    let stats = coverage.value().stats();
     println!(
         "输出 coverage：{}×{}（{} 面 × {face}²）｜值域 {:.4}..{:.4}｜均值 {:.4}",
         coverage.value().width,
@@ -126,7 +120,7 @@ fn report(
         stats.mean,
         face = FACE,
     );
-    let smooth = mixed.stats();
+    let smooth = mixed.value().stats();
     let mut sorted: Vec<f32> = mixed.value().data.clone();
     sorted.sort_by(|one, two| one.partial_cmp(two).unwrap_or(std::cmp::Ordering::Equal));
     let share = |fraction: f64| sorted[((sorted.len() - 1) as f64 * fraction) as usize];
@@ -141,7 +135,7 @@ fn report(
         share(0.95),
     );
     for (name, node) in ["slope_x", "slope_y", "slope_z"].iter().zip(slopes) {
-        let stats = node.stats();
+        let stats = node.value().stats();
         println!(
             "输出 {name}：值域 {:.4}..{:.4}｜均值 {:.4}",
             stats.min, stats.max, stats.mean
@@ -165,6 +159,7 @@ fn report(
 /// 判据 2（包住）与 `L` 的量法：每次烘完都在真数据上跑一遍，包括全部命中那一次
 /// —— 断言的对象是**存下来的产物**，不是内存里刚算出来的东西。
 fn check(
+    graph: &Graph,
     name: &str,
     mixed: &px_cook::Cooked<px_field_schema::field::Field>,
     volume: &volume::VolumeOut,
@@ -172,11 +167,11 @@ fn check(
 ) {
     // ⚠ 参数走 schema 的类型化解析（驱动只给原文）：判据读的是**同一份 TOML**，
     //   不是自己再抄一遍的数。
-    let params = px_volume_schema::params::parse(params_text(name).as_deref())
+    let params = px_volume_schema::params::parse(graph.params_text(name).as_deref())
         .unwrap_or_else(|err| panic!("读参数 {name} 失败：{err}"));
     let cloud = px_verify::proxy::from_volume(&params);
-    let coverage = mixed.field();
-    let mesh = proxy.mesh();
+    let coverage = mixed.value();
+    let mesh = proxy.value();
     let final_field = params.field == px_volume_schema::FieldKind::Final;
 
     let rays: usize = 256;

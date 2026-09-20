@@ -15,6 +15,12 @@
 >    （`git show f121ee3^:px_render/src/main.rs`）。⚠ 与 `bevy_pbr-0.19.1` 那一类不同 ——
 >    后者在 cargo registry 里，今天仍可直接打开（`15-render-wgpu.md` §156.2）。
 > 3. **全部读数（E1–E8、哈希、计时、四道墙）仍然有效**：它们没被推翻，只是描述的那支宿主没了。
+> 4. ⚠ 正文里的 `px_ops`（以及 `node()` / `cook_*` 那套 API）**已经不存在了**：算子拆成
+>    `px_*_schema`（数据与声明）+ `px_*_op`（实现库、按身份运行期装载）—— 见
+>    `16-graph-split.md` 与 `18-operator-libraries.md`；今天怎么写算子读
+>    `docs/generic-op-and-graph-integration.md`。
+> 5. ⚠ **参数名已改：`-Target` → `-Task`**（照抄本文里的命令会报"参数不存在"）。
+>    今天见 `20-build-graph.md` §191。
 
 ---
 

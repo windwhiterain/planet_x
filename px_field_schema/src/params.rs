@@ -1,19 +1,44 @@
-//! 七个场算子的**参数**：TOML 长什么样、默认值是多少、算子 id 叫什么。
+//! 七个场算子的**参数**：TOML 长什么样、默认值是多少。
+//! （算子 id 与接口形状住在同目录的 `ops.rs` 里 —— 一处定义。）
 //!
-//! ⚠ 参数住在 schema 这一侧，是为了让**算键不必求值**（§17.1）：驱动拿描述符表里的
-//! `canonical_params` 把 TOML 直接化成规范 JSON，`node_key` 用的就是这一份；算子求值时
-//! 收到的也是同一份 JSON。两侧一份口径，不会出现「键里的参数」与「算出来的参数」不是同一个。
+//! ⚠ 参数住 schema 这一侧，是因为**两处都要它**：算子声明（`ops.rs`）与判据仪器 ——
+//! 谁也不许自己再抄一份字段。`cook` 拿 `O::Params` 解 TOML（缺文件走 `Default`），
+//! 解出来的**规范 JSON** 进键，算子的 `render` 收到的是同一个值
+//! ⇒ 不会出现「键里的参数」与「算出来的参数」不是同一个。
 
-use serde::Serialize;
-use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 
-pub const CONSTANT: &str = "field.constant";
-pub const FBM: &str = "field.fbm";
-pub const GRADIENT: &str = "field.gradient";
-pub const MIX: &str = "field.mix";
-pub const REMAP: &str = "field.remap";
-pub const RIDGED: &str = "field.ridged";
-pub const WARP: &str = "field.warp";
+/// **泛型实例那一档的参数**（`FieldRemap` 的 `Params`）。
+///
+/// ⚠ 它与 [`remap::Params`] **不是**同一个类型，也**不该**合并：`remap` 是"把 `[in_min, in_max]`
+///   线性映到 `[out_min, out_max]`"那一档（七个预置算子之一）；这一档是"**上游 + 图侧函数**"
+///   （`px_inst!` 复用的声明）——`in_*` / `out_*` / `smooth` 是**共享路径**自己那一把尺子
+///   （活在 `px_field_alg::remap::normalize_value`，按 `[0,1] → [0,1]` 恒等档跑），
+///   而这里的三栏是**给图侧函数调的**（对比度 / 偏移 / 条带数）。
+///   两者共用的只有"归一化 + 钳制 + 映到输出值域"那一段，那一段住在 `px_field_alg` 里（**一份**）。
+///
+/// ⚠ 三栏都**进键**（`PxParams` 按字段名 + 字段值写哈希）：只改对比度必换键、必重算 ——
+///   而图程序 exe **一个字节不动**（泛型参数与参数都由命令行走）。
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, px_derive::PxParams)]
+#[serde(default, deny_unknown_fields)]
+pub struct RemapParams {
+    /// 对比度：图侧函数把落点从 `0.5` 往两边推开多少（`0` = 不推）。
+    pub gain: f32,
+    /// 偏移：整张场加多少再钳回 `[0,1]`。
+    pub bias: f32,
+    /// 条带数：图侧函数里那条正弦的**周期数**（换成"圈"就是 `bands` 圈）。
+    pub bands: f32,
+}
+
+impl Default for RemapParams {
+    fn default() -> Self {
+        Self {
+            gain: 0.65,
+            bias: 0.0,
+            bands: 8.0,
+        }
+    }
+}
 
 pub mod constant {
     use serde::{Deserialize, Serialize};
@@ -177,28 +202,3 @@ pub mod warp {
     }
 }
 
-/// TOML 原文 → 键用的规范 JSON。`None` = 参数文件不存在 ⇒ 算子的默认值（§17.2）。
-pub fn canonical(op_id: &str, toml_text: Option<&str>) -> Result<String, String> {
-    match op_id {
-        CONSTANT => one::<constant::Params>(toml_text),
-        FBM => one::<fbm::Params>(toml_text),
-        GRADIENT => one::<gradient::Params>(toml_text),
-        MIX => one::<mix::Params>(toml_text),
-        REMAP => one::<remap::Params>(toml_text),
-        RIDGED => one::<ridged::Params>(toml_text),
-        WARP => one::<warp::Params>(toml_text),
-        other => Err(format!("px_field_schema 不认识算子 {other}")),
-    }
-}
-
-/// 某个算子的参数类型解析（图脚本要拿**类型化的**参数去跑仪器时用这条）。
-pub fn parse<P: Serialize + DeserializeOwned + Default>(toml_text: Option<&str>) -> Result<P, String> {
-    match toml_text {
-        Some(text) => toml::from_str(text).map_err(|err| err.to_string()),
-        None => Ok(P::default()),
-    }
-}
-
-fn one<P: Serialize + DeserializeOwned + Default>(toml_text: Option<&str>) -> Result<String, String> {
-    Ok(px_graph_schema::canonical_params(&parse::<P>(toml_text)?))
-}

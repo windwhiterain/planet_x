@@ -1,0 +1,24 @@
+[package]
+name = "px_volume_alg"
+version = "0.1.0"
+edition = "2024"
+
+# ⚠ **rlib**（默认，不写 `crate-type`）：它是**算法**，不是被装载的实现库。
+#   体积域的实现库是 `px_volume_op`（dylib，薄壳），它把这门算法链进去。
+#
+# ⚠ 为什么算法要单独一个 crate：泛型实例（`px_inst!`）要**从盘上**算 alg crate 的源码名册
+#   来进 key（`19-generic-inst.md` §177），而名册要的是"这个文件"而不是"编译产物"；
+#   算法如果住在 dylib crate 里，图侧就没有一个稳定的目录名册可收。
+
+[dependencies]
+# 契约（`PxOp` / `Build`）+ 体积域的数据与**声明**（算法不吃声明，但符号签名要用它）。
+px_graph_schema = { path = "../px_graph_schema" }
+px_volume_schema = { path = "../px_volume_schema" }
+# 算子的输入就是一张场（`eval_sampled` 的签名里就是它）。
+px_field_schema = { path = "../px_field_schema" }
+# 参照场那一侧：烘出来的粗场要能与它逐位对上（§28.2 的共享依赖）。
+px_verify = { path = "../px_verify" }
+
+[build-dependencies]
+# 源码指纹（身份的那一半：进键的"alg 是哪一份"）用它，与键里的哈希同一个算法。
+px_fingerprint = { path = "../px_fingerprint" }

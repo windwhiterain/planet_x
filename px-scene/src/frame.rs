@@ -955,22 +955,6 @@ mod tests {
     use super::*;
     use px_protocol::scene::{CullMode, Geometry, Material, Transform};
 
-    /// 这些判据要**读真的配方**（`art/frame/default.toml`），而 `px_graph::workspace_root()`
-    /// 要上下文先开过 —— 生产里由两个 bin 的 main 开，测试里在这里开一次。
-    fn begin() {
-        use std::sync::Once;
-        static ONCE: Once = Once::new();
-        ONCE.call_once(|| {
-            px_graph::begin(px_graph::GraphSpec {
-                name: "frame-tests".to_string(),
-                width: 0,
-                height: 0,
-                projection: px_protocol::art::Domain::Cube,
-                cameras: Vec::new(),
-            });
-        });
-    }
-
     fn object(id: &str, alpha: AlphaMode) -> Object {
         let mut material = Material::new(Member::new("shaders", "surface", &"a".repeat(64)));
         material.alpha = alpha;
@@ -1058,7 +1042,6 @@ mod tests {
     /// 兼容逃生门：不给帧图 ⇒ 三节都空（产物逐字节回到老形状）。
     #[test]
     fn the_legacy_switch_emits_nothing_at_all() {
-        begin();
         let frame = load(DEFAULT_FRAME).expect("默认帧图要能读");
         let objects = vec![object("planet", AlphaMode::Opaque)];
         let baked = build(&frame, &objects, &sources(), false).expect("老形状");
@@ -1130,7 +1113,6 @@ mod tests {
     /// 而真正该改的是配方。
     #[test]
     fn a_broken_frame_material_is_refused_at_bake_time() {
-        begin();
         let modules = px_shader::workspace_modules(&px_graph::workspace_root()).expect("模块表");
         let material = |params: &str| -> MaterialFile {
             toml::from_str(&format!(
@@ -1230,7 +1212,6 @@ mod tests {
     /// 帧图的形状判据：乒乓对、select 词汇、顶点/片元各归其位。
     #[test]
     fn a_broken_frame_recipe_is_refused_by_name() {
-        begin();
         // ⚠ 取那一条要**按标签**，不按下标：帧图会长（§131 就往 prepass 后面插了 copy_depth），
         //    按下标写的判据会在别人加一条 pass 的那天悄悄指到另一条上去。
         fn entry_mut<'a>(frame: &'a mut FrameFile, label: &str) -> &'a mut EntryFile {
@@ -1281,7 +1262,6 @@ mod tests {
     /// 核对基准产物：标签对不上就报出**期望什么**与**实际是什么**。
     #[test]
     fn verify_names_the_expected_frame_and_what_it_found() {
-        begin();
         let frame = load(DEFAULT_FRAME).expect("默认帧图");
         let objects = vec![object("planet", AlphaMode::Opaque)];
         let baked = build(&frame, &objects, &sources(), true).expect("帧图");
@@ -1315,7 +1295,6 @@ mod tests {
     /// 而那时它只在宿主装载时才炸。
     #[test]
     fn the_baked_materials_satisfy_the_document_checks() {
-        begin();
         let frame = load(DEFAULT_FRAME).expect("默认帧图");
         let objects = vec![object("planet", AlphaMode::Opaque)];
         let baked = build(&frame, &objects, &sources(), true).expect("帧图");

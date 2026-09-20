@@ -2,38 +2,33 @@
 //!
 //! ⚠ 这里原来是老写法（字符串 id + `&[&Artifact]`）。见 `planet.rs` 顶上那条注释。
 
-use px_cook::cook;
-use px_field_op::typed as field;
-use px_graph::{GraphSpec, begin, finish};
-use px_mesh_op::typed as mesh;
-use px_protocol::art::Domain;
+use px_cook::{Domain, GraphSpec, artifact_path_of, begin, cameras, cook, field, mesh};
 
 type Fault = Box<dyn std::error::Error>;
 
 fn main() -> Result<(), Fault> {
-    begin(GraphSpec {
+    let graph = begin(GraphSpec {
         name: "desert".to_string(),
         width: 780,
         height: 520,
         projection: Domain::Cube,
-        cameras: px_graph::cameras::review(),
+        cameras: cameras::review(),
     });
-    let cache = px_graph::driver();
 
-    let plateaus = cook::<field::Fbm>(&cache, "plateaus", ())?;
-    let canyons = cook::<field::Ridged>(&cache, "canyons", ())?;
-    let flow = cook::<field::Fbm>(&cache, "flow", ())?;
+    let plateaus = cook::<field::Fbm>(&graph, "plateaus", ())?;
+    let canyons = cook::<field::Ridged>(&graph, "canyons", ())?;
+    let flow = cook::<field::Fbm>(&graph, "flow", ())?;
     let carved = cook::<field::Warp>(
-        &cache,
+        &graph,
         "carved",
         field::FieldPairInput {
             field: canyons,
             offset: flow,
         },
     )?;
-    let blend = cook::<field::Constant>(&cache, "blend", ())?;
+    let blend = cook::<field::Constant>(&graph, "blend", ())?;
     let terrain = cook::<field::Mix>(
-        &cache,
+        &graph,
         "terrain",
         field::MixInput {
             a: plateaus,
@@ -42,7 +37,7 @@ fn main() -> Result<(), Fault> {
         },
     )?;
     let height = cook::<field::Remap>(
-        &cache,
+        &graph,
         "height",
         field::FieldInput {
             field: terrain.clone(),
@@ -50,7 +45,7 @@ fn main() -> Result<(), Fault> {
     )?;
 
     let surface = cook::<mesh::CubeSphere>(
-        &cache,
+        &graph,
         "surface",
         mesh::CubeSphereInput {
             height: height.clone(),
@@ -69,8 +64,8 @@ fn main() -> Result<(), Fault> {
 
     println!(
         "输出 surface：{} 顶点 / {} 三角形",
-        surface.mesh().vertices(),
-        surface.mesh().triangles()
+        surface.value().vertices(),
+        surface.value().triangles()
     );
 
     println!(
@@ -79,10 +74,10 @@ fn main() -> Result<(), Fault> {
     );
     println!(
         "  这一趟烘的成员（要在 art/scene/ 里自己接上）：height {}｜surface {}",
-        px_graph::artifact_path_of(&height.key).display(),
-        px_graph::artifact_path_of(&surface.key).display(),
+        artifact_path_of(&height.key).display(),
+        artifact_path_of(&surface.key).display(),
     );
 
-    finish();
+    graph.finish();
     Ok(())
 }

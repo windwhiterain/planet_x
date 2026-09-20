@@ -1,13 +1,31 @@
+//! 键的门：**一个节点的键 = 产出这个节点的那些东西**。
+//!
+//! ⚠ 这里调的是**唯一那个算键的函数**（`px_graph_schema::node_key`）—— 生产路径
+//! （`px_cook::cook`）调的是同一个。从前有两份（`node_key` 只在测试里活着、`cook` 自己
+//! 内联算），于是"文档里的键定义"与"真正的键"可以悄悄漂开；现在漂不开。
+
 use px_field_schema::field::Field;
 use px_field_schema::params::fbm::Params;
-use px_graph::{canonical_params, node_key, shader_key};
+use px_graph::{Grid, OpId, canonical_params, node_key, shader_key};
+use px_protocol::art::Domain;
+
+const INTERFACE: u64 = 0x0123_4567_89ab_cdef;
+const SOURCE: &str = "0123456789abcdef";
 
 fn key_of(params: &Params, inputs: &[[u8; 32]]) -> [u8; 32] {
     node_key(
-        "field.fbm",
-        "0123456789abcdef",
+        &OpId {
+            id: "field.fbm",
+            interface: INTERFACE,
+            source_hash: SOURCE,
+        },
         &canonical_params(params),
-        inputs,
+        None,
+        |hasher| {
+            for key in inputs {
+                hasher.update(key);
+            }
+        },
     )
 }
 
@@ -19,10 +37,7 @@ fn the_same_values_give_the_same_key_however_they_were_written() {
         canonical_params(&explicit),
         "省略的字段应当等于默认值"
     );
-    assert_eq!(
-        key_of(&Params::default(), &[]),
-        key_of(&explicit, &[])
-    );
+    assert_eq!(key_of(&Params::default(), &[]), key_of(&explicit, &[]));
 }
 
 #[test]
@@ -48,36 +63,88 @@ fn a_different_interface_changes_the_key() {
     //   三个类型名推出来）。所以这条门守的变成"接口哈希进键"：
     //   改了参数 struct、改了输入 struct、改了输出域 ⇒ 哈希变 ⇒ 键变，没人需要记得升版本。
     let params = Params::default();
-    let before = node_key(
-        "field.fbm",
-        "0123456789abcdef",
+    let same = key_of(&params, &[]);
+    let other_interface = node_key(
+        &OpId {
+            id: "field.fbm",
+            interface: !INTERFACE,
+            source_hash: SOURCE,
+        },
         &canonical_params(&params),
-        &[],
+        None,
+        |_| {},
     );
+    assert_ne!(same, other_interface, "接口形状哈希必须进键");
+}
+
+/// **实现的源码指纹进键** —— 这是"改了实现却命中旧产物"唯一的解药。
+///
+/// 它与接口哈希是两半：接口哈希管"形状变了"，源码指纹管"形状没变而算法变了"。
+#[test]
+fn a_different_implementation_source_changes_the_key() {
+    let params = Params::default();
+    let before = key_of(&params, &[]);
     let after = node_key(
-        "field.fbm",
-        "fedcba9876543210",
+        &OpId {
+            id: "field.fbm",
+            interface: INTERFACE,
+            source_hash: "fedcba9876543210",
+        },
         &canonical_params(&params),
-        &[],
+        None,
+        |_| {},
     );
-    assert_ne!(before, after, "接口形状哈希必须进键");
+    assert_ne!(before, after, "改了实现就必须换键");
 }
 
 /// ⚠ 这条门是**反的**（原来是"图版本必须进键"）。
 ///
-/// 一个节点的键 = 产出这个节点的那些东西：算子身份 + 规范参数 + 上游的键。
 /// `graph_version` 是**图的属性** —— 改图脚本里别处一行代码，不该让这个节点的产物作废。
+/// 签名里根本没有它，所以"它不影响键"是**结构性**的，不靠自觉。
 #[test]
-fn the_graph_version_is_not_part_of_the_key() {
+fn nothing_about_the_graph_itself_is_in_the_key() {
     let params = Params::default();
-    // `node_key` 的签名里已经没有 `graph_version` 了 —— 这条测试记录的就是那个决定。
-    // 想证明"它不影响键"，最直接的办法是同一个调用给出同一个键（没有可变的第三个数）。
     let once = key_of(&params, &[]);
     let twice = key_of(&params, &[]);
-    assert_eq!(once, twice, "键只由算子身份 + 参数 + 上游决定");
+    assert_eq!(once, twice, "键只由算子身份 + 参数 + 上游（+ 该域的画布）决定");
+}
 
-    // ⚠ 画布同理：它对**场**是真的，但那件事由 `px_cook` 按域决定
-    //   （`Payload::RESOLUTION_IS_CANVAS`），不在 `node_key` 里一刀切。
+/// 画布**由调用点**决定给不给（域自己声明 `RESOLUTION_IS_CANVAS`）：
+/// 场给 `Some`，体积/网格给 `None` —— 一刀切两头都会错。
+#[test]
+fn the_canvas_is_a_coordinate_the_caller_opts_into() {
+    let params = Params::default();
+    let canvas = Grid {
+        width: 780,
+        height: 520,
+        projection: Domain::Cube,
+    };
+    let without = key_of(&params, &[]);
+    let with = node_key(
+        &OpId {
+            id: "field.fbm",
+            interface: INTERFACE,
+            source_hash: SOURCE,
+        },
+        &canonical_params(&params),
+        Some(canvas),
+        |_| {},
+    );
+    assert_ne!(without, with, "给了画布就该是另一个键");
+    let same_canvas = node_key(
+        &OpId {
+            id: "field.fbm",
+            interface: INTERFACE,
+            source_hash: SOURCE,
+        },
+        &canonical_params(&params),
+        Some(Grid {
+            projection: Domain::Cube,
+            ..canvas
+        }),
+        |_| {},
+    );
+    assert_eq!(with, same_canvas, "同一份画布 ⇒ 同一个键");
 }
 
 #[test]
@@ -146,5 +213,3 @@ fn a_field_survives_the_blob_round_trip() {
     let restored = Field::from_blob(&field.to_blob()).expect("往返失败");
     assert_eq!(field, restored);
 }
-
-

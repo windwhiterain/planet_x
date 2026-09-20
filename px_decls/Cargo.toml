@@ -1,0 +1,27 @@
+[package]
+name = "px_decls"
+version = "0.1.0"
+edition = "2024"
+
+# ⚠ **它只被 `px_graphs/build.rs`（`[build-dependencies]`）用**（`21-codegen-types.md`）：
+#   它是"声明名 → 类型级事实"那张表 —— 生成器编译不了算子类型，只能问一个**编译过**它们的
+#   小 rlib。于是它**不进任何算子实现库的名册**（那些库的 manifest 由 `px_cook::inst` 按
+#   边一条一条写出来，里面没有它）⇒ `px_*_schema` 一个字节不用动、两条实例 key 逐位不变。
+#
+# ⚠ **它不许出现在任何 `[dependencies]` 里**：一旦被图程序或实现库常规依赖，
+#   "改声明表 ⇒ 重编图程序"就变成了一件正常的事（而它该由 build.rs 的 `rerun-if-changed` 管）。
+[dependencies]
+px_graph_schema = { path = "../px_graph_schema" }
+px_field_schema = { path = "../px_field_schema" }
+px_volume_schema = { path = "../px_volume_schema" }
+px_mesh_schema = { path = "../px_mesh_schema" }
+
+[build-dependencies]
+# ⚠ 与各 schema / 实现库同一份算法：本 crate 也在**若干份名册**里（它是实现库的
+#   `[build-dependencies]` 吗？不是 —— 但它自己的身份仍按同一套口径算，见文件头）。
+px_fingerprint = { path = "../px_fingerprint" }
+
+[dev-dependencies]
+# ⚠ 只给那道门用：按文本数 `px_op!` 的处数（与"表里条数"比）。它**不进**本 crate 的
+#   正常依赖图 ⇒ 也不会把 px_cook 拖进 `px_graphs/build.rs`。
+px_cook = { path = "../px_cook" }

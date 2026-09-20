@@ -1,5 +1,7 @@
 # 产物与协议
 
+> ⚠ 后续（算子改回实现库、运行期按身份装载）：见 `18-operator-libraries.md`。
+
 一份 `.pxart` 里到底有什么、域（equirect / 八面体 / cube / cubemap）怎么定，以及怎么判断两份产物有没有差别。
 （PCG 侧的缓存键与版本号在 `02-pcg.md`。）
 

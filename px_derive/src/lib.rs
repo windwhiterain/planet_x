@@ -1,12 +1,12 @@
 //! **算子的样板收敛成宏**。
 //!
-//! 现在只有一支：
+//! 两支：
 //!
 //! * [`derive(PxParams)`] —— **超参数** struct：每个字段按自己的类型写进键。
+//! * [`derive(PxInputs)`] —— **图参数** struct：把每个上游的键折进键。
 //!
-//! 计划中的下一支（见 `docs/generic-op-and-graph-integration.md`）：
-//! `#[derive(PxOp)]` —— 从「身份 + 参数类型 + 输入 struct + 输出域」推出
-//! `PxOp` 实现与 dylib 那一侧的 `OpDescriptor` / `canonical_params` / `call` / `<库名>_table`。
+//! ⚠ 算子**本身**那一份声明不走 derive，走 `px_graph_schema` 的 `px_op!`（它要同时把
+//! 身份、符号名与"去哪个实现库取"钉在一起）。
 
 use proc_macro::TokenStream;
 use quote::quote;
@@ -62,7 +62,11 @@ pub fn derive_px_params(input: TokenStream) -> TokenStream {
 
     let expanded = quote! {
         impl ::px_graph_schema::PxKeyed for #name {
-            fn key(&self, hasher: &mut ::blake3::Hasher) {
+            // ⚠ 走 `px_graph_schema::blake3`（契约层的 re-export），**不是** `::blake3`：
+            //   后者要求"用这个 derive 的 crate 自己直接依赖 blake3" —— 图侧现写算子
+            //   （`px_cook::px_local_op!`）不该为了 derive 再添一个依赖。
+            //   两个 derive 的口径在这一行上必须一致（另一个在 `PxInputs` 那边）。
+            fn key(&self, hasher: &mut ::px_graph_schema::blake3::Hasher) {
                 #(#steps)*
             }
         }
@@ -76,31 +80,24 @@ fn compile_error(message: &str) -> TokenStream {
     quote! { ::core::compile_error!(#message); }.into()
 }
 
-/// 给**图参数** struct 生成 `PxInputs`：`collect`（把上游的键折进来）+ `PxInputs` 的
-/// 另一半 `from_payloads`（把上游的字节解回来）。
+/// 给**图参数** struct 生成 `PxInputs::collect`：把每个上游的**键**折进来。
 ///
 /// ```ignore
 /// #[derive(PxInputs)]
 /// pub struct MixInput { pub a: Cooked<Field>, pub b: Cooked<Field>, pub mask: Cooked<Field> }
 /// //                    ↓ 生成
-/// impl px_cook::PxInputs for MixInput {
+/// impl px_graph_schema::PxInputs for MixInput {
 ///     fn collect(&self, hasher: &mut blake3::Hasher) {
 ///         hasher.update(b"a");    hasher.update(&self.a.key);
 ///         hasher.update(b"b");    hasher.update(&self.b.key);
 ///         hasher.update(b"mask"); hasher.update(&self.mask.key);
 ///     }
 /// }
-/// impl px_cook::FromPayloads for MixInput {
-///     fn from_payloads(inputs: &[&[u8]], grid: Grid) -> Result<Self, String> {
-///         let [a, b, mask] = inputs else { return Err(…); };
-///         Ok(Self { a: Cooked::from_bytes(a, grid)?, … })
-///     }
-/// }
 /// ```
 ///
 /// ⚠ **字段名进键**（与 `PxParams` 同一条口径）：加一个字段又删一个，不会因为"值恰好一样"而撞。
-/// ⚠⚠ **字段顺序 = 上游顺序**。这是"按位置解字节"的代价，与手写版一样 —— 但手写版是
-///   `let [a, b, mask] = inputs` 摆在眼前，宏生成的要记住这条。改顺序 = 换接口。
+/// ⚠ 只有这一半：图脚本是把**值**交给 `cook` 的（`MixInput { a, b, mask }`），
+///   从来没有"按位置解上游字节"那条路 ⇒ 字段顺序不是接口的一部分，字段名才是。
 #[proc_macro_derive(PxInputs)]
 pub fn derive_px_inputs(input: TokenStream) -> TokenStream {
     let parsed = parse_macro_input!(input as DeriveInput);
@@ -113,7 +110,6 @@ pub fn derive_px_inputs(input: TokenStream) -> TokenStream {
         return compile_error("PxInputs 要具名字段（键里要写字段名）");
     };
 
-    let mut idents = Vec::new();
     let mut collect = Vec::new();
     for field in &named.named {
         let Some(ident) = &field.ident else {
@@ -124,32 +120,12 @@ pub fn derive_px_inputs(input: TokenStream) -> TokenStream {
             hasher.update(#label.as_bytes());
             hasher.update(&self.#ident.key);
         });
-        idents.push(ident);
     }
-    let arity = idents.len();
 
     let expanded = quote! {
-        impl ::px_cook::PxInputs for #name {
-            fn collect(&self, hasher: &mut ::px_cook::blake3::Hasher) {
+        impl ::px_graph_schema::PxInputs for #name {
+            fn collect(&self, hasher: &mut ::px_graph_schema::blake3::Hasher) {
                 #(#collect)*
-            }
-        }
-
-        impl ::px_cook::FromPayloads for #name {
-            fn from_payloads(
-                inputs: &[&[u8]],
-                grid: ::px_cook::Grid,
-            ) -> Result<Self, String> {
-                let [ #(#idents),* ] = inputs else {
-                    return Err(format!(
-                        "吃 {} 个上游，却收到 {} 个",
-                        #arity,
-                        inputs.len(),
-                    ));
-                };
-                Ok(Self {
-                    #(#idents: ::px_cook::Cooked::from_bytes(#idents, grid)?,)*
-                })
             }
         }
     };

@@ -1,9 +1,12 @@
 use px_field_schema::field::{Field, GridField};
 use px_field_schema::noise::FbmSettings;
+use px_field_schema::ops::Fbm;
 use px_field_schema::params;
 use px_graph_schema::Grid;
 
 use crate::noise;
+
+px_graph_schema::px_body! { Fbm, |p, _i, g| crate::ops::fbm::eval(p, &[], g) }
 
 pub fn eval(params: &params::fbm::Params, _inputs: &[&Field], grid: Grid) -> Field {
     let settings = FbmSettings {

@@ -133,9 +133,9 @@
 ## 怎么用（三条命令）
 
 ```powershell
-.\tools\px.ps1 -Target test                    # 快速测试链（默认 members，不碰 bevy）
-.\tools\px.ps1 -Target device                  # 最便宜的 GPU 门（约 10 秒）
-.\tools\px.ps1 -Target field_dual              # 梯度对错的唯一判据
+.\tools\px.ps1 -Task test                    # 快速测试链（默认 members，不碰 bevy）
+.\tools\px.ps1 -Task device                  # 最便宜的 GPU 门（约 10 秒）
+.\tools\px.ps1 -Task field_dual              # 梯度对错的唯一判据
 ```
 
 ## 关于被删掉的节

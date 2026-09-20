@@ -1,11 +1,10 @@
 //! 体积烘培的参数：烘哪个场、网格多密、壳的半径、阈值与归一化。
+//! （算子 id 与接口形状住在同目录的 `ops.rs` 里 —— 一处定义。）
 //!
 //! ⚠ 「这些参数怎么变成一份参照场」不在这里 —— 那是**参照实现**的事，住在
 //! `px_verify::proxy`（算子与判据仪器共用同一条映射，谁也不许自己再抄一份）。
 
 use serde::{Deserialize, Serialize};
-
-pub const CLOUD_COARSE: &str = "cloud.coarse";
 
 /// 烘进体积网格的**标量场**。
 ///
@@ -84,14 +83,8 @@ impl Params {
     }
 }
 
-/// TOML 原文 → 键用的规范 JSON（`None` = 文件不存在 ⇒ 默认值）。
-pub fn canonical(op_id: &str, toml_text: Option<&str>) -> Result<String, String> {
-    match op_id {
-        CLOUD_COARSE => Ok(px_graph_schema::canonical_params(&parse(toml_text)?)),
-        other => Err(format!("px_volume_schema 不认识算子 {other}")),
-    }
-}
-
+/// TOML 原文 → **类型化**的参数（图脚本拿它去跑判据仪器时用这条；`cook` 走的是
+/// `O::Params` 那一份，两者同一条 `Default` 口径）。
 pub fn parse(toml_text: Option<&str>) -> Result<Params, String> {
     match toml_text {
         Some(text) => toml::from_str(text).map_err(|err| err.to_string()),

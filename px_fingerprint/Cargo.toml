@@ -1,0 +1,15 @@
+[package]
+name = "px_fingerprint"
+version = "0.1.0"
+edition = "2024"
+
+# ⚠ 它是**普通 rlib**，而且**没有任何 path 依赖**：build.rs（`[build-dependencies]`）
+#   与运行期代码（`px_cook::inst`，`[dependencies]`）共用**同一份**指纹算法 ——
+#   两边算 key 的代码是同一份，才可能"工具算的 key 与图程序算的 key"永远对得上（§179.2）。
+#
+# ⚠ 它**不许**依赖本仓任何 crate：一旦依赖了，那些 crate 自己的 `build.rs` 就会经
+#   path 依赖闭包把 px_fingerprint 自己收进指纹 —— 而 build.rs 又必须先编好
+#   px_fingerprint 才能跑 ⇒ 环。哈希实现只许站在 `blake3` 上。
+[dependencies]
+# 指纹本体：与契约层（键）、各实现库身份**同一个算法**。
+blake3 = "1"

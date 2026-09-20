@@ -8,7 +8,8 @@ edition = "2024"
 # 反过来就是环。`frame` / `params` 两个模块已经从本 crate 搬进 `px_scene`（§px-scene）。
 px-scene = { path = "../px-scene" }
 # 图库本体（驱动 / 键 / 清单 / CAS / 参数）。
-px_graph = { path = "../px_graph" }
+# ⚠ 图脚本**不直接**用它：机制那几样都从 `px_cook` 那一扇门出去（re-export）。
+# px_graph = { path = "../px_graph" }
 # 契约层（键、载荷格式、参数规范化）。
 px_graph_schema = { path = "../px_graph_schema" }
 # 三个领域的数据：图脚本读写产物要用它们的解出来的类型。
@@ -17,14 +18,10 @@ px_volume_schema = { path = "../px_volume_schema" }
 px_mesh_schema = { path = "../px_mesh_schema" }
 # 参照场（判据仪器与体积算子共用同一份）。
 px_verify = { path = "../px_verify" }
-# ⚠ **类型化的算子契约**（`px_cook`）+ 各领域的算子（`px_*_op`）。
-# 图脚本静态链接的就是它们：参数类型、输入个数、输出域全是**编译期**的事。
-# ⚠ 这里原来还有一组同名 `[dev-dependencies]`，只为把算子库的 dylib 编出来给驱动装载
-#   —— 那条路已经删掉（连同描述符、`OpTable`、loader、生成的单态化实例），两组合成一组。
+# ⚠ **图脚本唯一那扇门**（`px_cook`）：`begin` / `cook` / 各域算子表（声明）都在它后面。
+# ⚠ 这里**不许出现任何 `px_*_op`**：实现库是运行时按身份装载的，一旦成了 cargo 依赖，
+#   「改一行实现不重编图程序」立刻没了（见 tests/crate_graph.rs 那道门）。
 px_cook = { path = "../px_cook" }
-px_field_op = { path = "../px_field_op" }
-px_volume_op = { path = "../px_volume_op" }
-px_mesh_op = { path = "../px_mesh_op" }
 px_shader = { path = "../px_shader" }
 px_protocol = { path = "../px_protocol" }
 serde = { version = "1", features = ["derive"] }
@@ -34,3 +31,23 @@ serde = { version = "1", features = ["derive"] }
 # 而文档只有几 KB。五个 crate 都写一遍：别靠特性合并的偶然。
 serde_json = { version = "1", features = ["float_roundtrip"] }
 toml = "0.8"
+
+[dev-dependencies]
+# ⚠ 只给测试用：判据要**真的去装载**每一个算子（`tests/ops_load.rs`）与**真的现写一个**
+#   图侧算子（`tests/local_op.rs`，那里要一个超参数 struct ⇒ 要 derive）。
+px_derive = { path = "../px_derive" }
+
+[build-dependencies]
+# ⚠ `build.rs` 算**本图程序**这一份源码的指纹（`PX_SOURCE_HASH`）—— 它是「图侧现写算子」的身份。
+#   共用的助手 `px_fingerprint` 用它，与三个实现库、契约层同一个算法。
+px_fingerprint = { path = "../px_fingerprint" }
+# ⚠ **stage 1 的计划段**（`build.rs`）要"声明名 → 类型级事实"那张表：build script 编译不了
+#   算子类型，只能问这个**编译过**它们的小 rlib（`21-codegen-types.md`）。
+#   ⚠ 它**只许住这里**（build-dependencies）：一旦进了 `[dependencies]`，它就进了图程序的名册，
+#   "改声明表 ⇒ 重编图程序"就成了一件正常的事（而它该由本脚本的 `rerun-if-changed` 管）。
+px_decls = { path = "../px_decls" }
+# ⚠ **stage 1 的生成器要它**：`px_cook::inst` 算 key、写实例库的 `Cargo.toml` / `src/lib.rs`。
+#   从前 `build.rs` 不依赖它（那时它是运行期那一侧的事）；今天生成器要在**编译图程序之前**
+#   就把 key 算出来（`key_of_facts`）⇒ 它必须住 build-dependencies。
+#   ⚠ 它**不会**因此进任何实现库的名册（那些库的 manifest 由 `px_cook::inst` 按边一条一条写）。
+px_cook = { path = "../px_cook" }

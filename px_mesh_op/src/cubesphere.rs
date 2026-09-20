@@ -2,11 +2,17 @@ use std::collections::HashMap;
 
 use px_field_schema::field::Field;
 use px_graph_schema::Grid;
+use px_mesh_schema::ops::CubeSphere;
 use px_mesh_schema::params;
 use px_protocol::art::{
     CUBE_FACES, CUBE_GUTTER, MeshData, cube_atlas_uv, cube_cell_size, cube_direction,
     cube_face_size,
 };
+
+px_graph_schema::px_body! {
+    CubeSphere,
+    |p, i, g| crate::cubesphere::eval(p, &[i.height.value()], g)
+}
 
 fn normalize(vector: [f32; 3]) -> [f32; 3] {
     let length = (vector[0] * vector[0] + vector[1] * vector[1] + vector[2] * vector[2]).sqrt();

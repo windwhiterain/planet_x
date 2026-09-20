@@ -6,8 +6,9 @@ edition = "2024"
 [dependencies]
 # 图库本体：契约（`px_graph_schema`）+ 三个领域的数据（`px_*_schema`）
 # + shader 写入（`px_shader`）。
-# ⚠ **一个算子都不依赖**：算子在 dylib 里，运行时按描述符表装载
-# （这也是「改算子不必重编图程序」的全部机关）。
+# ⚠ **一个算子都不依赖**：声明在 `px_*_schema::ops`，实现由 `px_graph_schema::ops`
+# 按**身份**从 `px_*_op` 的 dylib 运行期装载（而图程序不把它们写进 `[dependencies]`
+# 就是「改一行实现不重编图程序」的全部机关，见 `px_graphs/tests/crate_graph.rs`）。
 px_protocol = { path = "../px_protocol" }
 px_graph_schema = { path = "../px_graph_schema" }
 px_field_schema = { path = "../px_field_schema" }
