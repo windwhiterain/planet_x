@@ -98,8 +98,9 @@ use crate::assemble::{HOST_VIEW_STUB, bevy_stub};
 /// `fetch_point_shadow` 的 shader，组装会当场报"找不到 `clustered_lights`"——
 /// 那正是我们要的失败方式（同 [`DEPTH_NDC_TO_VIEW_Z`] 那条判据）。
 pub const POINT_SHADOW_STUB: &str = "\
-@group(0) @binding(2) var point_shadow_textures: texture_depth_cube_array;\n\
-@group(0) @binding(3) var point_shadow_textures_comparison_sampler: sampler_comparison;\n\
+@group(0) @binding(2) var point_shadow_textures: texture_depth_2d_array;\n\
+@group(0) @binding(3) var point_shadow_textures_comparison_sampler: sampler;\n\
+@group(0) @binding(4) var<storage, read> px_shadow_pages: array<u32>;\n\
 \n\
 // `bevy_render::maths::copysign`（`maths.wgsl:66-68`）：把 b 的符号位抄到 a 上。\n\
 //\n\
@@ -123,8 +124,6 @@ fn orthonormalize(z_basis: vec3<f32>) -> mat3x3<f32> {\n\
 \x20   return mat3x3<f32>(x_basis, y_basis, z_basis);\n\
 }\n\
 \n\
-const PX_POINT_SHADOW_SCALE: f32 = 0.003;\n\
-\n\
 // D3D 那 8 个 MSAA 位置与对应的高斯系数（`shadow_sampling.wgsl:79-102`）。\n\
 const PX_D3D_SAMPLE_POINT_POSITIONS: array<vec2<f32>, 8> = array<vec2<f32>, 8>(\n\
 \x20   vec2<f32>( 0.125, -0.375),\n\
@@ -140,7 +139,104 @@ const PX_D3D_SAMPLE_POINT_COEFFS: array<f32, 8> = array<f32, 8>(\n\
 \x20   0.157112, 0.157112, 0.138651, 0.130251, 0.114946, 0.114946, 0.107982, 0.079001,\n\
 );\n\
 \n\
-fn px_sample_shadow_cubemap_at_offset(\n\
+// ---- 虚拟影图（§本轮）：页表 + 手动比较 --------------------------------------\n\
+//\n\
+// 素材是**每盏投影灯一张稀疏 atlas**（每面一层，层号 = 灯 × 6 + 面），而页表说\n\
+// \"虚拟页 → 物理槽位\"。排法见 `px-scene/src/vshadow.rs` 的模块头：\n\
+//   [0] virtual_size（低 16 位）| pages_per_side（高 16 位）\n\
+//   [1] words_per_row\n\
+//   [2] 每一面那一段的字数\n\
+//   [3..] 面 0 的行段（每行：基址 1 字 + 掩码 words_per_row 字），接着面 1 ……\n\
+const PX_PAGE_SIZE: u32 = 128u;\n\
+const PX_PAGE_BITS: u32 = 7u;  // log2(PX_PAGE_SIZE)\n\
+const PX_CUBE_FACES: u32 = 6u;\n\
+// 一盏灯的页表段**最多**多少字（`px-scene/src/vshadow.rs::TABLE_HEAD_WORDS` +\n\
+// `CUBE_FACES × ROWS_PER_FACE × (1 + WORDS_PER_ROW)`）—— 数组下标的上界；\n\
+// 而这一盏灯实际用了多少，由头里的 `pages_per_side` 说。\n\
+const PX_SHADOW_TABLE_WORDS: u32 = 3u + PX_CUBE_FACES * 256u * (1u + 8u);\n\
+\n\
+// Bevy 的 `cube_face_index`（`shadows.wgsl`）那六条：`+X −X +Y −Y +Z −Z`。\n\
+//\n\
+// ⚠ 它与 `px-scene/src/vshadow.rs::face_uv` 是**同一条契约的两处转写**（那边烘页表、\n\
+//    这边采样）：写得不同的话症状是\"影贴到别的面上\"或\"影歪一点\"，而两者都像内容问题。\n\
+fn px_shadow_face_uv(light_local: vec3<f32>) -> vec3<f32> {\n\
+\x20   let abs = abs(light_local);\n\
+\x20   var uv: vec3<f32>;\n\
+\x20   if (abs.x > abs.y && abs.x > abs.z) {\n\
+\x20       uv = vec3<f32>(select(-1.0, 1.0, light_local.x > 0.0), -light_local.y, -light_local.z) / abs.x;\n\
+\x20   } else if (abs.y > abs.z) {\n\
+\x20       uv = vec3<f32>(light_local.x, select(-1.0, 1.0, light_local.y > 0.0), light_local.z) / abs.y;\n\
+\x20   } else {\n\
+\x20       uv = vec3<f32>(light_local.x, -light_local.y, select(-1.0, 1.0, light_local.z > 0.0)) / abs.z;\n\
+\x20   }\n\
+\x20   return uv;\n\
+}\n\
+\n\
+// 虚拟页坐标 → 物理槽位。返回 `-1` = 这一页没分配（采样侧照\"不在影里\"处理）。\n\
+fn px_shadow_page_slot(light_id: u32, face: u32, page_x: u32, page_y: u32) -> i32 {\n\
+\x20   let head = px_shadow_pages[light_id * PX_SHADOW_TABLE_WORDS];\n\
+\x20   let pages_per_side = head >> 16u;\n\
+\x20   if (page_x >= pages_per_side || page_y >= pages_per_side) { return -1; }\n\
+\x20   let words_per_row = px_shadow_pages[light_id * PX_SHADOW_TABLE_WORDS + 1u];\n\
+\x20   let face_words = px_shadow_pages[light_id * PX_SHADOW_TABLE_WORDS + 2u];\n\
+\x20   let row_words = 1u + words_per_row;\n\
+\x20   let base = light_id * PX_SHADOW_TABLE_WORDS + 3u\n\
+\x20       + face * face_words + page_y * row_words;\n\
+\x20   let row_base = px_shadow_pages[base];\n\
+\x20   // 这一行里位于我前面（含我）的占用位数 - 1 ⇒ 我在这一行里的第几个。\n\
+\x20   let word_index = page_x >> 5u;\n\
+\x20   let bit = page_x & 31u;\n\
+\x20   var rank: u32 = 0u;\n\
+\x20   var word: u32 = 0u;\n\
+\x20   loop {\n\
+\x20       if (word > word_index) { break; }\n\
+\x20       let bits = px_shadow_pages[base + 1u + word];\n\
+\x20       if (word == word_index) {\n\
+\x20           // 含本位的掩码：`bit == 31` 时全 1（`1u << 32` 是未定义）。\n\
+\x20           let mask = select((1u << (bit + 1u)) - 1u, 0xFFFFFFFFu, bit == 31u);\n\
+\x20           rank = rank + countOneBits(bits & mask);\n\
+\x20           break;\n\
+\x20       }\n\
+\x20       rank = rank + countOneBits(bits);\n\
+\x20       word = word + 1u;\n\
+\x20   }\n\
+\x20   if (rank == 0u) { return -1; }\n\
+\x20   return i32(row_base + rank - 1u);\n\
+}\n\
+\n\
+// 一个采样点：查页 → 取 texel → **手动比较**（reverse-Z ⇒ 影里是 `depth < 存的深度`）。\n\
+fn px_sample_shadow_page(\n\
+\x20   light_id: u32,\n\
+\x20   face: u32,\n\
+\x20   uv: vec2<f32>,\n\
+\x20   depth: f32,\n\
+) -> f32 {\n\
+\x20   let head = px_shadow_pages[light_id * PX_SHADOW_TABLE_WORDS];\n\
+\x20   let pages_per_side = head >> 16u;\n\
+\x20   // `uv` 在 `[-1, 1]` ⇒ 虚拟页格坐标。\n\
+\x20   let page_f = (uv * 0.5 + 0.5) * f32(pages_per_side);\n\
+\x20   let page_x = u32(clamp(page_f.x, 0.0, f32(pages_per_side) - 1.0));\n\
+\x20   let page_y = u32(clamp(page_f.y, 0.0, f32(pages_per_side) - 1.0));\n\
+\x20   let slot = px_shadow_page_slot(light_id, face, page_x, page_y);\n\
+\x20   if (slot < 0) { return 1.0; }  // 没分配 ⇒ 不受影\n\
+\x20   let atlas_pages = pages_per_side;  // 分配器按 2 的幂取层内边长\n\
+\x20   let slot_u = u32(slot);\n\
+\x20   let texel = vec2<u32>(\n\
+\x20       (slot_u % atlas_pages) * PX_PAGE_SIZE,\n\
+\x20       (slot_u / atlas_pages) * PX_PAGE_SIZE,\n\
+\x20   ) + vec2<u32>(\n\
+\x20       u32(clamp((uv.x * 0.5 + 0.5) * f32(pages_per_side) * f32(PX_PAGE_SIZE)\n\
+\x20           - f32(page_x) * f32(PX_PAGE_SIZE), 0.0, f32(PX_PAGE_SIZE) - 1.0)),\n\
+\x20       u32(clamp((uv.y * 0.5 + 0.5) * f32(pages_per_side) * f32(PX_PAGE_SIZE)\n\
+\x20           - f32(page_y) * f32(PX_PAGE_SIZE), 0.0, f32(PX_PAGE_SIZE) - 1.0)),\n\
+\x20   );\n\
+\x20   let stored = textureLoad(point_shadow_textures, texel, i32(light_id * PX_CUBE_FACES + face), 0);\n\
+\x20   return select(1.0, 0.0, depth > stored);\n\
+}\n\
+\n\
+const PX_POINT_SHADOW_SCALE: f32 = 0.003;\n\
+\n\
+fn px_sample_shadow_at_offset(\n\
 \x20   position: vec2<f32>,\n\
 \x20   coeff: f32,\n\
 \x20   x_basis: vec3<f32>,\n\
@@ -149,13 +245,10 @@ fn px_sample_shadow_cubemap_at_offset(\n\
 \x20   depth: f32,\n\
 \x20   light_id: u32,\n\
 ) -> f32 {\n\
-\x20   return textureSampleCompareLevel(\n\
-\x20       point_shadow_textures,\n\
-\x20       point_shadow_textures_comparison_sampler,\n\
-\x20       light_local + position.x * x_basis + position.y * y_basis,\n\
-\x20       i32(light_id),\n\
-\x20       depth,\n\
-\x20   ) * coeff;\n\
+\x20   let dir = light_local + position.x * x_basis + position.y * y_basis;\n\
+\x20   let uv = px_shadow_face_uv(dir);\n\
+\x20   let face = u32(uv.z);\n\
+\x20   return px_sample_shadow_page(light_id, face, uv.xy, depth) * coeff;\n\
 }\n\
 \n\
 fn fetch_point_shadow(\n\
@@ -171,7 +264,16 @@ fn fetch_point_shadow(\n\
 \x20       surface_to_light_abs.x,\n\
 \x20       max(surface_to_light_abs.y, surface_to_light_abs.z),\n\
 \x20   );\n\
-\x20   let normal_offset = (*light).shadow_normal_bias * distance_to_light * surface_normal.xyz;\n\
+\x20   // ⚠ **normal_offset 按\"当地一个 texel 有多大世界\"缩放**（§本轮）：\n\
+\x20   //    从前这里是 `shadow_normal_bias * distance_to_light * N`，而那个\n\
+\x20   //    `shadow_normal_bias` 是按固定 1024² 的边长算的（`0.6 × (2/1024) × √2`）\n\
+\x20   //    ⇒ 太阳拉远时偏移按距离涨，整颗行星被自己的影压暗一档（实测平均通道差 4.43）。\n\
+\x20   //    现在 `shadow_normal_bias` 只说\"偏移几个 texel\"，而 texel 的世界尺寸\n\
+\x20   //    = `2 · distance / N_virt`（虚拟面边长由页表头给）⇒ 与\"灯多远\"无关。\n\
+\x20   let head = px_shadow_pages[light_id * PX_SHADOW_TABLE_WORDS];\n\
+\x20   let virtual_size = f32(head & 0xFFFFu);\n\
+\x20   let texel_world = 2.0 * distance_to_light / max(virtual_size, 1.0);\n\
+\x20   let normal_offset = (*light).shadow_normal_bias * texel_world * surface_normal.xyz;\n\
 \x20   let depth_offset = (*light).shadow_depth_bias * normalize(surface_to_light.xyz);\n\
 \x20   let offset_position = frag_position.xyz + normal_offset + depth_offset;\n\
 \x20   let frag_ls = offset_position.xyz - (*light).position_radius.xyz;\n\
@@ -185,30 +287,30 @@ fn fetch_point_shadow(\n\
 \x20   let depth = zw.x / zw.y;\n\
 \x20   let light_local = frag_ls * vec3<f32>(1.0, 1.0, -1.0);\n\
 \x20   let basis = orthonormalize(normalize(light_local))\n\
-\x20       * PX_POINT_SHADOW_SCALE * distance_to_light;\n\
+\x20       * PX_POINT_SHADOW_SCALE * texel_world;\n\
 \x20   var sum: f32 = 0.0;\n\
-\x20   sum += px_sample_shadow_cubemap_at_offset(\n\
+\x20   sum += px_sample_shadow_at_offset(\n\
 \x20       PX_D3D_SAMPLE_POINT_POSITIONS[0], PX_D3D_SAMPLE_POINT_COEFFS[0],\n\
 \x20       basis[0], basis[1], light_local, depth, light_id);\n\
-\x20   sum += px_sample_shadow_cubemap_at_offset(\n\
+\x20   sum += px_sample_shadow_at_offset(\n\
 \x20       PX_D3D_SAMPLE_POINT_POSITIONS[1], PX_D3D_SAMPLE_POINT_COEFFS[1],\n\
 \x20       basis[0], basis[1], light_local, depth, light_id);\n\
-\x20   sum += px_sample_shadow_cubemap_at_offset(\n\
+\x20   sum += px_sample_shadow_at_offset(\n\
 \x20       PX_D3D_SAMPLE_POINT_POSITIONS[2], PX_D3D_SAMPLE_POINT_COEFFS[2],\n\
 \x20       basis[0], basis[1], light_local, depth, light_id);\n\
-\x20   sum += px_sample_shadow_cubemap_at_offset(\n\
+\x20   sum += px_sample_shadow_at_offset(\n\
 \x20       PX_D3D_SAMPLE_POINT_POSITIONS[3], PX_D3D_SAMPLE_POINT_COEFFS[3],\n\
 \x20       basis[0], basis[1], light_local, depth, light_id);\n\
-\x20   sum += px_sample_shadow_cubemap_at_offset(\n\
+\x20   sum += px_sample_shadow_at_offset(\n\
 \x20       PX_D3D_SAMPLE_POINT_POSITIONS[4], PX_D3D_SAMPLE_POINT_COEFFS[4],\n\
 \x20       basis[0], basis[1], light_local, depth, light_id);\n\
-\x20   sum += px_sample_shadow_cubemap_at_offset(\n\
+\x20   sum += px_sample_shadow_at_offset(\n\
 \x20       PX_D3D_SAMPLE_POINT_POSITIONS[5], PX_D3D_SAMPLE_POINT_COEFFS[5],\n\
 \x20       basis[0], basis[1], light_local, depth, light_id);\n\
-\x20   sum += px_sample_shadow_cubemap_at_offset(\n\
+\x20   sum += px_sample_shadow_at_offset(\n\
 \x20       PX_D3D_SAMPLE_POINT_POSITIONS[6], PX_D3D_SAMPLE_POINT_COEFFS[6],\n\
 \x20       basis[0], basis[1], light_local, depth, light_id);\n\
-\x20   sum += px_sample_shadow_cubemap_at_offset(\n\
+\x20   sum += px_sample_shadow_at_offset(\n\
 \x20       PX_D3D_SAMPLE_POINT_POSITIONS[7], PX_D3D_SAMPLE_POINT_COEFFS[7],\n\
 \x20       basis[0], basis[1], light_local, depth, light_id);\n\
 \x20   return sum;\n\

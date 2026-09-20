@@ -150,6 +150,16 @@ pub const GLOBALS_BINDING: (u32, u32) = (0, 11);
 /// 它不进缓冲，但它是 group 0 契约的一部分，所以和上面几个一起记在这儿。
 pub const DEPTH_PREPASS_BINDING: (u32, u32) = (0, 20);
 
+/// **每实例数据**（`MeshInstance` 数组）—— group 0 binding 21（§本轮加的）。
+///
+/// ⚠ 它原来是**组 1 binding 1**，而组 1 binding 0 是 `PassView`。甲方案之后组 1
+/// binding 0 归**pass 参数**（执行器按 `PassPlan::params` 绑），于是两样东西抢同一格 ——
+/// 后绑的赢，而赢的那一份是错的。把它搬到组 0 的空格位上，两件事各占一处。
+///
+/// ⚠ 组 0 的这一格与"布局是超集"那条口径一致：几何 pass 的管线布局按**声明的那些格**建，
+/// 而 `vertex_mesh.wgsl` 声明了这一格 ⇒ 每一份内容 shader 的组 0 都得有它。
+pub const MESH_INSTANCES_BINDING: (u32, u32) = (0, 21);
+
 // ---------------------------------------------------------------------------
 // 值 → 字节
 // ---------------------------------------------------------------------------
@@ -587,6 +597,11 @@ pub fn bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
                 SHADOW_PAGE_TABLE_BINDING.1,
                 wgpu::BufferBindingType::Storage { read_only: true },
             ),
+            // 每实例数据（§本轮从组 1 搬来）：`vertex_mesh.wgsl` 按 `instance_index` 选格。
+            buffer(
+                MESH_INSTANCES_BINDING.1,
+                wgpu::BufferBindingType::Storage { read_only: true },
+            ),
             buffer(
                 CLUSTERED_LIGHTS_BINDING.1,
                 wgpu::BufferBindingType::Storage { read_only: true },
@@ -684,8 +699,12 @@ pub fn frame(
     shadow_cube: &wgpu::TextureView,
     shadow_sampler: &wgpu::Sampler,
     shadow_page_table: &wgpu::Buffer,
+    mesh_instances: &wgpu::Buffer,
     shadow_note: &str,
 ) -> Result<GroupZero, String> {
+    // ⚠ `mesh_instances` 那一格（binding 21，**每实例数据**）是 §本轮从组 1 搬来的：
+    //    组 1 binding 0 现在归 **pass 参数**（执行器按 `PassPlan::params` 绑），
+    //    两样东西不能再抢同一格（"谁后绑谁赢"，而赢的那一份是错的）。
     // ⚠ `viewport` 是 **`view.viewport`**：**绝对像素矩形** `(x, y, w, h)`
     //    （Bevy 的 `ExtractedView::viewport`），**不是**"这一格的尺寸"：
     //    单张那条路是 `(0, 0, 宽, 高)`，而对照图里第 k 格是
@@ -773,6 +792,10 @@ pub fn frame(
             wgpu::BindGroupEntry {
                 binding: SHADOW_PAGE_TABLE_BINDING.1,
                 resource: shadow_page_table.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: MESH_INSTANCES_BINDING.1,
+                resource: mesh_instances.as_entire_binding(),
             },
             wgpu::BindGroupEntry {
                 binding: CLUSTERED_LIGHTS_BINDING.1,

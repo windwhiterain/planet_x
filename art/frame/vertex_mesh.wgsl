@@ -23,19 +23,22 @@
 // 换成 `(view_proj * world) * p` 就是另一个数）。
 
 // ============================================================================
-// 组 1：**两类参数**（§142 的用户裁决：per pass 的是 material 参数的 super class）
+// 参数分两处（§本轮，甲方案）：
 //
-// 这里原来是一个 `MeshStage`（三块矩阵绑成一份 176 B，每个 (物体, 视图) 各一份）。
-// 现在按**参数是谁在配**拆成两格：
+//   **组 1 binding 0  `PassView`** —— 这一条 pass 的 `view_proj`，**一条 pass 一份**。
+//      它现在由**执行器按文档的 pass 参数**绑（`PassPlan::params`），所以：
+//      - 相机那一条 pass：宿主写相机矩阵（相机是运行时参数：位姿可烘、投影随 aspect 变）；
+//      - 影子的一页：写这一页的 `clip_from_world`，而**页在面里的哪一块**跟在后面
+//        （`view_page`，见下面 `PageParams`）。
+//      ⚠ 布局声明了**动态偏移**（一帧一份大缓冲 + 每笔一个偏移），因为页有几百个而
+//        "一页一份绑定组"是几百个对象。
 //
-//   binding 0  `PassView`     —— **super**：这一条 pass 的 `view_proj`，**一条 pass 一份**。
-//                                由文档的 `passes[]` 说了算（`cube_face{light,face,layer}`
-//                                → 那一面；没有 cube_face 的就是相机），宿主把它解析成
-//                                一个 64 B 的 uniform。
-//   binding 1  `MeshInstance` —— **instance**：**长度等于物体数的一份 buffer of struct**，
-//                                靠 `@builtin(instance_index)` 选这一笔画的是哪一格；
-//                                下标 = 物体在 `objects[]` 里的次序（宿主与执行器都不认识
-//                                "物体"，它们只是把同一个表的两半对上了）。
+//   **组 0 binding 21 `MeshInstance`** —— **长度等于物体数的一份 buffer of struct**，
+//      靠 `@builtin(instance_index)` 选这一笔画的是哪一格；
+//      下标 = 物体在 `objects[]` 里的次序（宿主与执行器都不认识"物体"，
+//      它们只是把同一个表的两半对上了）。
+//      ⚠ §本轮它从组 1 binding 1 搬到**组 0**：组 1 那一格现在整份归 pass 参数，
+//        两样东西抢同一格就是"谁后绑谁赢"，而赢的那一份是错的。
 //
 // ⚠ **为什么能拆**：`world_from_local` 与法线矩阵**与视图无关**（它们是物体的），
 //    只有 `view_proj` 是每视图的。拆开之后那块数据从
@@ -54,6 +57,12 @@
 struct PassView {
     /// 这一条 pass 的 `clip_from_world`（相机那一份，或者 cube 某一面的那一份）。
     view_proj: mat4x4<f32>,
+    /// 这一页在**面 NDC** 里的矩形 `(中心 x, 中心 y, 半宽, 半高)`。
+    ///
+    /// ⚠ 相机那一条 pass 给 `(0, 0, 1, 1)`（整幅），于是下面的映射是**恒等** ——
+    ///    一条算式服务两档，而不是"影子走一条支路"。恒等那一档要逐位是恒等：
+    ///    `(x - 0) / 1` 与 `x` 在 IEEE 下是同一个数（除 1.0 精确）。
+    view_page: vec4<f32>,
 };
 
 struct MeshInstance {
@@ -68,7 +77,9 @@ struct MeshInstance {
 // `var<storage> mesh: array<Mesh>`（`bevy_pbr-0.19.1/src/render/mesh_bindings.wgsl:9`）。
 // 两边都是"按 `instance_index` 选一格"，取哪一档地址空间**不改任何一条算术**，
 // 但跟着 oracle 走免得下一次对账时先怀疑这里。
-@group(1) @binding(1) var<storage, read> mesh: array<MeshInstance>;
+//
+// ⚠ §本轮搬到**组 0**（binding 21）：组 1 只剩 pass 参数那一格。
+@group(0) @binding(21) var<storage, read> mesh: array<MeshInstance>;
 
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
@@ -90,7 +101,18 @@ fn vertex(
     //    世界法线走**法线矩阵**并且**逐顶点归一化**（见下）；`uv` 原样透传。
     let world = mesh[instance_index].world_from_local * vec4<f32>(position, 1.0);
     var out: VertexOutput;
-    out.position = pass_view.view_proj * world;
+    let clip = pass_view.view_proj * world;
+    // ⚠ 把**面的裁剪坐标映射进这一页**（§本轮）：`clip.xy / clip.w` 是面 NDC 里的
+    //    `[-1,1]`，而这一页只占其中 `(中心 ± 半宽)` 那一块 ⇒ 减中心、除半宽。
+    //    `w` 不动（透视除法与深度都不受影响）。
+    //    ⚠ 相机那一条 pass 的参数是 `(0, 0, 1, 1)` ⇒ 这一步是恒等；而"恒等要真的恒等"
+    //    是这条算式能服务两档的前提（`(x - 0) / 1` 与 `x` 在 IEEE 下同一个数）。
+    //    ⚠ 映射用**未除 w 的形式**更稳：`(clip.xy - 中心*w) / 半宽`，两边同除 w 之后等价，
+    //    而这样不会在 `w` 很小的地方先除一次再乘回来。
+    var mapped = clip;
+    mapped.x = (clip.x - pass_view.view_page.x * clip.w) / pass_view.view_page.z;
+    mapped.y = (clip.y - pass_view.view_page.y * clip.w) / pass_view.view_page.w;
+    out.position = mapped;
     out.world_position = world;
     // ⚠⚠ 法线这一格曾经写成 `(world_from_local * vec4(normal, 0.0)).xyz`，理由是
     //    "这几档的缩放是均匀的 1.0 ⇒ 3×3 就是正确的法线矩阵"。那句**数学上对、

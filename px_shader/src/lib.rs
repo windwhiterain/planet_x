@@ -734,27 +734,27 @@ mod tests {
         let pinned = [
             (
                 "atmosphere.wgsl",
-                8311_usize,
-                0x6b67_21a2_55ce_f009_u64,
-                0x3388_1b68_faef_8589_u64,
+                9528_usize,
+                0xb222_07bb_e62e_b0fa_u64,
+                0x7c31_cc92_7eab_ed01_u64,
             ),
             (
                 "clouds.wgsl",
-                52769,
-                0x7ff2_8567_aa71_6987,
-                0x7678_2061_a1bd_b006,
+                57537,
+                0x6f86_5584_df03_ad4d,
+                0x26d9_7a07_2b26_9596,
             ),
             (
                 "ring.wgsl",
-                1096,
-                0x59d8_22d8_f87c_d24c,
-                0x23d0_283f_680f_89d3,
+                18576,
+                0x29db_0dbd_6674_8c6c,
+                0x8c39_408d_fc5e_5e7b,
             ),
             (
                 "surface.wgsl",
-                25915,
-                0xfecf_8fee_bd76_8982,
-                0xabed_b20f_868b_f99c,
+                31545,
+                0xdd77_9069_e838_9bb7,
+                0x8865_fd2a_ed6d_4b64,
             ),
         ];
         for (name, bytes, fnv, closure_fingerprint) in pinned {

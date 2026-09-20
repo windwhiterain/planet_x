@@ -197,10 +197,10 @@ macro_rules! px_op {
 macro_rules! px_body {
     ($name:ident, |$p:ident, $i:ident, $g:ident| $body:expr) => {
         #[unsafe(export_name = ::core::concat!(
-                                                    env!("CARGO_PKG_NAME"),
-                                                    "__",
-                                                    ::core::stringify!($name)
-                                                ))]
+                                                            env!("CARGO_PKG_NAME"),
+                                                            "__",
+                                                            ::core::stringify!($name)
+                                                        ))]
         pub extern "Rust" fn __px_body(
             $p: &<$name as $crate::PxOp>::Params,
             $i: &<$name as $crate::PxOp>::Inputs,

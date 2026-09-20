@@ -1228,7 +1228,8 @@ impl Session {
 
         let build_zero = |camera: &crate::camera::Camera,
                           view: &wgpu::TextureView,
-                          viewport: [f32; 4]|
+                          viewport: [f32; 4],
+                          mesh_instances: &wgpu::Buffer|
          -> Result<group0::GroupZero, String> {
             group0::frame(
                 &gpu.device,
@@ -1241,6 +1242,9 @@ impl Session {
                 &shadow_view,
                 &shadow_sampler,
                 &shadow_page_table,
+                // ⚠ 每实例数据（§本轮从组 1 搬到组 0）：`vertex_mesh.wgsl` 按
+                //    `instance_index` 选格，而"长度 = 物体数"那份数组由这里建一次、全帧共用。
+                mesh_instances,
                 &shadow_note,
             )
         };
@@ -1572,37 +1576,39 @@ impl Session {
         // ---- 材质：group 3 由 `material.rs` 反射建（空槽绑兜底白图），group 1 每视图一份 ----
         let mut materials = Materials::new(&gpu.device, &gpu.queue);
         let material_layout = materials.bind_group_layout().clone();
-        // ⚠ group 1 的**布局只有一份**（所有视图共用同一份形状：`PassView` + 实例数组）：
-        //    每个视图各建一份"内容相同但对象不同"的布局，会踩到 `ResolvedGroup::layout_id`
-        //    那条契约的边界 —— 管线缓存键相同、而 wgpu 那边比的是布局对象本身。
-        //    一份布局 + 每个视图一个绑定组，这两件事就都干净了。
+        // ⚠ §本轮（甲方案）：**组 1 只剩"这一条 pass 的参数"这一格**
+        //    （`PassView.view_proj` + `PassView.view_page`），而它的布局必须与执行器那份
+        //    `geometry_params_group` **逐格相同**（同组号、同格位、同 `has_dynamic_offset`）
+        //    —— 几何 pass 的管线布局是从 `ResolvedMaterial.groups[]` 拼的，两处不一样时
+        //    wgpu 报的是 `Error matching ShaderStages(FRAGMENT) shader requirements
+        //    against the pipeline`：措辞说片元，病因在第 1 组。
+        //
+        //    ⚠ 每实例数据搬去了**组 0**（`group0::MESH_INSTANCES_BINDING` = binding 21）：
+        //    "两样东西抢同一格、谁后绑谁赢"那个形状从此不存在。
+        //    ⚠ **两格，但只绑一格**：管线布局要覆盖**顶点阶段声明的每一格**
+        //    （`PassView` 是 binding 0，而 `vertex_mesh.wgsl` 里那一格现在是 pass 参数），
+        //    而"这条 pass 的参数由谁绑"决定了 draw 时绑几格：
+        //    - 有参数块的 pass（影子页）：执行器绑它那一份（**只有 binding 0**）；
+        //    - 没有的（相机、天空盒）：宿主绑 binding 0 + binding 1。
+        //    所以 binding 1 在这里**声明**，而只有宿主那一档会真绑 —— 声明多一格不算错，
+        //    "布局可以多、绑定不能少"是同一条口径。
         let stage_layout = gpu
             .device
             .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("组 1：PassView + MeshInstance 数组"),
+                label: Some("组 1：这一条 pass 的参数"),
                 entries: &[
-                    // binding 0：**super** —— 这一条 pass 的 `view_proj`。
                     wgpu::BindGroupLayoutEntry {
                         binding: 0,
                         visibility: wgpu::ShaderStages::VERTEX,
                         ty: wgpu::BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Uniform,
-                            // ⚠ **动态偏移**（§本轮）：这一格现在是"这一条 pass 的视图"，
-                            //    而虚拟影图的**每一页**都有自己的视图。一帧一份大缓冲 +
-                            //    每笔一个偏移，才是"几百页"这个形状付得起的做法。
-                            //    执行器那边给的是 `PassPlan::params_offset`（同一份缓冲里的
-                            //    字节偏移）—— 两处指的是同一份缓冲，这里的布局必须声明它。
+                            // ⚠ **动态偏移**：一帧一份大缓冲 + 每笔一个偏移
+                            //    （页有几百个，"一页一份绑定组"是几百个对象）。
                             has_dynamic_offset: true,
                             min_binding_size: None,
                         },
                         count: None,
                     },
-                    // binding 1：**instance** —— 长度 = 物体数的那份数组。
-                    //
-                    // ⚠ 地址空间跟着 oracle 走：Bevy 那份每实例数据是
-                    //    `var<storage> mesh: array<Mesh>`（`mesh_bindings.wgsl:9`）。
-                    //    两档读出来的浮点位模式一模一样 —— 选它**不是**为了性能，
-                    //    是为了下一次对账时不必先怀疑这里。
                     wgpu::BindGroupLayoutEntry {
                         binding: 1,
                         visibility: wgpu::ShaderStages::VERTEX,
@@ -1636,12 +1642,29 @@ impl Session {
         // ⚠ 这一节就是"super 在 pass 配"的落地：`view_proj` 与物体无关（同一个视图下所有
         //    物体共用它），所以它按**视图**建，不按 (物体, 视图) 建。视图是哪一个由
         //    **文档的 pass** 说（`cube_face` → 那一面；没有就是相机）—— 见下面 `faces`。
+        // ⚠ 这一份是**相机/面那一档**的"回退视图"：文档给某条 pass 带了参数块时，
+        //    执行器会在同一格上再绑它自己那一份（**后绑的赢**），所以这里绑的那一份
+        //    只服务**没有参数块**的 pass（今天相机那些）。
+        //    ⚠ 每实例数据**不在这里**了（§本轮搬去组 0 binding 21）。
         let make_stage = |label: &str, view: &crate::camera::Camera| -> Stage {
+            // ⚠ 96 字节 = `PassView`（`view_proj` 64 + `view_page` 16）补齐到 16 的倍数
+            //    （`GEOMETRY_PARAMS_SIZE`）。相机那一档的 `view_page` 是 `(0,0,1,1)`
+            //    ⇒ 顶点阶段那一步映射是**恒等**。
+            let mut contents = view_bytes(view).to_vec();
+            contents.resize(crate::plan::GEOMETRY_PARAMS_SIZE, 0);
+            contents[crate::plan::VIEW_PAGE_OFFSET..crate::plan::VIEW_PAGE_OFFSET + 4]
+                .copy_from_slice(&0.0_f32.to_le_bytes());
+            contents[crate::plan::VIEW_PAGE_OFFSET + 4..crate::plan::VIEW_PAGE_OFFSET + 8]
+                .copy_from_slice(&0.0_f32.to_le_bytes());
+            contents[crate::plan::VIEW_PAGE_OFFSET + 8..crate::plan::VIEW_PAGE_OFFSET + 12]
+                .copy_from_slice(&1.0_f32.to_le_bytes());
+            contents[crate::plan::VIEW_PAGE_OFFSET + 12..crate::plan::VIEW_PAGE_OFFSET + 16]
+                .copy_from_slice(&1.0_f32.to_le_bytes());
             let buffer = gpu.device.create_buffer_init(&BufferInitDescriptor {
                 label: Some(label),
                 // ⚠ `COPY_DST` 是保留态要的（每帧写内容）：见 `Stage::view_buffer` 那段。
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                contents: &view_bytes(view),
+                contents: &contents,
             });
             let bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some(label),
@@ -1649,8 +1672,23 @@ impl Session {
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
-                        resource: buffer.as_entire_binding(),
+                        // ⚠ 这一格声明了**动态偏移** ⇒ 整份缓冲从 0 起、偏移由
+                        //    `ResolvedGroup::dynamic_offset` 给（相机那一档是 0）。
+                        //    ⚠ 缓冲要**活过**这一帧的编码（`create_bind_group` 持引用），
+                        //    而它由 `Stage` 持有。
+                        resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                            buffer: &buffer,
+                            offset: 0,
+                            // ⚠ 大小 = 这一份参数块**本身**（`GEOMETRY_PARAMS_SIZE`）。
+                            //    给大了就是"绑一个超出缓冲的范围"，wgpu 当场拒。
+                            size: wgpu::BufferSize::new(crate::plan::GEOMETRY_PARAMS_SIZE as u64),
+                        }),
                     },
+                    // ⚠ binding 1（每实例数据）**宿主照样绑**：布局里声明了两格，
+                    //    而 `create_bind_group` 要求"描述符里的格数 = 布局里的格数"。
+                    //    影子页那一路 binding 0 会被执行器**再绑一次**（后绑的赢），
+                    //    而 binding 1 这一份谁都没读 —— 它只是把布局填满。
+                    //    ⚠ 顶点阶段真正读的那一份在**组 0 binding 21**（同一个缓冲）。
                     wgpu::BindGroupEntry {
                         binding: 1,
                         resource: instance_buffer.as_entire_binding(),
@@ -1792,7 +1830,7 @@ impl Session {
         let mut cells: Vec<Cell> = Vec::with_capacity(placements.len());
         for placement in &placements {
             let viewport = placement.uniform_viewport((width, height));
-            let zero = build_zero(&placement.camera, &sampled_view, viewport)?;
+            let zero = build_zero(&placement.camera, &sampled_view, viewport, &instance_buffer)?;
             // 这一格的 `PassView`：`view_proj` 是"每一条 pass 一份"的 super，而它是每格一份的。
             let camera_stage = make_stage(
                 &format!("组 1：PassView（相机，第 {} 格）", placement.index),
@@ -2815,6 +2853,7 @@ fn cell_materials<'a>(
                         bind_group: &zero.bind_group,
                         layout: zero.layout.clone(),
                         layout_id: ZERO_LAYOUT_ID,
+                        dynamic: false,
                         dynamic_offset: 0,
                     },
                     ResolvedGroup {
@@ -2826,6 +2865,10 @@ fn cell_materials<'a>(
                         // 一份布局，所有视图共用（见上面那段）。
                         layout: stage_layout.clone(),
                         layout_id: STAGE_LAYOUT_ID,
+                        // ⚠ **声明了动态偏移**（组 1 binding 0 那一格）：`set_bind_group`
+                        //    必须给一个数，而相机这一档的偏移**正是 0** —— 0 是合法值，
+                        //    不能拿它当"不用给"的判据。
+                        dynamic: true,
                         dynamic_offset: 0,
                     },
                     ResolvedGroup {
@@ -2833,6 +2876,7 @@ fn cell_materials<'a>(
                         bind_group: &binding.bind_group,
                         layout: material_layout.clone(),
                         layout_id: MATERIAL_LAYOUT_ID,
+                        dynamic: false,
                         dynamic_offset: 0,
                     },
                 ],
@@ -2858,6 +2902,7 @@ fn cell_materials<'a>(
                         bind_group: &zero.bind_group,
                         layout: zero.layout.clone(),
                         layout_id: ZERO_LAYOUT_ID,
+                        dynamic: false,
                         dynamic_offset: 0,
                     },
                     ResolvedGroup {
@@ -2865,6 +2910,7 @@ fn cell_materials<'a>(
                         bind_group: &binding.bind_group,
                         layout: material_layout.clone(),
                         layout_id: MATERIAL_LAYOUT_ID,
+                        dynamic: false,
                         dynamic_offset: 0,
                     },
                 ],
@@ -3030,6 +3076,7 @@ fn cell_materials<'a>(
                 bind_group: &face_stages[face_index].bind_group,
                 layout: stage_layout.clone(),
                 layout_id: STAGE_LAYOUT_ID,
+                dynamic: false,
                 dynamic_offset: 0,
             }];
             resolved_materials.push(ResolvedMaterial {

@@ -1498,7 +1498,13 @@ pub struct ResolvedGroup<'a> {
     /// 执行器手里没有"这两份布局是不是同一份"的判据；而布局本来就是宿主建的，
     /// 只有它知道。
     pub layout_id: u64,
-    /// 设这一组时带的**动态偏移**（字节）。0 = 不带（`&[]`，今天所有组都是这样）。
+    /// 这一组的布局**声明了动态偏移**吗（`wgpu::BindGroupLayoutEntry.has_dynamic_offset`）。
+    ///
+    /// ⚠ 它是"要不要给那一个数"的**唯一**判据（§本轮）：声明了就必须给一个（`&[]` 是
+    /// "少给一个"，当场校验失败），而**0 是合法的偏移值** —— 拿"偏移是不是 0"当判据，
+    /// 症状是"相机那一组（偏移正好是 0）绑不上"。
+    pub dynamic: bool,
+    /// 设这一组时带的**动态偏移**（字节）。`dynamic == false` 时它不被使用。
     ///
     /// 为什么需要它（虚拟影图，§本轮）：影子的一页要用**它自己那一小块**的
     /// `PassView`（那一页的缩放投影），而页有几百个 —— 一页一份 `BindGroup` 就是
@@ -3048,14 +3054,18 @@ impl Executor {
                     render_pass.set_pipeline(pipeline);
                     if let Some(material) = material {
                         for group in &material.groups {
-                            if group.dynamic_offset == 0 {
-                                render_pass.set_bind_group(group.group, group.bind_group, &[]);
-                            } else {
+                            // ⚠ **声明了动态偏移就必须给一个数**（`&[]` 是"少给一个"，
+                            //    当场校验失败），而 0 是合法的偏移值 ⇒ 不能拿"偏移是不是 0"
+                            //    当"要不要给"的判据（§本轮实测：相机那一组偏移正是 0）。
+                            //    所以判据是**这一组的布局有没有声明它**。
+                            if group.dynamic {
                                 render_pass.set_bind_group(
                                     group.group,
                                     group.bind_group,
                                     &[group.dynamic_offset],
                                 );
+                            } else {
+                                render_pass.set_bind_group(group.group, group.bind_group, &[]);
                             }
                         }
                     }
@@ -5313,6 +5323,7 @@ fn fs_main(@location(0) tint: vec4<f32>) -> @location(0) vec4<f32> {
                 bind_group: &group.bind_group,
                 layout: layout.clone(),
                 layout_id: 1,
+                dynamic: false,
                 dynamic_offset: 0,
             }],
             blend: None,
@@ -5385,6 +5396,7 @@ fn fs_main(@location(0) tint: vec4<f32>) -> @location(0) vec4<f32> {
                 layout: layout.clone(),
                 // 这一台只有一份材质布局 ⇒ 一个 id。⚠ 契约：同布局同 id、异布局异 id。
                 layout_id: 1,
+                dynamic: false,
                 dynamic_offset: 0,
             }],
             blend: None,
