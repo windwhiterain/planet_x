@@ -64,21 +64,40 @@ pub const MAX_PAGES_PER_SIDE: u32 = 512;
 /// 一个 cube 的面数（次序照 `px_render::camera::CUBE_MAP_FACES`：`+X −X +Y −Y +Z −Z`）。
 pub const CUBE_FACES: u32 = 6;
 
-/// 一盏灯那一页表段的**头**字数。
+/// 一盏灯那一页表段的**头**字数（不含前缀表那一段）。
 ///
 /// ```text
 ///   [0] pages_per_side（低 16 位）| **物理 atlas 的页格边长**（高 16 位）
-///   [1] words_per_row（低 16 位）
-///   [2] 每一面那一段的字数（= rows × (1 + words_per_row)）
-///   [3..] 面 0 的行段（每行：基址 1 字 + 掩码 words_per_row 字），接着面 1 ……
+///   [1] levels（低 16 位）| 0
+///   [2 .. 2+levels]  level_offset[级] —— 那一级的六个面从第几个字开始（前缀和）
+///   [2+levels ..]   级 0 的六个面，然后级 1 的六个面 ……
+///                   每一面：`pps_级` 行 ×（基址 1 字 + 掩码 `ceil(pps_级/32)` 字）
 /// ```
-pub const TABLE_HEAD_WORDS: u32 = 3;
+///
+/// ⚠ 页表**从这一轮起是"级优先"的两维表**（用户裁决的 (ii)）：`pps_级 = pages_per_side >> 级`。
+///    级 0 最细（`pages_per_side = dρ_max/64`，精度要求定的），级 k 的一页盖住级 0 的
+///    `2^k × 2^k` 格 ⇒ 一个 texel 的世界尺寸 ×`2^k`。**"细格子重新聚合成大格子"就是这一维。**
+///
+/// ⚠ `level_offset` 落一张前缀表而不是让采样侧自己求和：着色器每次采样都要算段首，
+///    让它跑一遍 Σ 就是在最热的那条路径上加一个循环。
+pub const TABLE_HEAD_WORDS: u32 = 2;
 
-/// 一盏灯的页表段字数：头 + 每面 `rows × (1 + words_per_row)`。
-pub fn table_words_per_light(pages_per_side: u32) -> u32 {
-    let words = pages_per_side.div_ceil(32);
-    let rows = pages_per_side;
-    TABLE_HEAD_WORDS + CUBE_FACES * rows * (1 + words)
+/// 头里那张前缀表的字数上限（= `MAX_LEVELS`）。
+pub const PREFIX_WORDS: u32 = MAX_LEVELS;
+
+/// 级数上限。**硬编码的定长**：WGSL 不允许动态下标一组纹理，将来"每级一张 atlas"
+/// （目标 ③）要靠一条定长链选纹理，所以级数必须是个常数。
+pub const MAX_LEVELS: u32 = 4;
+
+/// 一盏灯的页表段字数：头 + 前缀表 + 每一级每一面 `pps_级 × (1 + 掩码字)`。
+///
+/// ⚠ 等比级数是 `Σ 1/4^级 ≈ 4/3` ⇒ **把金字塔建满只比只建级 0 贵 1/3**。
+pub fn table_words_per_light(pages_per_side: u32, levels: u32) -> u32 {
+    let mut words = TABLE_HEAD_WORDS + PREFIX_WORDS;
+    for level in 0..levels {
+        words += CUBE_FACES * pps_rows_words(pages_per_side, level);
+    }
+    words
 }
 
 /// 一个投影物体：灯要把它画进影图的那一份。
@@ -98,9 +117,11 @@ pub struct Caster {
 pub struct VirtualShadowMap {
     /// 虚拟面边长（texel），是 `PAGE_SIZE` 的整数倍。
     pub virtual_size: u32,
-    /// 每面的页数边长（`virtual_size / PAGE_SIZE`）。
+    /// 每面的页数边长（`virtual_size / PAGE_SIZE`）—— **级 0（最细那一级）**的。
     pub pages_per_side: u32,
-    /// atlas 每层的页格边长（2 的幂，≥ `pages_per_side`）。
+    /// 这一盏灯有几级（`1..=MAX_LEVELS`）。级 k 的页数边长 = `pages_per_side >> k`。
+    pub levels: u32,
+    /// atlas 每层的页格边长（2 的幂，≥ 那一层里最多的页数）。
     pub atlas_pages_per_side: u32,
     /// 这一盏灯在页表缓冲里的**字偏移**。
     pub table_offset: u32,
@@ -112,6 +133,8 @@ pub struct VirtualShadowMap {
 #[derive(Debug, Clone, PartialEq)]
 pub struct PagePatch {
     pub light: u32,
+    /// 这一页在哪一级。`0` 最细；级 k 的一页盖住级 0 的 `2^k × 2^k` 格。
+    pub level: u32,
     pub face: u32,
     /// 虚拟页格坐标。
     pub page_x: u32,
@@ -229,21 +252,75 @@ fn ceil_sqrt(pages: u32) -> u32 {
     side
 }
 
-/// 表里某一面那一段的起点（相对这一盏灯的段首）。
-fn face_section(face: u32, pages_per_side: u32) -> u32 {
-    let words = pages_per_side.div_ceil(32);
-    TABLE_HEAD_WORDS + face * pages_per_side * (1 + words)
+/// 一个**级**的页数边长：`pages_per_side >> level`。
+///
+/// level 0 是**最细**的那张格子（精度要求定的，见 `allocate` 那段推导）；level k 的
+/// 每一页仍然 128 texel，但它盖住 level 0 的 `2^k × 2^k` 格 ⇒ **一页顶 4^k 页**，
+/// 一个 texel 的世界尺寸是最细那级的 `2^k` 倍。这就是"细格子重新聚合成大格子"。
+pub fn pages_at_level(pages_per_side: u32, level: u32) -> u32 {
+    (pages_per_side >> level).max(1)
 }
 
-/// 表里**某一面某一行**的基址字（相对这一盏灯的段首）。
-pub fn base_word(face: u32, row: u32, pages_per_side: u32) -> u32 {
-    let words = pages_per_side.div_ceil(32);
-    face_section(face, pages_per_side) + row * (1 + words)
+/// `pages_per_side` 这一档最多能有几级：`pps >> (levels-1) >= 1`。
+pub fn levels_for(pages_per_side: u32, max_levels: u32) -> u32 {
+    let mut levels = 1_u32;
+    while levels < max_levels && (pages_per_side >> levels) >= 1 {
+        levels += 1;
+    }
+    levels
 }
 
-/// 表里**某一面某一行**的掩码首字（相对这一盏灯的段首）。
-pub fn mask_word(face: u32, row: u32, pages_per_side: u32) -> u32 {
-    base_word(face, row, pages_per_side) + 1
+/// 表里 `(级, 面)` 那一段的起点（相对这一盏灯的段首）。
+///
+/// ⚠ 布局是**级优先**：`level 0` 的六个面，然后 `level 1` 的六个面……
+///    头里因此存一张 `level_offset[级]` 的前缀表（`allocate` 里填），采样侧一次载入
+///    就能算出段首 —— 不在着色器里跑一遍前缀和。
+fn stage_section(level: u32, face: u32, pages_per_side: u32) -> u32 {
+    let mut at = TABLE_HEAD_WORDS + PREFIX_WORDS;
+    for j in 0..level {
+        at += CUBE_FACES * pps_rows_words(pages_per_side, j);
+    }
+    at + face * pps_rows_words(pages_per_side, level)
+}
+
+/// 一个级里**一面**的表字数（`pps × (1 + 掩码字)`）。
+pub fn pps_rows_words(pages_per_side: u32, level: u32) -> u32 {
+    let pps = pages_at_level(pages_per_side, level);
+    pps * (1 + pps.div_ceil(32))
+}
+
+/// 表里**某一级某一面某一行**的基址字（相对这一盏灯的段首）。
+pub fn base_word(level: u32, face: u32, row: u32, pages_per_side: u32) -> u32 {
+    let words = pages_at_level(pages_per_side, level).div_ceil(32);
+    stage_section(level, face, pages_per_side) + row * (1 + words)
+}
+
+/// 表里**某一级某一面某一行**的掩码首字（相对这一盏灯的段首）。
+pub fn mask_word(level: u32, face: u32, row: u32, pages_per_side: u32) -> u32 {
+    base_word(level, face, row, pages_per_side) + 1
+}
+
+/// 一个物体该落到哪一级：取**最粗**的那一级，使它的 texel 世界尺寸仍 ≤ `1/ρ`。
+///
+/// 最细那级（level 0）是按全场**最细**的 ρ 定的（`pages_per_side = dρ_max/64`），
+/// 所以 level k 的 texel 世界尺寸 = `2^k / ρ_max`。要它 ≤ `1/ρ`：
+///
+/// ```text
+///   2^k / ρ_max ≤ 1/ρ   ⇒   2^k ≤ ρ_max/ρ   ⇒   k = floor(log2(ρ_max/ρ))
+/// ```
+///
+/// ⚠ **这就是"按精度配置稀疏分配"那条口径**：精度要求低的物体自己落到粗级，
+///    页数按 `4^-k` 掉，不必跟最细的那个物体一样占细页。
+pub fn caster_level(density: f32, max_density: f32, levels: u32) -> u32 {
+    if density <= 0.0 || max_density <= density {
+        return 0;
+    }
+    let ratio = f64::from(max_density) / f64::from(density);
+    let mut level = 0_u32;
+    while level + 1 < levels && (1_u64 << (level + 1)) <= ratio as u64 {
+        level += 1;
+    }
+    level
 }
 
 /// 把世界方向投到 cube 的某一面上：`(u, v)` 是**面内归一化坐标**（`∈ [−1, 1]`，
@@ -386,37 +463,46 @@ pub fn allocate(lights: &[Vec<Caster>]) -> Result<Allocation, Overflow> {
         // ⚠ 块的大小**按这一格真的有多少世界单位**算，不照 `pages_for` 那个按 ρ 估的数：
         //    一页 = `2d/pages_per_side` 个世界单位，而 `pages_per_side` 是取过 2 的幂的，
         //    所以按 ρ 估会**偏小**（偏小 = 这个物体的影缺一块）。
-        let page_world = 2.0 * light_reach / f64::from(pages_per_side);
-        let mut wanted: Vec<(u32, u32, u32, String)> = Vec::new();
+        //
+        // ⚠⚠ **每个 caster 按自己的 ρ 选级**（§本轮的目标 ②）：精度要求低的物体落到粗级，
+        //    它占的页数按 `4^-级` 掉 —— 这才是"按精度配置稀疏分配"。粗级的一页盖住的
+        //    世界范围是 `2^级` 倍，所以同一个物体在粗级上占的**页数边长**几乎不变
+        //    （世界尺寸没变、一页更大 ⇒ 页数更少）。
+        let levels = levels_for(pages_per_side, MAX_LEVELS);
+        let mut wanted: Vec<(u32, u32, u32, u32, String)> = Vec::new();
         for caster in &live {
-            let span = if page_world > 0.0 {
-                ((2.0 * f64::from(caster.radius) / page_world).ceil() as u32).max(1) + 2
+            let level = caster_level(caster.density, density as f32, levels);
+            let pps = pages_at_level(pages_per_side, level);
+            let page_world_level = 2.0 * light_reach / f64::from(pps);
+            let span = if page_world_level > 0.0 {
+                ((2.0 * f64::from(caster.radius) / page_world_level).ceil() as u32).max(1) + 2
             } else {
                 pages_for(caster.radius, caster.density) + 2
             };
-            let span = span.min(pages_per_side);
+            let span = span.min(pps);
             for face in 0..CUBE_FACES {
-                let (x0, y0) = page_block_origin(caster.position, face, span, pages_per_side);
+                let (x0, y0) = page_block_origin(caster.position, face, span, pps);
                 for dy in 0..span {
                     for dx in 0..span {
                         let (px, py) = (x0 + dx, y0 + dy);
-                        match wanted
-                            .iter_mut()
-                            .find(|(f, y, x, _)| *f == face && *y == py && *x == px)
-                        {
-                            Some((_, _, _, id)) => {
+                        match wanted.iter_mut().find(|(l, f, y, x, _)| {
+                            *l == level && *f == face && *y == py && *x == px
+                        }) {
+                            Some((_, _, _, _, id)) => {
                                 if !id.split('|').any(|seen| seen == caster.id) {
                                     id.push('|');
                                     id.push_str(&caster.id);
                                 }
                             }
-                            None => wanted.push((face, py, px, caster.id.clone())),
+                            None => {
+                                wanted.push((level, face, py, px, caster.id.clone()));
+                            }
                         }
                     }
                 }
             }
         }
-        wanted.sort_by_key(|(face, y, x, _)| (*face, *y, *x));
+        wanted.sort_by_key(|(level, face, y, x, _)| (*level, *face, *y, *x));
 
         // ---- 物理 atlas 的页格边长：**按分出去的页数**算，与虚拟格子脱钩 ----
         //
@@ -430,8 +516,11 @@ pub fn allocate(lights: &[Vec<Caster>]) -> Result<Allocation, Overflow> {
         //      · 物理 atlas（`atlas_pages`）：**分出去多少页**定的，稀疏那一半。
         //    槽位解码（`slot % atlas_pages`）用后者，页索引用前者。
         //    两者混用 ⇒ "格子一变细 atlas 就爆"。
+        //
+        // ⚠ 槽位**在一面里跨级连续**（一层的 atlas 是那个面独占的）：级 0 的页先排，
+        //    接着级 1 的页…… ⇒ 每面一个计数器，`atlas_pages` 按**面**上最多的那个数算。
         let mut per_face = [0_u32; CUBE_FACES as usize];
-        for (face, _, _, _) in &wanted {
+        for (_, face, _, _, _) in &wanted {
             per_face[*face as usize] += 1;
         }
         let max_per_face = per_face.iter().copied().max().unwrap_or(1).max(1);
@@ -441,66 +530,78 @@ pub fn allocate(lights: &[Vec<Caster>]) -> Result<Allocation, Overflow> {
         let atlas_pages = atlas_side_for(ceil_sqrt(max_per_face));
         atlas_pages_side = atlas_pages_side.max(atlas_pages);
 
-        // ---- 装箱：每面一条扫描线，槽位在面内连续 ----
+        // ---- 装箱：级优先 → 面 → 行（每面一条扫描线，槽位在面内跨级连续）----
         let table_offset = out.table_words;
-        let mut table = vec![0_u32; table_words_per_light(pages_per_side) as usize];
+        let mut table = vec![0_u32; table_words_per_light(pages_per_side, levels) as usize];
         // ⚠ `virtual_size = pages_per_side × PAGE_SIZE` **不落盘**：`pages_per_side`
         //    到 512 时它是 65536，塞不进 16 位。采样侧由 `pages_per_side` 现算 ——
         //    反正两者差一个常数因子。
         table[0] = pages_per_side | (atlas_pages << 16);
-        let words_per_row = pages_per_side.div_ceil(32);
-        table[1] = words_per_row;
-        table[2] = pages_per_side * (1 + words_per_row);
+        table[1] = levels;
+        // 前缀表：级 `l` 的六个面从第几个字开始。
+        {
+            let mut at = TABLE_HEAD_WORDS + PREFIX_WORDS;
+            for level in 0..levels {
+                table[(TABLE_HEAD_WORDS + level) as usize] = at;
+                at += CUBE_FACES * pps_rows_words(pages_per_side, level);
+            }
+        }
 
         let mut patches: Vec<PagePatch> = Vec::with_capacity(wanted.len());
-        let mut slot_in_face = 0_u32;
-        let mut current_face = u32::MAX;
+        // 槽位**每面一个计数器**（跨级连续）—— 因为 atlas 的一层是那个面独占的。
+        let mut slots = [0_u32; CUBE_FACES as usize];
+        let mut current: Option<(u32, u32)> = None;
         let mut row = u32::MAX;
         let mut row_first_slot = 0_u32;
-        let mut words = vec![0_u32; words_per_row as usize];
+        let mut words = vec![0_u32; pages_per_side.div_ceil(32) as usize];
 
-        for (face, page_y, page_x, ids) in &wanted {
-            if *face != current_face {
-                if current_face != u32::MAX {
+        for (level, face, page_y, page_x, ids) in &wanted {
+            let pps = pages_at_level(pages_per_side, *level);
+            let words_per_row = pps.div_ceil(32);
+            if current != Some((*level, *face)) {
+                if let Some((l, f)) = current {
                     flush_row(
                         &mut table,
-                        current_face,
+                        l,
+                        f,
                         row,
                         row_first_slot,
                         &words,
                         pages_per_side,
                     );
                 }
-                current_face = *face;
-                slot_in_face = 0;
+                current = Some((*level, *face));
                 row = *page_y;
-                row_first_slot = 0;
+                row_first_slot = slots[*face as usize];
                 words = vec![0_u32; words_per_row as usize];
             } else if *page_y != row {
                 flush_row(
                     &mut table,
-                    current_face,
+                    *level,
+                    *face,
                     row,
                     row_first_slot,
                     &words,
                     pages_per_side,
                 );
                 row = *page_y;
-                row_first_slot = slot_in_face;
+                row_first_slot = slots[*face as usize];
                 words = vec![0_u32; words_per_row as usize];
             }
             words[(page_x / 32) as usize] |= 1_u32 << (page_x % 32);
             let mut casters_here: Vec<String> = ids.split('|').map(str::to_string).collect();
             casters_here.sort();
             casters_here.dedup();
+            let slot = slots[*face as usize];
             patches.push(PagePatch {
                 light,
+                level: *level,
                 face: *face,
                 page_x: *page_x,
                 page_y: *page_y,
-                slot: slot_in_face,
-                atlas_x: (slot_in_face % atlas_pages) * PAGE_SIZE,
-                atlas_y: (slot_in_face / atlas_pages) * PAGE_SIZE,
+                slot,
+                atlas_x: (slot % atlas_pages) * PAGE_SIZE,
+                atlas_y: (slot / atlas_pages) * PAGE_SIZE,
                 window: [
                     page_x * PAGE_SIZE,
                     page_y * PAGE_SIZE,
@@ -509,12 +610,13 @@ pub fn allocate(lights: &[Vec<Caster>]) -> Result<Allocation, Overflow> {
                 ],
                 casters: casters_here,
             });
-            slot_in_face += 1;
+            slots[*face as usize] += 1;
         }
-        if current_face != u32::MAX {
+        if let Some((l, f)) = current {
             flush_row(
                 &mut table,
-                current_face,
+                l,
+                f,
                 row,
                 row_first_slot,
                 &words,
@@ -527,6 +629,7 @@ pub fn allocate(lights: &[Vec<Caster>]) -> Result<Allocation, Overflow> {
         out.lights.push(VirtualShadowMap {
             virtual_size: pages_per_side * PAGE_SIZE,
             pages_per_side,
+            levels,
             atlas_pages_per_side: atlas_pages,
             table_offset,
         });
@@ -542,14 +645,15 @@ pub fn allocate(lights: &[Vec<Caster>]) -> Result<Allocation, Overflow> {
 /// 写一行的基址与掩码。
 fn flush_row(
     table: &mut [u32],
+    level: u32,
     face: u32,
     row: u32,
     first_slot: u32,
     words: &[u32],
     pages_per_side: u32,
 ) {
-    table[base_word(face, row, pages_per_side) as usize] = first_slot;
-    let at = mask_word(face, row, pages_per_side) as usize;
+    table[base_word(level, face, row, pages_per_side) as usize] = first_slot;
+    let at = mask_word(level, face, row, pages_per_side) as usize;
     table[at..at + words.len()].copy_from_slice(words);
 }
 
@@ -663,6 +767,87 @@ mod tests {
         );
     }
 
+    /// **这一轮的核心判据**：精度要求低的物体自己落到**粗级**，页数按 `4^-级` 掉 ——
+    /// 而粗级的"基址 + 掩码"仍然说得回它自己的物理槽位（表是两维的，不是只有级 0）。
+    ///
+    /// ⚠ 上一条 `the_row_mask_and_base_reproduce_every_slot` 用的是**单个**密度 256 的
+    ///    物体 ⇒ `caster_level(256, 256, _) = 0` ⇒ 它**只**走过级 0。两级混在一起时
+    ///    行段偏移、掩码字数、页数边长全都跟着级走，那条判据一个字都没覆盖。
+    #[test]
+    fn a_low_density_caster_lands_on_a_coarser_level() {
+        let allocation =
+            allocate(&[vec![at(4.95, 1.0, 256.0), at(4.95, 1.0, 64.0)]]).expect("分得出来");
+        let light = &allocation.lights[0];
+        assert_eq!(light.levels, 4, "pages_per_side 这一档该有 4 级");
+
+        let fine: Vec<&PagePatch> = allocation
+            .patches
+            .iter()
+            .filter(|patch| patch.level == 0)
+            .collect();
+        let coarse: Vec<&PagePatch> = allocation
+            .patches
+            .iter()
+            .filter(|patch| patch.level == 2)
+            .collect();
+        assert!(!fine.is_empty() && !coarse.is_empty(), "两级都该有页");
+        // `floor(log2(256/64)) = 2` ⇒ 一页的世界尺寸 ×4 ⇒ **不含余量**的页数边长 1/4、
+        // 页数 1/16。实测 486 → 96（**5.06 倍**），比 16 少一截的原因值得写下来：
+        // 边长里那个固定的 `+2` 余量在小物体上占了大头 ——
+        //   级 0：`ceil(2.0/0.309) + 2 = 9` 页边长
+        //   级 2：`ceil(2.0/1.2375) + 2 = 4` 页边长
+        // 真正"装得下物体"的是 7 与 2（那才是 12 倍），余量把经济性冲淡了。
+        // ⚠ 留这个 `+2` 是有意的：它防的是"块切掉物体的一角"（画面上看不出来是分配错了）。
+        assert!(
+            coarse.len() * 4 < fine.len(),
+            "粗级的页数 {} 该显著少于细级 {}",
+            coarse.len(),
+            fine.len()
+        );
+        // 粗级的页格坐标必须在粗级的格子里（`pps >> 2` 以内）。
+        let coarse_pps = pages_at_level(light.pages_per_side, 2);
+        for patch in &coarse {
+            assert!(patch.page_x < coarse_pps && patch.page_y < coarse_pps);
+        }
+
+        // 两级混着，rank 仍然说得回每一页的槽位。
+        let base = light.table_offset;
+        let pps = light.pages_per_side;
+        for patch in &allocation.patches {
+            let patch_pps = pages_at_level(pps, patch.level);
+            let row_base = allocation.table
+                [(base + base_word(patch.level, patch.face, patch.page_y, pps)) as usize];
+            let words = patch_pps.div_ceil(32);
+            let mut rank = 0_u32;
+            for word in 0..words {
+                let bits = allocation.table[(base
+                    + mask_word(patch.level, patch.face, patch.page_y, pps)
+                    + word) as usize];
+                if word < patch.page_x / 32 {
+                    rank += bits.count_ones();
+                } else {
+                    let upto = patch.page_x % 32;
+                    let mask = if upto == 31 {
+                        u32::MAX
+                    } else {
+                        (1_u32 << (upto + 1)) - 1
+                    };
+                    rank += (bits & mask).count_ones();
+                    break;
+                }
+            }
+            assert_eq!(
+                row_base + rank - 1,
+                patch.slot,
+                "级 {} 面 {} 行 {} 列 {} 的槽位对不上",
+                patch.level,
+                patch.face,
+                patch.page_y,
+                patch.page_x
+            );
+        }
+    }
+
     /// 表里的"基址 + 掩码"说得出一页的物理槽位 —— 采样侧 rank 的定点对照。
     #[test]
     fn the_row_mask_and_base_reproduce_every_slot() {
@@ -671,13 +856,16 @@ mod tests {
         let base = light.table_offset;
         let pps = light.pages_per_side;
         for patch in &allocation.patches {
-            let row_base =
-                allocation.table[(base + base_word(patch.face, patch.page_y, pps)) as usize];
-            let words = pps.div_ceil(32);
+            // ⚠ 现在每页自己带**级**：行段、掩码字数、页数边长都跟着这一页的级走。
+            let patch_pps = pages_at_level(pps, patch.level);
+            let row_base = allocation.table
+                [(base + base_word(patch.level, patch.face, patch.page_y, pps)) as usize];
+            let words = patch_pps.div_ceil(32);
             let mut rank = 0_u32;
             for word in 0..words {
-                let bits = allocation.table
-                    [(base + mask_word(patch.face, patch.page_y, pps) + word) as usize];
+                let bits = allocation.table[(base
+                    + mask_word(patch.level, patch.face, patch.page_y, pps)
+                    + word) as usize];
                 if word < patch.page_x / 32 {
                     rank += bits.count_ones();
                 } else {

@@ -202,21 +202,26 @@ fn px_shadow_face_texel(d: vec3<f32>, face_side: f32) -> vec3<f32> {\n\
 \x20       f32(face),\n\
 \x20   );\n\
 }\n\
-\n\
-// 虚拟页坐标 → 物理槽位。返回 `-1` = 这一页没分配（采样侧照\"不在影里\"处理）。\n\
-fn px_shadow_page_slot(light_id: u32, face: u32, page_x: u32, page_y: u32) -> i32 {\n\
-\x20   // ⚠ 两套网格，**分开读**（§本轮）：`pages_per_side` 是**虚拟**格子（精度要求定的、\n\
-\x20   //    随灯距变细），`atlas_pages` 是**物理 atlas** 的页格边长（分出去的页数定的）。\n\
-\x20   //    混用 ⇒ 格子一变细 atlas 就爆（5× 那一档要 6.4 GB）。\n\
-\x20   let head = px_shadow_pages[px_shadow_light_offsets[light_id]];\n\
-\x20   let pages_per_side = head & 0xFFFFu;\n\
-\x20   let atlas_pages = head >> 16u;\n\
-\x20   if (page_x >= pages_per_side || page_y >= pages_per_side) { return -1; }\n\
-\x20   let words_per_row = px_shadow_pages[px_shadow_light_offsets[light_id] + 1u] & 0xFFFFu;\n\
-\x20   let face_words = px_shadow_pages[px_shadow_light_offsets[light_id] + 2u];\n\
-\x20   let row_words = 1u + words_per_row;\n\
-\x20   let base = px_shadow_light_offsets[light_id] + 3u\n\
-\x20       + face * face_words + page_y * row_words;\n\
+// 虚拟页坐标 → 物理槽位。返回 `-1` = 这一页没分配（采样侧照「不在影里」处理）。\n\
+//\n\
+// ⚠⚠ 页表**是两维的**（级 × 面）：级 `l` 的页数边长是 `pages_per_side >> l`、掩码字数也跟着\n\
+//    减半，所以「某一级某一面某一行」的字偏移必须按**那一级**算。每一级的段首落在头里那张\n\
+//    前缀表（`[2 + l]`），采样侧一次载入 —— 不在最热的那条路径上跑一遍求和。\n\
+fn px_shadow_page_slot(light_id: u32, level: u32, face: u32, page_x: u32, page_y: u32) -> i32 {\n\
+\x20   let off = px_shadow_light_offsets[light_id];\n\
+\x20   // ⚠ 两套网格，**分开读**：`pages_per_side`（低 16 位）是**虚拟**格子（精度要求定的、\n\
+\x20   //    随灯距变细），`atlas_pages`（高 16 位）是**物理 atlas** 的页格边长（分出去的\n\
+\x20   //    页数定的）。混用 ⇒ 格子一变细 atlas 就爆（5× 那一档要 6.4 GB）。\n\
+\x20   // ⚠ `pages_per_side` 这里是**级 0** 的；别的级按 `>> level` 折。\n\
+\x20   let head = px_shadow_pages[off];\n\
+\x20   let pps0 = max(head & 0xFFFFu, 1u);\n\
+\x20   let levels = max(px_shadow_pages[off + 1u] & 0xFFFFu, 1u);\n\
+\x20   if (level >= levels) { return -1; }\n\
+\x20   let pps = max(pps0 >> level, 1u);\n\
+\x20   if (page_x >= pps || page_y >= pps) { return -1; }\n\
+\x20   let row_words = 1u + ((pps + 31u) >> 5u);\n\
+\x20   let base = off + px_shadow_pages[off + 2u + level]\n\
+\x20       + face * pps * row_words + page_y * row_words;\n\
 \x20   let row_base = px_shadow_pages[base];\n\
 \x20   // 这一行里位于我前面（含我）的占用位数 - 1 ⇒ 我在这一行里的第几个。\n\
 \x20   let word_index = page_x >> 5u;\n\
@@ -239,27 +244,27 @@ fn px_shadow_page_slot(light_id: u32, face: u32, page_x: u32, page_y: u32) -> i3
 \x20   return i32(row_base + rank - 1u);\n\
 }\n\
 \n\
-// 一个采样点：**面内 texel** → 查页 → 取那一格 → **手动比较**。\n\
-fn px_sample_shadow_page(\n\
-\x20   light_id: u32,\n\
-\x20   face: u32,\n\
-\x20   texel_in_face: vec2<f32>,\n\
-\x20   depth: f32,\n\
-) -> f32 {\n\
-\x20   let head = px_shadow_pages[px_shadow_light_offsets[light_id]];\n\
-\x20   // ⚠ **物理 atlas 的页格边长**（槽位解码用它 —— 行内压缩出来的槽位是按它折行的）。\n\
-\x20   //    与 `pages_per_side`（虚拟格子）**是两个数**，见 `px_shadow_page_slot` 那段。\n\
-\x20   let pages_per_side = head & 0xFFFFu;\n\
-\x20   let atlas_pages = head >> 16u;\n\
-\x20   // 面内 texel → 虚拟页格 + 页内余数。**与烘图侧 `page_block_origin` 同一套换算**\n\
-\x20   // （那边也是先 `face_texel` 再折成页格），否则页会整体错开若干格。\n\
-\x20   let page_f = texel_in_face / f32(PX_PAGE_SIZE);\n\
-\x20   let page_x = u32(clamp(floor(page_f.x), 0.0, f32(pages_per_side) - 1.0));\n\
-\x20   let page_y = u32(clamp(floor(page_f.y), 0.0, f32(pages_per_side) - 1.0));\n\
-\x20   let slot = px_shadow_page_slot(light_id, face, page_x, page_y);\n\
-\x20   if (slot < 0) { return 1.0; }  // 没分配 ⇒ 不受影\n\
+// 在**第 `level` 级**上定这一页：返回 `vec3(面内 texel x, 面内 texel y, 槽位)`，\n\
+// 槽位 `< 0` = 这一级上没分配。\n\
+//\n\
+// ⚠ 面内 texel 必须按**那一级自己的**面边长折算（`pps_级 × PX_PAGE_SIZE`）：级 k 的一页\n\
+//    盖住级 0 的 `2^k × 2^k` 格，拿级 0 的 texel 去折级 k 的页号会整体错位。\n\
+// ⚠ **面**与级无关（同一个方向按主轴分类），所以它在调用处算一次就够。\n\
+fn px_shadow_locate(light_id: u32, level: u32, face: u32, dir: vec3<f32>, pps0: u32) -> vec3<f32> {\n\
+\x20   let pps = max(pps0 >> level, 1u);\n\
+\x20   let t = px_shadow_face_texel(dir, f32(pps * PX_PAGE_SIZE));\n\
+\x20   let px = u32(clamp(floor(t.x / f32(PX_PAGE_SIZE)), 0.0, f32(pps) - 1.0));\n\
+\x20   let py = u32(clamp(floor(t.y / f32(PX_PAGE_SIZE)), 0.0, f32(pps) - 1.0));\n\
+\x20   let slot = px_shadow_page_slot(light_id, level, face, px, py);\n\
+\x20   return vec3<f32>(t.x, t.y, f32(slot));\n\
+}\n\
+\n\
+// 拿一个已经查到的槽位读那一格、做**手动深度比较**。\n\
+fn px_shadow_read(light_id: u32, face: u32, slot: i32, t: vec2<f32>, atlas_pages: u32, depth: f32) -> f32 {\n\
 \x20   let slot_u = u32(slot);\n\
-\x20   let local = texel_in_face - vec2<f32>(f32(page_x), f32(page_y)) * f32(PX_PAGE_SIZE);\n\
+\x20   let px = floor(t.x / f32(PX_PAGE_SIZE));\n\
+\x20   let py = floor(t.y / f32(PX_PAGE_SIZE));\n\
+\x20   let local = t - vec2<f32>(px, py) * f32(PX_PAGE_SIZE);\n\
 \x20   let texel = vec2<u32>(\n\
 \x20       (slot_u % atlas_pages) * PX_PAGE_SIZE\n\
 \x20           + u32(clamp(local.x, 0.0, f32(PX_PAGE_SIZE) - 1.0)),\n\
@@ -267,30 +272,59 @@ fn px_sample_shadow_page(\n\
 \x20           + u32(clamp(local.y, 0.0, f32(PX_PAGE_SIZE) - 1.0)),\n\
 \x20   );\n\
 \x20   let stored = textureLoad(point_shadow_textures, texel, i32(light_id * PX_CUBE_FACES + face), 0);\n\
-\x20   // ⚠ **无限 reverse-Z**：近处是 1.0、远处是 0.0（`camera.rs` 那条\n\
-\x20   //    `perspective_infinite_reverse_rh`）。影图里存的是**沿这条射线最近的那个\n\
-\x20   //    表面**（也就是离灯最近、深度最大那个）。于是：\n\
+\x20   // ⚠ **无限 reverse-Z**：近处是 1.0、远处是 0.0。影图里存的是**沿这条射线最近的\n\
+\x20   //    那个表面**（离灯最近、深度最大那个）。于是：\n\
 \x20   //\n\
 \x20   //      有个东西在我和灯之间 ⟺ 它比**离灯更近** ⟺ `stored > depth` ⟺ `depth < stored`\n\
 \x20   //      ⇒ 那才是**在影里**，影子因子取 **0**。\n\
-\x20   //\n\
-\x20   //    ⚠ 这一条我写反过两次，而两次的症状**不一样**，这里记下来省下一次：\n\
-\x20   //      · 写成 `select(0.0, 1.0, depth < stored)`（把「在影里」当成了「亮」）⇒\n\
-\x20   //        整颗行星的直接光被乘成 0，只剩大气边缘一条亮 —— 而那一版**看起来**\n\
-\x20   //        与「没画进影图」很像，于是追错了两轮。\n\
-\x20   //      · 深度按 Chebyshev 而不是按面相机真正的 w 算 ⇒ 只在面的**边缘**误判。\n\
 \x20   return select(1.0, 0.0, depth < stored);\n\
 }\n\
 \n\
-// ⚠ **已删**：`PX_POINT_SHADOW_SCALE = 0.003`。它原来是 oracle 那条基向量的系数
-//   （`orthonormalize(...) × 0.003 × distance_to_light`），换到我们的 texel 相对量上
-//   之后恒等于 0.003 个 texel ⇒ 八个 tap 挤在一个 texel 里（见 `fetch_point_shadow`
-//   里那段长注释）。核半径现在由**像素在光空间的足迹**定。
-
-// 核半径的上限（texel）。那八个 D3D 点是按 1–2 texel 的核设计的：核再大，
-// 8 个点铺开就是**采样不足**，比点采样好不了多少。足迹更大的情形要靠「级」来解
-// （粗级的 texel 更大 ⇒ 同一个像素在那一级上只跨 ~1 个 texel）。
-const PX_SHADOW_KERNEL_MAX_TEXELS: f32 = 2.0;
+// 一个采样点：**面内方向** → 逐级找有页的那一级 → 读 → 比较。\n\
+//\n\
+// ⚠⚠ **级的回退方向**：从想要的那一级起**先往粗走、再往细走**。\n\
+//    · 往粗：粗级的 texel 更大 ⇒ 影糊一点但不漏；\n\
+//    · 粗的都没有才往细：细级比足迹细 ⇒ 欠 filter，但至少影在。\n\
+//    ⚠ 这是「粗级由细级降采样生成」落地**之前**的过渡：那时粗级铺满、第一步就命中。\n\
+fn px_sample_shadow_page(light_id: u32, level: u32, dir: vec3<f32>, depth: f32) -> f32 {\n\
+\x20   let off = px_shadow_light_offsets[light_id];\n\
+\x20   let head = px_shadow_pages[off];\n\
+\x20   let pps0 = max(head & 0xFFFFu, 1u);\n\
+\x20   let atlas_pages = max(head >> 16u, 1u);\n\
+\x20   let levels = max(px_shadow_pages[off + 1u] & 0xFFFFu, 1u);\n\
+\x20   let face = u32(px_shadow_face_texel(dir, f32(pps0 * PX_PAGE_SIZE)).z);\n\
+\x20   var lv = level;\n\
+\x20   loop {\n\
+\x20       if (lv >= levels) { break; }\n\
+\x20       let found = px_shadow_locate(light_id, lv, face, dir, pps0);\n\
+\x20       if (found.z >= 0.0) {\n\
+\x20           return px_shadow_read(light_id, face, i32(found.z), found.xy, atlas_pages, depth);\n\
+\x20       }\n\
+\x20       lv = lv + 1u;\n\
+\x20   }\n\
+\x20   if (level > 0u) {\n\
+\x20       lv = level;\n\
+\x20       loop {\n\
+\x20           lv = lv - 1u;\n\
+\x20           let found = px_shadow_locate(light_id, lv, face, dir, pps0);\n\
+\x20           if (found.z >= 0.0) {\n\
+\x20               return px_shadow_read(light_id, face, i32(found.z), found.xy, atlas_pages, depth);\n\
+\x20           }\n\
+\x20           if (lv == 0u) { break; }\n\
+\x20       }\n\
+\x20   }\n\
+\x20   return 1.0;\n\
+}\n\
+\n\
+// ⚠ **已删**：`PX_POINT_SHADOW_SCALE = 0.003`。它原来是 oracle 那条基向量的系数\n\
+//   （`orthonormalize(...) × 0.003 × distance_to_light`），换到我们的 texel 相对量上\n\
+//   之后恒等于 0.003 个 texel ⇒ 八个 tap 挤在一个 texel 里（见 `fetch_point_shadow`\n\
+//   里那段长注释）。核半径现在由**像素在光空间的足迹**定。\n\
+\n\
+// 核半径的上限（texel）。那八个 D3D 点是按 1–2 texel 的核设计的：核再大，8 个点铺开\n\
+// 就是**采样不足**，比点采样好不了多少。足迹更大的情形靠**更粗的一级**把「一个像素跨\n\
+// 多少 texel」压回 ~1 —— 那正是级存在的一半理由。\n\
+const PX_SHADOW_KERNEL_MAX_TEXELS: f32 = 2.0;\n\
 \n\
 fn px_sample_shadow_at_offset(\n\
 \x20   position: vec2<f32>,\n\
@@ -300,14 +334,12 @@ fn px_sample_shadow_at_offset(\n\
 \x20   light_local: vec3<f32>,\n\
 \x20   depth: f32,\n\
 \x20   light_id: u32,\n\
-\x20   face_side: f32,\n\
+\x20   level: u32,\n\
 ) -> f32 {\n\
 \x20   let dir = light_local + position.x * x_basis + position.y * y_basis;\n\
-\x20   let texel = px_shadow_face_texel(dir, face_side);\n\
-\x20   let face = u32(texel.z);\n\
-\x20   return px_sample_shadow_page(light_id, face, texel.xy, depth) * coeff;\n\
+\x20   return px_sample_shadow_page(light_id, level, dir, depth) * coeff;\n\
 }\n\
-\n\
+
 fn fetch_point_shadow(\n\
 \x20   light_id: u32,\n\
 \x20   frag_position: vec4<f32>,\n\
@@ -385,38 +417,53 @@ fn fetch_point_shadow(\n\
 \x20   let light_dx = dpdx(light_local);\n\
 \x20   let light_dy = dpdy(light_local);\n\
 \x20   let footprint = max(length(light_dx), length(light_dy));\n\
+\x20   // ---- 级：由**足迹**定（用户裁决：相机必须进采样）----------------------\n\
+\x20   //
+\x20   // `texel_world` 是**级 0** 的。要「一个像素跨 ~1 个 texel」就得挑满足
+\x20   // `texel_级 ≈ footprint` 的那一级：级 k 的 texel 是级 0 的 `2^k` 倍 ⇒
+\x20   //      wish = floor(log2(footprint / texel_world))
+\x20   // 夹进 `[0, levels-1]`。⚠ 这一条**与相机有关** —— 而分配那一侧仍然与相机无关
+\x20   // （页/atlas 不随相机 churn），只有「读哪一级」看相机。
+\x20   let levels = max(px_shadow_pages[px_shadow_light_offsets[light_id] + 1u] & 0xFFFFu, 1u);\n\
+\x20   let want = u32(clamp(\n\
+\x20       floor(log2(max(footprint, 1e-9) / max(texel_world, 1e-9))),\n\
+\x20       0.0,\n\
+\x20       f32(levels - 1u),\n\
+\x20   ));\n\
+\x20   // 选中的那一级的 texel 世界尺寸：核半径与基向量都按它算（不是按级 0 的）。\n\
+\x20   let texel_level = texel_world * exp2(f32(want));\n\
 \x20   let kernel_texels = clamp(\n\
-\x20       footprint / max(texel_world, 1e-9),\n\
+\x20       footprint / max(texel_level, 1e-9),\n\
 \x20       1.0,\n\
 \x20       PX_SHADOW_KERNEL_MAX_TEXELS,\n\
 \x20   );\n\
 \x20   let basis = orthonormalize(normalize(light_local))\n\
-\x20       * kernel_texels * texel_world;\n\
+\x20       * kernel_texels * texel_level;\n\
 \x20   var sum: f32 = 0.0;\n\
 \x20   sum += px_sample_shadow_at_offset(\n\
 \x20       PX_D3D_SAMPLE_POINT_POSITIONS[0], PX_D3D_SAMPLE_POINT_COEFFS[0],\n\
-\x20       basis[0], basis[1], light_local, depth, light_id, face_side);\n\
+\x20       basis[0], basis[1], light_local, depth, light_id, want);\n\
 \x20   sum += px_sample_shadow_at_offset(\n\
 \x20       PX_D3D_SAMPLE_POINT_POSITIONS[1], PX_D3D_SAMPLE_POINT_COEFFS[1],\n\
-\x20       basis[0], basis[1], light_local, depth, light_id, face_side);\n\
+\x20       basis[0], basis[1], light_local, depth, light_id, want);\n\
 \x20   sum += px_sample_shadow_at_offset(\n\
 \x20       PX_D3D_SAMPLE_POINT_POSITIONS[2], PX_D3D_SAMPLE_POINT_COEFFS[2],\n\
-\x20       basis[0], basis[1], light_local, depth, light_id, face_side);\n\
+\x20       basis[0], basis[1], light_local, depth, light_id, want);\n\
 \x20   sum += px_sample_shadow_at_offset(\n\
 \x20       PX_D3D_SAMPLE_POINT_POSITIONS[3], PX_D3D_SAMPLE_POINT_COEFFS[3],\n\
-\x20       basis[0], basis[1], light_local, depth, light_id, face_side);\n\
+\x20       basis[0], basis[1], light_local, depth, light_id, want);\n\
 \x20   sum += px_sample_shadow_at_offset(\n\
 \x20       PX_D3D_SAMPLE_POINT_POSITIONS[4], PX_D3D_SAMPLE_POINT_COEFFS[4],\n\
-\x20       basis[0], basis[1], light_local, depth, light_id, face_side);\n\
+\x20       basis[0], basis[1], light_local, depth, light_id, want);\n\
 \x20   sum += px_sample_shadow_at_offset(\n\
 \x20       PX_D3D_SAMPLE_POINT_POSITIONS[5], PX_D3D_SAMPLE_POINT_COEFFS[5],\n\
-\x20       basis[0], basis[1], light_local, depth, light_id, face_side);\n\
+\x20       basis[0], basis[1], light_local, depth, light_id, want);\n\
 \x20   sum += px_sample_shadow_at_offset(\n\
 \x20       PX_D3D_SAMPLE_POINT_POSITIONS[6], PX_D3D_SAMPLE_POINT_COEFFS[6],\n\
-\x20       basis[0], basis[1], light_local, depth, light_id, face_side);\n\
+\x20       basis[0], basis[1], light_local, depth, light_id, want);\n\
 \x20   sum += px_sample_shadow_at_offset(\n\
 \x20       PX_D3D_SAMPLE_POINT_POSITIONS[7], PX_D3D_SAMPLE_POINT_COEFFS[7],\n\
-\x20       basis[0], basis[1], light_local, depth, light_id, face_side);\n\
+\x20       basis[0], basis[1], light_local, depth, light_id, want);\n\
 \x20   return sum;\n\
 }\n";
 

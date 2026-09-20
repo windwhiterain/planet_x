@@ -759,7 +759,7 @@ pub fn build(
                         let mut page = PassSpec {
                             kind: entry.kind.clone(),
                             shader: shader.clone(),
-                            label: page_label(&face_label, patch.page_y, patch.page_x),
+                            label: page_label(&face_label, patch.level, patch.page_y, patch.page_x),
                             entry: entry.entry.clone(),
                             reads: entry.reads.clone(),
                             writes: entry.writes.clone(),
@@ -774,7 +774,7 @@ pub fn build(
                         };
                         page.label = format!(
                             "{}_c{}",
-                            page_label(&face_label, patch.page_y, patch.page_x),
+                            page_label(&face_label, patch.level, patch.page_y, patch.page_x),
                             passes.len()
                         );
                         page.draws = vec![DrawSpec {
@@ -810,7 +810,13 @@ pub fn build(
                             "view_page".to_string(),
                             px_protocol::scene::Value::Quad(page_rect_in_face(
                                 window,
-                                allocation.lights[light as usize].pages_per_side,
+                                // ⚠ **这一页自己那一级**的页数边长：级 k 的格子是
+                                //    `pages_per_side >> k`，面 NDC 摊到更少的格上
+                                //    ⇒ 同一个 `window` 在粗级里覆盖更大的一块面。
+                                crate::vshadow::pages_at_level(
+                                    allocation.lights[light as usize].pages_per_side,
+                                    patch.level,
+                                ),
                             )),
                         )]);
                         if cleared {
@@ -847,7 +853,10 @@ pub fn build(
                     let mut at = 0_u32;
                     for light in &allocation.lights {
                         offsets.push(at);
-                        at += crate::vshadow::table_words_per_light(light.pages_per_side);
+                        at += crate::vshadow::table_words_per_light(
+                            light.pages_per_side,
+                            light.levels,
+                        );
                     }
                     offsets
                 },
@@ -957,12 +966,17 @@ fn page_rect_in_face(window: [u32; 4], pages_per_side: u32) -> [f32; 4] {
     [x0 + span * 0.5, y0 - span * 0.5, span * 0.5, span * 0.5]
 }
 
-/// 一页影子 pass 的标签：`<面 pass 的标签>_<页行>_<页列>`。
+/// 一页影子 pass 的标签：`<面 pass 的标签>_l<级>_p<页行>_<页列>`。
 ///
 /// ⚠ 页**不是** `cube_face` 那一维的展开（`layer` 仍然是 `灯 × 6 + 面`）：
 /// 一页一笔 draw 落在**同一层**里，靠 `PassPlan::viewport` 落在 atlas 的那一格上。
-fn page_label(face_label: &str, page_y: u32, page_x: u32) -> String {
-    format!("{face_label}_p{page_y}_{page_x}")
+///
+/// ⚠ **级必须进标签**（§本轮）：同一面同一条 pass 里，级 0 的 `p3_3` 与级 2 的 `p3_3`
+/// 是两页不同的东西（页格坐标只在**自己那一级**的格子里有意义）。标签是宿主的
+/// `layer_of` 用来对账"这一条 pass 落在哪一层哪一面"的唯一凭据，少了级就会出现
+/// **两个不同的 pass 同名**，而对账看不出区别。
+fn page_label(face_label: &str, level: u32, page_y: u32, page_x: u32) -> String {
+    format!("{face_label}_l{level}_p{page_y}_{page_x}")
 }
 
 /// 一页要**清**（`depth=clear(0)`）的 pass：它不画几何，只把那一格压到最远。
