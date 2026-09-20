@@ -7,17 +7,18 @@
 //! 2. **生成物与 recipe 一致**：生成物里的 `INST_TEMPLATE`（= **key 的那一轴**）必须与
 //!    recipe 里那一栏**逐字相同**；`INST_BODY`（抄进实例库的那一份）必须是把 `ARG`
 //!    换成 `&<类型名>` 之后的结果。对不上的话 key 会按旧模板算、复用错的构件（真缺陷的形状）。
-//! 3. **端到端**：实例库在盘上时，用 `cook` 算一个**自己的图名**（`inst-op`）—— 能算、能再命中、
-//!    身份就是实例 key。⚠ 库不在盘上时**只报一行、不红**（不许让没有实例库的机器红）。
+//! 3. **库路径 ↔ 身份**：每条实例的库路径（`<key>.dll`）必须与它自己算出来的 key 是同一个
+//!    —— 纯事实，不需要任何产物，任何 checkout 都断言得动。
+//!    ⚠ **运行那一半**（真装载、真 cook、真命中）搬进了**探针** `--bin inst_probe`：
+//!    它要 `px build` 的产物才能跑，而测试不该替构建产物负责。搬出去之前那一段在库里写着
+//!    "库不在盘上就打印一行、然后 return" —— 那就是"跳过"，本仓不吃这一套。
 
 use std::path::Path;
 
 use px_cook::inst;
 use px_cook::inst::BuildGraph;
-use px_cook::{Cooked, Domain, GraphSpec, begin, cook, volume};
-use px_field_schema::field::Field;
 use px_graph_schema::PxOp;
-use px_graphs::insts::{Band, Waves, build};
+use px_graphs::insts::{Band, LatBands, Waves, build};
 
 /// 图从 **build graph** 来（`20-build-graph.md` §190）：跑一遍 `build()`，不读任何手写清单。
 fn graph() -> BuildGraph {
@@ -106,73 +107,51 @@ fn the_symbol_name_is_the_same_string_on_both_sides() {
 }
 
 #[test]
-fn a_real_instance_cooks_end_to_end() {
-    let info = graph()
-        .into_nodes()
-        .into_iter()
-        .next()
-        .expect("build graph 里至少要有一条实例");
-    let key = Band::source_hash().expect("图侧算得出实例 key");
-    assert_eq!(
-        Path::new(&info.library)
-            .file_stem()
-            .and_then(|stem| stem.to_str()),
-        Some(key),
-        "`info_of_facts` 给的库路径与 `source_hash()`（实例 key）不是同一个 key"
-    );
-
-    if !Path::new(&info.library).is_file() {
-        // ⚠ 命令走 `driver_command()`（**直接跑 driver exe**），与别处的提示同一口径 ——
-        //   从前这里手写了一句 `cargo run -p px_graphs --bin px -- build`，那是**慢路径**
-        //   （`cargo run` 会按另一套特性合并把图程序重链一遍），而且是**第三份**手抄的命令串。
-        eprintln!(
-            "⚠ 跳过端到端：实例库不在盘上（{}）⇒ 先跑 `{} build`",
-            info.library,
-            px_cook::inst::driver_command(),
+fn every_instance_library_path_is_the_key_the_generator_planned() {
+    // ⚠ 这条测试**只判计划那一半**（纯事实，不需要任何产物）。运行那一半（真装载、真 cook、
+    //   真命中）搬进了**探针** `--bin inst_probe`：它要 `px build` 烘出来的库才能跑，而那是
+    //   **构建产物**，`cargo test` 不保证它在盘上、也不该替它去编。
+    //   搬出去之前那一段写的是"**库不在盘上就打印一行、然后 return**" —— 那就是"跳过"，
+    //   而本仓的不变式是"任何『跳过』都是判据的敌人"（一条可能什么都不查的判据比没有更坏）。
+    //   现在两半**各自都硬**：这一半任何 checkout 都断言得了、且一定会断言；那一半缺库就报错并给命令。
+    //
+    // ⚠ 这里**不写手维护的实例清单**：名单从 build graph 与生成物（`codegen()`）来，
+    //   两边的 op id 集合必须一模一样（多一条、少一条都当场红）。
+    let catalogue = px_graphs::insts::codegen();
+    let nodes = graph().into_nodes();
+    for node in &nodes {
+        let entry = catalogue
+            .for_op(&node.op_id)
+            .unwrap_or_else(|err| panic!("{err}"));
+        assert_eq!(
+            Path::new(&node.library)
+                .file_stem()
+                .and_then(|stem| stem.to_str()),
+            Some(entry.key),
+            "实例 `{}` 的库路径不是生成器算出来的那个 key（计划的两半分家了）",
+            node.op_id,
         );
-        return;
     }
-
-    // ⚠ 自己的图名（`inst-op`），不碰 `art/` 下任何既有图。
-    let graph = begin(GraphSpec {
-        name: "inst-op".to_string(),
-        width: 8,
-        height: 4,
-        projection: Domain::Cube,
-        cameras: Vec::new(),
-    });
-    // 上游那张覆盖度场：实例复用的是 `CloudCoarse` 的**声明** ⇒ 输入形状就是它那个
-    // `CloudCoarseInput { coverage }`。⚠ `Band` 自己就是覆盖度的来源，这张场**不参与计算**，
-    // 但接口要它在场（`19` §179.1：体逐字套在复用的声明上）。
-    let coverage = Cooked::new(
-        *px_cook::blake3::hash(b"inst-op/coverage").as_bytes(),
-        Field::filled_with(8, 4, 1.0, Domain::Cube),
-        false,
-        0,
-        0,
-    );
-    // `CloudCoarseInput` 不吃 `Clone` ⇒ 两条输入各建一次（同一份上游 ⇒ 同一个键）。
-    let inputs = || volume::CloudCoarseInput {
-        coverage: coverage.clone(),
-    };
-    let first = cook::<Band>(&graph, "band", inputs()).expect("实例算子应当能算");
-    let again = cook::<Band>(&graph, "band", inputs()).expect("第二次");
-    println!(
-        "实例算子：{}×{}×{}｜命中={} → {}｜key {}",
-        first.value().res,
-        first.value().layers,
-        first.value().data.len(),
-        first.hit,
-        again.hit,
-        px_cook::hex_short(&first.key),
-    );
-    assert!(again.hit, "同一个节点再算一次没命中 ⇒ 实例 key 不稳定");
-    assert_eq!(first.key, again.key);
     assert_eq!(
-        Band::source_hash().expect("身份"),
-        key,
-        "`source_hash()` 两次算出来不一样"
+        nodes.len(),
+        catalogue.entries.len(),
+        "build graph 里 {} 条实例、生成物里 {} 条 —— 名单不同步",
+        nodes.len(),
+        catalogue.entries.len(),
     );
-    assert!(!first.value().data.is_empty(), "实例算子算出了一份空体积");
-    graph.finish();
+    // 逐类型再钉一遍"类型自己报的身份"（生成物的 const 与 `source_hash()` 是两条路）。
+    for (op_id, hash) in [
+        ("cloud.coarse/band", Band::source_hash()),
+        ("field.remap/waves", Waves::source_hash()),
+        ("field.remap/latbands", LatBands::source_hash()),
+    ] {
+        let entry = catalogue
+            .for_op(op_id)
+            .unwrap_or_else(|err| panic!("{err}"));
+        assert_eq!(
+            hash.as_deref(),
+            Ok(entry.key),
+            "`{op_id}` 的类型自报身份与生成器算的不是同一个"
+        );
+    }
 }
