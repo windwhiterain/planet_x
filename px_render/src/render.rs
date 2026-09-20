@@ -1263,6 +1263,17 @@ impl Session {
                 .as_ref()
                 .or(shadow_texture.as_ref())
                 .expect("有投影的灯才有 atlas");
+            println!(
+                "影子 atlas 探针：读的是**{}**（{}×{} × {} 层）",
+                if written_atlas.is_some() {
+                    "要写的那张 point_shadow_atlas"
+                } else {
+                    "采样那张 point_shadow_atlas_sample"
+                },
+                texture.width(),
+                texture.height(),
+                texture.depth_or_array_layers(),
+            );
             let layers = scene.shadow.as_ref().map(|plan| plan.layers).unwrap_or(0);
             let mut lines = Vec::new();
             for layer in 0..layers.min(6) {
