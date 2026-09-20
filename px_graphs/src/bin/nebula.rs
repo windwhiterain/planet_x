@@ -215,12 +215,42 @@ fn main() -> Result<(), Fault> {
         &shape_graph,
         "shaped",
         field::MixInput {
-            a: vacuum,
+            a: vacuum.clone(),
             b: density,
             mask: extent,
         },
     )?;
     report("shaped", shaped.value());
+
+    // ── **细丝**：与团块无关的一层高频结构 ────────────────────────────────
+    //
+    // ⚠⚠ 这一层是为**局域对比的 p90** 加的。上一轮的包络把**中位**拉到了 0.00176
+    //   （参考 0.00200，只差 14%），而 **p90 还差 2.4 倍**（0.00522 对 0.01263）
+    //   ⇒ "细节的典型量"够了，缺的是**少数地方有强反差**。
+    //   而把 `density` 压得更狠只会连同团块一起压暗（中位掉、p90 不起来）
+    //   —— 参考图的强反差来自**另一层尺度**，所以它得是**另一个场**。
+    //
+    // ⚠ 这里只用 `field.mix`（本仓没有乘法算子）：`filaments` 的窗口决定
+    //   "多细的地方还留得住气" ⇒ `mix(0, shaped, 门)` 等价于**门控的密度**。
+    //   门越窄（`filaments.toml` 里的窗口）丝就越细、反差就越强。
+    let filaments = cook::<field::Ridged3>(&shape_graph, "filaments", ())?;
+    // ⚠ 只在**有气的地方**加细丝（门乘上包络）：真空里出现细丝会把上一轮刚拿到的
+    //   "成片的黑"又糊掉。
+    let carved = cook::<field::Remap>(
+        &shape_graph,
+        "carved",
+        field::FieldInput { field: filaments },
+    )?;
+    let textured = cook::<field::Mix>(
+        &shape_graph,
+        "textured",
+        field::MixInput {
+            a: vacuum.clone(),
+            b: shaped.clone(),
+            mask: carved,
+        },
+    )?;
+    report("textured", textured.value());
 
     let density_volume = cook::<volume::Density>(
         &shape_graph,

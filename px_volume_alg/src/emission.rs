@@ -91,7 +91,12 @@ pub fn bake_emission(density: &VolumeData, params: &EmissionParams) -> VolumeDat
                     }
                     let lit = (-optical_depth * params.shadow_gain).exp();
 
-                    let emit = d.powf(params.emission_power) * params.emission_gain * lit;
+                    // ⚠ **两份发射**：主项（`power` 高 ⇒ 只有浓的地方亮）+ **中性底光**
+                    //   （`power` 低 ≈1 ⇒ 浓处相对更强，形成核里那层白蓝）。
+                    //   见 `EmissionParams::glow_gain` 的文档：单标量发射给不出
+                    //   "核白蓝、边玫红"，因为颜色只来自消光、而消光只按**总量**染色。
+                    let emit = d.powf(params.emission_power) * params.emission_gain * lit
+                        + d.powf(params.glow_power) * params.glow_gain * lit;
 
                     // ---- 消光：逐通道 + 尘埃那一笔 ----
                     let base = d.powf(params.extinction_power);
