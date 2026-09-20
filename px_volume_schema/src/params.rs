@@ -210,17 +210,19 @@ pub mod density {
     #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, px_derive::PxParams)]
     #[serde(default, deny_unknown_fields)]
     pub struct DensityParams {
-        /// **径向层数与面内分辨率的比**（`res` 从画布取，见 [`Self::shape_of`]）。
+        /// **面内分辨率占画布宽度的比例**（`1.0` = 与画布同细）。
         ///
-        /// ⚠ 这里**故意不给 `res`**：体网格的分辨率必须等于上游那张三维场的 `width`，
-        ///   而那张场是照画布造的（`field.fbm3` 用 `grid.width`）⇒ 参数再写一遍 `res`
-        ///   只是多一个"两处必须一致"的地方，而它**只能**一致。
-        ///   更要紧的是：`--face` 是唯一该动分辨率的旋钮，而参数文件是静态的 ——
-        ///   写死 `res` 会让 `--face` 改不动体积的粗细（"快速迭代形状"就废了一半）。
+        /// ⚠ 这里**故意不给绝对 `res`**：上游那张三维场是照画布造的，两边差一个绝对数就
+        ///   永远对不上。给比例则可以"画布细、体积粗"（体积按体素坐标三线性读那张场）。
+        pub res_ratio: f32,
+        /// **径向层数**（**独立**于面内分辨率）。
         ///
-        /// ⚠ `layers = res × 这个`：径向给得比面内稀是省算力的常规做法（视线在径向走得长，
-        ///   而径向的细节靠 `reach` 保守化兜住）。
-        pub layers_ratio: f32,
+        /// ⚠⚠ 它与 `res_ratio` 分开是**必须**的，不是留白：格数是 `res × res × layers` 级
+        ///   ⇒ 层数一旦跟着面内分辨率走就是 `res³`。实测把两者绑死（`layers = res/2`）时
+        ///   `--face 128` **烘不完**（10 分钟超时）、`--face 256` **分配 50 GB 失败**。
+        ///   星云要的是"角向细节 + 适中的径向分层"：丝与星点都在角向上，径向给 64~96 层
+        ///   已经够（径向的细结构另有 `reach` 保守化兜底）。
+        pub layers: u32,
         /// 壳的内外半径（世界点 = 方向 × 半径）。
         ///
         /// ⚠ 它**只在这一档有定义**：上游那张三维场活在体素坐标 `(s, t, altitude)` 里、
@@ -240,7 +242,8 @@ pub mod density {
     impl Default for DensityParams {
         fn default() -> Self {
             Self {
-                layers_ratio: 0.5,
+                res_ratio: 1.0,
+                layers: 64,
                 inner: 1.0,
                 outer: 1.6,
                 reach: 1,
@@ -255,11 +258,9 @@ pub mod density {
         }
 
         /// 这份参数 + 画布宽度 ⇒ 体网格的形状 `(res, layers)`。
-        ///
-        /// ⚠ 分辨率取自**画布宽度**（见 [`Self::layers_ratio`] 的文档）。
         pub fn shape_of(&self, canvas_width: u32) -> (u32, u32) {
-            let res = canvas_width.max(2);
-            let layers = ((res as f32 * self.layers_ratio).round() as u32).max(2);
+            let res = ((canvas_width as f32 * self.res_ratio).round() as u32).max(2);
+            let layers = self.layers.max(2);
             (res, layers)
         }
     }

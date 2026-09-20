@@ -230,7 +230,6 @@ impl Build for TextureData {
 mod texture_tests {
     use super::*;
 
-    
     fn sample() -> TextureData {
         // 4×4×6 层、1 级、半精度 ⇒ 4×4×6×8 = 768 字节。
         TextureData {

@@ -73,6 +73,64 @@ fn field_row(shape: &VolumeShape, face: u32, layer: u32, t: u32) -> u32 {
     shape.row_of(face, layer) + t
 }
 
+/// **按体素坐标读上游那张场**（三线性，面内两维）。
+///
+/// ⚠ 只在"体积的分辨率与场不同"时才用得上（见 [`bake_density`] 的文档）：
+///   两者**相同**时是纯粹的布局搬运，走 [`field_to_volume_slot`]，不该插值。
+///   写成插值会引入两种必须自己保证的精度陷阱（浮点反解跳层、面偏移往返丢低位）
+///   —— 那是白付的代价。
+///
+/// ⚠ 面内两维**不跨面**：两个面在公共棱上的方向虽然相同，但它们的体素坐标带着不同的
+///   面偏移 ⇒ 在参数空间里是两块分开的区域。跨面取样会读到另一块噪声（错位的云）。
+///   边缘一律**钳制**：这是"最多把边界糊住"，方向是安全的那一边。
+fn sample_field_local(
+    field: &Field,
+    shape: &VolumeShape,
+    face: u32,
+    s: f32,
+    t: f32,
+    altitude: f32,
+) -> f32 {
+    let res = shape.res.max(1);
+    let last_layer = shape.layers.max(2) - 1;
+    let snap = |fraction: f32| {
+        if fraction < 1e-4 {
+            0.0
+        } else if fraction > 1.0 - 1e-4 {
+            1.0
+        } else {
+            fraction
+        }
+    };
+    let sx = s * res as f32 - 0.5;
+    let sy = t * res as f32 - 0.5;
+    let x0 = sx.floor();
+    let y0 = sy.floor();
+    let tx = snap(sx - x0);
+    let ty = snap(sy - y0);
+    let sz = altitude * last_layer as f32;
+    let nearest = sz.round();
+    let layer0 = if (sz - nearest).abs() < 1e-3 {
+        nearest
+    } else {
+        sz.floor()
+    };
+    let tz = snap(sz - layer0);
+    let last_cell = res.max(2) - 1;
+    let clamp_cell = |value: f32| value.clamp(0.0, last_cell as f32) as u32;
+    let (xa, xb) = (clamp_cell(x0), clamp_cell(x0 + 1.0));
+    let (ya, yb) = (clamp_cell(y0), clamp_cell(y0 + 1.0));
+    let layer_at = |step: f32| (layer0 + step).clamp(0.0, last_layer as f32) as u32;
+    let (la, lb) = (layer_at(0.0), layer_at(1.0));
+    // 行号 = 层号 × res + 面内行（⚠ 面偏移不加：读**网格**走面内坐标）。
+    let corner = |cell_x: u32, cell_t: u32, layer: u32| field.at(cell_x, layer * res + cell_t);
+    let top = (corner(xa, ya, la) * (1.0 - tx) + corner(xb, ya, la) * tx) * (1.0 - ty)
+        + (corner(xa, yb, la) * (1.0 - tx) + corner(xb, yb, la) * tx) * ty;
+    let bottom = (corner(xa, ya, lb) * (1.0 - tx) + corner(xb, ya, lb) * tx) * (1.0 - ty)
+        + (corner(xa, yb, lb) * (1.0 - tx) + corner(xb, yb, lb) * tx) * ty;
+    top * (1.0 - tz) + bottom * tz
+}
+
 /// **按世界点读密度体积**（三线性，跨面；这是步进真正需要的那把尺子）。
 ///
 /// 映射链：世界点 → 半径 → 径向高度（层号）→ 单位方向 → `(面, s, t)` → 三线性。
@@ -147,35 +205,61 @@ pub fn sample_world(volume: &VolumeData, point: [f32; 3]) -> f32 {
 /// 值的含义就是**密度本身**（不是 `(场-τ)/L` 那一档）：步进要按它算消光与发射，
 /// 所以这里**不许**做阈值或归一化 —— 那是下游调参的事（同 `params` 里那句：
 /// "算子不钳制输出，要钳就在下游接一个 `field.remap`"）。
+///
+/// ⚠ **体积的分辨率与上游那张场可以不同**（`params.shape_of` 按画布的**比例**给）：
+///   两者相同时是纯粹的**布局搬运**（走 [`field_to_volume_slot`]，不插值）；
+///   不同时按体素坐标**三线性读**那张场（走 [`sample_field_local`]）。
+///
+/// ⚠ 为什么需要这个解耦：格数是 `res × res × layers` 级，而 `layers` 一旦绑住面内分辨率
+///   就是 `res³` —— 实测 `--face 128` 烘不完（超时）、`--face 256` **分配 50 GB 失败**。
+///   解耦之后"角分辨率"与"径向层数"各是一个旋钮：细的角向结构（星云里的丝、星点）
+///   不必逼着径向也一起变密。
 pub fn bake_density(
     params: &DensityParams,
     canvas_width: u32,
     field: &Field,
 ) -> Result<VolumeData, String> {
+    // 上游那张场自己的形状（由画布推出来）。
+    let source = VolumeShape::of(&px_graph_schema::Grid {
+        width: field.width,
+        height: field.height,
+        projection: field.projection,
+    })
+    .ok_or_else(|| {
+        format!(
+            "cloud.density 的上游必须是体网格场（域 volume、行数能被 res²×6 整除），\
+             拿到的是 {}×{} / {:?}",
+            field.width, field.height, field.projection,
+        )
+    })?;
+    // 产物那一份体积的形状（按画布比例给，与场的粗细无关）。
     let (res, layers) = params.shape_of(canvas_width);
     let shape = VolumeShape { res, layers };
-    if !shape.matches(field) {
-        return Err(format!(
-            "cloud.density 的上游必须是 res {} × layers {} 的体网格场（域 volume、\
-             行数 = res² × layers × 6 = {}），拿到的是 {}×{} / {:?}",
-            shape.res,
-            shape.layers,
-            shape.height(),
-            field.width,
-            field.height,
-            field.projection,
-        ));
-    }
+    let same_grid = res == source.res && layers == source.layers;
 
-    let res = shape.res;
-    let layers = shape.layers;
     let mut data = vec![0.0_f32; (CUBE_FACES * layers * res * res) as usize];
     let mut column = vec![0.0_f32; layers as usize];
     for face in 0..CUBE_FACES {
         for t in 0..res {
             for s in 0..res {
                 for layer in 0..layers {
-                    column[layer as usize] = field.at(s, field_row(&shape, face, layer, t));
+                    let density = if same_grid {
+                        // ⚠ 同网格 ⇒ **搬运**（不插值）。走体素坐标解出那一段行号。
+                        let t_source = t * source.res / res.max(1);
+                        let layer_source = layer * source.layers / layers.max(1);
+                        field.at(s, field_row(&source, face, layer_source, t_source))
+                    } else {
+                        // ⚠ 不同网格 ⇒ 按**归一化体素坐标**读（三线性）。
+                        sample_field_local(
+                            field,
+                            &source,
+                            face,
+                            (s as f32 + 0.5) / res as f32,
+                            (t as f32 + 0.5) / res as f32,
+                            (layer as f32 + 0.5) / layers as f32,
+                        )
+                    };
+                    column[layer as usize] = density;
                 }
                 let column = dilate_layers(&column, layers, params.reach);
                 for layer in 0..layers {
@@ -209,7 +293,7 @@ mod tests {
     ///   线"，它错了会让**每一条**判据都在测别的东西。
     fn params_for(shape: &VolumeShape) -> DensityParams {
         DensityParams {
-            layers_ratio: shape.layers as f32 / shape.res as f32,
+            layers: shape.layers,
             ..Default::default()
         }
     }
@@ -287,13 +371,52 @@ mod tests {
         }
     }
 
+    /// **体积可以比上游那张场粗**（分辨率解耦）：粗的那一份读到的仍是同一片密度，
+    /// 而且**格数按自己的形状算**（不跟场面内分辨率一起涨）。
+    ///
+    /// ⚠ 这条钉的是"角分辨率与径向层数各是一个旋钮"。绑死时格数是 `res³` 级 ——
+    ///   实测 `--face 128` 烘不完、`--face 256` 分配 50 GB 失败。
+    #[test]
+    fn the_volume_can_be_coarser_than_the_field() {
+        let field_shape = VolumeShape { res: 8, layers: 6 };
+        // 场里放一个"只跟高度有关"的密度：粗采样之后**逐层**仍然对得上。
+        let field = grid_field(&field_shape, |_, y| {
+            field_shape.slot_of(y).map(|(_, layer)| layer).unwrap_or(0) as f32 / 5.0
+        });
+        let params = DensityParams {
+            res_ratio: 0.5,
+            layers: 6,
+            reach: 0,
+            ..Default::default()
+        };
+        let volume = bake_density(&params, field_shape.res, &field).expect("烘密度");
+        assert_eq!(volume.res, 4, "面内应当减半（8 × 0.5）");
+        assert_eq!(volume.layers, 6, "层数由参数自己给，不跟着面内走");
+        assert_eq!(volume.samples(), (CUBE_FACES * 6 * 4 * 4) as usize);
+        // 只跟高度有关 ⇒ 同一层上处处相等，且六面一致。
+        for face in 0..CUBE_FACES {
+            for layer in 0..volume.layers {
+                let first = volume.at(face, layer, 0, 0);
+                for t in 0..volume.res {
+                    for s in 0..volume.res {
+                        assert!(
+                            (volume.at(face, layer, t, s) - first).abs() < 1e-4,
+                            "只跟高度有关的密度，层 {layer} 上应当处处相等"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     /// **逐点搬运**：一份常数密度的场搬进体积还是那个常数（不重排、不缩放）。
     #[test]
     fn a_constant_field_arrives_unchanged() {
         let shape = shape();
         let field = grid_field(&shape, |_, _| 0.37);
         let params = DensityParams {
-            layers_ratio: shape.layers as f32 / shape.res as f32,
+            res_ratio: 1.0,
+            layers: shape.layers,
             inner: 2.0,
             outer: 5.0,
             reach: 0,
@@ -322,7 +445,7 @@ mod tests {
         // 值 = 坐标的可逆编码（每一格都不一样）。
         let field = grid_field(&shape, |x, y| (x as f32 + 1.0) + (y as f32 + 1.0) * 100.0);
         let params = DensityParams {
-            layers_ratio: shape.layers as f32 / shape.res as f32,
+            layers: shape.layers,
             reach: 0,
             ..Default::default()
         };
