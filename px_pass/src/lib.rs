@@ -741,6 +741,12 @@ impl RenderState {
 pub enum Dimension {
     D2,
     Cube,
+    /// `texture_depth_2d_array` —— 虚拟影图的 atlas。
+    ///
+    /// ⚠ 它**必须**跟 [`Slot::depth`] 一起用：深度纹理的 `sample_type` 是 `Depth`、
+    /// 采样器是 `Comparison`，而这两样在 [`Slot`] 那一侧从前是**写死**成
+    /// `Float { filterable: true }` + `Filtering` 的。
+    D2Array,
 }
 
 impl Dimension {
@@ -748,6 +754,7 @@ impl Dimension {
         match self {
             Dimension::D2 => "texture_2d",
             Dimension::Cube => "texture_cube",
+            Dimension::D2Array => "texture_depth_2d_array",
         }
     }
 
@@ -755,6 +762,7 @@ impl Dimension {
         match self {
             Dimension::D2 => TextureViewDimension::D2,
             Dimension::Cube => TextureViewDimension::Cube,
+            Dimension::D2Array => TextureViewDimension::D2Array,
         }
     }
 
@@ -762,6 +770,9 @@ impl Dimension {
         match self {
             Dimension::D2 => 1,
             Dimension::Cube => 6,
+            // ⚠ 只喂**兜底纹理**（见 `fallback`）。真 atlas 的层数是
+            //    `shadow_faces`（灯数 × 6），由烘图侧解出来。
+            Dimension::D2Array => 1,
         }
     }
 }
@@ -771,6 +782,12 @@ impl Dimension {
 pub struct Slot {
     pub binding: u32,
     pub dimension: Dimension,
+    /// 这一格是**深度**纹理吗（`sample_type = Depth`、采样器 `Comparison`）。
+    ///
+    /// ⚠ 为什么要这一栏：从前的声明把这两样**写死**成 `Float { filterable: true }` +
+    /// `SamplerBindingType::Filtering` —— 那对颜色贴图是对的，对影子 atlas 一条都不成立。
+    /// 而"布局与绑定的类型对不上"在 wgpu 里是**建管线/建组时**才炸，不是编译期。
+    pub depth: bool,
 }
 
 /// 执行器的绑定组形状。
@@ -2223,11 +2240,21 @@ impl Executor {
             count: None,
         }];
         for slot in &layout.slots {
+            // ⚠ **深度纹理要 `Depth` + `Comparison`**（§本轮）：从前这两样写死成
+            //    `Float { filterable: true }` + `Filtering` —— 那对颜色贴图是对的，
+            //    对影子 atlas（`texture_depth_2d_array`）两条都不成立。而"布局与绑定的
+            //    类型对不上"在 wgpu 里是**建管线/建组时**才炸，不是编译期 ⇒ 靠这一栏
+            //    说清楚，别靠"看起来差不多"。
+            let sample_type = if slot.depth {
+                TextureSampleType::Depth
+            } else {
+                TextureSampleType::Float { filterable: true }
+            };
             entries.push(BindGroupLayoutEntry {
                 binding: slot.binding,
                 visibility: ShaderStages::FRAGMENT,
                 ty: BindingType::Texture {
-                    sample_type: TextureSampleType::Float { filterable: true },
+                    sample_type,
                     view_dimension: slot.dimension.view_dimension(),
                     multisampled: false,
                 },
@@ -2236,7 +2263,11 @@ impl Executor {
             entries.push(BindGroupLayoutEntry {
                 binding: slot.binding + 1,
                 visibility: ShaderStages::FRAGMENT,
-                ty: BindingType::Sampler(SamplerBindingType::Filtering),
+                ty: BindingType::Sampler(if slot.depth {
+                    SamplerBindingType::Comparison
+                } else {
+                    SamplerBindingType::Filtering
+                }),
                 count: None,
             });
         }
@@ -3370,8 +3401,8 @@ mod tests {
                 slots: vec![Slot {
                     binding: 1,
                     dimension: Dimension::D2,
+                    depth: false,
                 }],
-                // 判据夹具走缺省那一档（几何 pass 的参数落点由宿主说，见 `Layout` 那段）。
                 geometry_group: 0,
                 geometry_params_binding: 0,
             },

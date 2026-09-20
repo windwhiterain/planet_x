@@ -51,6 +51,8 @@ pub fn layout() -> Layout {
                     px_protocol::material::TextureDimension::D2 => Dimension::D2,
                     px_protocol::material::TextureDimension::Cube => Dimension::Cube,
                 },
+                // 材质那一套贴图是**颜色**的（色板/条带/云图）⇒ 不是深度。
+                depth: false,
             })
             .collect(),
         // ⚠ **几何 pass 的参数在第 1 组 binding 0**（§本轮）：那一格是顶点阶段
