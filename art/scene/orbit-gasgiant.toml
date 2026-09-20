@@ -37,3 +37,15 @@ graph = "planet"
 members = { shader = "shaders::gasgiant", bands = "gasgiant::mixed" }
 primitive = "icosphere"
 params = { palette = "gas", displace = 0.010, sea_level = 0.45, radius = 1.0, subdivisions = 64, spin = 0.0, rings = 1.75, albedo = [0.870, 0.800, 0.660, 1.0], absorption = [0.20, 0.34, 0.70, 1.0], wrap = 0.70, thickness = 1.00, limb = 0.36, band_gain = 0.46, band_contrast = 0.80, sun_gain = 1.00, ambient = 0.75, hemi_depth = 0.35, haze = 0.30, shadows = 1.0 }
+
+# 天上那颗**凌日的卫星**（参考图上那颗圆的土黄小球）—— `kind = "moon"` 是第 7 轮为它加的。
+# ⚠ 它用的是**气态巨行星那份材质**（次表面散射），但没给条带图 ⇒ 渲染器兜底的空白条带图
+#   让 `band` 恒为一个常数 ⇒ 出来是一颗**均匀的奶黄球**，正是参考图里那颗卫星的样子。
+#   位置在**世界系**里（相机在 +z 一侧、太阳在 -x 一侧）。
+[[parts]]
+id = "satellite"
+kind = "moon"
+shader = "gasgiant"
+graph = "shaders"
+members = { shader = "shaders::gasgiant" }
+params = { radius = 0.093, subdivisions = 48, position = [-0.62, 0.30, 1.32], spin = 0.0, albedo = [0.780, 0.712, 0.560, 1.0], absorption = [0.26, 0.40, 0.78, 1.0], wrap = 0.45, thickness = 1.35, limb = 0.10, band_gain = 0.0, band_contrast = 1.0, sun_gain = 1.0, ambient = 0.75, hemi_depth = 0.0, haze = 0.0 }

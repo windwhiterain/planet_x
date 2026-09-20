@@ -21,7 +21,7 @@ use crate::contract::{merge_named, schema_of};
 use crate::members::{member_of, path_of};
 use crate::vocab::{
     self, ATMOSPHERE_KEYS, CLOUD_BASE, CLOUD_SHADOW_GAIN, CLOUD_SHADOW_HEIGHT, CLOUD_TOP,
-    CLOUDS_KEYS, CloudShape, PLANET_KEYS, RING_BAND, RING_SEGMENTS, SKYBOX_BRIGHTNESS,
+    CLOUDS_KEYS, CloudShape, MOON_KEYS, PLANET_KEYS, RING_BAND, RING_SEGMENTS, SKYBOX_BRIGHTNESS,
     STARS_FACE, SUN_RANGE_FACTOR,
 };
 use crate::{math, stage};
@@ -238,12 +238,7 @@ pub fn compile(
     let clouds = file.parts.iter().find(|part| part.kind == "clouds");
     let atmosphere = file.parts.iter().find(|part| part.kind == "atmosphere");
     for part in &file.parts {
-        if !["planet", "clouds", "atmosphere"].contains(&part.kind.as_str()) {
-            return Err(format!(
-                "part '{}' 的 kind '{}' 不认识；场景编译器认：planet / clouds / atmosphere",
-                part.id, part.kind
-            ));
-        }
+        check_kind(part)?;
     }
 
     // 配方的参数名不再在这里按白名单查：判据换成这份 shader 的契约（见 `merge`）。
@@ -592,6 +587,37 @@ pub fn compile(
         });
     }
 
+    // ---- 卫星：天上**另外一颗小球**（`kind = "moon"`，2026-09-20 加）----
+    //
+    // ⚠ 它与 planet 的区别只有三条：① 不产环、不产云、不当光源；② 几何**只**走内建球
+    //   （一颗小球不需要图烘网格）；③ 自己带 `position`（世界系里的偏移）—— 参考图上那颗
+    //   凌日的卫星就是"球 + 一个位置"。
+    //   ⚠ 材质那一侧与 planet **同一条口径**：参数按本 part shader 的契约判，声明了贴图
+    //   而配方没给成员的格子就吃渲染器的兜底（`fallback_slots`）—— 气态巨行星那份材质
+    //   在没有条带图时退化成"一颗均匀的气球"，正好是参考图上那颗土黄小球的样子。
+    for part in file.parts.iter().filter(|part| part.kind == "moon") {
+        let moon_shader = part.shader_member()?;
+        let (geometry, transform, moon_rotation) = moon_body(part)?;
+        // ⚠ `orientation` 与行星同口径：由 `spin × SYSTEM_TILT` 算出来（不是配方写的），
+        //   所以这里要当**算好的那一栏**递进去，否则契约会判"shader 声明的 orientation 没给"。
+        let moon_params = material_params(
+            part,
+            &moon_shader,
+            &MOON_KEYS,
+            BTreeMap::from([("orientation".to_string(), Value::Quad(moon_rotation))]),
+            &root,
+        )?;
+        let material = Material::new(moon_shader).with_params(moon_params);
+        check_stage(&file.name, &part.id, &material)?;
+        objects.push(Object {
+            id: part.id.clone(),
+            geometry,
+            material,
+            transform,
+            cast_shadow: true,
+        });
+    }
+
     // ---- 灯：那盏太阳（点光源，§60）----
     let position = match planet.params.get("light_position") {
         Some(_) => planet.triple("light_position")?,
@@ -709,6 +735,60 @@ fn check_stage(scene: &str, id: &str, material: &Material) -> Result<(), String>
 /// · 名字在 `structural` 里 ⇒ 编译器自己要用它（半径、色板、灯、消融档……），**不进**参数表；
 /// · 名字在这份 shader 的参数表里 ⇒ 按它声明的类型透传（**这就是「加一个参数不用改 Rust」**）；
 /// · 两边都不是 ⇒ 报错，并把两张表都列出来。
+/// **part 的种类白名单**（2026-09-20 第 7 轮把 `moon` 加进来）。
+///
+/// ⚠ 抽成函数不是为了好看：它是"场景里能放什么"这件事**唯一的门**，
+///   一个 part 种类加进来而这里没放行，报错必须**点名它认哪些**（否则用户只能猜）。
+fn check_kind(part: &PartFile) -> Result<(), String> {
+    const KINDS: [&str; 4] = ["planet", "clouds", "atmosphere", "moon"];
+    if KINDS.contains(&part.kind.as_str()) {
+        return Ok(());
+    }
+    Err(format!(
+        "part '{}' 的 kind '{}' 不认识；场景编译器认：{}",
+        part.id,
+        part.kind,
+        KINDS.join(" / ")
+    ))
+}
+
+/// 卫星 part 的**几何与变换**（`kind = "moon"`）。
+///
+/// ⚠ 抽出来是为了**能单独判**：`position` 进 `translation`、`radius` 进内建球、
+///   `subdivisions` 有默认值、`spin` 与行星同口径 —— 这四件都不需要烘任何产物，
+///   于是可以在一个 unit 测试里钉住（场景级那条判据要烘图，代价大得多）。
+fn moon_body(part: &PartFile) -> Result<(Geometry, Transform, [f32; 4]), String> {
+    // ⚠ 这两栏**不许走 `number_or`**（它给 f32）：几何参数在产物里是 f64（`Value::Num`），
+    //   绕一趟 f32 会把配方里的 `0.093` 写成 `0.09300000220537186` —— 那是**静默改产物字节**。
+    //   （测试 `a_moon_part_carries_its_position_and_radius_into_the_object` 抓的就是这一条。）
+    let number = |key: &str, fallback: f64| -> Result<f64, String> {
+        match part.params.get(key) {
+            Some(_) => part.number(key),
+            None => Ok(fallback),
+        }
+    };
+    let radius = number("radius", 0.08)?;
+    let subdivisions = number("subdivisions", 48.0)?;
+    let rotation = math::orientation(part.number_or("spin", 0.0), vocab::SYSTEM_TILT);
+    let geometry = Geometry::primitive(
+        "icosphere",
+        BTreeMap::from([
+            ("radius".to_string(), Value::Num(f64::from(radius))),
+            ("subdivisions".to_string(), Value::Num(subdivisions)),
+        ]),
+    );
+    let position = match part.params.get("position") {
+        Some(_) => part.triple("position")?,
+        None => [0.0, 0.0, 0.0],
+    };
+    let transform = Transform {
+        translation: position,
+        rotation,
+        scale: [1.0, 1.0, 1.0],
+    };
+    Ok((geometry, transform, rotation))
+}
+
 pub fn material_params(
     part: &PartFile,
     shader: &px_protocol::scene::Member,
@@ -823,6 +903,59 @@ mod tests {
                 ("这一格是别的档要的", Value::Num(1.0)),
             ],
         )
+    }
+
+    /// 卫星 part：`position` 进 `translation`、`radius` 进内建球、`subdivisions` 有默认值。
+    ///
+    /// ⚠ 判的是**装配**（这条新路唯一容易写错的那几栏），不烘任何产物。
+    #[test]
+    fn a_moon_part_carries_its_position_and_radius_into_the_object() {
+        let part: PartFile = toml::from_str(
+            r#"
+id = "satellite"
+kind = "moon"
+shader = "gasgiant"
+params = { radius = 0.093, position = [-0.62, 0.30, 1.32] }
+"#,
+        )
+        .expect("这份 part 应当解得开");
+        let (geometry, transform, _) = moon_body(&part).expect("卫星的几何/变换应当装得出来");
+        assert_eq!(transform.translation, [-0.62, 0.30, 1.32]);
+        assert_eq!(transform.scale, [1.0, 1.0, 1.0]);
+        match geometry {
+            Geometry::Primitive { name, params } => {
+                assert_eq!(name, "icosphere");
+                assert_eq!(params.get("radius"), Some(&Value::Num(0.093)));
+                // ⚠ 默认细分：不写这一栏也该有一颗球（不是 0 个三角形）。
+                assert_eq!(params.get("subdivisions"), Some(&Value::Num(48.0)));
+            }
+            other => panic!("卫星的几何必须是内建球，实际是 {other:?}"),
+        }
+    }
+
+    /// **种类白名单**：`moon` 放行；不认识的种类当场点名"我认哪些"。
+    ///
+    /// ⚠ 报错信息里必须出现 `moon` —— 新加一个 part 种类时，这条会替他回答用户
+    ///   "为什么我写的 kind 不被认"（否则只能去读源码）。
+    #[test]
+    fn an_unknown_part_kind_is_named_against_the_list_it_knows() {
+        let known: PartFile = toml::from_str(
+            "id = \"satellite\"
+kind = \"moon\"
+shader = \"gasgiant\"
+",
+        )
+        .expect("解得开");
+        assert!(check_kind(&known).is_ok(), "`moon` 必须放行");
+        let unknown: PartFile =
+            toml::from_str("id = \"x\"
+kind = \"asteroid\"
+shader = \"surface\"
+")
+                .expect("解得开");
+        let err = check_kind(&unknown).expect_err("不认识的 kind 必须被拒");
+        assert!(err.contains("asteroid"), "要点名写错的那个：{err}");
+        assert!(err.contains("moon"), "要点名它认哪些（含 moon）：{err}");
     }
 
     /// **对账真的会红**：surface 那一档要 8 格，只给 2 格 ⇒ 当场点名缺的是哪几个。

@@ -116,6 +116,14 @@ pub const PLANET_KEYS: [&str; 16] = [
     "subdivisions",
 ];
 
+/// **编译器自己消化的结构键**（卫星 part，2026-09-20 第 7 轮加）。
+///
+/// ⚠ 为什么要有 `kind = "moon"` 这个 part：场景编译器从前只认 planet / clouds / atmosphere，
+///   "天上还有一颗小球"这件事**根本写不出来**（参考图上那颗凌日的卫星就是它）。
+///   `radius` / `subdivisions` 进几何，`position` 进变换，`spin` 与行星同口径（`orientation()`）；
+///   其余一律交给本 part 那份 shader 的契约去判（与 planet 同一条口径）。
+pub const MOON_KEYS: [&str; 4] = ["radius", "subdivisions", "position", "spin"];
+
 /// **编译器自己消化的结构键**（云）：形状档、消融档、风 —— 这些要么进几何、要么与云影同口径。
 pub const CLOUDS_KEYS: [&str; 24] = [
     "inner",
