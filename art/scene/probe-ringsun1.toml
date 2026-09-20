@@ -15,7 +15,7 @@ kind = "planet"
 shader = "surface"
 graph = "planet"
 members = { height = "height", mesh = "surface", shader = "shaders::surface" }
-params = { palette = "rocky", displace = 0.06, sea_level = 0.52, radius = 1.0, spin = 0.0, rings = 1.6, shadows = 1, shadow_density = 256, light_position = [-4.2, 2.6, 2.35], light_intensity = 7.6e5 }
+params = { palette = "rocky", displace = 0.06, sea_level = 0.52, radius = 1.0, spin = 0.0, rings = 3.0, shadows = 1, shadow_density = 256, light_position = [-4.2, 2.6, 2.35], light_intensity = 7.6e5 }
 
 [[parts]]
 id = "atmosphere"

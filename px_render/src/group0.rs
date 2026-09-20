@@ -405,8 +405,20 @@ pub fn light_of(light: &px_protocol::scene::Light) -> Result<ClusteredLight, Str
             } else {
                 0
             },
-        shadow_depth_bias: POINT_LIGHT_SHADOW_DEPTH_BIAS,
-        shadow_normal_bias: shadow_normal_bias(),
+        // ⚠ **诊断开关**（`PX_NO_SHADOW_BIAS=1`）：把两条偏移压成 0。
+        //    为什么需要它：影子"随灯距消失"时有两个完全不同的病因 ——
+        //    ①偏移随灯距涨、把影吃掉；②影子**挪到看不见的地方**（灯远了射线更平行，
+        //    投到球面上的位置会变）。压掉偏移之后影回来 ⇒ 是 ①；仍然没有 ⇒ 是 ②。
+        shadow_depth_bias: if std::env::var_os("PX_NO_SHADOW_BIAS").is_some() {
+            0.0
+        } else {
+            POINT_LIGHT_SHADOW_DEPTH_BIAS
+        },
+        shadow_normal_bias: if std::env::var_os("PX_NO_SHADOW_BIAS").is_some() {
+            0.0
+        } else {
+            shadow_normal_bias()
+        },
         // 点光没有锥角（`light.rs:1312-1313` 那一支给的就是 0.0）。
         spot_light_tan_angle: 0.0,
         // PCSS 没开（`bevy_pbr` 的 `experimental_pbr_pcss`）⇒ 恒 0.0（`light.rs:1340-1344`）。
