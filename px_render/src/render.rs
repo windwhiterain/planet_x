@@ -1286,6 +1286,29 @@ impl Session {
                 Some(plan) if !plan.table.is_empty() => plan.table.as_slice(),
                 _ => &[0_u8; 4],
             };
+            // ⚠ **仪器**（`PX_AUDIT_SHADOW=1`）：把**着色器真会读到**的那个头打出来
+            //    ——`head = virtual_size（低 16 位）| pages_per_side（高 16 位）`。
+            //    为什么值得一行：采样侧的"面内 texel → 页格"与"页格 → 物理槽位"两处都用
+            //    `pages_per_side`，而**烘图侧给页矩形用的是 atlas 的页格边长**。两者不相等
+            //    （例如一个是 16、一个是 7）时，查页会整体错位，而成图上只表现为"影是错的"。
+            if std::env::var_os("PX_AUDIT_SHADOW").is_some() && contents.len() >= 4 {
+                let head = u32::from_le_bytes([contents[0], contents[1], contents[2], contents[3]]);
+                println!(
+                    "影子页表头：virtual_size={}｜pages_per_side={}｜（atlas {}² ⇒ 页格 {} 个/边）",
+                    head & 0xFFFF,
+                    head >> 16,
+                    scene
+                        .shadow
+                        .as_ref()
+                        .map(|plan| plan.atlas_side)
+                        .unwrap_or(0),
+                    scene
+                        .shadow
+                        .as_ref()
+                        .map(|plan| plan.atlas_side / 128)
+                        .unwrap_or(0),
+                );
+            }
             audit.push(match &scene.shadow {
                 Some(plan) if !plan.table.is_empty() => format!(
                     "虚拟影图页表：{} 字节（{} 盏灯，段起点 {:?}）｜采样侧按\
