@@ -158,21 +158,49 @@ const PX_CUBE_FACES: u32 = 6u;\n\
 // 而这一盏灯实际用了多少，由头里的 `pages_per_side` 说。\n\
 
 \n\
-// Bevy 的 `cube_face_index`（`shadows.wgsl`）那六条：`+X −X +Y −Y +Z −Z`。\n\
+// ⚠ **朝向不在这里定义**（用户裁决）：六面的基从**文档**读（`px_shadow_faces`），
+// 于是烘图侧与采样侧不可能再漂开。从前这里是一份手写的 `match`，与烘图侧那份、
+// 与渲染器 `CUBE_MAP_FACES` 那份**三份都不同**：4/5 面的朝向与渲染器反、UV 轴还与
+// 烘图侧转置。症状是「影贴到别的面上」或整颗行星被判成全在影里。
+@group(0) @binding(6) var<storage, read> px_shadow_faces: array<vec4<f32>>;\n\
+\n\
+// 第 `face` 面的基：`[right, up2, axis]`（一行三格；`vec4` 的 `w` 不用，
+// 只是为了绕开 WGSL 里 `vec3` 在数组中的 16 字节步长）。\n\
+fn px_shadow_face_basis(face: u32) -> mat3x3<f32> {\n\
+\x20   let at = face * 3u;\n\
+\x20   return mat3x3<f32>(\n\
+\x20       px_shadow_faces[at].xyz,\n\
+\x20       px_shadow_faces[at + 1u].xyz,\n\
+\x20       px_shadow_faces[at + 2u].xyz,\n\
+\x20   );\n\
+}\n\
+\n\
+// 方向 `d`（**从灯指向片元**）落在哪一面：轴分量绝对值最大的那一面。\n\
+// 次序照渲染器：`0:+X 1:−X 2:+Y 3:−Y 4:−Z 5:+Z`（`FaceNames` 与它同序）。\n\
+fn px_shadow_face_of(d: vec3<f32>) -> u32 {\n\
+\x20   let a = abs(d);\n\
+\x20   if (a.x >= a.y && a.x >= a.z) { return select(1u, 0u, d.x > 0.0); }\n\
+\x20   if (a.y >= a.z) { return select(3u, 2u, d.y > 0.0); }\n\
+\x20   return select(5u, 4u, d.z > 0.0);\n\
+}\n\
+\n\
+// 方向 → `(面内 texel x, 面内 texel y, 面号)`。\n\
 //\n\
-// ⚠ 它与 `px-scene/src/vshadow.rs::face_uv` 是**同一条契约的两处转写**（那边烘页表、\n\
-//    这边采样）：写得不同的话症状是\"影贴到别的面上\"或\"影歪一点\"，而两者都像内容问题。\n\
-fn px_shadow_face_uv(light_local: vec3<f32>) -> vec3<f32> {\n\
-\x20   let abs = abs(light_local);\n\
-\x20   var uv: vec3<f32>;\n\
-\x20   if (abs.x > abs.y && abs.x > abs.z) {\n\
-\x20       uv = vec3<f32>(select(-1.0, 1.0, light_local.x > 0.0), -light_local.y, -light_local.z) / abs.x;\n\
-\x20   } else if (abs.y > abs.z) {\n\
-\x20       uv = vec3<f32>(light_local.x, select(-1.0, 1.0, light_local.y > 0.0), light_local.z) / abs.y;\n\
-\x20   } else {\n\
-\x20       uv = vec3<f32>(light_local.x, -light_local.y, select(-1.0, 1.0, light_local.z > 0.0)) / abs.z;\n\
-\x20   }\n\
-\x20   return uv;\n\
+// ⚠ **全流程唯一的 y 翻转就在这一行**：`v` 与 NDC y 同向（向上为正），而 atlas 的\n\
+//    行号向下增。它与烘图侧 `vshadow::face_texel` 是同一个约定 —— 翻两次等于没翻，\n\
+//    而「没翻」的症状是影子**上下镜像**（在球面上看着像「影子有点歪」，不像镜像）。\n\
+fn px_shadow_face_texel(d: vec3<f32>, face_side: f32) -> vec3<f32> {\n\
+\x20   let face = px_shadow_face_of(d);\n\
+\x20   let basis = px_shadow_face_basis(face);\n\
+\x20   let denom = dot(basis[2], d);\n\
+\x20   if (denom == 0.0) { return vec3<f32>(-1.0, -1.0, f32(face)); }\n\
+\x20   let u = dot(basis[0], d) / denom;\n\
+\x20   let v = dot(basis[1], d) / denom;\n\
+\x20   return vec3<f32>(\n\
+\x20       (u * 0.5 + 0.5) * face_side,\n\
+\x20       (0.5 - v * 0.5) * face_side,\n\
+\x20       f32(face),\n\
+\x20   );\n\
 }\n\
 \n\
 // 虚拟页坐标 → 物理槽位。返回 `-1` = 这一页没分配（采样侧照\"不在影里\"处理）。\n\
@@ -207,39 +235,44 @@ fn px_shadow_page_slot(light_id: u32, face: u32, page_x: u32, page_y: u32) -> i3
 \x20   return i32(row_base + rank - 1u);\n\
 }\n\
 \n\
-// 一个采样点：查页 → 取 texel → **手动比较**（reverse-Z ⇒ 影里是 `depth < 存的深度`）。\n\
+// 一个采样点：**面内 texel** → 查页 → 取那一格 → **手动比较**。\n\
 fn px_sample_shadow_page(\n\
 \x20   light_id: u32,\n\
 \x20   face: u32,\n\
-\x20   uv: vec2<f32>,\n\
+\x20   texel_in_face: vec2<f32>,\n\
 \x20   depth: f32,\n\
 ) -> f32 {\n\
 \x20   let head = px_shadow_pages[px_shadow_light_offsets[light_id]];\n\
 \x20   let pages_per_side = head >> 16u;\n\
-\x20   // `uv` 在 `[-1, 1]` ⇒ 虚拟页格坐标。\n\
-\x20   let page_f = (uv * 0.5 + 0.5) * f32(pages_per_side);\n\
-\x20   let page_x = u32(clamp(page_f.x, 0.0, f32(pages_per_side) - 1.0));\n\
-\x20   let page_y = u32(clamp(page_f.y, 0.0, f32(pages_per_side) - 1.0));\n\
+\x20   // 面内 texel → 虚拟页格 + 页内余数。**与烘图侧 `page_block_origin` 同一套换算**\n\
+\x20   // （那边也是先 `face_texel` 再折成页格），否则页会整体错开若干格。\n\
+\x20   let page_f = texel_in_face / f32(PX_PAGE_SIZE);\n\
+\x20   let page_x = u32(clamp(floor(page_f.x), 0.0, f32(pages_per_side) - 1.0));\n\
+\x20   let page_y = u32(clamp(floor(page_f.y), 0.0, f32(pages_per_side) - 1.0));\n\
 \x20   let slot = px_shadow_page_slot(light_id, face, page_x, page_y);\n\
 \x20   if (slot < 0) { return 1.0; }  // 没分配 ⇒ 不受影\n\
-\x20   let atlas_pages = pages_per_side;  // 分配器按 2 的幂取层内边长\n\
 \x20   let slot_u = u32(slot);\n\
+\x20   let local = texel_in_face - vec2<f32>(f32(page_x), f32(page_y)) * f32(PX_PAGE_SIZE);\n\
 \x20   let texel = vec2<u32>(\n\
-\x20       (slot_u % atlas_pages) * PX_PAGE_SIZE,\n\
-\x20       (slot_u / atlas_pages) * PX_PAGE_SIZE,\n\
-\x20   ) + vec2<u32>(\n\
-\x20       u32(clamp((uv.x * 0.5 + 0.5) * f32(pages_per_side) * f32(PX_PAGE_SIZE)\n\
-\x20           - f32(page_x) * f32(PX_PAGE_SIZE), 0.0, f32(PX_PAGE_SIZE) - 1.0)),\n\
-\x20       u32(clamp((uv.y * 0.5 + 0.5) * f32(pages_per_side) * f32(PX_PAGE_SIZE)\n\
-\x20           - f32(page_y) * f32(PX_PAGE_SIZE), 0.0, f32(PX_PAGE_SIZE) - 1.0)),\n\
+\x20       (slot_u % pages_per_side) * PX_PAGE_SIZE\n\
+\x20           + u32(clamp(local.x, 0.0, f32(PX_PAGE_SIZE) - 1.0)),\n\
+\x20       (slot_u / pages_per_side) * PX_PAGE_SIZE\n\
+\x20           + u32(clamp(local.y, 0.0, f32(PX_PAGE_SIZE) - 1.0)),\n\
 \x20   );\n\
 \x20   let stored = textureLoad(point_shadow_textures, texel, i32(light_id * PX_CUBE_FACES + face), 0);\n\
 \x20   // ⚠ **无限 reverse-Z**：近处是 1.0、远处是 0.0（`camera.rs` 那条\n\
-\x20   //    `perspective_infinite_reverse_rh`）。所以我在影里 = 我比影图里记的更近\n\
-\x20   //    ⇒ `depth < stored`。\n\
-\x20   //    这一条写反过的症状不是「影没了」，而是**整颗行星发暗**（`depth > stored` 在\n\
-\x20   //    这个方向上几乎恒真）—— 实测：写反那一版行星几乎全黑，只剩边缘一条亮。\n\
-\x20   return select(0.0, 1.0, depth < stored);\n\
+\x20   //    `perspective_infinite_reverse_rh`）。影图里存的是**沿这条射线最近的那个\n\
+\x20   //    表面**（也就是离灯最近、深度最大那个）。于是：\n\
+\x20   //\n\
+\x20   //      有个东西在我和灯之间 ⟺ 它比**离灯更近** ⟺ `stored > depth` ⟺ `depth < stored`\n\
+\x20   //      ⇒ 那才是**在影里**，影子因子取 **0**。\n\
+\x20   //\n\
+\x20   //    ⚠ 这一条我写反过两次，而两次的症状**不一样**，这里记下来省下一次：\n\
+\x20   //      · 写成 `select(0.0, 1.0, depth < stored)`（把「在影里」当成了「亮」）⇒\n\
+\x20   //        整颗行星的直接光被乘成 0，只剩大气边缘一条亮 —— 而那一版**看起来**\n\
+\x20   //        与「没画进影图」很像，于是追错了两轮。\n\
+\x20   //      · 深度按 Chebyshev 而不是按面相机真正的 w 算 ⇒ 只在面的**边缘**误判。\n\
+\x20   return select(1.0, 0.0, depth < stored);\n\
 }\n\
 \n\
 const PX_POINT_SHADOW_SCALE: f32 = 0.003;\n\
@@ -252,11 +285,12 @@ fn px_sample_shadow_at_offset(\n\
 \x20   light_local: vec3<f32>,\n\
 \x20   depth: f32,\n\
 \x20   light_id: u32,\n\
+\x20   face_side: f32,\n\
 ) -> f32 {\n\
 \x20   let dir = light_local + position.x * x_basis + position.y * y_basis;\n\
-\x20   let uv = px_shadow_face_uv(dir);\n\
-\x20   let face = u32(uv.z);\n\
-\x20   return px_sample_shadow_page(light_id, face, uv.xy, depth) * coeff;\n\
+\x20   let texel = px_shadow_face_texel(dir, face_side);\n\
+\x20   let face = u32(texel.z);\n\
+\x20   return px_sample_shadow_page(light_id, face, texel.xy, depth) * coeff;\n\
 }\n\
 \n\
 fn fetch_point_shadow(\n\
@@ -285,42 +319,57 @@ fn fetch_point_shadow(\n\
 \x20   let depth_offset = (*light).shadow_depth_bias * normalize(surface_to_light.xyz);\n\
 \x20   let offset_position = frag_position.xyz + normal_offset + depth_offset;\n\
 \x20   let frag_ls = offset_position.xyz - (*light).position_radius.xyz;\n\
-\x20   let abs_position_ls = abs(frag_ls);\n\
-\x20   let major_axis_magnitude = max(\n\
-\x20       abs_position_ls.x,\n\
-\x20       max(abs_position_ls.y, abs_position_ls.z),\n\
-\x20   );\n\
-\x20   let zw = -major_axis_magnitude * (*light).light_custom_data.xy\n\
+\x20   // ⚠ **不翻 z**（§本轮）：Bevy 那边是 `frag_ls * (1,1,-1)`，因为它的 cube 采样走\n\
+\x20   //    另一套约定。我们的层是**渲染器按世界空间的六面相机**画出来的\n\
+\x20   //    （`CUBE_MAP_FACES[i].target` 就是世界方向），所以分类用的方向必须是\n\
+\x20   //    **世界方向**本身。翻一次就是「影子按镜像找面」。\n\
+\x20   let light_local = frag_ls;\n\
+\x20   // 一面的边长（texel）= `pages_per_side × PX_PAGE_SIZE`；面内 texel 按它折算。\n\
+\x20   let face_side = f32((head >> 16u) * PX_PAGE_SIZE);\n\
+\x20   let face_texel = px_shadow_face_texel(light_local, face_side);\n\
+\x20   let face = u32(face_texel.z);\n\
+\x20   // ---- ⚠⚠ 深度必须按**那一面相机真正的 w** 算，不是按 Chebyshev 距离 ----------\n\
+\x20   //\n\
+\x20   // 从前的 `major_axis_magnitude = max(|x|,|y|,|z|)` 是 **cube 影图**那套\n\
+\x20   // （Bevy 的每个面也是按主轴裁的）。而我们的面是 90° 的**普通透视投影**：\n\
+\x20   // `clip.w = -z_view = dot(axis, dir)`。两者只在面的正中央相等，越靠边\n\
+\x20   // `max|·|` 越大 ⇒ 这算出来的 `depth` 比影图里存的小 ⇒ `depth < stored` 在**面的边缘\n\
+\x20   // 附近恒真**。症状：整颗行星发暗、只有一条亮边 —— 与「比较方向写反」看起来一样，\n\
+\x20   // 所以这两条必须分别钉住。\n\
+\x20   //\n\
+\x20   // 主轴分量改成**那一面的轴**点乘（轴从文档那张基表读，不在这里猜朝向）。\n\
+\x20   let axis = px_shadow_faces[face * 3u + 2u].xyz;\n\
+\x20   let planar = dot(axis, light_local);\n\
+\x20   let zw = -planar * (*light).light_custom_data.xy\n\
 \x20       + (*light).light_custom_data.zw;\n\
 \x20   let depth = zw.x / zw.y;\n\
-\x20   let light_local = frag_ls * vec3<f32>(1.0, 1.0, -1.0);\n\
 \x20   let basis = orthonormalize(normalize(light_local))\n\
 \x20       * PX_POINT_SHADOW_SCALE * texel_world;\n\
 \x20   var sum: f32 = 0.0;\n\
 \x20   sum += px_sample_shadow_at_offset(\n\
 \x20       PX_D3D_SAMPLE_POINT_POSITIONS[0], PX_D3D_SAMPLE_POINT_COEFFS[0],\n\
-\x20       basis[0], basis[1], light_local, depth, light_id);\n\
+\x20       basis[0], basis[1], light_local, depth, light_id, face_side);\n\
 \x20   sum += px_sample_shadow_at_offset(\n\
 \x20       PX_D3D_SAMPLE_POINT_POSITIONS[1], PX_D3D_SAMPLE_POINT_COEFFS[1],\n\
-\x20       basis[0], basis[1], light_local, depth, light_id);\n\
+\x20       basis[0], basis[1], light_local, depth, light_id, face_side);\n\
 \x20   sum += px_sample_shadow_at_offset(\n\
 \x20       PX_D3D_SAMPLE_POINT_POSITIONS[2], PX_D3D_SAMPLE_POINT_COEFFS[2],\n\
-\x20       basis[0], basis[1], light_local, depth, light_id);\n\
+\x20       basis[0], basis[1], light_local, depth, light_id, face_side);\n\
 \x20   sum += px_sample_shadow_at_offset(\n\
 \x20       PX_D3D_SAMPLE_POINT_POSITIONS[3], PX_D3D_SAMPLE_POINT_COEFFS[3],\n\
-\x20       basis[0], basis[1], light_local, depth, light_id);\n\
+\x20       basis[0], basis[1], light_local, depth, light_id, face_side);\n\
 \x20   sum += px_sample_shadow_at_offset(\n\
 \x20       PX_D3D_SAMPLE_POINT_POSITIONS[4], PX_D3D_SAMPLE_POINT_COEFFS[4],\n\
-\x20       basis[0], basis[1], light_local, depth, light_id);\n\
+\x20       basis[0], basis[1], light_local, depth, light_id, face_side);\n\
 \x20   sum += px_sample_shadow_at_offset(\n\
 \x20       PX_D3D_SAMPLE_POINT_POSITIONS[5], PX_D3D_SAMPLE_POINT_COEFFS[5],\n\
-\x20       basis[0], basis[1], light_local, depth, light_id);\n\
+\x20       basis[0], basis[1], light_local, depth, light_id, face_side);\n\
 \x20   sum += px_sample_shadow_at_offset(\n\
 \x20       PX_D3D_SAMPLE_POINT_POSITIONS[6], PX_D3D_SAMPLE_POINT_COEFFS[6],\n\
-\x20       basis[0], basis[1], light_local, depth, light_id);\n\
+\x20       basis[0], basis[1], light_local, depth, light_id, face_side);\n\
 \x20   sum += px_sample_shadow_at_offset(\n\
 \x20       PX_D3D_SAMPLE_POINT_POSITIONS[7], PX_D3D_SAMPLE_POINT_COEFFS[7],\n\
-\x20       basis[0], basis[1], light_local, depth, light_id);\n\
+\x20       basis[0], basis[1], light_local, depth, light_id, face_side);\n\
 \x20   return sum;\n\
 }\n";
 

@@ -123,7 +123,14 @@ pub const SOURCES: [&str; 2] = ["environment.ambient", "environment.skybox_brigh
 /// （它要算矩阵），两边的**次序**必须一致 —— 一致性由 `layer = light×6+face` 那条对账
 /// 钉住（宿主拿到的 face 与 layer 一起进来，对不上就拒）。
 pub const CUBE_FACES: u32 = 6;
-pub const FACE_NAMES: [&str; 6] = ["+x", "-x", "+y", "-y", "+z", "-z"];
+/// cube 六面的名字。**次序照 `px_render::camera::CUBE_MAP_FACES`**：
+/// `0:+X 1:−X 2:+Y 3:−Y **4:−Z 5:+Z**`。
+///
+/// ⚠ 从前这里写的是 `[…, "+z", "-z"]` —— 与渲染器**反**（渲染器第 4 面画的是 −Z）。
+/// 这六条只是 pass 标签，不影响像素；但它让"第 4 面"这个数在日志里说成另一面，
+/// 而排查影子时唯一能对的就是这些标签 —— 说反了等于把排查方向指反。
+/// `camera.rs` 那句"与 `FACE_NAMES` 同序"从前是假的，现在是直的。
+pub const FACE_NAMES: [&str; 6] = ["+x", "-x", "+y", "-y", "-z", "+z"];
 
 /// 来源名 →（值，那一档类型）。`None` = 不认识这个名字。
 fn source_of(name: &str, sources: &Sources) -> Option<(Value, ParamKind)> {
@@ -819,6 +826,11 @@ pub fn build(
                 },
                 atlas_side: allocation.atlas.0,
                 layers: allocation.atlas.2,
+                // 六面的基**作为数据落盘**（用户裁决）：采样侧只读它，自己一个朝向都不猜。
+                faces: px_protocol::scene::SHADOW_FACE_BASIS
+                    .iter()
+                    .flat_map(|face| face.iter().copied())
+                    .collect(),
             }
         }),
     })
@@ -899,12 +911,23 @@ fn shadow_allocation(
 /// 面 NDC ↔ 虚拟页格的关系是线性的（一面 `[-1,1]` 摊成 `pages_per_side²` 个页格）：
 /// 第 `px` 列占 `[-1 + 2·px/n, -1 + 2·(px+1)/n]`。于是中心与半宽各一条算式 ——
 /// 而**这一份算式与采样侧那份必须一致**（那边要从面的方向反算出虚拟 texel 坐标）。
+///
+/// ⚠ **y 与 x 的符号是反的，这不是笔误**：`window` 里的 `y` 是 atlas 的**行号**
+/// （向下增），而 NDC 的 `y` **向上**增。实测过的证据：page(1,1) 的 `viewport` 是
+/// `y = 128`（靠上），而它的 NDC y 必须是 `+0.625`（也靠上）—— 从前这里给了 `−0.625`，
+/// 于是顶点阶段把那一页映射到了 atlas 的**下半张**，与 `viewport` 管的格子错开：
+/// 结果是**每一页都在画邻居的格子**（49 页互相踩），而画面上只表现为"影是错的"。
+///
+/// 这一处翻转与 `vshadow::face_texel` 那一处是**同一个约定**的两端：那边是
+/// "方向 → 面内 texel"，这边是"页格 → 面内 NDC"，两者都按"行号向下"折算。
 fn page_rect_in_face(window: [u32; 4], pages_per_side: u32) -> [f32; 4] {
     let n = pages_per_side as f32;
     let span = 2.0 / n;
     let x0 = -1.0 + span * (window[0] as f32 / crate::vshadow::PAGE_SIZE as f32);
-    let y0 = -1.0 + span * (window[1] as f32 / crate::vshadow::PAGE_SIZE as f32);
-    [x0 + span * 0.5, y0 + span * 0.5, span * 0.5, span * 0.5]
+    // 行号 `y` 从上往下数 ⇒ NDC y 从 `+1` 往下减。
+    let y0 = 1.0 - span * (window[1] as f32 / crate::vshadow::PAGE_SIZE as f32);
+    // ⚠ 中心那个 `−span·0.5`：`y0` 是这一页**顶边**的 NDC y，而中心在它下面半格。
+    [x0 + span * 0.5, y0 - span * 0.5, span * 0.5, span * 0.5]
 }
 
 /// 一页影子 pass 的标签：`<面 pass 的标签>_<页行>_<页列>`。

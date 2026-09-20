@@ -1176,6 +1176,33 @@ impl Session {
                 }
             }
         });
+        // 六面的基（用户裁决：作为数据落进文档）—— 每格一个 `vec4`，18 格 = 288 字节。
+        //
+        // ⚠ 采样侧**只读它**，自己一个朝向都不猜；没有影子时给一份**单位基**（六面都退化
+        //    成"x/y/z 轴"）：反正那一档 `fetch_point_shadow` 不会被调用（`shadow_maps` 位），
+        //    而"给个能绑的东西"是管线布局的硬要求。
+        let shadow_faces = {
+            let mut bytes = Vec::with_capacity(18 * 16);
+            let faces: Vec<[f32; 3]> = match &scene.shadow {
+                Some(plan) if plan.faces.len() == 18 => plan.faces.clone(),
+                _ => px_protocol::scene::SHADOW_FACE_BASIS
+                    .iter()
+                    .flat_map(|face| face.iter().copied())
+                    .collect(),
+            };
+            for vector in &faces {
+                bytes.extend_from_slice(&vector[0].to_le_bytes());
+                bytes.extend_from_slice(&vector[1].to_le_bytes());
+                bytes.extend_from_slice(&vector[2].to_le_bytes());
+                bytes.extend_from_slice(&0.0_f32.to_le_bytes());
+            }
+            gpu.device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("组 0：立方体六面的基（文档给，见 SHADOW_FACE_BASIS）"),
+                    usage: wgpu::BufferUsages::STORAGE,
+                    contents: &bytes,
+                })
+        };
         let shadow_sampler = group0::point_shadow_sampler(&gpu.device);
         let (shadow_texture, shadow_view, shadow_note) = match plan
             .resource(SHADOW_TEXTURE_RESOURCE)
@@ -1253,48 +1280,6 @@ impl Session {
         };
         // ⚠ 纹理要活到这一帧画完（`wgpu::BindGroup` 持的是视图、视图持的是纹理 ——
         //    引用计数保证它不会先死；这里留一个绑定只是让"谁活着"这件事看得见）。
-        // ---- 影子 atlas 的读数（**仪器**，§本轮）----
-        //
-        // ⚠ 为什么要有它：这一轮的三种病 —— "页表没查到" / "查到了但那一页是空的" /
-        //    "深度比较方向反了" —— 在成图上都表现为"有点暗"，而均值分不出来。读回几个数
-        //    立刻分辨：`0.0` = 清屏值（没画进去东西或没查到页），非 0 = 那一笔真写进去了。
-        if std::env::var_os("PX_AUDIT_SHADOW").is_some() {
-            let texture = written_atlas
-                .as_ref()
-                .or(shadow_texture.as_ref())
-                .expect("有投影的灯才有 atlas");
-            println!(
-                "影子 atlas 探针：读的是**{}**（{}×{} × {} 层）",
-                if written_atlas.is_some() {
-                    "要写的那张 point_shadow_atlas"
-                } else {
-                    "采样那张 point_shadow_atlas_sample"
-                },
-                texture.width(),
-                texture.height(),
-                texture.depth_or_array_layers(),
-            );
-            let layers = scene.shadow.as_ref().map(|plan| plan.layers).unwrap_or(0);
-            let mut lines = Vec::new();
-            for layer in 0..layers.min(6) {
-                // 一张 atlas 里，第 `layer` 层的第 0 号页格（左上角）那一块的中心。
-                let side = scene
-                    .shadow
-                    .as_ref()
-                    .map(|plan| plan.atlas_side)
-                    .unwrap_or(1024);
-                let points = [(64, 64), (64, 192), (192, 64), (side / 2, side / 2)];
-                match read_depth_stats(&gpu.device, &gpu.queue, texture, layer) {
-                    Some((max, nonzero, total, corner)) => lines.push(format!(
-                        "层 {layer}｜最大深度 {max:.6}｜非零 {nonzero} / {total}（左上 256² 里 {corner}）",
-                    )),
-                    None => lines.push(format!("层 {layer}｜读不回来")),
-                }
-            }
-            for line in lines {
-                println!("影子 atlas 探针：{line}");
-            }
-        }
         let _shadow_texture = shadow_texture;
 
         // ---- group 0 的契约：从**某一份物体 shader** 反射（五格超集的那份布局）----
@@ -1366,7 +1351,8 @@ impl Session {
                           view: &wgpu::TextureView,
                           viewport: [f32; 4],
                           mesh_instances: &wgpu::Buffer,
-                          shadow_page_offsets: &wgpu::Buffer|
+                          shadow_page_offsets: &wgpu::Buffer,
+                          shadow_faces: &wgpu::Buffer|
          -> Result<group0::GroupZero, String> {
             group0::frame(
                 &gpu.device,
@@ -1383,6 +1369,7 @@ impl Session {
                 //    `instance_index` 选格，而"长度 = 物体数"那份数组由这里建一次、全帧共用。
                 mesh_instances,
                 &shadow_page_offsets,
+                &shadow_faces,
                 &shadow_note,
             )
         };
@@ -2037,6 +2024,7 @@ impl Session {
                 viewport,
                 &instance_buffer,
                 &shadow_page_offsets,
+                &shadow_faces,
             )?;
             // 这一格的 `PassView`：`view_proj` 是"每一条 pass 一份"的 super，而它是每格一份的。
             let camera_stage = make_stage(
@@ -3942,6 +3930,9 @@ mod tests {
             params: Vec::new(),
             slots: Vec::new(),
             render: px_pass::RenderState::parse(render).expect("状态那几栏"),
+            // ⚠ 页那一档的两栏（§本轮）：这条判据不看它们，但结构体要求填。
+            viewport: None,
+            params_offset: 0,
             draws: Vec::new(),
             depth_target: None,
             layer: None,

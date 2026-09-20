@@ -237,21 +237,41 @@ pub fn mask_word(face: u32, row: u32, pages_per_side: u32) -> u32 {
     base_word(face, row, pages_per_side) + 1
 }
 
-/// 把世界方向投到 cube 的某一面上：`(u, v)` 是**分量**，还没除主轴。
+/// 把世界方向投到 cube 的某一面上：`(u, v)` 是**面内归一化坐标**（`∈ [−1, 1]`，
+/// `v` **向上**为正），`u` 向右为正。
 ///
-/// ⚠ 这两条映射**必须**与 `px_render::camera::CUBE_MAP_FACES` 的六条朝向、以及着色器侧
-/// 的同名函数逐字对齐。三处各写一遍而写得不同，症状是"影贴到别的面上"或"影歪一点" ——
-/// 两者都像内容的问题。
+/// ⚠ 朝向**不在这里定义**：它读 [`px_protocol::scene::SHADOW_FACE_BASIS`] ——
+/// 那是这条契约的唯一一处（用户裁决）。从前这里是六条手写的 `match`，而它与渲染器、
+/// 与着色器**三份都不同**：4/5 面的朝向与渲染器反、v 轴在六个面上还不自洽
+/// （2/3 面一个符号、0/1/4/5 面另一个符号）。症状是页分到了错的面/错的半面。
+///
+/// ⚠ `v` 这里**不翻**：翻的那一次只在"换成 atlas 像素"那一步（见 [`face_texel`]），
+/// 一处翻转好过两处相互抵消。
 pub fn face_uv(direction: [f32; 3], face: u32) -> (f32, f32) {
-    let [x, y, z] = direction;
-    match face {
-        0 => (-z, -y), // +X
-        1 => (z, -y),  // −X
-        2 => (x, z),   // +Y
-        3 => (x, -z),  // −Y
-        4 => (x, -y),  // +Z
-        _ => (-x, -y), // −Z
+    let basis = px_protocol::scene::SHADOW_FACE_BASIS[(face as usize).min(5)];
+    let dot = |vector: [f32; 3]| {
+        vector[0] * direction[0] + vector[1] * direction[1] + vector[2] * direction[2]
+    };
+    let denom = dot(basis[2]);
+    if denom == 0.0 {
+        return (0.0, 0.0);
     }
+    (dot(basis[0]) / denom, dot(basis[1]) / denom)
+}
+
+/// 这一面**在 atlas 里的边长**（texel）。页格与 texel 都按它折算。
+pub fn face_side(pages_per_side: u32) -> f32 {
+    (pages_per_side * PAGE_SIZE) as f32
+}
+
+/// 面内归一化坐标 → **atlas 面内的 texel**（`x` 向右、`y` **向下**）。
+///
+/// ⚠ **全流程唯一的 y 翻转就在这一行**：`face_uv` 的 `v` 与 NDC y 同向（向上为正），
+/// 而 atlas 的行号向下增。翻两次就等于没翻，而"没翻"的症状是影子上下镜像 ——
+/// 在球面上看着像"影子有点歪"，不像镜像。
+pub fn face_texel(uv: (f32, f32), face_side: f32) -> (f32, f32) {
+    let (u, v) = uv;
+    ((u * 0.5 + 0.5) * face_side, (0.5 - v * 0.5) * face_side)
 }
 
 /// 一个物体在**某一面**上的页块左上角（页格坐标）。
@@ -261,23 +281,13 @@ pub fn face_uv(direction: [f32; 3], face: u32) -> (f32, f32) {
 /// 截断就是"这个物体在那一面的影缺一块"，而那在画面上看不出来是分配错了）。
 fn page_block_origin(position: [f32; 3], face: u32, span: u32, pages_per_side: u32) -> (u32, u32) {
     let (u, v) = face_uv(position, face);
-    let major = position[0]
-        .abs()
-        .max(position[1].abs())
-        .max(position[2].abs());
-    // 投影到面上之后的正切 = 面内分量 / 主轴分量；`tan(45°) = 1` 就是半个面。
-    let tan_u = if major > 0.0 {
-        f64::from(u / major)
-    } else {
-        0.0
-    };
-    let tan_v = if major > 0.0 {
-        f64::from(v / major)
-    } else {
-        0.0
-    };
-    let centre_u = (tan_u * 0.5 + 0.5).clamp(0.0, 1.0);
-    let centre_v = (tan_v * 0.5 + 0.5).clamp(0.0, 1.0);
+    let side = face_side(pages_per_side);
+    // ⚠ 走**同一套**换算（`face_uv` → `face_texel`）：页的格子位置与着色器查页时
+    //    算出来的 texel 必须落在同一格里，否则影子会整体偏移若干页 —— 而那就成了
+    //    "影糊了"或"影缺一块"，从画面上看不出是分配错了。
+    let (x_texel, y_texel) = face_texel((u, v), side);
+    let centre_u = f64::from((x_texel / side).clamp(0.0, 1.0));
+    let centre_v = f64::from((y_texel / side).clamp(0.0, 1.0));
     let last = i64::from(pages_per_side) - i64::from(span);
     let x = (centre_u * f64::from(pages_per_side)) as i64 - i64::from(span / 2);
     let y = (centre_v * f64::from(pages_per_side)) as i64 - i64::from(span / 2);
@@ -603,17 +613,73 @@ mod tests {
         assert_eq!(one.atlas.2, 12, "层号 = 灯 × 6 + 面");
     }
 
-    /// 面映射的六条：`+Z` 面看到 `(x, −y)`、`−Z` 面看到 `(−x, −y)`
-    /// （cube 是左手 y-up，而世界是右手 —— 这两条是翻过的）。
+    /// 面映射的六条：**朝向照 `CUBE_MAP_FACES`**（`0:+X 1:−X 2:+Y 3:−Y 4:−Z 5:+Z`），
+    /// 而 `(u, v)` 是**面内归一化坐标**（`v` 向上为正，与 NDC y 同向）。
+    ///
+    /// ⚠ 这六条**不再手写**：它们是从 `px_protocol::scene::SHADOW_FACE_BASIS` 算出来的
+    /// （用户裁决：这条契约只留一处定义）。所以这条判据钉的是"那份表确实按
+    /// Bevy 的 `looking_at` 展开"—— 数值在这里现算，不抄结论。
+    ///
+    /// ⚠ 第 4/5 面**从前是反的**（那时这里写着 `+Z` 在 4 号），而渲染器在 4 号画的是 −Z
+    /// ⇒ 页分到了"不是渲染器画的那一面"上。
     #[test]
     fn the_face_map_matches_the_cube_order() {
         let dir = [3.0, 0.4, 0.2];
-        assert_eq!(face_uv(dir, 0), (-0.2, -0.4)); // +X
-        assert_eq!(face_uv(dir, 1), (0.2, -0.4)); // −X
-        assert_eq!(face_uv(dir, 2), (3.0, 0.2)); // +Y
-        assert_eq!(face_uv(dir, 3), (3.0, -0.2)); // −Y
-        assert_eq!(face_uv(dir, 4), (3.0, -0.4)); // +Z
-        assert_eq!(face_uv(dir, 5), (-3.0, -0.4)); // −Z
+        // 轴的次序：`+X −X +Y −Y −Z +Z`。
+        let axes = [
+            [1.0, 0.0, 0.0],
+            [-1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, -1.0, 0.0],
+            [0.0, 0.0, -1.0],
+            [0.0, 0.0, 1.0],
+        ];
+        for (face, axis) in axes.iter().enumerate() {
+            let basis = px_protocol::scene::SHADOW_FACE_BASIS[face];
+            assert_eq!(
+                basis[2], *axis,
+                "第 {face} 面的轴：`CUBE_MAP_FACES` 说 {axis:?}，协议那张表说 {:?}",
+                basis[2]
+            );
+            // `(u, v)` = 两条面内基向量点乘方向，再除以轴点乘 —— 与着色器同一条算式。
+            let dot = |v: [f32; 3]| v[0] * dir[0] + v[1] * dir[1] + v[2] * dir[2];
+            let denom = dot(basis[2]);
+            assert_eq!(
+                face_uv(dir, face as u32),
+                (dot(basis[0]) / denom, dot(basis[1]) / denom),
+                "第 {face} 面的 `(u, v)`"
+            );
+        }
+        // 逐条对一遍**实数值**（`v` 向上为正），防"算式对了但表填错"：
+        assert_eq!(face_uv([1.0, 0.0, 0.0], 0), (0.0, 0.0), "+X 面正中央");
+        assert_eq!(face_uv([-1.0, 0.0, 0.0], 1), (0.0, 0.0), "−X 面正中央");
+        assert_eq!(face_uv([0.0, 1.0, 0.0], 2), (0.0, 0.0), "+Y 面正中央");
+        assert_eq!(face_uv([0.0, -1.0, 0.0], 3), (0.0, 0.0), "−Y 面正中央");
+        assert_eq!(
+            face_uv([0.0, 0.0, -1.0], 4),
+            (0.0, 0.0),
+            "−Z 面正中央（第 4 面）"
+        );
+        assert_eq!(
+            face_uv([0.0, 0.0, 1.0], 5),
+            (0.0, 0.0),
+            "+Z 面正中央（第 5 面）"
+        );
+        // 第 4 面（−Z）：right = +X、up2 = +Y ⇒ 世界 +x 给 u=+1、世界 +y 给 v=+1。
+        assert_eq!(face_uv([0.2, 0.4, -3.0], 4), (0.2 / 3.0, 0.4 / 3.0));
+        // 第 5 面（+Z）：right = −X、up2 = +Y ⇒ 世界 +x 给 u=−1。
+        assert_eq!(face_uv([0.2, 0.4, 3.0], 5), (-0.2 / 3.0, 0.4 / 3.0));
+    }
+
+    /// **y 的翻转只发生一次**：`face_uv` 的 `v` 向上为正，而 atlas 行号向下增。
+    #[test]
+    fn the_atlas_row_grows_downwards() {
+        let side = 128.0;
+        // 面正中央 → texel 正中央。
+        assert_eq!(face_texel((0.0, 0.0), side), (64.0, 64.0));
+        // 往上（`v = +1`）⇒ 行号**小**（atlas 顶行）；往右 ⇒ 列号大。
+        assert_eq!(face_texel((1.0, 1.0), side), (128.0, 0.0));
+        assert_eq!(face_texel((-1.0, -1.0), side), (0.0, 128.0));
     }
 
     /// 页块**不许越出格子**：物体中心贴边时块整体移进来（不是截断）。

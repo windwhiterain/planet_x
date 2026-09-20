@@ -132,25 +132,45 @@ mod tests {
             Some(POINT_SHADOW_STUB),
             "影子走的是本表里那一格（§109 起是真实现）"
         );
+        // ⚠ 判据从"不许出现 `return 1.0;`"改成下面这两条（§本轮）：虚拟影图里
+        //    `return 1.0;` 是**合法**的（那一页没分配 ⇒ 照"不在影里"处理），
+        //    所以"出现过这个字符串"不再是桩的痕迹。真正要钉的是"它真的在采样并比较"。
         assert!(
-            !POINT_SHADOW_STUB.contains("return 1.0;"),
-            "桩的痕迹（`return 1.0`）不许留在真实现里"
+            POINT_SHADOW_STUB.contains("depth < stored"),
+            "手动比较那一条（reverse-Z：影里是 `depth < stored`）不许丢"
+        );
+        assert!(
+            POINT_SHADOW_STUB.contains("return sum;"),
+            "它必须把八个采样加起来返回，而不是变成一个常量"
         );
         assert_eq!(
             POINT_SHADOW_STUB
-                .matches("px_sample_shadow_cubemap_at_offset(")
+                .matches("px_sample_shadow_at_offset(")
                 .count(),
             9,
             "Gaussian 那条路是**八个**采样（一次定义 + 八次调用）"
         );
         assert!(
-            POINT_SHADOW_STUB.contains("textureSampleCompareLevel("),
-            "比较采样必须走 Level 那一档：`fetch_point_shadow` 的调用点有非一致控制流\
-             （`shadow_sampling.wgsl:319-323`），隐式 LOD 在那种地方是未定义行为"
+            POINT_SHADOW_STUB.contains("textureLoad("),
+            "虚拟影图改**手动比较**（§本轮）：一页里的某一格只有 `textureLoad` 取得到，\
+             比较采样器那一档取不到\"这一页里的这一格\""
         );
         assert!(
-            POINT_SHADOW_STUB.contains("vec3<f32>(1.0, 1.0, -1.0)"),
-            "采样坐标要 flip_z（cube 是左手 y-up）"
+            !POINT_SHADOW_STUB.contains("px_shadow_face_uv("),
+            "六面的朝向**不许**在着色器里再写一遍（用户裁决）：它从文档的 \
+             `px_shadow_faces` 读 —— 这条契约从前有三份转写而且漂开过（4/5 面朝向反了）"
+        );
+        assert!(
+            POINT_SHADOW_STUB.contains("px_shadow_faces["),
+            "面选择与 UV 必须走文档给的那张基表"
+        );
+        // ⚠ 这一条**反过来**了（§本轮）：从前它要求 `flip_z`（`frag_ls * (1,1,-1)`），
+        //    那是 Bevy 的 cube 采样约定。我们的层是**渲染器按世界空间的六面相机**画的，
+        //    所以分类与 UV 必须用**世界方向本身** —— 翻一次就是"影子按镜像找面"。
+        assert!(
+            !POINT_SHADOW_STUB.contains("vec3<f32>(1.0, 1.0, -1.0)"),
+            "采样方向**不许** flip_z：我们的层不是 cube 采样，是渲染器按世界空间六面相机\
+             画出来的（翻了就是按镜像找面）"
         );
         assert!(
             POINT_SHADOW_STUB.contains("@group(0) @binding(2)")

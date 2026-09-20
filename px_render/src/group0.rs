@@ -166,6 +166,12 @@ pub const MESH_INSTANCES_BINDING: (u32, u32) = (0, 21);
 /// `pages_per_side` 走，而那是每盏灯自己的数 ⇒ 采样侧只做一次查表。
 pub const SHADOW_PAGE_OFFSETS_BINDING: (u32, u32) = (0, 5);
 
+/// **六面的基**（`[right, up2, axis]` × 6，每格一个 `vec4`）—— group 0 binding 6（§本轮）。
+///
+/// ⚠ 它是"哪一面 / 面上的哪一点"这条契约的**唯一一处**（用户裁决：作为数据落进文档）。
+/// 从前这条契约有三份转写，而它们漂开了 —— 见 `px_protocol::scene::SHADOW_FACE_BASIS`。
+pub const SHADOW_FACES_BINDING: (u32, u32) = (0, 6);
+
 // ---------------------------------------------------------------------------
 // 值 → 字节
 // ---------------------------------------------------------------------------
@@ -613,6 +619,10 @@ pub fn bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
                 wgpu::BufferBindingType::Storage { read_only: true },
             ),
             buffer(
+                SHADOW_FACES_BINDING.1,
+                wgpu::BufferBindingType::Storage { read_only: true },
+            ),
+            buffer(
                 CLUSTERED_LIGHTS_BINDING.1,
                 wgpu::BufferBindingType::Storage { read_only: true },
             ),
@@ -711,6 +721,7 @@ pub fn frame(
     shadow_page_table: &wgpu::Buffer,
     mesh_instances: &wgpu::Buffer,
     shadow_page_offsets: &wgpu::Buffer,
+    shadow_faces: &wgpu::Buffer,
     shadow_note: &str,
 ) -> Result<GroupZero, String> {
     // ⚠ `mesh_instances` 那一格（binding 21，**每实例数据**）是 §本轮从组 1 搬来的：
@@ -811,6 +822,10 @@ pub fn frame(
             wgpu::BindGroupEntry {
                 binding: SHADOW_PAGE_OFFSETS_BINDING.1,
                 resource: shadow_page_offsets.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: SHADOW_FACES_BINDING.1,
+                resource: shadow_faces.as_entire_binding(),
             },
             wgpu::BindGroupEntry {
                 binding: CLUSTERED_LIGHTS_BINDING.1,
@@ -1614,11 +1629,16 @@ mod tests {
             POINT_LIGHT_FLAGS_AFFECTS_LIGHTMAPPED_MESH_DIFFUSE, 8,
             "bit3 —— `PointLight::default()` 里这个开关是 true，所以它**每盏灯**都在"
         );
-        // §109.2 那一格：`0.6 × (2/1024) × √2`
+        // §本轮那一格：`shadow_normal_bias` 只说**偏移几个 texel**（不再是"几个世界单位"）。
+        //
+        // ⚠ 从前这里钉的是 `0.6 × (2/1024) × √2`（把 texel 的世界尺寸也算进去了），而那个
+        //    式子把"texel 多大"钉死成旧版固定 1024² cube 的边长 ⇒ **太阳拉远时偏移按距离
+        //    涨**，整颗行星被自己的影压暗一档（实测平均通道差 4.43）。现在 texel 的世界尺寸
+        //    由页表头里的 `virtual_size` 现算（`2·distance / N_virt`），这一格只剩系数。
         assert_eq!(
             shadow_normal_bias().to_bits(),
-            0.0016572815f32.to_bits(),
-            "shadow_normal_bias＝0.6 × texel × √2，texel = 2/1024（§109.2）"
+            (0.6f32 * core::f32::consts::SQRT_2).to_bits(),
+            "shadow_normal_bias＝0.6 × √2（**texel 数**，§本轮）"
         );
     }
 

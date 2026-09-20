@@ -2071,11 +2071,30 @@ impl Executor {
         let layers = resource.layers.max(1);
         let stale = match self.pool.get(&resource.name) {
             Some(pooled) => {
-                pooled.width != width
-                    || pooled.height != height
-                    || pooled.layers != layers
-                    || pooled.format != format
-                    || pooled.usage != usage
+                let reason = if pooled.width != width {
+                    Some(format!("宽 {} → {width}", pooled.width))
+                } else if pooled.height != height {
+                    Some(format!("高 {} → {height}", pooled.height))
+                } else if pooled.layers != layers {
+                    Some(format!("层 {} → {layers}", pooled.layers))
+                } else if pooled.format != format {
+                    Some(format!("格式 {:?} → {format:?}", pooled.format))
+                } else if pooled.usage != usage {
+                    Some(format!("用途 {:?} → {usage:?}", pooled.usage))
+                } else {
+                    None
+                };
+                // ⚠ **仪器**（`PX_POOL_DEBUG=1`）：池子**为什么要重建**一张纹理。
+                //    这一条是被"影一条都没画进 atlas"逼出来的：附件、viewport、清屏值
+                //    三样都读对了，而纹理里是空的 ⇒ 只剩"附件不是池子里那一张"这一种可能，
+                //    而"哪一项对不上"必须当场说出来（`seed` 与 `pooled` 各自算一遍规格，
+                //    两处的数只要有一处不同就是两张纹理、两条路，谁都不报错）。
+                if let Some(reason) = &reason {
+                    if std::env::var_os("PX_POOL_DEBUG").is_some() {
+                        eprintln!("池子重建 '{}'：{reason}", resource.name);
+                    }
+                }
+                reason.is_some()
             }
             None => true,
         };

@@ -1317,7 +1317,11 @@ mod tests {
                 sorted
             });
             let material_layout = materials.bind_group_layout().clone();
-            let pipeline_layout = pipeline_layout(&gpu.device, &group_zero, &material_layout);
+            // ⚠ 第 4 个参数是**舞台布局**（§本轮：几何 pass 的组 1）—— 这条判据走的是
+            //    内容材质那条路，给它一份与组 0 同源的布局就够（它只影响组 1 那一格）。
+            let stage_layout = group_zero.clone();
+            let pipeline_layout =
+                pipeline_layout(&gpu.device, &group_zero, &material_layout, &stage_layout);
             let pipeline = materials.pipeline(
                 &gpu.device,
                 &PipelineRequest {
@@ -1369,7 +1373,11 @@ mod tests {
             });
         let (group_zero, _) = group_zero_layout(&gpu.device, &module);
         let material_layout = materials.bind_group_layout().clone();
-        let pipeline_layout = pipeline_layout(&gpu.device, &group_zero, &material_layout);
+        // ⚠ 第 4 个参数是**舞台布局**（§本轮：几何 pass 的组 1）—— 这条判据走的是
+        //    内容材质那条路，给它一份与组 0 同源的布局就够（它只影响组 1 那一格）。
+        let stage_layout = group_zero.clone();
+        let pipeline_layout =
+            pipeline_layout(&gpu.device, &group_zero, &material_layout, &stage_layout);
         let again = materials.pipeline(
             &gpu.device,
             &PipelineRequest {

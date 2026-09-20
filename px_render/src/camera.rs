@@ -217,7 +217,7 @@ fn dir3(value: Vec3, fallback: Vec3) -> Vec3 {
 
 #[cfg(test)]
 mod tests {
-    use super::{probe_camera, review_camera};
+    use super::{CUBE_MAP_FACES, probe_camera, review_camera};
     use crate::mat4::Mat4;
 
     fn bits(m: &Mat4) -> [u32; 16] {
@@ -459,5 +459,35 @@ mod tests {
             [0.0, 0.0, 4.0],
             "平方 1e-14 不够 1e-12"
         );
+    }
+    /// **六面的基**（用户裁决的那条契约）：`px_protocol::scene::SHADOW_FACE_BASIS` 必须
+    /// 与 `CUBE_MAP_FACES` 经 `looking_at` 展开出来的基**逐位相同**。
+    ///
+    /// ⚠ 为什么必须有一条判据把它钉住：这条契约从前有三份转写（渲染器的 `CUBE_MAP_FACES`
+    /// / 烘图侧的 `face_uv` / 着色器的面选择），而它们**漂开过一次** —— 第 4/5 面朝向反了、
+    /// v 轴在六个面上还不自洽，症状是"影子贴到别的面上"或整颗行星被判成全在影里。
+    /// 现在烘图侧把这张表落进文档、着色器只读它，而"这张表本身对不对"就靠这一条。
+    #[test]
+    fn the_protocols_six_face_basis_is_the_one_these_cameras_use() {
+        for (index, (target, up)) in CUBE_MAP_FACES.iter().enumerate() {
+            // Bevy 的 `looking_at`：`back = −target`、`right = normalize(up × back)`、
+            // `up2 = back × right`（`primitives.rs:341-346`）。
+            let back = target.mul(-1.0);
+            let right = up.cross(back).normalize();
+            let up2 = back.cross(right);
+            let expected = [right, up2, *target];
+            let got = px_protocol::scene::SHADOW_FACE_BASIS[index];
+            for (slot, (want, have)) in expected.iter().zip(got.iter()).enumerate() {
+                assert_eq!(
+                    want.to_array(),
+                    *have,
+                    "第 {index} 面（{}）的第 {slot} 条基向量：协议那张表是 {have:?}，\
+                     而这六台相机用的是 {want:?} —— 两处不一致 ⇒ 烘图侧会把页分到\"不是\
+                     渲染器画的那一面\"上，而着色器照着协议查页 ⇒ 影子贴错面",
+                    // ⚠ 名字逐字照 `px_scene::frame::FACE_NAMES`（次序：`+x -x +y -y -z +z`）。
+                    ["+x", "-x", "+y", "-y", "-z", "+z"][index]
+                );
+            }
+        }
     }
 }
