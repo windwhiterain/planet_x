@@ -1216,6 +1216,16 @@ impl Session {
         //    （`view.viewport` 是绝对矩形，见 `group0::frame`）。其余六格（灯 / 聚类 /
         //    globals / 影图 / 采样器 / 深度快照）内容一样，但绑定组是每格一个 ——
         //    "一份组给 12 格用"这件事在 wgpu 里不存在（组里的 uniform 就是那一格的）。
+        // ⚠ 页表（§本轮）：内容由**烘图侧**算（页的分配在那儿），落到文档里。
+        //    这一笔先把那一格接上（空表 ⇒ 采样侧一格都查不到），把文档那一栏接进来是下一步。
+        let shadow_page_table = gpu
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("组 0：虚拟影图页表（烘图侧算，见 px-scene::vshadow）"),
+                usage: wgpu::BufferUsages::STORAGE,
+                contents: &[0_u8; 4],
+            });
+
         let build_zero = |camera: &crate::camera::Camera,
                           view: &wgpu::TextureView,
                           viewport: [f32; 4]|
@@ -1230,6 +1240,7 @@ impl Session {
                 view,
                 &shadow_view,
                 &shadow_sampler,
+                &shadow_page_table,
                 &shadow_note,
             )
         };
@@ -3025,41 +3036,10 @@ fn cell_materials<'a>(
                 fragment_entry: base.fragment_entry,
             });
         }
-        // ② 带 `cube_face` 的 pass 只许用实例名（见上面 ② 那段）。
-        for pass in plan.passes.iter() {
-            let Some(document) = spec
-                .passes
-                .iter()
-                .enumerate()
-                .find(|(index, document)| document.label_or(*index) == pass.label)
-                .map(|(_, document)| document)
-            else {
-                continue;
-            };
-            if document.cube_face.is_none() {
-                continue;
-            }
-            for draw in &pass.draws {
-                if draw.material.is_empty() {
-                    continue;
-                }
-                if !spec
-                    .material_instances
-                    .iter()
-                    .any(|instance| instance.name == draw.material)
-                {
-                    return Err(format!(
-                        "pass '{}' 带 `cube_face`（写 cube 的某一层），而它的 draw 用的是材质\
-                         '{}' —— 那不是生成的材质实例：这一笔会拿到**相机**的那一份 PassView，\
-                         影子会贴到相机那一面去（画面上只是「影子歪了」）。\
-                         带 cube_face 的 pass 只能用 `material_instances` 里的名字",
-                        pass.label, draw.material
-                    ));
-                }
-            }
-        }
+        // ② 从前这里还有一条"带 `cube_face` 的 pass 只许用实例名"的守卫（§148）——
+        //    §本轮把页的视图搬进 `PassSpec.params` 之后它没有依据了：面由 `cube_face`
+        //    直接说，名字不再承载"哪一面"。一个事实一处这条口径仍在，只是换了落点。
     }
-
     Ok(resolved_materials)
 }
 

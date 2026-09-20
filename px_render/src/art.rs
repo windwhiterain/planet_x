@@ -669,7 +669,7 @@ fn load_texture(member: &Member, pcg_root: &Path, what: &str) -> Result<LoadedTe
 
 fn load_geometry(geometry: &Geometry, id: &str, pcg_root: &Path) -> Result<LoadedGeometry, String> {
     match geometry {
-        Geometry::Mesh { member } => {
+        Geometry::Mesh { member, .. } => {
             let path = member.resolve(pcg_root)?;
             // 审计文本照打（焊接 / 缠绕 / 法线）：它是"这张网格长什么样"的唯一仪器，
             // 而 §102 记过两次搬运里那几个括号**改的是像素**，所以它必须一直看得见。
@@ -681,7 +681,7 @@ fn load_geometry(geometry: &Geometry, id: &str, pcg_root: &Path) -> Result<Loade
                 mesh,
             })
         }
-        Geometry::Primitive { name, params } => {
+        Geometry::Primitive { name, params, .. } => {
             let mesh = primitive_mesh(name, params).map_err(|err| format!("物体 '{id}'：{err}"))?;
             Ok(LoadedGeometry::Primitive {
                 name: name.clone(),
