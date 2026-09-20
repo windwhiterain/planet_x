@@ -80,13 +80,31 @@ impl px_field_alg::field_fn::FieldFn for LatBands {
         let folded = (phase * (1.0 / (2.0 * std::f32::consts::PI)))
             .fract()
             .abs();
-        let wave = 1.0 - (2.0 * folded - 1.0).abs();
+        let mut wave = 1.0 - (2.0 * folded - 1.0).abs();
 
         // ② 细丝：高频小涟漪，振幅骑在上游场上（湍流亮的地方丝更明显）—— 破坏"一圈光板"。
         let fiber = 0.5 + 0.5 * (phase * 5.0 + upstream * 9.0).sin();
         let ripple = 0.085 * fiber * (0.35 + 0.65 * upstream);
         // ③ 天气：沿经度分几段"带被洗淡"（`washed ∈ [0.65, 1]`）—— 同一颗球上不是每条带一样清楚。
         let longitude = bent[2].atan2(bent[0]);
+        // ⑥ **极涡**（2026-09-20，用户待办 V3："极区没有特征"）：
+        //   极点那几圈纬度带被非线性映射拉得几乎没有起伏（`g(y)` 在两端斜率只剩 0.28），
+        //   而参考图（土星）的极区**不是空白**：那里是一圈**绕极的同心环 + 螺旋**。
+        //   做法：把 `|纬度|` 大于 0.72 的那一顶帽子里的"纬度带"**换成极角上的环**，
+        //   并按经度扭一个固定角度（`POLAR_TWIST`）⇒ 环变成螺旋，这就是极涡的样子。
+        let pole = latitude.abs();
+        let cap = px_field_alg::noise::smoothstep(0.66, 0.99, pole);
+        if cap > 0.001 {
+            // 极角：0 = 极点、π/2 = 赤道（`acos` 的输入钳住，防浮点越界）。
+            let polar_angle = (1.0 - pole.min(1.0)).acos();
+            let polar_phase = polar_angle * POLAR_RINGS + longitude * POLAR_TWIST;
+            let folded_polar = (polar_phase * (1.0 / std::f32::consts::TAU))
+                .fract()
+                .abs();
+            let polar_wave = 1.0 - (2.0 * folded_polar - 1.0).abs();
+            wave = wave * (1.0 - cap) + polar_wave * cap;
+        }
+
         let weather = 0.5 + 0.5 * (longitude * 2.0 + upstream * 4.0).sin();
         let washed = 1.0 - 0.35 * (1.0 - weather);
         // ④ 按纬度的淡出：`fade ∈ [0,1]`，取 0 的那些纬度**整片没有带**（剩下一点基底起伏）。
@@ -107,6 +125,13 @@ impl px_field_alg::field_fn::FieldFn for LatBands {
         contrasted.clamp(0.0, 1.0)
     }
 }
+
+/// 极涡的两把旋钮（`polar_phase = 极角 · POLAR_RINGS + 经度 · POLAR_TWIST`）。
+/// ⚠ `POLAR_RINGS` 是**每弧度**的环数（不是每圈）：极冠只跨 `acos(0.72) ≈ 0.77 rad`，
+///   要在这个跨度里看见两三圈环 ⇒ 取 20 上下。
+const POLAR_RINGS: f32 = 27.0;
+/// 沿经度扭多少（弧度/弧度）⇒ 环是**螺旋**而不是同心圆。
+const POLAR_TWIST: f32 = 0.55;
 
 /// **独立椭圆涡**：把采样方向在若干"格点涡心"附近**局部转一圈**。
 ///

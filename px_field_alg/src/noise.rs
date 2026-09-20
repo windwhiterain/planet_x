@@ -113,6 +113,18 @@ pub fn faded_gradient_noise_3<S: Scalar>(point: [S; 3], seed: u32) -> S {
     (total * S::from_f32(0.9) + S::from_f32(0.5)).clamp01()
 }
 
+/// **平滑阶跃**（`edge0` 到 `edge1` 之间用 `3t²−2t³` 过渡）—— 场域里到处要用的那一支。
+///
+/// ⚠ 与 `smooth_scalar`（泛型那支）的关系：这一支是 `f32` 的**对外的**版本，
+///   实例与算子共用同一份；`edge0 == edge1` 时按阶跃处理（不产生 `0/0`）。
+pub fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
+    if (edge1 - edge0).abs() <= f32::EPSILON {
+        return if x < edge0 { 0.0 } else { 1.0 };
+    }
+    let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
 /// **三维值噪声**（格点哈希 + 三线性插值）—— 给"要一条**不重复**的低频曲线"的场合。
 ///
 /// ⚠ 它与正弦的区别正是它存在的理由：`sin(a·纬度 + b·上游)` 这类解析摆**在球面上会周期性重复**
