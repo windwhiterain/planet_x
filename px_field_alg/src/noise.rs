@@ -6,9 +6,11 @@
 //!   "同一个格 → 同一个数"是**全仓共用的一条约定**，不是某个算子的私事。
 //!   搬下来之后 `px_field_op` 把它 re-export 出去（老调用点一字不改）。
 //!
-//! ⚠ 这一份**是算法**：进了场域那名册 ⇒ 改它要重登记（与 `remap.rs` 同一条规矩）。
+//! ⚠ 这一份**是算法**：改了它，吃场算子的节点键就换（名册吃这些源文件）。
 
 /// 三维格点的 32 位哈希（`cell_hash` 的内核；梯度噪声也用同一个）。
+use px_field_schema::noise::Scalar;
+
 pub fn lattice3(x: i32, y: i32, z: i32, seed: u32) -> u32 {
     let mut h = (x as u32).wrapping_mul(0x27d4_eb2d)
         ^ (y as u32).wrapping_mul(0x1656_67b1)
@@ -42,13 +44,82 @@ pub fn unit(hash: u32, channel: u32) -> f32 {
     ((hash >> shift) & 0xff) as f32 / 255.0
 }
 
+/// 梯度噪声用的 12 个方向（与 Ken Perlin 那套同形）。
+const GRADIENTS: [[f32; 3]; 12] = [
+    [1.0, 1.0, 0.0],
+    [-1.0, 1.0, 0.0],
+    [1.0, -1.0, 0.0],
+    [-1.0, -1.0, 0.0],
+    [1.0, 0.0, 1.0],
+    [-1.0, 0.0, 1.0],
+    [1.0, 0.0, -1.0],
+    [-1.0, 0.0, -1.0],
+    [0.0, 1.0, 1.0],
+    [0.0, -1.0, 1.0],
+    [0.0, 1.0, -1.0],
+    [0.0, -1.0, -1.0],
+];
+
+fn smooth_scalar<S: Scalar>(t: S) -> S {
+    t * t * (S::from_f32(3.0) - t - t)
+}
+
+/// **三维梯度噪声**（`[-1,1]` 的梯度点积 + 平滑权重，映到 `[0,1]`）。
+///
+/// ⚠ 与 [`value_noise3`] 的区别是**量化**的，不是"折线 vs 平滑"（2026-09-20 实测）：
+///   两者都用同一个 `3t²−2t³` 平滑权重 ⇒ **都在格面上变平**。同一条扫描线上量到的斜率：
+///   值噪声格面 `0.001` / 格中 `0.851`（压掉约 900 倍 ⇒ 看起来像一块块平台），
+///   梯度噪声格面 `0.004` / 格中 `0.358`（压掉约 100 倍）。
+///   ⇒ 想要"没有平台感"的起伏用这一档；只想要"便宜的低频扰动"用值噪声。
+///   ⚠ 我原先在注释里写"值噪声在格面导数不连续"——**那是错的**（那是**线性**插值那版的性质），
+///     已按实测改正。
+/// ⚠ 泛型 `S: Scalar`：`px_verify` 的 `Dual` 也实现它 ⇒ 解析梯度那条路复用的就是这一份。
+///   2026-09-20 从 `px_field_op` 搬下来（实例库只链 `px_field_alg`，要平滑噪声就得有这一档）。
+pub fn faded_gradient_noise_3<S: Scalar>(point: [S; 3], seed: u32) -> S {
+    let x0 = point[0].real().floor();
+    let y0 = point[1].real().floor();
+    let z0 = point[2].real().floor();
+    let (ix, iy, iz) = (x0 as i32, y0 as i32, z0 as i32);
+    let tx = smooth_scalar(point[0] - S::from_f32(x0));
+    let ty = smooth_scalar(point[1] - S::from_f32(y0));
+    let tz = smooth_scalar(point[2] - S::from_f32(z0));
+
+    let mut total = S::zero();
+    for corner in 0..8 {
+        let step_x = (corner & 1) as i32;
+        let step_y = (corner >> 1) as i32 & 1;
+        let step_z = (corner >> 2) as i32 & 1;
+        let offset = [step_x as f32, step_y as f32, step_z as f32];
+        let gradient =
+            GRADIENTS[(lattice3(ix + step_x, iy + step_y, iz + step_z, seed) % 12) as usize];
+        let dot = S::from_f32(gradient[0]) * (tx - S::from_f32(offset[0]))
+            + S::from_f32(gradient[1]) * (ty - S::from_f32(offset[1]))
+            + S::from_f32(gradient[2]) * (tz - S::from_f32(offset[2]));
+        let weight = if step_x == 1 {
+            tx
+        } else {
+            S::from_f32(1.0) - tx
+        } * if step_y == 1 {
+            ty
+        } else {
+            S::from_f32(1.0) - ty
+        } * if step_z == 1 {
+            tz
+        } else {
+            S::from_f32(1.0) - tz
+        };
+        total = total + dot * weight;
+    }
+    (total * S::from_f32(0.9) + S::from_f32(0.5)).clamp01()
+}
+
 /// **三维值噪声**（格点哈希 + 三线性插值）—— 给"要一条**不重复**的低频曲线"的场合。
 ///
 /// ⚠ 它与正弦的区别正是它存在的理由：`sin(a·纬度 + b·上游)` 这类解析摆**在球面上会周期性重复**
 ///   （绕经度一圈回来是同一个样子，只是被"看不见的接缝"藏住了），而哈希值噪声不会 ——
 ///   同一个方向永远同一个值，但**没有任何周期**。
-/// ⚠ 值噪声的导数不连续（格点边界上有折线感）；要平滑的梯度噪声用 `px_field_op` 那一档
-///   （它不能进实例库：那边还带着梯度表与 12 个方向的常量）。
+/// ⚠ 它在**格面上会变平**（平滑权重的必然结果，实测见 [`faded_gradient_noise_3`] 的注释）——
+///   低频扰动看不出来，要"平台感更弱"的起伏就用梯度噪声那一档。
 pub fn value_noise3(point: [f32; 3], seed: u32) -> f32 {
     let base = [
         point[0].floor() as i32,
