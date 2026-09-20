@@ -37,9 +37,19 @@ impl px_field_alg::field_fn::FieldFn for LatBands {
         let bands = if params.bands > 0.0 { params.bands } else { 1.0 };
         // 纬度：`direction.y`（球面上的 y 就是自转轴方向）⇒ `[-1, 1]`。
         let latitude = direction[1].clamp(-1.0, 1.0);
-        // 相位：纬度给"几圈带"，上游给"边界怎么起伏"（`× 3.5`：摆幅要大于一圈带的宽度，
-        // 边界才会真的起伏成波浪，否则看着还是一圈死正弦）。
-        let phase = latitude * bands * std::f32::consts::PI - (upstream - 0.5) * 3.5;
+        // ⚠ 2026-09-20（用户："气态行星表面的纹理是很不规则的，你的那个像个西瓜"）：
+        //   "纯纬度 + 一圈正弦"出来的就是**西瓜**。真实的气态行星条带：
+        //     · 带的**宽窄沿纬度差得很远**，相邻的带会**挤在一起或分开**；
+        //     · 有些纬度**整片没有带**（均匀的区）；
+        //     · 边界被湍流拉成分叉、打卷的长条。
+        //   前两件事在这一支里做（第三件是图上那两级**域扭曲**的活，`field.warp`）：
+        //   ① **相位摆动**：叠两个大振幅、低频的摆 —— 振幅与"一圈带"同量级（约 1.4 rad ≈
+        //      半个周期），于是条纹会真实的**疏密不均、局部并拢**；
+        //   ② **按纬度的淡出**：`fade` 让某些纬度带整体淡下去（那里就是"没有带"的区）。
+        let wobble = (latitude * 2.30 + upstream * 4.0).sin()
+            + 0.55 * (latitude * 5.10 - upstream * 7.0).cos();
+        // 相位：纬度给"几圈带"，摆动与上游各给一部分"边界怎么歪"。
+        let phase = latitude * bands * std::f32::consts::PI + wobble * 1.4 - (upstream - 0.5) * 3.5;
 
         // ① 相位 → **三角波**（等斜率、周期 2π）：`fract` 把它折回 `[0,1)`，再从 1 折回 0。
         //   ⚠ 相对正弦，这一条把"过渡"从"中点最陡"改成"全程同陡" ⇒ 同一条带看着宽得多。
@@ -55,9 +65,12 @@ impl px_field_alg::field_fn::FieldFn for LatBands {
         let longitude = direction[2].atan2(direction[0]);
         let weather = 0.5 + 0.5 * (longitude * 2.0 + upstream * 4.0).sin();
         let washed = 1.0 - 0.35 * (1.0 - weather);
+        // ④ 按纬度的淡出：`fade ∈ [0,1]`，取 0 的那些纬度**整片没有带**（剩下一点基底起伏）。
+        let fade = 0.5 + 0.5 * (latitude * 2.7 + upstream * 2.2).sin();
+        let strength = 0.45 + 0.55 * fade;
 
         // 对比：以 0.5 为轴把落点推开（`gain = 0` ⇒ 不动）。
-        let band = 0.5 + (wave - 0.5) * washed + ripple;
+        let band = 0.5 + (wave - 0.5) * washed * strength + ripple;
         let contrasted = 0.5 + (band - 0.5) * (1.0 + params.gain) + params.bias;
         contrasted.clamp(0.0, 1.0)
     }
