@@ -34,6 +34,13 @@ pub mod payload;
 pub mod render;
 pub mod scene;
 pub mod sparse;
+// ⚠ `rows`（按输出分区的并行）**暂时没挂上去** —— 它的判据（单测级的逐位相同）已经通过，
+//   但**产物级**还没证明：把 `field.fbm3` / `cloud.emission` 换成并行之后，
+//   同一份参数烘出来的场产物键与串行版**不同**（`91ca05e2ede7` vs `3bedc81c3c2d`），
+//   而本仓的地基是「键 = 完整产物字节」⇒ 那会让缓存永不命中、症状只是"每次都重烘"。
+//   在证明之前不许接线。文件留在 `src/rows.rs`（带两条通过的判据），
+//   证明之后把下面这一行的注释去掉即可。
+// pub mod rows;
 pub mod stream;
 pub mod wire;
 
