@@ -6,3 +6,4 @@ octaves = 3
 lacunarity = 2.05
 gain = 0.60
 seed = 913
+zonal = 2.50

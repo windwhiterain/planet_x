@@ -86,6 +86,38 @@ fn main() {
     report_band_structure(&path, width, height, &data, projection);
 }
 
+/// 每一行**沿经度**的两条读数：行内标准差 + lag=`W/8` 的归一化自相关（取中位数）。
+fn longitude_readings(field: &Field, width: u32, height: u32) -> (f64, f64) {
+    let lag = (width / 8).max(1);
+    let mut stds = Vec::new();
+    let mut corrs = Vec::new();
+    for y in 0..height {
+        let row: Vec<f64> = (0..width).map(|x| field.at(x, y) as f64).collect();
+        let mean = row.iter().sum::<f64>() / width as f64;
+        let variance = row.iter().map(|v| (v - mean) * (v - mean)).sum::<f64>() / width as f64;
+        let std = variance.sqrt();
+        stds.push(std);
+        if std <= 1e-9 {
+            corrs.push(1.0);
+            continue;
+        }
+        let mut acc = 0.0;
+        let mut count = 0.0;
+        for x in 0..(width - lag) {
+            acc += (row[x as usize] - mean) * (row[(x + lag) as usize] - mean);
+            count += 1.0;
+        }
+        corrs.push(if count > 0.0 {
+            acc / count / variance
+        } else {
+            1.0
+        });
+    }
+    stds.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    corrs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    (stds[stds.len() / 2], corrs[corrs.len() / 2])
+}
+
 /// **这张场有多少是纯纬度的函数**（"西瓜度"）—— 见文件头那一段。
 fn report_band_structure(
     path: &str,
@@ -140,6 +172,17 @@ fn report_band_structure(
     };
     let lon = along_lon / (samples - height as f64).max(1.0);
     let lat = along_lat / (samples - width as f64).max(1.0);
+    // ⚠ 2026-09-20 补：`R²` **分不开**"纯纬度条带"与"平滑的长波流线"（实测：
+    //   西瓜那版 0.6175、长波流线那版 0.6148 —— 几乎同一个数，而画面上完全是两回事：
+    //   后者沿经度有明显起伏，只是起伏是**低频**的，被纬度分箱平均掉之后又"像"纬度的函数）。
+    //   ⇒ 再量两条**只看沿经度**的读数：
+    //     · `lon_std`：每一行内的标准差（沿经度有没有变化）——西瓜 ≈ 0；
+    //     · `lon_corr`：行内信号在 lag = W/8 处的归一化自相关（变化是**低频**还是**碎**）——
+    //       长波流线接近 1、絮状接近 0。
+    //   两条合起来才分得开三种形态。
+    let (lon_std, lon_corr) = longitude_readings(&field, width, height);
+    println!("  沿经度标准差（中位）= {lon_std:.4}（西瓜 ≈ 0）");
+    println!("  沿经度自相关 lag=W/8（中位）= {lon_corr:.3}（≈1 = 低频长波，≈0 = 碎）");
     println!("  纬向可解释度 R²（西瓜度）= {r2:.4}（1 = 纯纬度的函数）");
     println!(
         "  经/纬梯度比 = {:.3}（沿经度 {lon:.5} ÷ 沿纬度 {lat:.5}）",

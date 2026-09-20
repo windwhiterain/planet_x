@@ -53,6 +53,13 @@ struct GasParams {
     /// 参考图（土星的南半球、天王星的极区）那种"发青"的来源 —— 它与吸收是两件事：
     /// 吸收让颜色偏暖，霾往回收一点蓝。
     haze: f32,
+    /// **第二尺度的采样倍率**（2026-09-20 加，用户："大气不够丰富，层次单一"）。
+    /// 同一张条带图再采一次，但采样方向乘上它 ⇒ 得到**更细的一层**（`6` 上下）。
+    /// ⚠ 为什么用"同一张贴图缩放"而不是再烘一张：多层次在这里的**语义**是
+    ///   "同一套湍流的更细一档"，不是另一套独立结构（真实大气里后者也会被前者带着走）。
+    detail_scale: f32,
+    /// 第二尺度加多少（`0` = 只有一层，与原行为等价）。
+    detail_strength: f32,
 };
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(0) var<uniform> params: GasParams;
@@ -99,11 +106,23 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let latitude = clamp(local.y, -1.0, 1.0);
     var band = clamp(band_of(local), 0.0, 1.0);
     band = clamp((band - 0.5) * params.band_contrast + 0.5, 0.0, 1.0);
+    // ---- ①b 第二尺度：**细丝只长在带的边缘上** --------------------------------
+    // ⚠ 三条层次的分工：`band` 是"带在哪"（粗）、`detail` 是"带边缘长什么样"（细）、
+    //   `edge` 是"哪里该长细丝"（带的过渡带）。三者相乘才是"丰富"；
+    //   把 `detail` 直接加到 `band` 上会得到一层均匀的噪点（那不是层次，是脏）。
+    let edge = 1.0 - abs(band - 0.5) * 2.0;
+    var shaped = band;
+    if params.detail_strength > 0.0 {
+        let detail = band_of(normalize(local * params.detail_scale));
+        shaped = clamp(band + params.detail_strength * edge * (detail - 0.5) * 2.0, 0.0, 1.0);
+    }
+    let band_shaped = shaped;
+
     // 视线越斜，穿过的那一柱越长（`grazing`：正对 = 0、边缘 = 1）。
     let grazing = 1.0 - abs(ndotv);
     // 深度 = 厚度尺度 × 带的浓淡 × 掠射加长。
     let depth = params.thickness
-        * (1.0 - params.band_gain * (band - 0.5) * 2.0)
+        * (1.0 - params.band_gain * (band_shaped - 0.5) * 2.0)
         * (1.0 + params.limb * grazing)
         * (1.0 + params.hemi_depth * latitude);
 

@@ -8,3 +8,5 @@ gain = 0.55
 seed = 17
 aspect = 2.0
 spherical = true
+# 相位源也沿经度拉长：带边缘的起伏要是长波流线，不是疙瘩（第 9 轮新栏 `zonal`）。
+zonal = 2.50

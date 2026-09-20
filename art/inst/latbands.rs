@@ -60,7 +60,7 @@ impl px_field_alg::field_fn::FieldFn for LatBands {
 
         // ② 细丝：高频小涟漪，振幅骑在上游场上（湍流亮的地方丝更明显）—— 破坏"一圈光板"。
         let fiber = 0.5 + 0.5 * (phase * 5.0 + upstream * 9.0).sin();
-        let ripple = 0.055 * fiber * (0.35 + 0.65 * upstream);
+        let ripple = 0.085 * fiber * (0.35 + 0.65 * upstream);
         // ③ 天气：沿经度分几段"带被洗淡"（`washed ∈ [0.65, 1]`）—— 同一颗球上不是每条带一样清楚。
         let longitude = direction[2].atan2(direction[0]);
         let weather = 0.5 + 0.5 * (longitude * 2.0 + upstream * 4.0).sin();
@@ -69,9 +69,14 @@ impl px_field_alg::field_fn::FieldFn for LatBands {
         let fade = 0.5 + 0.5 * (latitude * 2.7 + upstream * 2.2).sin();
         let strength = 0.55 + 0.45 * fade;
 
+        // ⑤ **对比度分层**（"有的带深、有的几乎看不见"）：`gain` 按一条**低频、与相位不同源**的
+        //    曲线走 ⇒ 相邻的带深浅不一样。⚠ 用同一个相位去调对比会把深浅锁在位置上（那又变回单一层次）。
+        let rank = 0.5 + 0.5 * (latitude * 2.6 - upstream * 3.1).sin();
+        let local_gain = params.gain * (0.30 + 0.70 * rank);
+
         // 对比：以 0.5 为轴把落点推开（`gain = 0` ⇒ 不动）。
         let band = 0.5 + (wave - 0.5) * washed * strength + ripple;
-        let contrasted = 0.5 + (band - 0.5) * (1.0 + params.gain) + params.bias;
+        let contrasted = 0.5 + (band - 0.5) * (1.0 + local_gain) + params.bias;
         contrasted.clamp(0.0, 1.0)
     }
 }
