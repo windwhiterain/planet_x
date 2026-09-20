@@ -602,14 +602,25 @@ pub fn build(
         // ⚠ 写的是**没烘出来的那份资源**（一盏投影的灯都没有）⇒ 这条 pass 也不烘：
         //    否则文档里会出现一条"深度附件指向一个不存在的名字"的 pass，
         //    而那份文档在装载时会被拒 —— 一份自相矛盾的产物比少一条 pass 糟得多。
-        if let Some(target) = &entry.depth_target {
-            if dropped.contains(target) {
-                println!(
-                    "⚠ 帧图 pass '{}' 写的是没烘出来的 '{}' ⇒ 这一条也不烘",
-                    entry.label, target
-                );
-                continue;
-            }
+        // ⚠ **引用了没烘出来的资源**（一盏投影的灯都没有）⇒ 这条 pass 也不烘。
+        //
+        // 三处都要看，缺一处就是一份**自相矛盾**的产物（装载时被拒，而那时离病因很远）：
+        //   · `depth_target` —— 深度附件指向一个不存在的名字；
+        //   · `reads` / `writes` —— **`copy` 那一条**（`copy_shadow_atlas`）就是栽在这里的：
+        //     它 `writes` 的是同样被丢掉的 `point_shadow_atlas_sample`，
+        //     而这一条判据从前只看 `depth_target` ⇒ pass 留下来、两端都指向空气。
+        if let Some(found) = [entry.depth_target.as_ref()]
+            .into_iter()
+            .flatten()
+            .chain(entry.reads.iter())
+            .chain(entry.writes.iter())
+            .find(|name| dropped.contains(name))
+        {
+            println!(
+                "⚠ 帧图 pass '{}' 用到没烘出来的 '{}' ⇒ 这一条也不烘",
+                entry.label, found
+            );
+            continue;
         }
         // 顶点阶段：文件内容**内联**进文档（自描述：读这份产物不需要再回来看配方）。
         let (vertex_shader, vertex_entry) = match &entry.vertex_shader {
