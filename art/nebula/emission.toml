@@ -24,8 +24,8 @@ shadow_gain = 2.2
 #
 # ⚠ 而 `gain` 只负责**整体亮度**（不动比值）：亮度对齐靠它、形状对齐靠 `power`
 #   —— 两者分开是有意的，不然"调暗一点"会把反差也一起改掉。
-emission_power = 6.0
-emission_gain = 1.7
+emission_power = 4.5
+emission_gain = 1.2
 
 # 消光：**逐通道**（R, G, B）。
 #

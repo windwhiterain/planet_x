@@ -81,6 +81,29 @@ fn shape_from_args() -> u32 {
     shape.max(8)
 }
 
+/// **径向层数**（`--layers <n>`）：不给就用 `art/nebula/density_volume.toml` 里那一份。
+///
+/// ⚠ 单独给这个开关是因为**径向是体网格上最粗的那一维**：`layers = 64` 要覆盖
+///   1.0~3.0 的壳厚 ⇒ 每层 0.031 世界单位，而一条视线穿过壳要走 2.0
+///   ⇒ 径向的细节被三线性平均得最狠。而它比 `--shape` **便宜**：
+///   格数是 `res² × layers`，径向翻倍只让格数翻倍（面内翻倍是四倍）。
+fn layers_from_args() -> Option<u32> {
+    let args: Vec<String> = std::env::args().collect();
+    let mut index = 1;
+    while index < args.len() {
+        if args[index] == "--layers" {
+            if let Some(value) = args
+                .get(index + 1)
+                .and_then(|text| text.parse::<u32>().ok())
+            {
+                return Some(value.max(8));
+            }
+        }
+        index += 1;
+    }
+    None
+}
+
 /// `art/nebula/density_volume.toml` 里写的层数（读不到/解不开就 `Err`，不猜）。
 ///
 /// ⚠ 必须读**文件里那一份**，不能用 `DensityParams::default()`：两者不一致时
@@ -110,14 +133,17 @@ fn main() -> Result<(), Fault> {
     let face = face_from_args();
     let shape = shape_from_args();
     let started = Instant::now();
-    println!("形状 {shape}³ ｜ 天空面 {face}");
 
     // ── 图一：形状 → 密度体积 → 发射体积（画布是**体网格**）────────────────
-    // ⚠ 画布的形状必须与 `art/nebula/density_volume.toml` **逐字一致**：
-    //   `cloud.density` 只在"同网格"时走纯搬运，不同网格会按体素坐标重采样
-    //   （允许、但白花一次采样）。所以层数从**那份 toml** 读，不用默认值
-    //   —— 用默认值会在"文件里写的层数不是 64"时静默地变成重采样。
-    let layers = volume_layers()?;
+    // ⚠ 画布的形状必须与 `cloud.density` 拿到的参数**逐字一致**：只有"同网格"时它才走
+    //   纯搬运，不同网格会按体素坐标重采样（允许，但白花一次采样）。
+    //   ⇒ 默认层数从 `art/nebula/density_volume.toml` 读（不用 `Default`）；
+    //   `--layers` 给的则同时**覆盖那份 toml 里的值**（见下面 `params_override`）。
+    let layers = match layers_from_args() {
+        Some(given) => given,
+        None => volume_layers()?,
+    };
+    println!("形状 {shape} × {shape} × {layers} 层 ｜ 天空面 {face}");
     let shape_graph = begin(GraphSpec {
         name: "nebula".to_string(),
         width: shape,
