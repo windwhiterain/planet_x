@@ -3115,6 +3115,7 @@ fn read_depth_stats(
     let mut max = 0.0_f32;
     let mut nonzero = 0_usize;
     let mut corner = 0_usize;
+    let mut bbox = (u32::MAX, u32::MAX, 0_u32, 0_u32);
     let total = (side * side) as usize;
     for y in 0..side {
         for x in 0..side {
@@ -3128,11 +3129,18 @@ fn read_depth_stats(
                 if x < 256 && y < 256 {
                     corner += 1;
                 }
+                bbox = (bbox.0.min(x), bbox.1.min(y), bbox.2.max(x), bbox.3.max(y));
             }
         }
     }
     drop(data);
     buffer.unmap();
+    if nonzero > 0 {
+        println!(
+            "    （非零的包围盒 = x {}..{}、y {}..{}）",
+            bbox.0, bbox.2, bbox.1, bbox.3
+        );
+    }
     Some((max, nonzero, total, corner))
 }
 

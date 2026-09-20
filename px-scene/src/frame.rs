@@ -717,42 +717,36 @@ pub fn build(
             for face in 0..CUBE_FACES {
                 let face_label = format!("{}_{}_{}", entry.label, light, FACE_NAMES[face as usize]);
                 let layer = light * CUBE_FACES + face;
-                // ---- 这一面的每一页：先清一格，再画**落在这一页上的那几个物体** ----
+                // ---- 这一面的每一页：画**落在这一页上的那几个物体** ----
+                //
+                // ⚠⚠ **整层只清一次，而且不在这一层的第一条 pass 上乱清**（§本轮最贵的一课）：
+                //    wgpu/WebGPU 的 `LoadOp::Clear` 清的是**整份附件**（这一层 1024² 全清），
+                //    **不受 viewport 限制**。于是"一页一条 clear pass"这条设计**根本不成立**：
+                //    第 k 页的清屏会把第 1..k-1 页已经画好的深度**全抹掉**，
+                //    最后整层只剩**最后一页**那一笔的几何。
+                //
+                //    实测（`probe-vs-center`，灯正好在 +X 轴上、行星必然落在面 0 正中央）：
+                //    atlas 六层里只有一层有内容，而且内容挤在**页块最后一页**上 ——
+                //    那正是"清屏把别人抹了"的指纹。修之前 `PX_SHADOW_FULLPAGE=1`
+                //    （把页矩形换成恒等）也只留下中央 26×26 个 texel 的孤岛。
+                //
+                //    所以：**每一层的第一条 pass 清，其余一律 load**。清屏那一笔的 viewport
+                //    无所谓（整层都会被清），而"load"是对的 —— 剩下的页都在同一层里，
+                //    必须接着前面几页已经写下的深度。
                 //
                 // ⚠ 一页一笔 draw（而不是一页里把该画的物体都画一遍）的理由：一笔 draw
                 //    只挂一份材质（一套组 1），而"每页只有少数几个物体落进去"是常态 ——
                 //    按 caster 拆开之后，每一笔的实例下标是唯一的一个，
                 //    而"这一页的 view"由这一笔自己的 `viewport` 说。
+                let mut cleared = false;
                 for patch in allocation
                     .patches
                     .iter()
                     .filter(|patch| patch.light == light && patch.face == face)
                 {
                     let window = patch.window;
-                    let clear = PassSpec {
-                        kind: entry.kind.clone(),
-                        shader: shader.clone(),
-                        label: page_label(&face_label, patch.page_y, patch.page_x),
-                        entry: entry.entry.clone(),
-                        reads: entry.reads.clone(),
-                        writes: entry.writes.clone(),
-                        params: params.clone(),
-                        draws: Vec::new(),
-                        vertex_shader: vertex_shader.clone(),
-                        vertex_entry: vertex_entry.clone(),
-                        render: entry.render.clone(),
-                        depth_target: entry.depth_target.clone(),
-                        cube_face: Some(PassCubeFace { light, face, layer }),
-                        viewport: None,
-                    };
-                    passes.push(page_clear_pass(&clear, window, clear.label.clone()));
                     // 这一页的几何：只画 `patch.casters` 里点名的那些物体。
-                    //
-                    // ⚠ **第一笔顺手清这一格**（`depth=clear(0)`），后面几笔 `load` ——
-                    //    atlas 是共享的，而每一页占的是**自己那一格**（互不重叠），
-                    //    所以"load"读到的一定是本页第一笔写下的东西。省掉一条专为清屏
-                    //    而存在的 pass（一页一条），而"清哪一格"这件事一次都没少。
-                    for (index, caster) in patch.casters.iter().enumerate() {
+                    for caster in patch.casters.iter() {
                         // 这一页的那一笔：材质名照**这一面**那一份实例（它带着"哪一面"），
                         // 几何是那个物体自己（`draws_of` 里 geometry == material == 物体 id）。
                         let Some(draw) = draws.iter().find(|draw| &draw.geometry == caster) else {
@@ -762,7 +756,22 @@ pub fn build(
                                 FACE_NAMES[face as usize], patch.page_x, patch.page_y, caster
                             ));
                         };
-                        let mut page = clear.clone();
+                        let mut page = PassSpec {
+                            kind: entry.kind.clone(),
+                            shader: shader.clone(),
+                            label: page_label(&face_label, patch.page_y, patch.page_x),
+                            entry: entry.entry.clone(),
+                            reads: entry.reads.clone(),
+                            writes: entry.writes.clone(),
+                            params: params.clone(),
+                            draws: Vec::new(),
+                            vertex_shader: vertex_shader.clone(),
+                            vertex_entry: vertex_entry.clone(),
+                            render: entry.render.clone(),
+                            depth_target: entry.depth_target.clone(),
+                            cube_face: Some(PassCubeFace { light, face, layer }),
+                            viewport: None,
+                        };
                         page.label = format!(
                             "{}_c{}",
                             page_label(&face_label, patch.page_y, patch.page_x),
@@ -798,10 +807,11 @@ pub fn build(
                                 allocation.lights[light as usize].pages_per_side,
                             )),
                         )]);
-                        if index > 0 {
-                            // 已经不是本页第一笔了：接着本页第一笔的深度，不清。
+                        if cleared {
+                            // 这一层已经清过了：接着前面几页写下的深度，不清。
                             page.render = load_state(&page.render);
                         }
+                        cleared = true;
                         passes.push(page);
                     }
                 }
