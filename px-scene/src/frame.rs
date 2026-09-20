@@ -785,11 +785,17 @@ pub fn build(
                             //    参数**（`viewport` + `params`），与材质无关。
                             material: draw.material.clone(),
                         }];
+                        // ⚠⚠ **viewport 是 atlas 里的矩形，不是虚拟格子里的**（§本轮）。
+                        //    这两套网格从这一轮起**不再同值**：虚拟格子随灯距变细
+                        //    （精度要求的实现），而 atlas 的页格按**分出去的页数**算。
+                        //    拿虚拟格子的 `window` 当 viewport，页号稍大就超出设备的
+                        //    `max_texture_dimension_2d`（实测：`y = 30464` 当场被 wgpu 拒）。
+                        //    `window` 仍然留给 `view_page`（那个是按**虚拟**格子算的面内矩形）。
                         page.viewport = Some([
-                            window[0] as f32,
-                            window[1] as f32,
-                            (window[2] - window[0]) as f32,
-                            (window[3] - window[1]) as f32,
+                            patch.atlas_x as f32,
+                            patch.atlas_y as f32,
+                            crate::vshadow::PAGE_SIZE as f32,
+                            crate::vshadow::PAGE_SIZE as f32,
                         ]);
                         // 这一页在**面 NDC** 里的矩形：`(中心 x, 中心 y, 半宽, 半高)`，
                         // 四个数都在 `[-1, 1]`。

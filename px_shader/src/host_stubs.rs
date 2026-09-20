@@ -208,7 +208,12 @@ fn px_shadow_page_slot(light_id: u32, face: u32, page_x: u32, page_y: u32) -> i3
 \x20   let head = px_shadow_pages[px_shadow_light_offsets[light_id]];\n\
 \x20   let pages_per_side = head >> 16u;\n\
 \x20   if (page_x >= pages_per_side || page_y >= pages_per_side) { return -1; }\n\
-\x20   let words_per_row = px_shadow_pages[px_shadow_light_offsets[light_id] + 1u];\n\
+\x20   // ⚠ 两套网格，**分开读**（§本轮）：`pages_per_side` 是**虚拟**格子（精度要求定的、
+\x20   //    随灯距变细），而槽位解码要的是**物理 atlas** 的页格边长（分出去的页数定的）。
+\x20   //    混用 ⇒ 格子一变细 atlas 就爆（5× 那一档要 6.4 GB）。
+\x20   let packed = px_shadow_pages[px_shadow_light_offsets[light_id] + 1u];\n\
+\x20   let words_per_row = packed & 0xFFFFu;\n\
+\x20   let atlas_pages = packed >> 16u;\n\
 \x20   let face_words = px_shadow_pages[px_shadow_light_offsets[light_id] + 2u];\n\
 \x20   let row_words = 1u + words_per_row;\n\
 \x20   let base = px_shadow_light_offsets[light_id] + 3u\n\
@@ -244,6 +249,9 @@ fn px_sample_shadow_page(\n\
 ) -> f32 {\n\
 \x20   let head = px_shadow_pages[px_shadow_light_offsets[light_id]];\n\
 \x20   let pages_per_side = head >> 16u;\n\
+\x20   // ⚠ **物理 atlas 的页格边长**（槽位解码用它 —— 行内压缩出来的槽位是按它折行的）。\n\
+\x20   //    与 `pages_per_side`（虚拟格子）**是两个数**，见 `px_shadow_page_slot` 那段。\n\
+\x20   let atlas_pages = px_shadow_pages[px_shadow_light_offsets[light_id] + 1u] >> 16u;\n\
 \x20   // 面内 texel → 虚拟页格 + 页内余数。**与烘图侧 `page_block_origin` 同一套换算**\n\
 \x20   // （那边也是先 `face_texel` 再折成页格），否则页会整体错开若干格。\n\
 \x20   let page_f = texel_in_face / f32(PX_PAGE_SIZE);\n\
@@ -254,9 +262,9 @@ fn px_sample_shadow_page(\n\
 \x20   let slot_u = u32(slot);\n\
 \x20   let local = texel_in_face - vec2<f32>(f32(page_x), f32(page_y)) * f32(PX_PAGE_SIZE);\n\
 \x20   let texel = vec2<u32>(\n\
-\x20       (slot_u % pages_per_side) * PX_PAGE_SIZE\n\
+\x20       (slot_u % atlas_pages) * PX_PAGE_SIZE\n\
 \x20           + u32(clamp(local.x, 0.0, f32(PX_PAGE_SIZE) - 1.0)),\n\
-\x20       (slot_u / pages_per_side) * PX_PAGE_SIZE\n\
+\x20       (slot_u / atlas_pages) * PX_PAGE_SIZE\n\
 \x20           + u32(clamp(local.y, 0.0, f32(PX_PAGE_SIZE) - 1.0)),\n\
 \x20   );\n\
 \x20   let stored = textureLoad(point_shadow_textures, texel, i32(light_id * PX_CUBE_FACES + face), 0);\n\

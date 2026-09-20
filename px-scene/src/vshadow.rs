@@ -68,7 +68,7 @@ pub const CUBE_FACES: u32 = 6;
 ///
 /// ```text
 ///   [0] virtual_size（低 16 位）| pages_per_side（高 16 位）
-///   [1] words_per_row
+///   [1] 低 16 位 words_per_row｜高 16 位 **物理 atlas 的页格边长**
 ///   [2] 每一面那一段的字数（= rows × (1 + words_per_row)）
 ///   [3..] 面 0 的行段（每行：基址 1 字 + 掩码 words_per_row 字），接着面 1 ……
 /// ```
@@ -216,6 +216,15 @@ fn atlas_side_for(pages_per_side: u32) -> u32 {
     let mut side = 1_u32;
     while side < pages_per_side {
         side *= 2;
+    }
+    side
+}
+
+/// 装得下 `pages` 页的方形网格边长（向上取整），**不**取 2 的幂。
+fn ceil_sqrt(pages: u32) -> u32 {
+    let mut side = 1_u32;
+    while side.saturating_mul(side) < pages {
+        side += 1;
     }
     side
 }
@@ -408,7 +417,28 @@ pub fn allocate(lights: &[Vec<Caster>]) -> Result<Allocation, Overflow> {
             }
         }
         wanted.sort_by_key(|(face, y, x, _)| (*face, *y, *x));
-        let atlas_pages = atlas_side_for(pages_per_side);
+
+        // ---- 物理 atlas 的页格边长：**按分出去的页数**算，与虚拟格子脱钩 ----
+        //
+        // ⚠⚠ 这一条是"格子随灯距变细"落地时**必须**一起改的那一半（§本轮）。
+        //    从前 `atlas_pages = atlas_side_for(pages_per_side)` —— atlas 的页格边长
+        //    直接抄虚拟格子。而虚拟格子现在随 `d × ρ` 变细（那是精度要求的实现），
+        //    于是 atlas 跟着炸：5× 那一档要 16384² × 6 层 × 4B = **6.4 GB**。
+        //
+        //    两者本来是**两种网格**，只是从前同值：
+        //      · 虚拟格子（`pages_per_side`）：精度要求定的，细；
+        //      · 物理 atlas（`atlas_pages`）：**分出去多少页**定的，稀疏那一半。
+        //    槽位解码（`slot % atlas_pages`）用后者，页索引用前者。
+        //    两者混用 ⇒ "格子一变细 atlas 就爆"。
+        let mut per_face = [0_u32; CUBE_FACES as usize];
+        for (face, _, _, _) in &wanted {
+            per_face[*face as usize] += 1;
+        }
+        let max_per_face = per_face.iter().copied().max().unwrap_or(1).max(1);
+        // ⚠ 要的是**边长**不是页数：一层里塞 `max_per_face` 页，边长至少 `ceil(√页数)`。
+        //    直接拿页数当边长会浪费一个平方（81 页 ⇒ 边长 128 ⇒ 16384² 的 atlas，
+        //    而 9 页边长就够）。
+        let atlas_pages = atlas_side_for(ceil_sqrt(max_per_face));
         atlas_pages_side = atlas_pages_side.max(atlas_pages);
 
         // ---- 装箱：每面一条扫描线，槽位在面内连续 ----
@@ -416,15 +446,18 @@ pub fn allocate(lights: &[Vec<Caster>]) -> Result<Allocation, Overflow> {
         let mut table = vec![0_u32; table_words_per_light(pages_per_side) as usize];
         let virtual_size = pages_per_side * PAGE_SIZE;
         table[0] = virtual_size | (pages_per_side << 16);
-        table[1] = pages_per_side.div_ceil(32);
-        table[2] = pages_per_side * (1 + table[1]);
+        let words_per_row = pages_per_side.div_ceil(32);
+        // ⚠ 低 16 位 = 掩码字数（≤ 8），**高 16 位 = 物理 atlas 的页格边长**。
+        //    槽位解码要后者、页索引要前者，两个数都得让采样侧拿到。
+        table[1] = words_per_row | (atlas_pages << 16);
+        table[2] = pages_per_side * (1 + words_per_row);
 
         let mut patches: Vec<PagePatch> = Vec::with_capacity(wanted.len());
         let mut slot_in_face = 0_u32;
         let mut current_face = u32::MAX;
         let mut row = u32::MAX;
         let mut row_first_slot = 0_u32;
-        let mut words = vec![0_u32; table[1] as usize];
+        let mut words = vec![0_u32; words_per_row as usize];
 
         for (face, page_y, page_x, ids) in &wanted {
             if *face != current_face {
@@ -442,7 +475,7 @@ pub fn allocate(lights: &[Vec<Caster>]) -> Result<Allocation, Overflow> {
                 slot_in_face = 0;
                 row = *page_y;
                 row_first_slot = 0;
-                words = vec![0_u32; table[1] as usize];
+                words = vec![0_u32; words_per_row as usize];
             } else if *page_y != row {
                 flush_row(
                     &mut table,
@@ -454,7 +487,7 @@ pub fn allocate(lights: &[Vec<Caster>]) -> Result<Allocation, Overflow> {
                 );
                 row = *page_y;
                 row_first_slot = slot_in_face;
-                words = vec![0_u32; table[1] as usize];
+                words = vec![0_u32; words_per_row as usize];
             }
             words[(page_x / 32) as usize] |= 1_u32 << (page_x % 32);
             let mut casters_here: Vec<String> = ids.split('|').map(str::to_string).collect();
