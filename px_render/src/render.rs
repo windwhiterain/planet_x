@@ -238,13 +238,21 @@ const DEPTH_RESOURCES: [&str; 2] = ["scene_depth", "scene_depth_sample"];
 /// 那几个是同一类：**渲染器的形状**（哪一格绑哪张图）本来就住在宿主这一侧（§104 第 1 条）。
 /// 文档那边「有没有这份资源」是**内容/形状的合成结果**（一盏投影的点光都没有时它就不烘），
 /// 所以宿主必须自己判"有没有"，而不是假定它一定在。
-/// 影子 atlas 那个资源的名字。
+/// **采样侧**读的那份影子 atlas 的名字（§本轮）。
 ///
-/// ⚠ §本轮它从 `point_shadow_textures`（每盏灯一张 cube）改成 **`point_shadow_atlas`**
-/// （每面一层、每面一支稀疏页）。**名字必须与 `art/frame/default.toml` 里那一份一致** ——
-/// 不一致的后果是这一档**悄悄退回兜底 atlas**：采样侧照常跑、出图照常出，只有影没了
-/// （而"没影"在成图上看起来就像"这一版还没做影子"）。
-const SHADOW_TEXTURE_RESOURCE: &str = "point_shadow_atlas";
+/// ⚠ 为什么采样读的不是 `point_shadow_atlas` 本身：页 pass 一边写它、一边在 group 0
+/// 第 2 格绑它 ⇒ wgpu 的 `DEPTH_STENCIL_WRITE` 独占用法**当场拒**（整帧跑不完，
+/// `In a pass parameter`）。所以帧图里多一条 `copy_shadow_atlas` 把它搬成这一份，
+/// 采样读快照 —— 与 `scene_depth_sample` 是同一颗雷、同一种收法
+/// （见 `art/frame/default.toml` 那一段）。
+///
+/// ⚠ **名字必须与帧图里那一份一致** —— 不一致的后果是这一档**悄悄退回兜底 atlas**：
+/// 采样侧照常跑、出图照常出，只有影没了（而"没影"看起来就像"这一版还没做影子"）。
+const SHADOW_TEXTURE_RESOURCE: &str = "point_shadow_atlas_sample";
+
+/// **写**的那张 atlas 的名字（页 pass 的深度附件）—— 两者是同一份内容的两个视图。
+#[allow(dead_code)]
+const SHADOW_ATLAS_WRITTEN: &str = "point_shadow_atlas";
 
 /// 一份画好的图：紧凑 RGBA8 + 这一帧的审计文本。
 ///
@@ -1079,7 +1087,7 @@ impl Session {
                 pass.render.name()
             ));
         }
-        let executed_plan = all_passes(&plan, &mut audit)?;
+        let mut executed_plan = all_passes(&plan, &mut audit)?;
 
         // ---- ⚠ 保留态的**前提**：池子跨帧活着，而池子里的纹理带着上一帧的内容 ----
         //
@@ -1141,6 +1149,33 @@ impl Session {
         //    **仍然声明**了 group 0 的 binding 2 ⇒ 管线布局必须有这一格、必须绑得上。
         //    那一档绑一份 1×1×6 全 0 的兜底图，并把"绑的是兜底"**打印出来** ——
         //    没有投影的灯时没有任何一条路会去采它（`surface.wgsl` 那个 `shadow_maps` 位）。
+        // ⚠ **诊断**：把"要写的那张" atlas 也交给宿主建（`seed` 进池子）—— 这样探针
+        //    读到的就是**页 pass 真正的附件**，而不是它的拷贝。影"一条都没画进去"时，
+        //    "拷贝坏了"与"压根没画"必须分开，而只有拿到写的那一张才能分。
+        let written_atlas = plan.resource(SHADOW_ATLAS_WRITTEN).and_then(|resource| {
+            let (width, height) = resource.size.resolve(target.0, target.1);
+            let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(resource.name.as_str()),
+                size: wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: resource.layers,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Depth32Float,
+                usage: px_pass::texture_usage(resource) | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            });
+            match executor.seed(resource, width, height, texture.clone()) {
+                Ok(()) => Some(texture),
+                Err(err) => {
+                    audit.push(format!("⚠ 写的那张 atlas 没能 seed 进池子：{err}"));
+                    None
+                }
+            }
+        });
         let shadow_sampler = group0::point_shadow_sampler(&gpu.device);
         let (shadow_texture, shadow_view, shadow_note) = match plan
             .resource(SHADOW_TEXTURE_RESOURCE)
@@ -1166,14 +1201,22 @@ impl Session {
                     view_formats: &[],
                 });
                 // ⚠ 和深度预通道那两张一样：**一张纹理**，`seed` 进池子 —— 六条影子 pass 的
-                //    附件（按 `PassPlan::layer` 建的单层视图）与 group 0 第 2 格（整份 cube 的
-                //    `CubeArray` 视图）必须是**同一张纹理**的两个视图。各建一张就是静默错像素。
+                //    附件（按 `PassPlan::layer` 建的单层视图）与 group 0 第 2 格（整份的
+                //    `D2Array` 视图）必须是**同一张纹理**的两个视图。各建一张就是静默错像素。
                 executor.seed(resource, cube_width, cube_height, texture.clone())?;
-                // 整份 cube 的视图：`CubeArray` + `DepthOnly`（`light.rs:1416-1444` 那一份）。
+                // 整份 atlas 的视图：**`D2Array` + `DepthOnly`**（§本轮从 `CubeArray` 换过来）。
+                //
+                // ⚠ 这一格从前是 `CubeArray`（每盏灯一个 cube），现在每面一层 ⇒ 采样侧是
+                //    `texture_depth_2d_array` + 手动 `textureLoad`（页要按 texel 取，
+                //    比较采样器那一路取不到"某一页里的某一格"）。
+                //    **两处写法必须同时改**：只改渲染器这一处，`create_bind_group` 会当场拒
+                //    （`binding 2 expects dimension = D2Array, but given a view with
+                //    dimension = CubeArray`）—— 那个错还算近；而只改 shader 那一处就是
+                //    "绑上了、采出来全 0"，一路静默到成图上只剩"有点暗"。
                 let view = texture.create_view(&wgpu::TextureViewDescriptor {
-                    label: Some("点光 cube 影图（CubeArray/DepthOnly）"),
+                    label: Some("点光虚拟影图 atlas（D2Array/DepthOnly）"),
                     format: None,
-                    dimension: Some(wgpu::TextureViewDimension::CubeArray),
+                    dimension: Some(wgpu::TextureViewDimension::D2Array),
                     usage: None,
                     aspect: wgpu::TextureAspect::DepthOnly,
                     base_mip_level: 0,
@@ -1182,14 +1225,13 @@ impl Session {
                     array_layer_count: Some(resource.layers),
                 });
                 let note = format!(
-                    "文档烘的那份（{cube_width}×{cube_height} × {} 层 = {} 个 cube，每面一层，层号 = 灯×6 + 面）",
+                    "文档烘的那份（{cube_width}×{cube_height} × {} 层，每面一层，层号 = 灯×6 + 面）",
                     resource.layers,
-                    resource.layers / group0::SHADOW_CUBE_FACES
                 );
                 audit.push(format!(
                     "  ⚠ 池子里的 '{SHADOW_TEXTURE_RESOURCE}' 现在就是**宿主建的**这一张\
-                 （{cube_width}×{cube_height} × {} 层）：六面各挂它的**单层**视图，\
-                 group 0 第 2 格挂整份的 CubeArray 视图",
+                 （{cube_width}×{cube_height} × {} 层）：每一页各挂它的**单层**视图 + 一格 \
+                 viewport，group 0 第 2 格挂整份的 **D2Array** 视图",
                     resource.layers
                 ));
                 (Some(texture), view, note)
@@ -1217,7 +1259,10 @@ impl Session {
         //    "深度比较方向反了" —— 在成图上都表现为"有点暗"，而均值分不出来。读回几个数
         //    立刻分辨：`0.0` = 清屏值（没画进去东西或没查到页），非 0 = 那一笔真写进去了。
         if std::env::var_os("PX_AUDIT_SHADOW").is_some() {
-            let texture = shadow_texture.as_ref().expect("有投影的灯才有 atlas");
+            let texture = written_atlas
+                .as_ref()
+                .or(shadow_texture.as_ref())
+                .expect("有投影的灯才有 atlas");
             let layers = scene.shadow.as_ref().map(|plan| plan.layers).unwrap_or(0);
             let mut lines = Vec::new();
             for layer in 0..layers.min(6) {
@@ -1523,7 +1568,7 @@ impl Session {
             let _ = &face_camera;
             let layer = light * group0::SHADOW_CUBE_FACES + face;
             audit.push(format!(
-            "  面 (灯 {light}, 面 {face}, 层 {layer})：world_from_view 的平移 ({:.6}, {:.6}, {:.6})｜\
+            "  面 (灯 {light}, 面 {face}, 层 {layer})：world_from_view 的平移 ({:.6}, {:.6}, {:.6})｜
              clip_from_world 的 w 列 ({:.9e}, {:.9e}, {:.9e}, {:.9e})",
             face_camera.world_from_view.w_axis.x,
             face_camera.world_from_view.w_axis.y,
@@ -1797,6 +1842,69 @@ impl Session {
             })
             .collect();
         // 相机那一份 `PassView` 是**每格一份**的（见下面逐格那一段），所以这里不建。
+        //
+        // ---- 页 pass 的视图：把它填进那些 pass 的参数块（§本轮）----
+        //
+        // ⚠ **这一步不能省**，而它省掉的症状骗人：烘图侧在页 pass 的参数里只写了
+        //    `view_page`（那一页在面 NDC 里的矩形），`view_proj` 那 64 字节是**占位 0**
+        //    （"位姿可烘、投影随 aspect 变" ⇒ 矩阵只能在运行时算，见 `plan::page_params_of`）。
+        //    而执行器是拿 `PassPlan::params` **直接当 uniform** 的，不会替谁补那 64 字节 ——
+        //    于是每个顶点都被乘成全 0、三角形退化成一条线、**一个 texel 都画不进去**，
+        //    而整帧跑得完、成图照出、只是影是空的（实测：atlas 六层全 0）。
+        {
+            let mut filled = 0_usize;
+            for pass in executed_plan.passes.iter_mut() {
+                if pass.params.len() < 64 || pass.kind != px_pass::PassKind::Geometry {
+                    continue;
+                }
+                let Some(layer) = pass.layer else { continue };
+                // `Face` 只带 (灯, 面)；层号就是那条算式，与 `plan.rs::layer_of` 同一份。
+                let Some(face) = faces
+                    .iter()
+                    .find(|face| face.light * group0::SHADOW_CUBE_FACES + face.face == layer)
+                else {
+                    continue;
+                };
+                pass.params[0..64].copy_from_slice(&view_bytes(&face.camera));
+                // ⚠ **诊断开关**（`PX_SHADOW_FULLPAGE=1`）：把 `view_page` 换成恒等矩形
+                //    `(0,0,1,1)` ⇒ 这一条 pass 画的是**整面**（与 `viewport` 无关地铺满）。
+                //    用它把"页参数+viewport 这一对配错了"与"这一笔画本身什么都没产出"分开：
+                //    前者在恒等矩形下会立刻有内容，后者仍然全 0。
+                if std::env::var_os("PX_SHADOW_FULLPAGE").is_some() {
+                    let rect = [0.0_f32, 0.0, 1.0, 1.0];
+                    for (index, number) in rect.iter().enumerate() {
+                        let at = crate::plan::VIEW_PAGE_OFFSET + index * 4;
+                        pass.params[at..at + 4].copy_from_slice(&number.to_le_bytes());
+                    }
+                }
+                filled += 1;
+            }
+            audit.push(format!(
+                "页 pass 的视图：{filled} 条参数块的 `view_proj` 由宿主按 `cube_face` 那一面填上\
+                 （烘图侧只写了 `view_page`，矩阵那 64 字节是占位 0）"
+            ));
+            // ⚠ **诊断**：把前三条影子页 pass 的计划原样打出来。影"一条都没画进去"时，
+            //    要分辨的是"这一笔没被执行器当成几何 pass" / "没有 viewport" /
+            //    "draw 是空的" / "附件不是那张 atlas" —— 这四个在成图上是同一件事。
+            for pass in executed_plan
+                .passes
+                .iter()
+                .filter(|pass| pass.label.starts_with("point_shadow") && !pass.draws.is_empty())
+                .take(2)
+            {
+                let draw = &pass.draws[0];
+                audit.push(format!(
+                    "  · '{}'｜viewport {:?}｜参数 {} B｜几何 '{}'｜材质 '{}'｜
+                     {:?}",
+                    pass.label,
+                    pass.viewport,
+                    pass.params.len(),
+                    draw.geometry,
+                    draw.material,
+                    pass.render,
+                ));
+            }
+        }
         audit.push(format!(
         "组 1（§142 的两类参数）：**super** = 每视图一份 `PassView`（{} 份 × 64 B = {} B：\
          相机 **每格一份**（{} 格）+ 影子面 {}）｜**instance** = 全帧**一份**实例数组\
@@ -1879,7 +1987,7 @@ impl Session {
                 },
             )?;
             audit.push(format!(
-                "帧自有材质 '{}'：entry {}｜组装后 {} 字节（内容键 {:016x}）｜参数 {} 字节｜\
+                "帧自有材质 '{}'：entry {}｜组装后 {} 字节（内容键 {:016x}）｜参数 {} 字节｜
              声明的贴图格 {:?}｜绑上的格 {:?}｜走兜底白图的格 {:?}（**与内容材质同一条 \
              12 格超集的路**：帧材质的「自有」是兑现者自有，不是契约自有）",
                 loaded.name,

@@ -52,7 +52,28 @@ name = "point_shadow_atlas"
 format = "depth32float"
 size = "4096x4096"
 layers = "shadow_faces"
-usage = ["render_attachment", "texture_binding"]
+usage = ["render_attachment", "texture_binding", "copy_src"]
+
+# ---- 影子 atlas 的**快照**（§本轮）：给"既要写它、又要采它"的两方各一份 ----
+#
+# ⚠ 为什么必须有这一步（与下面 `scene_depth_sample` 同一条理由，而且是**同一颗雷**）：
+# wgpu 不许同一条 pass 里把一张图既当（写的）深度附件、又当资源绑进绑定组
+# （`DEPTH_STENCIL_WRITE` 是独占用法）。影子的页 pass 一边往 atlas 里写、一边又要
+# 在 group 0 第 2 格绑它 ⇒ 整帧在 `In a pass parameter` 处当场拒：
+#
+#     Attempted to use Texture with 'point_shadow_atlas' label … with conflicting usages.
+#     Current usage TextureUses(RESOURCE) and new usage TextureUses(DEPTH_STENCIL_WRITE)
+#
+# ⚠ 这一条**必须**在页 pass 之后、主 pass 之前（`before` 的次序就是执行次序）。
+# ⚠ 代价说清楚：整份 atlas 1024×1024×6 × 4 B = **24 MB 一帧**的搬运。这是"先要正确"的
+#    选择；真嫌贵时的收法是"让影子 pass 的 group 0 不绑 atlas"（那一档根本不采样它），
+#    而那需要"同一份材质、两种组 0"那条路 —— 留作下一轮的候选，不在这一笔里做。
+[[resources]]
+name = "point_shadow_atlas_sample"
+format = "depth32float"
+size = "4096x4096"
+layers = "shadow_faces"
+usage = ["texture_binding", "copy_dst"]
 
 # ---- 预通道深度的**快照**（§131）：给"既要拿它做深度测试、又要采样它"的那几方各一份 ----
 [[resources]]
@@ -102,6 +123,14 @@ writes = []
 depth_target = "point_shadow_atlas"
 shadow_faces = 6
 render = "color=none|depth=clear(0)|depth_write=true|compare=greater_equal|winding=ccw"
+
+[[before]]
+label = "copy_shadow_atlas"
+kind = "copy"
+reads = ["point_shadow_atlas"]
+writes = ["point_shadow_atlas_sample"]
+# ⚠ 与 `copy_depth` 同一档状态：copy 只认"没有附件"这一种。
+render = "color=none|depth=none|depth_write=true|compare=greater_equal|winding=ccw"
 
 # ---- 拷贝：把预通道的深度**搬**一份快照出来（§131）----
 #

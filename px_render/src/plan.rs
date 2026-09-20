@@ -202,10 +202,14 @@ pub fn build(spec: &SceneSpec, pcg_root: &Path) -> Result<Plan, String> {
             layer: layer_of(pass, &label)?,
             vertex_shader: pass.vertex_shader.clone(),
             vertex_entry: pass.vertex_entry.clone(),
-            // ⚠ 文档不给它：虚拟影图的一页落在 atlas 的哪一块是**宿主侧**算的
-            //    （页数由 `shadow_density` 与包围球决定，见 `render::vshadow_of`）——
-            //    所以这一格在翻译这一步是空的，宿主在建 pass 计划时逐条填。
-            viewport: None,
+            // **这一页落在 atlas 的哪一块**（§本轮）：文档给的就是它 —— 页是烘图侧分配的
+            // （`px-scene::vshadow`），所以"落在哪一格"也在那边算好。
+            //
+            // ⚠ 从前这里写死 `None`（那时页不在文档里），而 `None` 的后果不是"少设一次
+            //    viewport"：一页一条 pass 时，不设 viewport 就意味着**每一页都往整层画**，
+            //    49 页互相覆盖 ⇒ 读回那一层时看起来像"某一页画过"，而**页表说的那些格
+            //    一个都不对**。所以这一栏与 `params.view_page` 必须成对出现（见下面 `params`）。
+            viewport: pass.viewport,
             // ⚠ 偏移由**宿主**在建参数缓冲时定（一帧一份大缓冲，每笔指到自己的那一份）。
             params_offset: 0,
         });
