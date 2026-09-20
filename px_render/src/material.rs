@@ -443,10 +443,18 @@ pub fn pipeline_layout(
     device: &wgpu::Device,
     group_zero: &wgpu::BindGroupLayout,
     material: &wgpu::BindGroupLayout,
+    stage: &wgpu::BindGroupLayout,
 ) -> wgpu::PipelineLayout {
+    // `stage` = **第 1 组**（`PassView` / 页参数 + 实例数组）那一份布局。
+    //
+    // ⚠ 它必须**是**那一份：顶点阶段声明了 group(1)，而管线布局里的第 1 组要是 `None`，
+    //    wgpu 就在管线校验处停下（`Error matching ShaderStages(FRAGMENT) shader
+    //    requirements against the pipeline`）—— 而这个错误的措辞说的是**片元**阶段，
+    //    离病因（缺的是第 1 组）很远，所以这里留一句。
     let mut groups: Vec<Option<&wgpu::BindGroupLayout>> =
         vec![None; MATERIAL_BIND_GROUP as usize + 1];
     groups[0] = Some(group_zero);
+    groups[1] = Some(stage);
     groups[MATERIAL_BIND_GROUP as usize] = Some(material);
     device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("material pipeline layout"),

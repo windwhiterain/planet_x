@@ -62,6 +62,39 @@ pub fn layout() -> Layout {
     }
 }
 
+/// 几何 pass 的参数块布局：`view_proj`（64 字节）+ `view_page`（16 字节），一共 80，
+/// 补齐到 96（`PARAMS_ALIGN` 的整数倍）。
+///
+/// ⚠ **一份布局，两处读**：`art/frame/vertex_mesh.wgsl` 里那个 `struct` 必须逐格对上
+/// （它声明的是 `PassView` 那一格 —— 同一组、同一格、同一份字节）。改这里就要改那边，
+/// 而错开的症状是"影子贴到别的面/别的页上"（画面上只是歪一点）。
+pub const GEOMETRY_PARAMS_SIZE: usize = 96;
+/// `view_page` 在参数块里的字节偏移。
+pub const VIEW_PAGE_OFFSET: usize = 64;
+
+/// 文档里一条几何 pass 的参数 → 参数块字节（`view_proj` 留空，宿主填）。
+fn page_params_of(pass: &PassSpec, label: &str) -> Result<Vec<u8>, String> {
+    let mut bytes = vec![0_u8; GEOMETRY_PARAMS_SIZE];
+    if let Some(value) = pass.params.get("view_page") {
+        let px_protocol::scene::Value::Quad(rect) = value else {
+            return Err(format!(
+                "pass '{label}' 的参数 'view_page' 是 {}：这一页在面 NDC 里的矩形是四个数",
+                match value {
+                    px_protocol::scene::Value::Num(_) => "一个数",
+                    px_protocol::scene::Value::Text(_) => "一段文本",
+                    px_protocol::scene::Value::Triple(_) => "三个数",
+                    px_protocol::scene::Value::Quad(_) => "四个数",
+                }
+            ));
+        };
+        for (index, number) in rect.iter().enumerate() {
+            let at = VIEW_PAGE_OFFSET + index * 4;
+            bytes[at..at + 4].copy_from_slice(&number.to_le_bytes());
+        }
+    }
+    Ok(bytes)
+}
+
 /// 一条 pass 的**全屏那一半**：组装后的 WGSL + 打包好的参数 + reads 落在哪几格。
 ///
 /// 为什么是组装后的**全文**而不是成员名：`px_pass` 把 `PassPlan::shader` 直接交给
@@ -131,10 +164,21 @@ pub fn build(spec: &SceneSpec, pcg_root: &Path) -> Result<Plan, String> {
                 .unwrap_or_default(),
             reads: pass.reads.clone(),
             writes: pass.writes.clone(),
-            params: fullscreen
-                .as_ref()
-                .map(|screen| screen.params.clone())
-                .unwrap_or_default(),
+            params: match (&fullscreen, kind) {
+                (Some(screen), _) => screen.params.clone(),
+                // ⚠ **几何 pass 的参数**（§本轮）：`view_proj` 那 64 字节由**宿主**在出图时
+                //    填（相机是运行时参数：位姿可烘、投影随 aspect 变，所以矩阵只能在运行时
+                //    算）。文档里带着的 `view_page`（页在面 NDC 里的矩形）**跟在它后面**，
+                //    顶点阶段用把面的裁剪坐标映射进那一页。
+                //
+                //    这里给的是**占位**（全零），长度与 `PageParams` 的布局一致 ——
+                //    "声明了却没打包"与"打包了却没人要"都是说不清的话，而这里是
+                //    "宿主一定会填"，所以先占住长度。
+                (None, PassKind::Geometry) if !pass.params.is_empty() => {
+                    page_params_of(pass, &label)?
+                }
+                (None, _) => Vec::new(),
+            },
             slots: fullscreen
                 .as_ref()
                 .map(|screen| screen.slots.clone())
@@ -162,6 +206,8 @@ pub fn build(spec: &SceneSpec, pcg_root: &Path) -> Result<Plan, String> {
             //    （页数由 `shadow_density` 与包围球决定，见 `render::vshadow_of`）——
             //    所以这一格在翻译这一步是空的，宿主在建 pass 计划时逐条填。
             viewport: None,
+            // ⚠ 偏移由**宿主**在建参数缓冲时定（一帧一份大缓冲，每笔指到自己的那一份）。
+            params_offset: 0,
         });
     }
 

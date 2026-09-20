@@ -888,6 +888,15 @@ pub struct PassPlan {
     ///
     /// ⚠ `None` = 一个 `set_viewport` 都不发，行为与没有这一格时**逐字节相同**。
     pub viewport: Option<[f32; 4]>,
+    /// 几何 pass 的参数块**在这一帧那份缓冲里的字节偏移**（动态偏移）。
+    ///
+    /// ⚠ 为什么是偏移而不是"一份缓冲"：页有几百个，而"一页一份 `BindGroup`"就是几百个
+    /// 对象；一批数据 + 每笔一个偏移才是那个形状付得起的做法。布局那一格必须声明
+    /// `has_dynamic_offset`（宿主建的布局说了算），而偏移要是设备
+    /// `min_uniform_buffer_offset_alignment` 的整数倍。
+    ///
+    /// 0 = 不带偏移（`&[]`），行为与没有这一格时**逐字节相同**。
+    pub params_offset: u32,
 }
 
 impl PassPlan {
@@ -2228,7 +2237,9 @@ impl Executor {
                 visibility: wgpu::ShaderStages::VERTEX,
                 ty: BindingType::Buffer {
                     ty: BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
+                    // ⚠ 动态偏移：一帧一份大缓冲，每笔 draw 指到自己的那一份
+                    //    （页有几百个，一页一份 `BindGroup` 是这个形状付不起的）。
+                    has_dynamic_offset: true,
                     min_binding_size: None,
                 },
                 count: None,
@@ -3029,7 +3040,9 @@ impl Executor {
                 render_pass.draw(0..3, 0..1);
             } else {
                 if let Some(group) = &geometry_params {
-                    render_pass.set_bind_group(layout.geometry_group, group, &[]);
+                    // ⚠ 偏移 0 与"不带偏移"在 wgpu 里**不是同一件事**：布局声明了动态偏移
+                    //    之后必须给一个数（给空切片是"少给了一个动态偏移"，当场校验失败）。
+                    render_pass.set_bind_group(layout.geometry_group, group, &[pass.params_offset]);
                 }
                 for (pipeline, geometry, material) in &draws {
                     render_pass.set_pipeline(pipeline);

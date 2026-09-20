@@ -1587,7 +1587,12 @@ impl Session {
                         visibility: wgpu::ShaderStages::VERTEX,
                         ty: wgpu::BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Uniform,
-                            has_dynamic_offset: false,
+                            // ⚠ **动态偏移**（§本轮）：这一格现在是"这一条 pass 的视图"，
+                            //    而虚拟影图的**每一页**都有自己的视图。一帧一份大缓冲 +
+                            //    每笔一个偏移，才是"几百页"这个形状付得起的做法。
+                            //    执行器那边给的是 `PassPlan::params_offset`（同一份缓冲里的
+                            //    字节偏移）—— 两处指的是同一份缓冲，这里的布局必须声明它。
+                            has_dynamic_offset: true,
                             min_binding_size: None,
                         },
                         count: None,
