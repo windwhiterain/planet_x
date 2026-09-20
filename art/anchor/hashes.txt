@@ -65,12 +65,12 @@ sheet                  = A94F9F2D1437C06C   3159948 B   3840x1920
 #   同一轮产物仍**逐字节 28/28**（planet 6/6、desert 8/8、clouds 14/14）、**J1 orbit-bare 一位没动**。
 #
 # 六格（冻结态连跑两次同值）：
-# orbit-bare             = C74E6EBD82D34E30   （4126 B）
-# orbit-bare-nolight     = 06A55F1B0CBF23CE   （4136 B）
-# orbit-bare-shadow      = 87CEBDA6CF86B89A   （4139 B）
-# orbit-proxy-fine-bound = 331AA36A8D8F346F   （5749 B）
-# orbit-rings            = E0B281C0F4A7AD41   （4890 B）
-# orbit-soft             = A29E991D16D5F45E   （5720 B）
+# orbit-bare             = 1845BAEE444D1DB3   （4123 B）
+# orbit-bare-nolight     = 56594EDAC57A9313   （4137 B）
+# orbit-bare-shadow      = EA74796EF7CDE686   （4137 B）
+# orbit-proxy-fine-bound = 59211AC50371EF6F   （5750 B）
+# orbit-rings            = 3C603527DEDD34A5   （4891 B）
+# orbit-soft             = EBF570334D895524   （5720 B）
 #
 # ⚠ **第五次重登记**（field 域泛型实例那一轮）。根因与第四次不同：这一轮把 field 的算法
 #   从 `px_field_op`（dylib）拆进新的 `px_field_alg`（rlib，泛型实例库要链它）⇒
@@ -106,6 +106,15 @@ sheet                  = A94F9F2D1437C06C   3159948 B   3840x1920
 #   三份 `.pxart` 的 sha256 前后相同）⇒ 这正是"**键 = 身份 + 内容**"：身份换了要重算，
 #   内容没换就不会变。⇒ 这一条也说明"改实现库 ⇒ §三 全变"**不等于**"画面会变"。
 #   判据：**J1 六张逐字节 6/6**（这一轮重新出过图 —— §三 已经不能当像素判据了，见根因）。
+#
+# ⚠ **2026-09-20 第八次重登记**（本 worktree `planet-art`，持续优化第 4 轮：**盖章式打坑**）。
+#   根因：**`px_field_schema` 多了一个声明**（`field.stamps`）＋ **`px_field_op` 多了一个实现**
+#   （`ops/stamps.rs`，另给 `noise` 加了一扇 `cell_hash`）⇒ 场域那几个库的名册全变 ⇒
+#   **吃场算子的节点键全换**（连**实例 key** 也换：`px build` 那三条重编了一遍）。
+#   判据（同轮实测）：**旧四张图 30/30 节点内容逐字节不变**（与 `target/baseline/pre.json` 对账）、
+#   **J1 六张逐字节 6/6**（重出图）。⇒ 又一次"键 = 身份 + 内容"：身份换了要重算，内容没换就不会变。
+#   这一轮换来的东西：`field.stamps`（印章式打坑：幂律尺寸 + 年龄序挖掘式压盖 + 上游场当密度遮罩），
+#   月球的坑从"均匀的小凹点"变成"大小不一、互相压盖、月海处稀疏"。
 # ⚠ 更早七批（`2795F948…` … `D579241A…`）是**历史值**，留着是因为 §六 那一格要拿它们讲
 #   "换一份 checkout 的字节约定会当场全红"。**今天生效的是下面这六行。**
 #   ⚠ 行尾那一格也咬到本表：本 worktree 是**新 checkout**，`art/shaders/blit.wgsl` 这类
@@ -114,12 +123,12 @@ sheet                  = A94F9F2D1437C06C   3159948 B   3840x1920
 # ⚠ **纪律**：**先把源码冻住，再量 anchor**（这一轮我破了四次；`px_graph_schema` 与
 #   `px_fingerprint` 这种被所有实现库共享的源码，量完再动一行就当场全作废）。
 
-orbit-bare             = C74E6EBD82D34E30
-orbit-bare-nolight     = 06A55F1B0CBF23CE
-orbit-bare-shadow      = 87CEBDA6CF86B89A
-orbit-proxy-fine-bound = 331AA36A8D8F346F
-orbit-rings            = E0B281C0F4A7AD41
-orbit-soft             = A29E991D16D5F45E
+orbit-bare             = 1845BAEE444D1DB3
+orbit-bare-nolight     = 56594EDAC57A9313
+orbit-bare-shadow      = EA74796EF7CDE686
+orbit-proxy-fine-bound = 59211AC50371EF6F
+orbit-rings            = 3C603527DEDD34A5
+orbit-soft             = EBF570334D895524
 
 ## 四、J3 pass 表（判据图在 `art/passes/` 那七份配方上跑）
 

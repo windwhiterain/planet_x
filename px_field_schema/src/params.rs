@@ -262,3 +262,82 @@ impl Default for CratersParams {
     }
 }
 
+/// **盖章式打坑**（`field.stamps`）—— 与 `CratersParams` 同一个意图，换一套**摆法**。
+///
+/// ⚠ 与 `field.craters` 的差别（用户 2026-09-20 的口径："像印章一样打很多上去，按真实物理压盖"）：
+///   `craters` 是**元胞距离**：每格一个坑、同层半径是**常数**、同层不重叠 ⇒ 坑的大小与间距偏整齐。
+///   真实的撞击地貌是：**小坑极多、偶尔一个巨坑**（尺寸幂律）、**互相压盖**（年轻的坑挖掉老的坑缘，
+///   于是老坑只剩半个），而且**不是哪儿都一样密**（月海少坑、高地密坑）。
+///   这一支就是照这三件事来的 —— 三个机制各自对应下面三组参数：
+///   1. **摆法**：格点还是那个加速结构（每格至多一个印章），但每个印章的**半径与年龄都是随机的**；
+///   2. **压盖**：按**年龄序**从老到新依次"挖掘"—— 碗内把已有地形**清掉**再落碗底，
+///      坑缘是往上堆的；年轻的坑因此会把老坑的坑缘切掉（真实规则，不是"谁新谁覆盖"那么简单）；
+///   3. **分布**：半径按**幂律**抽（`power > 1` ⇒ 小坑多），密度受**上游场当遮罩**
+///      （`mask_lo..mask_hi` 之间线性映射成盖章概率）。
+#[derive(Debug, Clone, Serialize, Deserialize, px_derive::PxParams)]
+#[serde(default, deny_unknown_fields)]
+pub struct StampsParams {
+    /// 格子密度：球面档是 `direction × frequency`，平面档是 `(u × aspect, v) × frequency`。
+    /// ⚠ 它同时是**印章尺寸的尺子**：半径以格为单位（见 `max_radius`）。
+    pub frequency: f32,
+    /// 叠几"代"印章（每代换个格点尺度 ⇒ 巨坑与小坑并存；代与代之间也是"老的先打"）。
+    pub octaves: u32,
+    /// 每代格子密度的倍率（与 `fbm` 同口径）。
+    pub lacunarity: f32,
+    /// 每代的权重衰减（与 `fbm` 同口径）。
+    pub gain: f32,
+    /// 印章中心在它自己格子里的散布（`0` = 规则格点，`1` = 满格乱撒）。
+    pub jitter: f32,
+    pub seed: u32,
+    /// 平面档的横比（与 `fbm` 同口径；球面档不用）。
+    pub aspect: f32,
+    /// 球面档（按 `direction` 取格点）；`false` = 平面档。
+    pub spherical: bool,
+    /// 半径上限（格为单位）：`base_radius × (1 + 该代往上加)` 之后的封顶，也是幂律抽样的上界。
+    pub max_radius: f32,
+    /// 半径下限（格为单位）：幂律抽样的下界（再小就比一个纹素还细 ⇒ 只会变成噪点）。
+    pub min_radius: f32,
+    /// 幂律指数：`r = min + (max − min)·(1 − u)^power`（`u ∈ [0,1)` 由哈希给）。
+    /// `power = 1` = 均匀；`power > 1` = **小坑多、大坑少**（真实的撞击坑尺寸分布就是这个方向）。
+    pub power: f32,
+    /// 坑深 / 半径（真实简单坑的深径比约 1/5 ⇒ `0.2`）。
+    pub depth: f32,
+    /// 坑缘高 / 坑深（真实约 `0.2` 上下）。
+    pub height: f32,
+    /// 坑缘半宽 / 半径。
+    pub rim: f32,
+    /// 碗内的**清除强度**：`1` = 碗里旧地形全清（年轻坑挖到底）、`0` = 旧地形原样保留（只叠加）。
+    /// ⚠ 这一栏就是"按真实物理压盖"的那个旋钮：真实撞击是**挖掉**再堆坑缘，所以默认给得高。
+    pub excavate: f32,
+    /// 老化：越老的印章，坑越浅、缘越平（`0` = 不老化；`1` = 最老的只剩一半）。
+    pub degrade: f32,
+    /// 遮罩：上游值 ≤ `mask_lo` 的地方**完全不盖章**，≥ `mask_hi` 的地方**满概率**。
+    pub mask_lo: f32,
+    pub mask_hi: f32,
+}
+
+impl Default for StampsParams {
+    fn default() -> Self {
+        Self {
+            frequency: 6.0,
+            octaves: 3,
+            lacunarity: 2.4,
+            gain: 0.7,
+            jitter: 0.9,
+            seed: 31,
+            aspect: 2.0,
+            spherical: true,
+            max_radius: 0.55,
+            min_radius: 0.12,
+            power: 2.2,
+            depth: 0.22,
+            height: 0.22,
+            rim: 0.35,
+            excavate: 0.85,
+            degrade: 0.45,
+            mask_lo: 0.0,
+            mask_hi: 1.0,
+        }
+    }
+}
+

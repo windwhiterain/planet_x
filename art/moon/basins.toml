@@ -1,13 +1,21 @@
-# 第一层：大盆地。octaves = 1（这一层只要一种尺度），半径大、坑浅。
-frequency = 1.55
+# 第一层：大盆地／月海那一档（印章式）。少而大：频率低、幂律平（`power` 小 ⇒ 大坑占比高）、
+# 挖得深、老化强（老盆地早被磨平）。上游是 `terra`（低频 fbm）⇒ 它同时是**密度遮罩**：
+# 亮的区域盆地多、暗的区域几乎没有（月海那一带就是这样稀下来）。
+frequency = 2.60
 octaves = 1
-lacunarity = 2.15
-gain = 0.55
-jitter = 0.85
+lacunarity = 2.40
+gain = 0.70
+jitter = 0.92
 seed = 101
 aspect = 2.0
 spherical = true
-radius = 0.62
-rim = 0.16
-depth = 0.46
-height = 0.07
+max_radius = 0.60
+min_radius = 0.30
+power = 1.10
+depth = 0.30
+height = 0.35
+rim = 0.45
+excavate = 0.90
+degrade = 0.65
+mask_lo = 0.25
+mask_hi = 0.75

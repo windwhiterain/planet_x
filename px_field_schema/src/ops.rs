@@ -116,3 +116,13 @@ px_op! {
     ///   `px_field_alg::field_fn::FieldFn` 那一条）。
     Craters, "field.craters", "px_field_op", params::CratersParams, CratersInput, Field
 }
+
+px_op! {
+    /// **盖章式打坑**：每个印章有自己的**随机半径与年龄**，按年龄序"挖掘"（碗里清掉旧地形、
+    /// 再堆坑缘），密度受**上游场当遮罩** —— 见 `params::StampsParams` 的文档（三条机制）。
+    ///
+    /// ⚠ 与 `field.craters` 是**两个算子**（不是同一份参数的新档）：`craters` 的元胞距离语义
+    ///   （每格一个、半径常数、同层不重叠）与这里完全不同 ⇒ 各自留一份，谁也别想悄悄换掉谁。
+    ///   同一张图里两个都能用（大盆地用 `craters`、表面麻点用 `stamps` 也成立）。
+    Stamps, "field.stamps", "px_field_op", params::StampsParams, CratersInput, Field
+}

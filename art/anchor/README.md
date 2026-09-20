@@ -82,8 +82,12 @@ cargo run -q -p px_render -- --offline --scene <产物> --out x.png --width 960 
 
 # 逃生门：老形状产物的**文件字节**哈希
 cargo run -q -p px_graphs --bin scene orbit-bare --no-frame-graph
-# 拿到的 .pxart 的 sha256 前 16 应当 == C74E6EBD82D34E30
+# 拿到的 .pxart 的 sha256 前 16 应当 == 1845BAEE444D1DB3
 ```
+
+⚠ **2026-09-20：§三 那六格重登记过**八次**。第八次（第 4 轮）的根因是**场域多了一个算子**
+（`field.stamps`：`px_field_schema` 多一条声明、`px_field_op` 多一个实现）⇒ 吃场算子的
+节点键全换；同轮判据：**旧四张图 30/30 内容逐字节不变**、**J1 六张 6/6**。
 
 ⚠ **2026-09-20：§三 那六格重登记过**七次**。第七次（第 2 轮）的根因是 **`px_mesh_op` 的源码变了**
 （把「法线朝内」从打印改成硬失败）⇒ 网格节点键变 ⇒ 文档字节变；但**网格内容逐字节没变**、

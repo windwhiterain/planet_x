@@ -71,6 +71,7 @@ pub const TABLE: &[(&str, fn() -> DeclFacts)] = &[
     ("Mix", || facts::<px_field_schema::ops::Mix>()),
     ("Warp", || facts::<px_field_schema::ops::Warp>()),
     ("Craters", || facts::<px_field_schema::ops::Craters>()),
+    ("Stamps", || facts::<px_field_schema::ops::Stamps>()),
     ("FieldRemap", || facts::<px_field_schema::ops::FieldRemap>()),
     ("CloudCoarse", || {
         facts::<px_volume_schema::ops::CloudCoarse>()

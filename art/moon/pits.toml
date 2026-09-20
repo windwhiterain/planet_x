@@ -1,13 +1,19 @@
-# 第三层：小坑与麻点（近看的那一层）。
-frequency = 24.0
-octaves = 3
-lacunarity = 2.05
-gain = 0.50
+# 第三层：小坑与麻点（近看的那一层）。频率最高、幂律最陡（小坑极多、大坑极少）。
+frequency = 30.0
+octaves = 2
+lacunarity = 2.20
+gain = 0.55
 jitter = 0.95
 seed = 303
 aspect = 2.0
 spherical = true
-radius = 0.62
-rim = 0.16
+max_radius = 0.34
+min_radius = 0.10
+power = 2.60
 depth = 0.16
-height = 0.14
+height = 0.40
+rim = 0.30
+excavate = 0.85
+degrade = 0.35
+mask_lo = 0.05
+mask_hi = 0.45
