@@ -41,6 +41,16 @@ pub struct SceneFile {
     /// 用哪张**帧图**（`art/frame/<名>.toml`，§128）。不写 = `default`。
     #[serde(default)]
     pub frame: Option<String>,
+    /// **天空盒换一份产物**（`"图名::节点名"`，或者配上 `skybox_graph` 写裸节点名）。
+    ///
+    /// ⚠ 不写 = 内置星空（`generate::stars`）—— 那条路是老行为，一个字节没动。
+    ///   写了的用途是"天空由 PCG 烘出来"那一档（星云背景）：烘出来的贴图是一条**正常的
+    ///   图产物**，场景这边按名字引用它即可，渲染器不必知道它是怎么来的。
+    #[serde(default)]
+    pub skybox: Option<String>,
+    /// `skybox` 写裸节点名时，它属于哪张图。
+    #[serde(default)]
+    pub skybox_graph: Option<String>,
     pub parts: Vec<PartFile>,
 }
 
@@ -192,7 +202,10 @@ impl PartFile {
     }
 
     /// 可选成员。
-    pub fn optional_member(&self, role: &str) -> Result<Option<px_protocol::scene::Member>, String> {
+    pub fn optional_member(
+        &self,
+        role: &str,
+    ) -> Result<Option<px_protocol::scene::Member>, String> {
         match self.members.get(role) {
             None => Ok(None),
             Some(reference) => {
@@ -228,17 +241,16 @@ pub struct Compiled {
 /// `with_graph = false` 是**兼容逃生门**（`--no-frame-graph`）：帧图那三节两栏都空，
 /// 产物因此与没有帧图时**逐字节相同**（六份冻产物的 sha256 是这条的判据）。
 /// ⚠ 它不是"另一种受支持的烘法" —— 它存在的唯一目的是证明老产物还能逐字节复现。
-pub fn compile(
-    file: &SceneFile,
-    baked: &mut Baked,
-    with_graph: bool,
-) -> Result<Compiled, String> {
+pub fn compile(file: &SceneFile, baked: &mut Baked, with_graph: bool) -> Result<Compiled, String> {
     let root = px_graph::cache_root();
     let planet = file
         .parts
         .iter()
         .find(|part| part.kind == "planet")
-        .ok_or_else(|| "场景里没有 kind planet 的 part：主体（height / mesh / palette / …）全在它身上".to_string())?;
+        .ok_or_else(|| {
+            "场景里没有 kind planet 的 part：主体（height / mesh / palette / …）全在它身上"
+                .to_string()
+        })?;
     let clouds = file.parts.iter().find(|part| part.kind == "clouds");
     let atmosphere = file.parts.iter().find(|part| part.kind == "atmosphere");
     for part in &file.parts {
@@ -311,7 +323,14 @@ pub fn compile(
     } else {
         (None, None)
     };
-    let stars_member = baked.texture("stars", generate::stars(STARS_FACE), "texture.stars")?;
+    // ⚠ 天空那一格：**不写就用内置星空**（老行为），写了就按名字取一份**烘出来的**产物
+    //   —— 后者是星云背景那条路（`sky.nebula` 交出一张 HDR 立方贴图，这里只引用它）。
+    let stars_member = match (&file.skybox, &file.skybox_graph) {
+        (Some(reference), graph) => {
+            crate::members::reference("场景的 skybox", reference, graph.as_deref())?
+        }
+        (None, _) => baked.texture("stars", generate::stars(STARS_FACE), "texture.stars")?,
+    };
 
     // ---- 云：壳、覆盖度立方图、形状档 ----
     let (cloud_inner, cloud_outer, cloud_shape, coverage_member) = match clouds {
@@ -374,10 +393,7 @@ pub fn compile(
             "coverage".to_string(),
             Value::Num(f64::from(cloud_shape.coverage)),
         ),
-        (
-            "shadow".to_string(),
-            Value::Num(f64::from(cloud_shadow)),
-        ),
+        ("shadow".to_string(), Value::Num(f64::from(cloud_shadow))),
         (
             "height".to_string(),
             Value::Num(planet.number_or("shadow_height", CLOUD_SHADOW_HEIGHT) as f64),
@@ -385,13 +401,7 @@ pub fn compile(
         ("gain".to_string(), Value::Num(f64::from(CLOUD_SHADOW_GAIN))),
     ]);
     computed.retain(|name, _| surface_layout.param(name).is_some());
-    let surface_params = material_params(
-        planet,
-        &surface_shader,
-        &PLANET_KEYS,
-        computed,
-        &root,
-    )?;
+    let surface_params = material_params(planet, &surface_shader, &PLANET_KEYS, computed, &root)?;
     let mut surface = Material::new(surface_shader).with_params(surface_params);
     if let Some(color) = &color_member {
         surface = surface.with_texture(
@@ -451,7 +461,7 @@ pub fn compile(
                 "part '{}' 的 primitive '{other}' 不认识（今天只有 icosphere；\
                  不写这一栏就用 members 里那个网格）",
                 planet.id
-            ))
+            ));
         }
     };
     objects.push(Object {
@@ -668,8 +678,8 @@ pub fn compile(
         };
         let intensity = part.number_or("intensity", 1.0e4);
         let reach = part.number_or("range", math::length(position) * SUN_RANGE_FACTOR);
-        let mut light = Light::point(&part.id, position, color, intensity as f32)
-            .with_range(reach as f32);
+        let mut light =
+            Light::point(&part.id, position, color, intensity as f32).with_range(reach as f32);
         light.shadows = part.number_or("shadows", 0.0) > 0.5;
         extra_lights.push(light);
     }
@@ -677,18 +687,11 @@ pub fn compile(
     // ---- 相机：局部方向 → 世界系 ----
     let cameras: Vec<Camera> = match file.cameras.as_deref() {
         Some("review") | None => px_graph::cameras::review(),
-        Some(other) => {
-            return Err(format!(
-                "不认识的相机表 '{other}'（现在只有 review）"
-            ))
-        }
+        Some(other) => return Err(format!("不认识的相机表 '{other}'（现在只有 review）")),
     }
     .into_iter()
     .map(|camera| {
-        let world_direction = math::rotate(
-            math::quat_x(vocab::SYSTEM_TILT),
-            camera.direction,
-        );
+        let world_direction = math::rotate(math::quat_x(vocab::SYSTEM_TILT), camera.direction);
         Camera::new(world_direction, camera.distance, &camera.tag)
     })
     .collect();
@@ -880,7 +883,11 @@ pub fn ring_shader() -> Result<px_protocol::scene::Member, String> {
     let closure = px_shader::closure(&text, &modules);
     let (key, _path, _bytes) = px_graph::write_shader("ring", &text, &closure, &modules)
         .map_err(|err| format!("写环 shader 失败：{err}"))?;
-    println!("环 shader {}｜{}", px_graph::hex_short(&key), closure.summary());
+    println!(
+        "环 shader {}｜{}",
+        px_graph::hex_short(&key),
+        closure.summary()
+    );
     Ok(px_protocol::scene::Member::new(
         "shaders",
         "ring",
@@ -992,12 +999,13 @@ shader = \"gasgiant\"
         )
         .expect("解得开");
         assert!(check_kind(&known).is_ok(), "`moon` 必须放行");
-        let unknown: PartFile =
-            toml::from_str("id = \"x\"
+        let unknown: PartFile = toml::from_str(
+            "id = \"x\"
 kind = \"asteroid\"
 shader = \"surface\"
-")
-                .expect("解得开");
+",
+        )
+        .expect("解得开");
         let err = check_kind(&unknown).expect_err("不认识的 kind 必须被拒");
         assert!(err.contains("asteroid"), "要点名写错的那个：{err}");
         assert!(err.contains("moon"), "要点名它认哪些（含 moon）：{err}");

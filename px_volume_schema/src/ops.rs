@@ -9,6 +9,7 @@
 
 use px_field_schema::field::Field;
 use px_graph_schema::{Cooked, px_op};
+use px_protocol::art::TextureData;
 
 use crate::VolumeData;
 use crate::params;
@@ -73,16 +74,19 @@ px_op! {
 }
 
 px_op! {
-    /// **沿视线积分**：发射体积 + 星图 → **一条通道**的天空（立方贴图场）。
+    /// **沿视线积分**：发射体积 + 星图 → **一张天空立方贴图**（HDR）。
     ///
-    /// ⚠ 通道由**节点自己的参数**给（`SkyParams::channel`）：一条通道一个节点、一份缓存。
-    ///   三条通道要分别积，因为逐通道消光让它们本来就不同（尘埃染红就是这么来的）。
+    /// ⚠ 三条通道在**这一档内部**各积一遍（参数里没有 `channel`）：逐通道消光意味着三张
+    ///   本来就不同，一次交出一张贴图才是这个算子该有的形状
+    ///   —— 分成三个节点会让"一张天空"变成三个必须自己对齐的产物。
     ///
-    /// ⚠ **它本该直接交出一张贴图**（那才是这个算子该有的形状），但今天交不了：
-    ///   `TextureData` 住在 `px_graph`（在 `px_volume_schema` **上面**），这一层够不到它。
-    ///   要让算子直接出贴图，得先把那个载荷类型搬到 `px_protocol::art`
-    ///   —— 与 `VolumeData` / `MeshData` 同住一处（`AssetKind::Texture` 本来就在那儿）。
-    ///   `TextureData` 的 `Build` 已经写好并判过了（`px_graph::generate::payload`），
-    ///   那一步做完之后，这一档的 `Payload` 换成 `TextureData`、图脚本里的手工拼图就能删。
-    SkyNebula, "sky.nebula", "px_volume_op", params::sky::SkyParams, SkyInput, Field
+    /// ⚠ 它**只收发射体积**（不是密度场）：搬密度、算光照是 `cloud.density` /
+    ///   `cloud.emission` 那两档的事，而它们与"壳多细、半径多大"有关、与"积多细"无关
+    ///   ⇒ 那些参数不该出现在这一档（出现就是多一处必须与上游一致的抄写）。
+    ///
+    /// ⚠ 输出是**贴图**：`TextureData` 的载荷类型与它的 `Build` 都住在 `px_protocol::art` /
+    ///   `px_protocol::payload`（与 `VolumeData` / `MeshData` 同一个口径）⇒ 天空是一条
+    ///   **正常的图产物**，场景文档按 `"图名::节点名"` 引用它当 `environment.skybox`，
+    ///   渲染器一个字节不用改。
+    SkyNebula, "sky.nebula", "px_volume_op", params::sky::SkyParams, SkyInput, TextureData
 }

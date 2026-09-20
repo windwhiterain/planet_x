@@ -137,42 +137,27 @@ fn main() -> Result<(), Fault> {
         cameras: Vec::new(),
     });
     let stars = cook::<field::Stars>(&sky_graph, "stars", ())?;
-
-    let mut channels = Vec::with_capacity(3);
-    for channel in 0..3_u32 {
-        let sky = cook::<volume::SkyNebula>(
-            &sky_graph,
-            &format!("sky_{channel}"),
-            volume::SkyInput {
-                volume: emission.clone(),
-                stars: stars.clone(),
-            },
-        )?;
-        report(&format!("sky_{channel}"), sky.value());
-        channels.push(sky);
-    }
-
-    // ── 拼成一张 HDR 立方贴图，写进 CAS ─────────────────────────────────
-    let texture = px_graph::generate::color_cube(
-        channels[0].value(),
-        channels[1].value(),
-        channels[2].value(),
-    )?;
-    let written = px_graph::generate::write_texture(
-        "nebula_sky",
-        texture.shape(),
-        &texture.bytes,
-        px_protocol::wire::DType::U16,
+    // ⚠ **一个节点交出一整张天空贴图**（三条通道在算子内部各积一遍）。
+    //   `sky` 就是场景文档要引用的那个节点名（`nebulasky::sky`），而它是一条
+    //   **正常的图成员** —— 驱动照常进键、落盘、登记清单，这里不必手工拼贴图。
+    let sky = cook::<volume::SkyNebula>(
+        &sky_graph,
+        "sky",
+        volume::SkyInput {
+            volume: emission,
+            stars,
+        },
     )?;
     println!(
-        "贴图：{}×{}×{} 层 ⇒ {}（{:.2} MB，{}）",
-        texture.width,
-        texture.height,
-        texture.layers,
-        written.path.display(),
-        written.bytes as f64 / 1e6,
-        if written.hit { "命中" } else { "新写" },
+        "天空贴图：{}",
+        px_graph_schema::payload::Build::detail(sky.value())
     );
+
+    // ⚠ **必须收尾**：清单（`target/pcg/<图名>/manifest.json`）是 `finish()` 写出去的
+    //   —— 场景文档按 `"图名::节点名"` 取成员键走的就是它。不收尾的话产物**在 CAS 里**
+    //   但**没有名字**，场景那边会报"图里没有节点"。
+    shape_graph.finish();
+    sky_graph.finish();
     println!("共 {:.1} 秒", started.elapsed().as_secs_f64());
     Ok(())
 }

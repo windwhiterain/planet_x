@@ -3,9 +3,9 @@ use std::path::Path;
 
 use game::sim::{DepartmentView, GoodView, Totals, WorldView};
 use px_protocol::art::{ArtBundle, AssetKind, AssetManifest, Camera};
+use px_protocol::render::{self as render, Lease, Request, Response, Scene};
 use px_protocol::wire::{Blob, BlobHeader, DType};
 use px_protocol::{Handshake, ProtocolId, SCHEMA_VERSION};
-use px_protocol::render::{self as render, Lease, Request, Response, Scene};
 
 /// 资产种类必须**逐个列出**（穷尽匹配）：加一种资产而不动这份快照就编不过 ——
 /// 快照一变 `protocol_hash` 就变，跨进程握手会因此拒绝旧对端，这正是要人看一眼的地方。
@@ -18,6 +18,10 @@ fn asset_kind_name(kind: AssetKind) -> &'static str {
         AssetKind::Mesh => "mesh",
         AssetKind::Instances => "instances",
         AssetKind::Volume => "volume",
+        // ⚠ 体网格**当一张场**（`Domain::Volume`）：二维 blob、第三维折进 `height`。
+        //   与上面那个 `volume`（立方球体网格、半径住清单参数、四维 blob）不是一回事
+        //   —— 两者同名不同形，所以各有各的资产种类（域必须能从种类唯一还原）。
+        AssetKind::VoxelField => "voxel_field",
         AssetKind::Scene => "scene",
         AssetKind::Shader => "shader",
         AssetKind::Texture => "texture",
@@ -238,7 +242,11 @@ fn canonical() -> String {
         name: "orbit".to_string(),
         environment: px_protocol::Environment {
             ambient: 80.0,
-            skybox: Some(px_protocol::Member::new("generated", "stars", &"7".repeat(64))),
+            skybox: Some(px_protocol::Member::new(
+                "generated",
+                "stars",
+                &"7".repeat(64),
+            )),
             skybox_brightness: 900.0,
         },
         cameras: vec![Camera::new([0.0, 1.0, 0.0], 3.15, "review")],
@@ -264,8 +272,14 @@ fn canonical() -> String {
                 ))
                 .with_params(BTreeMap::from([
                     ("inner".to_string(), px_protocol::Value::Num(1.01)),
-                    ("emissive".to_string(), px_protocol::Value::Quad([0.0, 0.0, 0.0, 0.0])),
-                    ("tint".to_string(), px_protocol::Value::Triple([0.44, 0.64, 0.98])),
+                    (
+                        "emissive".to_string(),
+                        px_protocol::Value::Quad([0.0, 0.0, 0.0, 0.0]),
+                    ),
+                    (
+                        "tint".to_string(),
+                        px_protocol::Value::Triple([0.44, 0.64, 0.98]),
+                    ),
                 ]))
                 .with_texture(
                     "albedo",
@@ -326,7 +340,11 @@ fn canonical() -> String {
     // "加字段是纯加法"这件事在快照里也是看得见的。
     let pass_fullscreen = px_protocol::scene::PassSpec {
         kind: "fullscreen".to_string(),
-        shader: Some(px_protocol::Member::new("shaders", "grade", &"2".repeat(64))),
+        shader: Some(px_protocol::Member::new(
+            "shaders",
+            "grade",
+            &"2".repeat(64),
+        )),
         label: "grade".to_string(),
         entry: "fs_main".to_string(),
         reads: vec!["scene_color".to_string()],
@@ -362,7 +380,9 @@ fn canonical() -> String {
         vertex_shader: "struct Out { @builtin(position) position: vec4<f32> }\n".to_string(),
         vertex_entry: "vertex".to_string(),
         // 状态是**文本**：解析器只有一份，住在 `px_pass::RenderState::parse`。
-        render: "color=clear(0,0,0,0)|depth=clear(0)|depth_write=true|compare=greater_equal|winding=ccw".to_string(),
+        render:
+            "color=clear(0,0,0,0)|depth=clear(0)|depth_write=true|compare=greater_equal|winding=ccw"
+                .to_string(),
         depth_target: Some("depth".to_string()),
         cube_face: None,
     };
@@ -468,5 +488,3 @@ fn snapshot_drives_the_protocol_hash() {
     let again = px_protocol::protocol_hash();
     assert_eq!(px_protocol::protocol_hash(), again);
 }
-
-

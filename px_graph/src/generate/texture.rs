@@ -8,70 +8,21 @@
 //! `px_render/src/planet.rs` 的口径，别拿"看起来等价"的写法替。
 
 use px_field_schema::field::Field;
-use px_protocol::art::{CUBE_COLUMNS, CUBE_FACES, Domain, TextureFormat, TextureShape};
+use px_protocol::art::{CUBE_COLUMNS, CUBE_FACES, Domain, TextureFormat};
 
 use super::shade::{half_from_f32, push_color};
 
 // ---------------------------------------------------------------------------
 // 贴图载荷
 // ---------------------------------------------------------------------------
+//
+// ⚠ `TextureData` **不在这里**（它搬去了 `px_protocol::art`，与 `VolumeData` / `MeshData`
+//   同住）：算子的 `Payload` 必须由 schema 层声明，而 schema 在 `px_graph` 下面
+//   ⇒ 载荷类型住在 `px_graph` 里的时候，**算子交不出贴图**。
+//   这一份只从上面把它引进来（下面还有一句 re-export，`px_graph::generate::TextureData`
+//   这个路径对调用方保持不变）。
 
-/// 一份贴图的**全部字节**：整条 mip 链，与渲染器今天写进 `Image.data` 的那串逐字节相同。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TextureData {
-    pub width: u32,
-    pub height: u32,
-    pub layers: u32,
-    pub levels: u32,
-    pub format: TextureFormat,
-    pub bytes: Vec<u8>,
-}
-
-impl TextureData {
-    pub fn shape(&self) -> TextureShape {
-        TextureShape {
-            width: self.width,
-            height: self.height,
-            layers: self.layers,
-            levels: self.levels,
-            format: self.format,
-        }
-    }
-
-    /// 唯一的构造口：自检「载荷字节数 = 形状算出来的整条 mip 链字节数」。
-    /// 少一级 mip、多层一层、位深写错，都会在这里当场炸，而不是等到渲染器那边采样出错。
-    fn new(
-        width: u32,
-        height: u32,
-        layers: u32,
-        levels: u32,
-        format: TextureFormat,
-        bytes: Vec<u8>,
-    ) -> Self {
-        let data = Self {
-            width,
-            height,
-            layers,
-            levels,
-            format,
-            bytes,
-        };
-        let expected = data.shape().chain_bytes();
-        assert_eq!(
-            data.bytes.len(),
-            expected,
-            "贴图载荷与形状不符：{}×{}×{} 层、{} 级、{:?} 应当是 {} 字节，实际 {} 字节",
-            data.width,
-            data.height,
-            data.layers,
-            data.levels,
-            data.format,
-            expected,
-            data.bytes.len(),
-        );
-        data
-    }
-}
+pub use px_protocol::art::TextureData;
 
 // ---------------------------------------------------------------------------
 // mip 链与极冠（逐字搬自 px_render/src/planet.rs）

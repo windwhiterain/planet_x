@@ -25,7 +25,6 @@
 
 mod mesh;
 mod palette;
-mod payload;
 mod shade;
 mod store;
 mod texture;

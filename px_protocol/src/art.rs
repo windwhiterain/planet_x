@@ -172,6 +172,74 @@ impl TextureShape {
     }
 }
 
+/// 一份贴图的**全部字节**：整条 mip 链，与渲染器今天写进 `Image.data` 的那串逐字节相同。
+///
+/// ⚠ **它为什么住这里**（与 [`VolumeData`] / [`MeshData`] 同住一处）：`AssetKind::Texture`
+///   本来就在本模块，而"一个域的载荷类型与它的编解码住在一起"是全仓的口径
+///   （孤儿规则那条）。从前它在 `px_graph::generate`，于是**算子交不出贴图**
+///   —— 算子的 `Payload` 必须由 schema 层声明，而 schema 在 `px_graph` **下面**。
+///   搬到这里之后 `sky.nebula` 那类算子可以直接把一张烘好的天空当产物交出去。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TextureData {
+    pub width: u32,
+    pub height: u32,
+    pub layers: u32,
+    pub levels: u32,
+    pub format: TextureFormat,
+    pub bytes: Vec<u8>,
+}
+
+impl TextureData {
+    pub fn shape(&self) -> TextureShape {
+        TextureShape {
+            width: self.width,
+            height: self.height,
+            layers: self.layers,
+            levels: self.levels,
+            format: self.format,
+        }
+    }
+
+    /// **唯一的构造口**：自检「载荷字节数 = 形状算出来的整条 mip 链字节数」。
+    /// 少一级 mip、多层一层、位深写错，都会在这里当场炸，而不是等到渲染器那边采样出错。
+    ///
+    /// ⚠ `px_graph` 那边原来把它写成**私有**的（"别绕过它"）。搬过来之后私有做不到
+    ///   （跨 crate），于是它变成公开的 —— 但那条纪律没变：**要用贴图就过这一道**，
+    ///   别去手搓结构体字面量。这也是为什么它叫 `new` 而字段是公开的：
+    ///   字段公开是为了让 `Build::decode` 能从字节还原（那时字节已经是自己人写出来的）。
+    pub fn new(
+        width: u32,
+        height: u32,
+        layers: u32,
+        levels: u32,
+        format: TextureFormat,
+        bytes: Vec<u8>,
+    ) -> Self {
+        let data = Self {
+            width,
+            height,
+            layers,
+            levels,
+            format,
+            bytes,
+        };
+        let expected = data.shape().chain_bytes();
+        assert_eq!(
+            data.bytes.len(),
+            expected,
+            "贴图载荷与形状不符：{}×{}×{} 层、{} 级、{:?} 应当是 {} 字节，实际 {} 字节",
+            data.width,
+            data.height,
+            data.layers,
+            data.levels,
+            data.format,
+            expected,
+            data.bytes.len(),
+        );
+        data
+    }
+}
+
 fn sign(value: f32) -> f32 {
     if value < 0.0 { -1.0 } else { 1.0 }
 }

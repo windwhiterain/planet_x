@@ -17,8 +17,8 @@
 //!   光照在 `cloud.emission` 里（按体素算过一遍）。这里只有积分。
 
 use px_field_schema::field::{CUBE_FACES, Field, Projection, art_direction_at, cube_face_of};
-use px_volume_schema::VolumeData;
 use px_volume_schema::params::sky::SkyParams;
+use px_volume_schema::{TextureData, TextureFormat, VolumeData};
 
 /// 格子的确定性抖动：同一格永远同一个偏移。
 ///
@@ -202,25 +202,47 @@ pub fn raymarch_channel(
     field
 }
 
-/// 图侧最顺手的入口：**发射体积 + 星图 → 一条通道的天空**。
+/// 图侧最顺手的入口：**发射体积 + 星图 → 一张天空立方贴图**。
 ///
-/// ⚠ 三条通道要**分别**积（`SkyParams::channel`）：逐通道消光让它们本来就不同，
-///   `exp(-σ_B·ds) / exp(-σ_R·ds)` 那个比值就是"尘埃染红"。
+/// ⚠ 三条通道在**这一档内部**各积一遍：逐通道消光意味着它们本来就不同
+///   （`exp(-σ_B·ds) / exp(-σ_R·ds)` 那个比值就是"尘埃染红"），一次交出一张
+///   `Rgba16Float` 立方贴图才是这个算子该有的形状。
 ///
-/// ⚠ **将来这一档该直接交出一张贴图**（那才是它该有的形状）—— 但 `TextureData` 住在
-///   `px_graph`，而本 crate 在它下面。等那个载荷类型搬到 `px_protocol::art`
-///   （与 `VolumeData` / `MeshData` 同住），这里改成"三条通道各积一遍 + 拼贴图"、
-///   图脚本里的手工拼图就能删掉。
+/// ⚠ 它**只收发射体积**（不是密度场）：搬密度、算光照是上游那两档的事，而它们与
+///   "壳多细、半径多大"有关、与"积多细"无关 ⇒ 那些参数不该抄到这一档来。
 pub fn raymarch_sky(
     emission: &VolumeData,
     stars: &Field,
     sky_params: &SkyParams,
-) -> Result<Field, String> {
-    Ok(raymarch_channel(
-        emission,
-        Some(stars),
-        sky_params,
-        sky_params.channel as usize,
+) -> Result<TextureData, String> {
+    let mut planes = Vec::with_capacity(3);
+    for channel in 0..3 {
+        let field = raymarch_channel(emission, Some(stars), sky_params, channel);
+        planes.push(field.data);
+    }
+
+    // ⚠ **半精度、线性、不钳**：亮核可以超过 1，8 位会把高光砍在 1.0
+    //   —— 而"亮核"正是靠超过 1 的那一段。转换走 `crate::half`（本 crate 自己的那一份：
+    //   `px_graph` 的同类函数在依赖树的上面，够不到）。
+    let face = sky_params.face.max(1);
+    let texels = planes[0].len();
+    let mut bytes = Vec::with_capacity(texels * 8);
+    for index in 0..texels {
+        for plane in &planes {
+            bytes.extend_from_slice(&crate::half::half_from_f32(plane[index]).to_le_bytes());
+        }
+        bytes.extend_from_slice(&crate::half::half_from_f32(1.0).to_le_bytes());
+    }
+
+    // ⚠ 构造走 `TextureData::new`（唯一的构造口）：它自检"字节数 = 形状算出来的 mip 链长度"。
+    //   一份字节数不对的贴图进了 CAS 之后，症状是渲染器采样越界 —— 归因极远。
+    Ok(TextureData::new(
+        face,
+        face,
+        CUBE_FACES,
+        1,
+        TextureFormat::Rgba16Float,
+        bytes,
     ))
 }
 
