@@ -14,6 +14,8 @@ pub mod noise;
 pub mod ops;
 pub mod params;
 pub mod payload;
+pub mod volume;
 
 pub use field::{Field, GridField, Projection, ProjectionKind, Stats, cube_map_extent};
 pub use noise::{FbmSettings, Scalar};
+pub use volume::VolumeShape;

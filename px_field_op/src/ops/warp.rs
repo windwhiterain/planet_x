@@ -61,6 +61,10 @@ mod tests {
                 Projection::Octahedral => (64, 64),
                 Projection::Cube => (78, 52),
                 Projection::CubeMap => (32, 192),
+                // ⚠ 体网格走的是**另一个算子**（`field.warp3`）：它在体素空间里挪三个轴，
+                //   而这一档靠 `tangent_frame` 在球面的切平面上挪 —— 没有"球面切平面"
+                //   这回事的域不该混进来（用户 2026-09-20 的口径：3D 用独立的算子）。
+                Projection::Volume => continue,
             };
             let grid = Grid {
                 width,

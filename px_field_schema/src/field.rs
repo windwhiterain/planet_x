@@ -8,7 +8,7 @@ use px_protocol::art::AssetKind;
 use px_protocol::wire::{Blob, DType, WireError};
 
 pub use px_protocol::art::Domain as Projection;
-pub use px_protocol::art::cube_map_extent;
+pub use px_protocol::art::{CUBE_FACES, cube_map_extent};
 
 pub trait ProjectionKind {
     fn asset_kind(self) -> AssetKind;
@@ -21,6 +21,12 @@ impl ProjectionKind for Projection {
             Self::Octahedral => AssetKind::OctahedralField,
             Self::Cube => AssetKind::CubeField,
             Self::CubeMap => AssetKind::CubeMap,
+            // ⚠ 体网格落的**还是** `Field2D`：它对载荷是"一张 `[height, width]` 的 f32"，
+            //   与别的域**同一种**字节。资产种类说的是"这份载荷怎么解"，不是"它是什么形状"。
+            //   （`AssetKind::Volume` 是**立方球体网格**那一档，给等值面提取用：它的清单参数
+            //   里带着 `layers` / `inner` / `outer`，而场节点的清单里没有那几栏 ⇒ 借它会把
+            //   "形状"掰成两处。体网格的形状由 `px_field_schema::volume::VolumeShape` 带。）
+            Self::Volume => AssetKind::Field2D,
         }
     }
 }
@@ -83,13 +89,7 @@ pub fn tangent_frame(direction: [f32; 3]) -> ([f32; 3], [f32; 3]) {
     (east, north)
 }
 
-pub fn direction_at(
-    width: u32,
-    height: u32,
-    projection: Projection,
-    x: u32,
-    y: u32,
-) -> [f32; 3] {
+pub fn direction_at(width: u32, height: u32, projection: Projection, x: u32, y: u32) -> [f32; 3] {
     px_protocol::art::direction_at(projection, width, height, x, y)
 }
 

@@ -151,7 +151,8 @@ impl TextureShape {
         let mut total = 0_usize;
         let (mut width, mut height) = (self.width, self.height);
         for _ in 0..self.levels {
-            total += width as usize * height as usize * self.layers as usize * self.format.texel_bytes();
+            total +=
+                width as usize * height as usize * self.layers as usize * self.format.texel_bytes();
             width = (width / 2).max(1);
             height = (height / 2).max(1);
         }
@@ -338,7 +339,11 @@ impl Camera {
     }
 
     pub fn raw(direction: [f32; 3], distance: f32, tag: impl Into<String>) -> Self {
-        Self { direction, distance, tag: tag.into() }
+        Self {
+            direction,
+            distance,
+            tag: tag.into(),
+        }
     }
 
     pub fn normalized(mut self) -> Self {
@@ -347,7 +352,11 @@ impl Camera {
             + self.direction[2] * self.direction[2])
             .sqrt();
         self.direction = if length > f32::EPSILON {
-            [self.direction[0] / length, self.direction[1] / length, self.direction[2] / length]
+            [
+                self.direction[0] / length,
+                self.direction[1] / length,
+                self.direction[2] / length,
+            ]
         } else {
             [0.0, 0.0, 1.0]
         };
@@ -454,7 +463,6 @@ pub fn cube_atlas_uv(face: u32, s: f32, t: f32, face_size: u32, gutter: u32) -> 
     [x / width, y / height]
 }
 
-
 pub fn cube_map_extent(face_size: u32) -> (u32, u32) {
     let face = face_size.max(1);
     (face, face * CUBE_FACES)
@@ -466,6 +474,15 @@ pub enum Domain {
     Octahedral,
     Cube,
     CubeMap,
+    /// **三维**：立方球参数空间里的体网格（`res × res × layers × 6 面`）。
+    ///
+    /// ⚠ 前四个域是"**同一张网格的四种读法**"（都是球面上的一个方向），而这一个多了一维
+    ///   —— 它不是"另一种投影"，是**另一类采样空间**。放进同一个枚举是因为算子读的
+    ///   处处都是 `Field`（`width × height` 的 f32 网格 + 一个域），而"这一格在世界里
+    ///   落在哪儿"完全由域决定 ⇒ 加一个域就让**整套场算法**多了一档可用空间，
+    ///   而不必再造一类资产、一套 crate。⚠ 代价：`direction_at` / `uv_of` 这类
+    ///   **只对球面有意义**的入口必须显式把这一档挡掉（见那两处的文档）。
+    Volume,
 }
 
 impl Domain {
@@ -475,17 +492,39 @@ impl Domain {
             Self::Octahedral => "octahedral",
             Self::Cube => "cube",
             Self::CubeMap => "cubemap",
+            Self::Volume => "volume",
         }
     }
 }
 
-pub fn direction_at(
-    domain: Domain,
-    width: u32,
-    height: u32,
-    x: u32,
-    y: u32,
-) -> [f32; 3] {
+/// 体网格的**画布尺寸**：`(res, res² × layers × 6)`。
+///
+/// ⚠ 为什么第三维折进 `height` 而不是给 `Field` 加一个 `layers` 字段：`Field` 是
+///   `width × height` 的 f32 网格（[`Field::to_blob`] 写的就是 `[height, width]`），
+///   加一维要动线格式、动每一个消费方。折进 `height` 之后**体网格就是一张普通场**，
+///   逐元素算子（`remap` / `mix`）一行都不用改就能用。
+///
+/// ⚠ 一面是一块 `res × (layers × res)` 的平面（`res²·layers` 行），不是 `layers` 行 ——
+///   一"层"占 `res` 行。行号是 `face × (res·layers) + layer × res + t`
+///   （真源与推导见 `px_field_schema::volume` 的文件头）。
+pub fn volume_extent(res: u32, layers: u32) -> (u32, u32) {
+    let res = res.max(1);
+    let layers = layers.max(1);
+    (res, res * res * layers * CUBE_FACES)
+}
+
+/// 体网格的行数 → 层数（[`volume_extent`] 的逆）。
+pub fn volume_layers(height: u32, res: u32) -> Option<u32> {
+    let res = res.max(1);
+    let block = res.checked_mul(res)?.checked_mul(CUBE_FACES)?;
+    if height == 0 || height % block != 0 {
+        return None;
+    }
+    let layers = height / block;
+    (layers > 0).then_some(layers)
+}
+
+pub fn direction_at(domain: Domain, width: u32, height: u32, x: u32, y: u32) -> [f32; 3] {
     let u = (x as f32 + 0.5) / width.max(1) as f32;
     let v = (y as f32 + 0.5) / height.max(1) as f32;
     match domain {
@@ -512,6 +551,15 @@ pub fn direction_at(
             let t = ((y % face_size) as f32 + 0.5) / face_size as f32;
             cube_direction(face, s, t)
         }
+        // ⚠ 体网格**不是一个方向**：它多一维（径向层），而这一格的层号在 `height` 里
+        //   （`y = face × layers + layer`）—— 这里只有 `height`，解不出 `layers`，
+        //   于是拿不到真正的半径。⇒ 给"半径 1 的方向"会让调用方以为这是个方向场，
+        //   那是**静默的错**。体网格的世界点映射住在 `px_field_schema::volume::point_of`
+        //   （它知道 `inner` / `outer` / `res` / `layers`），球面那些入口一律走它。
+        Domain::Volume => panic!(
+            "体网格（Domain::Volume）没有「一个方向」这回事：\
+             世界点映射走 px_field_schema::volume::point_of（它知道 inner/outer/res/layers）"
+        ),
     }
 }
 
@@ -525,17 +573,17 @@ pub fn uv_of(domain: Domain, direction: [f32; 3], width: u32, _height: u32) -> [
         Domain::Octahedral => octahedral_uv_y_up(direction),
         Domain::Cube => {
             let (face, s, t) = cube_face_of(direction);
-            cube_atlas_uv(
-                face,
-                s,
-                t,
-                cube_face_size(width),
-                CUBE_GUTTER,
-            )
+            cube_atlas_uv(face, s, t, cube_face_size(width), CUBE_GUTTER)
         }
         Domain::CubeMap => {
             let (face, s, t) = cube_face_of(direction);
             [s, (face as f32 + t) / CUBE_FACES as f32]
+        }
+        // ⚠ 体网格的那一面里，这一格的面内参数就是 `(s, t)`（径向层不在这个二元组里，
+        //   它由行号给）—— 见 [`direction_at`] 那一档的文档。
+        Domain::Volume => {
+            let (_, s, t) = cube_face_of(direction);
+            [s, t]
         }
     }
 }
@@ -682,7 +730,8 @@ fn classify(before: &AssetManifest, after: &AssetManifest) -> Option<AssetChange
             after: after.kind,
         });
     }
-    if before.fingerprint != 0 && after.fingerprint != 0 && before.fingerprint != after.fingerprint {
+    if before.fingerprint != 0 && after.fingerprint != 0 && before.fingerprint != after.fingerprint
+    {
         return Some(AssetChange::Content);
     }
     let keys: Vec<String> = before
@@ -817,8 +866,16 @@ mod tests {
             &[crate::stream::Frame::Blob(Blob::from_f32(vec![1], &[1.0]))],
         )
         .unwrap();
-        assert_eq!(bundle_from_prefix(&bytes), None, "第一个帧不是清单 ⇒ 交给整读兜底");
-        assert_eq!(bundle_from_prefix(&bytes[..6]), None, "前缀太短也不许 panic");
+        assert_eq!(
+            bundle_from_prefix(&bytes),
+            None,
+            "第一个帧不是清单 ⇒ 交给整读兜底"
+        );
+        assert_eq!(
+            bundle_from_prefix(&bytes[..6]),
+            None,
+            "前缀太短也不许 panic"
+        );
     }
 
     #[test]
@@ -854,15 +911,20 @@ pub fn read_shader_parts(path: &std::path::Path) -> Result<(String, Option<Strin
         _ => None,
     });
     let Some(wgsl) = blobs.next() else {
-        return Err(format!("{} 里没有 U8 blob（不是 shader 产物？）", path.display()));
+        return Err(format!(
+            "{} 里没有 U8 blob（不是 shader 产物？）",
+            path.display()
+        ));
     };
     let source = String::from_utf8(wgsl.bytes.clone())
         .map_err(|err| format!("{} 的 WGSL 不是合法 UTF-8：{err}", path.display()))?;
     let schema = match blobs.next() {
-        Some(blob) => Some(
-            String::from_utf8(blob.bytes.clone())
-                .map_err(|err| format!("{} 的 schema descriptor 不是合法 UTF-8：{err}", path.display()))?,
-        ),
+        Some(blob) => Some(String::from_utf8(blob.bytes.clone()).map_err(|err| {
+            format!(
+                "{} 的 schema descriptor 不是合法 UTF-8：{err}",
+                path.display()
+            )
+        })?),
         None => None,
     };
     Ok((source, schema))
@@ -871,7 +933,8 @@ pub fn read_shader_parts(path: &std::path::Path) -> Result<(String, Option<Strin
 /// 从 `.pxart` / `.pxstream` 里取出第一份产物清单。
 pub fn read_bundle(path: &std::path::Path) -> Result<ArtBundle, String> {
     let bytes = std::fs::read(path).map_err(|err| format!("读不到 {}：{err}", path.display()))?;
-    let frames = crate::stream::read_stream(&mut bytes.as_slice()).map_err(|err| err.to_string())?;
+    let frames =
+        crate::stream::read_stream(&mut bytes.as_slice()).map_err(|err| err.to_string())?;
     bundle_of(&frames)
         .cloned()
         .ok_or_else(|| format!("{} 里没有 Art 帧", path.display()))
@@ -887,8 +950,8 @@ pub const MANIFEST_PREFIX: usize = 64 * 1024;
 /// 而清单帧**写在流的最前面**（`px_graph::write_artifact` 如此）⇒ 读一个前缀就够，
 /// 不必把 8 MB 的场整个读进来。前缀里没解出清单帧（文件不是那么写的）⇒ 回落到整读。
 pub fn read_manifest(path: &std::path::Path) -> Result<ArtBundle, String> {
-    let mut file = std::fs::File::open(path)
-        .map_err(|err| format!("读不到 {}：{err}", path.display()))?;
+    let mut file =
+        std::fs::File::open(path).map_err(|err| format!("读不到 {}：{err}", path.display()))?;
     let mut prefix = vec![0_u8; MANIFEST_PREFIX];
     let mut filled = 0;
     while filled < prefix.len() {
@@ -921,7 +984,8 @@ fn bundle_from_prefix(prefix: &[u8]) -> Option<ArtBundle> {
 }
 
 /// 一组帧里的第一份清单。
-pub fn bundle_of(frames: &[crate::stream::Frame]) -> Option<&ArtBundle> {    frames.iter().find_map(|frame| match frame {
+pub fn bundle_of(frames: &[crate::stream::Frame]) -> Option<&ArtBundle> {
+    frames.iter().find_map(|frame| match frame {
         crate::stream::Frame::Art(bundle) => Some(bundle),
         _ => None,
     })

@@ -40,6 +40,96 @@ impl Default for RemapParams {
     }
 }
 
+/// **体网格上的分形噪声**（`field.fbm3`）：采样点是"这一格的体素坐标"，不是球面方向。
+///
+/// ⚠ 它与 [`fbm`] 的差别不只是"三维"：`fbm` 的球面档按 `direction` 取噪声（**没有径向**），
+///   于是它造出来的场是"贴在球面上的一层皮"；这一档按 `(s, t, altitude)` 取噪声
+///   ⇒ 才有真正的**体内结构**（云里前中后三层各自不同）。体渲染要的正是后者。
+///
+/// ⚠ 频率的参照系是"**一整面 = 1.0**"（体素坐标是 `[0,1]³`）⇒ 与 `fbm` 的球面档
+///   （`direction` 的模长是 1）**数值口径相近**，但**不是同一把尺子**：同一个频率下
+///   这一档的格子数是 `frequency` 个/面。
+#[derive(Debug, Clone, Serialize, Deserialize, px_derive::PxParams)]
+#[serde(default, deny_unknown_fields)]
+pub struct Fbm3Params {
+    pub frequency: f32,
+    pub octaves: u32,
+    pub lacunarity: f32,
+    pub gain: f32,
+    pub seed: u32,
+    /// **各向异性**：把体素坐标的第三维（径向）乘上它 ⇒ 结构沿**径向**拉长／压扁。
+    ///
+    /// ⚠ 星云的盘状/纤维状结构是**沿视线方向拉长**的，而各向同性的噪声给的是"一坨坨圆球"
+    ///   ⇒ 这一栏是"云"与"絮"之间那个旋钮。`1.0` = 各向同性。
+    pub zonal: f32,
+}
+
+impl Default for Fbm3Params {
+    fn default() -> Self {
+        Self {
+            frequency: 3.0,
+            octaves: 6,
+            lacunarity: 2.0,
+            gain: 0.5,
+            seed: 7,
+            zonal: 1.0,
+        }
+    }
+}
+
+/// **体网格上的脊状噪声**（`field.ridged3`）：星云的"丝"就是脊。
+///
+/// ⚠ `sharpness` 越大脊越细（`1.0` = 三角波，`2` 以上 = 一根根细丝）。
+///   星云那些一丝一丝的纤维结构靠的是这一档 + 后续的域扭曲。
+#[derive(Debug, Clone, Serialize, Deserialize, px_derive::PxParams)]
+#[serde(default, deny_unknown_fields)]
+pub struct Ridged3Params {
+    pub frequency: f32,
+    pub octaves: u32,
+    pub lacunarity: f32,
+    pub gain: f32,
+    pub seed: u32,
+    pub sharpness: f32,
+    pub zonal: f32,
+}
+
+impl Default for Ridged3Params {
+    fn default() -> Self {
+        Self {
+            frequency: 6.0,
+            octaves: 5,
+            lacunarity: 2.1,
+            gain: 0.55,
+            seed: 21,
+            sharpness: 2.0,
+            zonal: 1.0,
+        }
+    }
+}
+
+/// **体网格上的域扭曲**（`field.warp3`）：按偏移场挪动采样点。
+///
+/// ⚠ 它与 [`warp`]（球面那一档）的差别：那一档在**切平面**上挪（`lateral` 决定
+///   沿视线挪多少），这一档在**体素空间**里挪三个轴 —— 没有"切平面"这回事，
+///   三格偏移就是三维位移。
+#[derive(Debug, Clone, Serialize, Deserialize, px_derive::PxParams)]
+#[serde(default, deny_unknown_fields)]
+pub struct Warp3Params {
+    /// 位移总量（**体素坐标**的单位：`1.0` = 挪一整面）。⚠ 这里不是弧度。
+    pub strength: f32,
+    /// 轴向权重：`0` = 只沿径向挪，`1` = 三个轴等权。
+    pub axial: f32,
+}
+
+impl Default for Warp3Params {
+    fn default() -> Self {
+        Self {
+            strength: 0.35,
+            axial: 1.0,
+        }
+    }
+}
+
 pub mod constant {
     use serde::{Deserialize, Serialize};
 
@@ -352,4 +442,3 @@ impl Default for StampsParams {
         }
     }
 }
-
