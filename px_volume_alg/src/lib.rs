@@ -16,14 +16,17 @@
 //   **外部 impl** 用的（那份源码会被 `px_jit` **`include!`** 进实例库，不是本 crate 的模块）。
 //   而 `dead_code` **只看本 crate 自己用没用**，本 crate 恰好只用 `SampleField`
 //   ⇒ 替它收声。这正是这个机制的性质：泛型参数住在**被 include 进来的外部源码**里。
+pub mod density;
 #[allow(dead_code)]
 pub mod field_fn;
 
+pub use density::bake_density;
+
 use field_fn::{FieldFn, SampleField};
 use px_field_schema::field::{Field, tangent_frame};
+use px_verify::proxy;
 use px_volume_schema::params::{self, FieldKind};
 use px_volume_schema::{PATCHES, VolumeData, direction_of};
-use px_verify::proxy;
 
 fn normalize(vector: [f32; 3]) -> [f32; 3] {
     let length = (vector[0] * vector[0] + vector[1] * vector[1] + vector[2] * vector[2]).sqrt();
@@ -43,7 +46,12 @@ pub fn bake<F: FieldFn>(params: &params::Params, cover: &F) -> VolumeData {
     let at = |direction: [f32; 3]| cover.cover(&cloud, direction);
     let res = params.res.max(2);
     let layers = params.layers.max(2);
-    let inv_scale = 1.0 / if params.scale > 0.0 { params.scale } else { 1.0 };
+    let inv_scale = 1.0
+        / if params.scale > 0.0 {
+            params.scale
+        } else {
+            1.0
+        };
 
     // 每个节点的覆盖度取**切向邻域**上的最大值（保守化）。邻域撒在**方向**上：
     // 面内参数是各面自己的，两个面在接缝上的同一个节点用参数撒邻域会撒出两组不同的

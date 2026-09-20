@@ -119,11 +119,10 @@ pub fn voxel_of(shape: &VolumeShape, face: u32, x: u32, y: u32) -> [f32; 3] {
     ]
 }
 
-/// 行号 → **这一面之内的行号**（`0..res × layers`）。
+/// 行号 → **这一面之内的行号**（`0..res × layers`），即 `layer × res + t`。
 ///
-/// ⚠ 面内行号是 `layer × res + t`（见本模块的文件头：一层之内行是连续的）。**不是**
-///   `y % res` —— 那个只给出层内的纵向格号 `t`，丢掉层号之后第 1 层的第 0 行会被读成
-///   第 0 层的第 1 行（实测：`field.warp3` 的格心采样偏差 0.40，画面上只表现为"形状不对"）。
+/// ⚠ 它是**从第 0 面起数**的口径（`y % (res·layers)`）。要"某一面的面内行号"就减去那一面的
+///   起点（见 [`local_voxel_of`]）—— 面是权威，行号单独一个数分不出自己在哪一面。
 pub fn in_face_row(shape: &VolumeShape, y: u32) -> u32 {
     let res = shape.res.max(1);
     y % (res * shape.layers.max(1))
@@ -141,23 +140,27 @@ pub fn layer_of(shape: &VolumeShape, y: u32) -> u32 {
     in_face_row(shape, y) / shape.res.max(1)
 }
 
-/// 一行 → 它的**面内**体素坐标（`(s, t, altitude)`，**不含**面偏移）。
+/// 行号 → **面内坐标** `(s, t, altitude)`（`t` 是**层内**纵向格号，**不含**面偏移）。
 ///
-/// ⚠ 网格的行列只按面内位置排 ⇒ 想按坐标回读网格的人要的是这一份（见 [`voxel_of`] 的
-///   文档：减偏移那条路在 `f32` 上会丢精度）。
+/// ⚠ **这一份是"网格的行列"那一套坐标**（读网格用它），而 [`voxel_of`] 是"噪声空间"
+///   那一套（取噪声用它）。两者的差别**只有面偏移**。
 ///
-/// ⚠⚠ **这一份只能用来"取噪声"，不能用来"回读网格"**：`altitude = layer / (layers - 1)`
-///   再乘回 `layers - 1` **不是**原来的整数（`f32` 上 `1/3 × 3 = 1.0000001`），
-///   于是 `floor` 会往上跳一层 —— 实测：按它回读网格，第 1 层的采样读到的是第 2 层的值，
-///   偏差 0.4（近半个值域），而**画面看起来只是"形状不对"**，极难归因。
-///   要回读网格就用 [`layer_of`] 与 [`row_within_layer`]（它们走整数除法，不经过浮点）。
-pub fn local_voxel_of(shape: &VolumeShape, _face: u32, x: u32, y: u32) -> [f32; 3] {
+/// ⚠⚠ **面内行号要按这一面的起点算**（`face` 是权威）：只拿 `y` 去 `% (res·layers)` 是
+///   "从第 0 面起数"，六面会全部落到同一块的同一个位置上 —— 实测 `cloud.density` 把第 5
+///   面的值读成第 0 面的，偏差 6000（整整六个面的行距）。传进来的 `face` 与 `y` 说的是
+///   同一格，用 `face` 的起点就没有这个歧义。
+///
+/// ⚠ 层号必须走**整数除法**，不能用 `altitude × (layers-1)` 反解：`f32` 上
+///   `1/3 × 3 = 1.0000001` ⇒ `floor` 跳一层（实测偏差 0.40，近半个值域）。
+pub fn local_voxel_of(shape: &VolumeShape, face: u32, x: u32, y: u32) -> [f32; 3] {
     let res = shape.res.max(1);
     let last = shape.layers.max(2) - 1;
-    let layer = layer_of(shape, y);
+    let in_face = y.saturating_sub(face * res * shape.layers.max(1));
+    let layer = in_face / res;
+    let t = in_face % res;
     [
         (x as f32 + 0.5) / res as f32,
-        (row_within_layer(shape, y) as f32 + 0.5) / res as f32,
+        (t as f32 + 0.5) / res as f32,
         layer.min(last) as f32 / last as f32,
     ]
 }
@@ -273,6 +276,38 @@ mod tests {
         let voxel = voxel_of(&shape, 0, 2, 3);
         assert!(voxel[0] > 0.0 && voxel[0] < 1.0, "{voxel:?}");
         assert!(voxel[1] > 0.0 && voxel[1] < 1.0, "{voxel:?}");
+    }
+
+    /// **面内坐标随行号走**：`t` 循环 `0..res`、层号递增，跨面时重新从 `(0, 0)` 起。
+    ///
+    /// ⚠ 这条钉的是"面号必须被剥掉"：不剥的话第 1 面会被读成第 0 面（实测：
+    ///   `cloud.density` 把第 1 面的值全部搬到第 0 面上，而画面上只表现为"六面一样"）。
+    #[test]
+    fn the_in_face_coordinates_do_not_leak_across_faces() {
+        let shape = VolumeShape { res: 4, layers: 3 };
+        for face in 0..CUBE_FACES {
+            for layer in 0..shape.layers {
+                for t in 0..shape.res {
+                    let y = shape.row_of(face, layer) + t;
+                    assert_eq!(layer_of(&shape, y), layer, "面 {face} 行 {y} 的层号");
+                    assert_eq!(
+                        row_within_layer(&shape, y),
+                        t,
+                        "面 {face} 行 {y} 的层内格号"
+                    );
+                    assert_eq!(
+                        in_face_row(&shape, y),
+                        layer * shape.res + t,
+                        "面 {face} 行 {y} 的面内行号"
+                    );
+                    let voxel = local_voxel_of(&shape, face, 1, y);
+                    assert!(
+                        (voxel[2] - layer as f32 / (shape.layers - 1) as f32).abs() < 1e-6,
+                        "面 {face} 行 {y} 的高度应当是第 {layer} 层"
+                    );
+                }
+            }
+        }
     }
 
     /// **六面在噪声空间里不重叠**：同一个 `(s, t, altitude)` 在六面上必须给出六个不同的点。

@@ -98,3 +98,60 @@ impl px_graph_schema::HashField for FieldKind {
         hasher.update(&[*self as u8]);
     }
 }
+
+/// **`cloud.density` 的参数**：体网格多粗、壳摆在哪、要不要保守化。
+///
+/// ⚠ 它与顶上的 [`Params`]（`cloud.coarse`）**不是同一件事**，所以各留一份：
+///   `cloud.coarse` 吃"覆盖度场 + 云的形状参数"，烘的是**等值面提取**要的那张场
+///   （存 `(场 - τ) / L`，服务于网格）；这一档吃**一张三维密度场**，烘的是**体渲染**
+///   要的密度（存密度本身，服务于沿视线的积分）。两者的"值"含义不同 ⇒ 参数表也不同
+///   （这一档没有 `tau` / `scale` 那些给等值面用的栏，多了半径与径向的保守化）。
+pub mod density {
+    use serde::{Deserialize, Serialize};
+
+    /// 一张三维场 → 一份可步进的体网格（立方球参数空间）。
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, px_derive::PxParams)]
+    #[serde(default, deny_unknown_fields)]
+    pub struct DensityParams {
+        /// 每个面 `s` / `t` 两个轴的采样点数（`res × res` 个格）。
+        ///
+        /// ⚠ 它就是上游体网格场的 `width`：两边必须一致（上游场是照这张画布造的）。
+        pub res: u32,
+        /// 径向层数。⚠ 同样要与上游场一致（行数 = `res² × layers × 6`）。
+        pub layers: u32,
+        /// 壳的内外半径（世界点 = 方向 × 半径）。
+        ///
+        /// ⚠ 它**只在这一档有定义**：上游那张三维场活在体素坐标 `(s, t, altitude)` 里、
+        ///   不知道世界尺度；"这张网格摆在世界的哪"是**这一档**的事。步进要的是世界里
+        ///   的一段区间，所以半径必须在这里钉下来。
+        pub inner: f32,
+        pub outer: f32,
+        /// **径向的保守化**（单位：格，`0` = 不保守）。
+        ///
+        /// ⚠ 为什么径向要有它、而面内不要：步进是**沿视线**走的，而视线在参数空间里主要
+        ///   沿径向推进 ⇒ 面内那一维被三线性插值平滑掉了，径向的细结构才会**整根跨过**。
+        ///   保守化 = 取"这一格与它里外各一层"的最大值 ⇒ 密度只增不减（视觉上边界往外长，
+        ///   方向是安全的那一边）。给 1 就够；给 0 是"我要看原样"那一档。
+        pub reach: u32,
+    }
+
+    impl Default for DensityParams {
+        fn default() -> Self {
+            Self {
+                res: 64,
+                layers: 32,
+                inner: 1.0,
+                outer: 1.6,
+                reach: 1,
+            }
+        }
+    }
+
+    impl DensityParams {
+        /// 壳的厚度。⚠ 步进要按它算步长，所以两处必须是同一个数。
+        pub fn span(&self) -> f32 {
+            self.outer - self.inner
+        }
+    }
+}
+
