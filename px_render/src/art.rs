@@ -266,7 +266,11 @@ impl LoadedScene {
                 object.textures.len(),
                 object.alpha,
                 object.cull,
-                if object.cast_shadow { "" } else { "｜不投影" }
+                if object.cast_shadow {
+                    ""
+                } else {
+                    "｜不投影"
+                }
             ));
             for bound in &object.textures {
                 lines.push(format!(
@@ -561,12 +565,12 @@ pub(crate) fn load_shader(
             return Err(format!(
                 "shader 成员 {member} 的 include 闭包对不上：产物记的 {value:016x}｜盘上现在的 {fingerprint:016x}\n  \
                  ⇒ 这份产物是拿另一版 include 烘的，画出来既不是老那一版也不是新那一版。\n  {REBAKE}"
-            ))
+            ));
         }
         None => {
             return Err(format!(
                 "shader 成员 {member} 的产物没有 include 闭包指纹。\n  {REBAKE}"
-            ))
+            ));
         }
     }
 
@@ -581,12 +585,12 @@ pub(crate) fn load_shader(
         Some(text) => {
             return Err(format!(
                 "shader 成员 {member} 的 schema descriptor 对不上：\n  产物记的 {text}\n  现在的   {now}\n  {REBAKE}"
-            ))
+            ));
         }
         None => {
             return Err(format!(
                 "shader 成员 {member} 的产物没有 schema descriptor。\n  {REBAKE}"
-            ))
+            ));
         }
     }
 
@@ -699,7 +703,9 @@ pub fn primitive_mesh(name: &str, params: &BTreeMap<String, Value>) -> Result<Me
     let number = |key: &str| -> Result<f32, String> {
         match params.get(key) {
             Some(Value::Num(value)) => Ok(*value as f32),
-            Some(other) => Err(format!("图元 '{name}' 的参数 '{key}' 要一个数，实际是 {other:?}")),
+            Some(other) => Err(format!(
+                "图元 '{name}' 的参数 '{key}' 要一个数，实际是 {other:?}"
+            )),
             None => Err(format!(
                 "图元 '{name}' 缺参数 '{key}'；它有的参数：{}",
                 if params.is_empty() {
@@ -723,9 +729,7 @@ pub fn primitive_mesh(name: &str, params: &BTreeMap<String, Value>) -> Result<Me
             }
             Ok(crate::icosphere::icosphere(radius, subdivisions as u32))
         }
-        other => Err(format!(
-            "不认识的图元 '{other}'；这份渲染器认：icosphere"
-        )),
+        other => Err(format!("不认识的图元 '{other}'；这份渲染器认：icosphere")),
     }
 }
 
@@ -757,12 +761,8 @@ fn decode_base_level(shape: &TextureShape, bytes: &[u8]) -> Result<image::RgbaIm
         }
     }
     let height = shape.height * shape.layers;
-    image::RgbaImage::from_raw(shape.width, height, rgba).ok_or_else(|| {
-        format!(
-            "解出来的字节数与 {}×{} 对不上",
-            shape.width, height
-        )
-    })
+    image::RgbaImage::from_raw(shape.width, height, rgba)
+        .ok_or_else(|| format!("解出来的字节数与 {}×{} 对不上", shape.width, height))
 }
 
 /// IEEE 754 半精度 → 单精度。
@@ -817,7 +817,10 @@ mod tests {
             .unwrap_or_else(|err| panic!("读不了 {}：{err}", list.display()));
         let path = PathBuf::from(text.trim());
         if !path.exists() {
-            println!("⚠ 跳过：场景产物 {} 不在（target/ 不入 git）", path.display());
+            println!(
+                "⚠ 跳过：场景产物 {} 不在（target/ 不入 git）",
+                path.display()
+            );
             return None;
         }
         Some(path)
@@ -892,7 +895,11 @@ mod tests {
         };
         println!("{}", scene.audit());
 
-        let ids: Vec<&str> = scene.objects.iter().map(|object| object.id.as_str()).collect();
+        let ids: Vec<&str> = scene
+            .objects
+            .iter()
+            .map(|object| object.id.as_str())
+            .collect();
         assert_eq!(ids, vec!["planet", "atmosphere"], "物体表");
         assert_eq!(scene.ambient, 80.0, "环境光");
 
@@ -901,9 +908,17 @@ mod tests {
             planet.geometry.member().expect("网格成员").to_string(),
             "planet/surface@f5d69bcdde79"
         );
-        assert_eq!(planet.shader.member.to_string(), "shaders/surface@f679cdf81015");
         assert_eq!(
-            planet.texture(1).expect("第 1 格贴图").texture.member.to_string(),
+            planet.shader.member.to_string(),
+            "shaders/surface@f679cdf81015"
+        );
+        assert_eq!(
+            planet
+                .texture(1)
+                .expect("第 1 格贴图")
+                .texture
+                .member
+                .to_string(),
             "generated/surface_color@94acc1920c4a"
         );
         assert_eq!(planet.alpha, AlphaMode::Opaque);
@@ -915,7 +930,12 @@ mod tests {
         assert_eq!(planet.geometry.mesh().triangle_count(), 307_200);
         // 预览的最细一级 = 780×520；整条链是 10 级 —— 上传要用的是**后者**。
         assert_eq!(
-            planet.texture(1).expect("第 1 格").texture.image.dimensions(),
+            planet
+                .texture(1)
+                .expect("第 1 格")
+                .texture
+                .image
+                .dimensions(),
             (780, 520)
         );
         assert_eq!(planet.texture(1).expect("第 1 格").texture.shape.levels, 10);
@@ -946,7 +966,10 @@ mod tests {
         // ⚠ 期望值是**文档里那串 f64**（= f32 的 1.14）：`as f32` 那一步不许改成 `as f64` 再取整。
         assert_eq!(number(params, "radius"), 1.1399999856948853);
         assert_eq!(number(params, "subdivisions"), 64.0);
-        assert_eq!(atmosphere.shader.member.to_string(), "shaders/atmosphere@d4501946bb0c");
+        assert_eq!(
+            atmosphere.shader.member.to_string(),
+            "shaders/atmosphere@d4501946bb0c"
+        );
         assert_eq!(atmosphere.alpha, AlphaMode::Add);
         assert_eq!(atmosphere.cull, CullMode::Back);
         assert!(!atmosphere.cast_shadow);
@@ -1034,9 +1057,15 @@ mod tests {
         let worst = other
             .positions
             .iter()
-            .map(|position| (position[0] * position[0] + position[1] * position[1] + position[2] * position[2]).sqrt())
+            .map(|position| {
+                (position[0] * position[0] + position[1] * position[1] + position[2] * position[2])
+                    .sqrt()
+            })
             .fold(0.0_f32, f32::max);
-        assert!((worst - 7.5).abs() < 1e-4, "换过半径的那份外接半径是 {worst}");
+        assert!(
+            (worst - 7.5).abs() < 1e-4,
+            "换过半径的那份外接半径是 {worst}"
+        );
 
         let mut denser = params.clone();
         let dense = 8.0;
@@ -1047,7 +1076,10 @@ mod tests {
             10 * (dense as usize + 1).pow(2) + 2,
             "细分改了顶点数就该按闭式 10(s+1)²+2 变"
         );
-        assert_ne!(coarse.indices.len(), atmosphere.geometry.mesh().indices.len());
+        assert_ne!(
+            coarse.indices.len(),
+            atmosphere.geometry.mesh().indices.len()
+        );
     }
 
     /// 解码那条路**不依赖 `target/`**：新克隆上唯一还能跑的判据就是它（所以它必须自己站得住）。
@@ -1074,7 +1106,9 @@ mod tests {
             format: TextureFormat::Rgba16Float,
         };
         let mut payload = Vec::new();
-        for bits in [0x3C00u16, 0x3800, 0x0000, 0x4000, 0xBC00, 0x7C00, 0x0001, 0x3555] {
+        for bits in [
+            0x3C00u16, 0x3800, 0x0000, 0x4000, 0xBC00, 0x7C00, 0x0001, 0x3555,
+        ] {
             payload.extend_from_slice(&bits.to_le_bytes());
         }
         // 半精度那五档：1 / 0.5 / 2 / −1 / 0（外加 ±∞ 与次正规数走一遍不 panic）。
@@ -1127,7 +1161,10 @@ mod tests {
         let loaded = load_frame_material(&declared, &shader::modules()).expect("装载帧材质");
 
         assert_eq!(loaded.name, "skybox");
-        assert_eq!(loaded.entry, "fragment", "入口名是文档给的那个（已核对它存在）");
+        assert_eq!(
+            loaded.entry, "fragment",
+            "入口名是文档给的那个（已核对它存在）"
+        );
         // 声明的格子**从反射来**：第 5 格是契约表里那几档 cube 之一。
         assert_eq!(loaded.textures, vec![(5, TextureDimension::Cube)]);
         // 参数按**它自己声明的结构体**打包：一个 f32，补齐到 16 字节（WGSL 的 uniform 对齐）。
@@ -1139,7 +1176,9 @@ mod tests {
         // ⚠ 曝光那一乘**必须真的在组装后的文本里**：它是策略，不是注释。
         //    少了它整幅背景会被推到 255（§136 实测：非黑像素数一样、值全错）。
         assert!(
-            loaded.assembled.contains("params.brightness * view.exposure"),
+            loaded
+                .assembled
+                .contains("params.brightness * view.exposure"),
             "亮度那一格要乘上相机的曝光（oracle：`skybox.brightness * exposure`）"
         );
         // 内容键 = 组装后全文的 sha256 前 16 位（它没有 CAS 成员，见 [`content_key`]）。

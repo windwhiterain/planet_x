@@ -41,12 +41,12 @@ pub use material::{
     MATERIAL_BIND_GROUP, MAX_PARAMS_BYTES, MaterialLayout, PARAMS_ALIGN, PARAMS_BINDING, ParamKind,
     ParamSlot, TEXTURE_SLOTS, TextureDimension, TextureSlot,
 };
+pub use payload::{Build, PayloadBundle};
 pub use scene::{
-    Address, AlphaMode, CullMode, Environment, Filter, Geometry, Light, LightKind, Material, Member,
-    Object, SCENE_SCHEMA, Sampler, SceneSpec, TextureRef, Transform, Value,
+    Address, AlphaMode, CullMode, Environment, Filter, Geometry, Light, LightKind, Material,
+    Member, Object, SCENE_SCHEMA, Sampler, SceneSpec, TextureRef, Transform, Value,
 };
 pub use stream::Frame;
-pub use payload::{Build, PayloadBundle};
 pub use wire::{Blob, BlobHeader, DType, WireError};
 
 pub const PROTOCOL_SNAPSHOT: &str = include_str!("../snapshots/protocol.snapshot.json");
@@ -146,7 +146,10 @@ impl std::fmt::Display for HandshakeError {
                 write!(formatter, "协议版本不一致：本地 {ours}，对端 {theirs}")
             }
             Self::ProtocolHash { ours, theirs } => {
-                write!(formatter, "协议指纹不一致：本地 {ours:016x}，对端 {theirs:016x}")
+                write!(
+                    formatter,
+                    "协议指纹不一致：本地 {ours:016x}，对端 {theirs:016x}"
+                )
             }
         }
     }

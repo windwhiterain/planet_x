@@ -364,12 +364,7 @@ pub fn light_of(light: &px_protocol::scene::Light) -> Result<ClusteredLight, Str
         POINT_LIGHT_SHADOW_MAP_NEAR_Z,
     );
     Ok(ClusteredLight {
-        light_custom_data: [
-            face.z_axis.z,
-            face.z_axis.w,
-            face.w_axis.z,
-            face.w_axis.w,
-        ],
+        light_custom_data: [face.z_axis.z, face.z_axis.w, face.w_axis.z, face.w_axis.w],
         color_inverse_square_range: [
             light.color[0] * intensity,
             light.color[1] * intensity,
@@ -797,38 +792,38 @@ pub fn frame(
     //    调用方按 [`GroupZero::set_view`] 现取那一行，把它排在
     //    这几行**前面**（次序与加保留态之前逐字相同）。
     let mut audit = vec![
-            format!(
-                "lights：ambient_color ({}, {}, {}, {})",
-                lights.ambient_color[0],
-                lights.ambient_color[1],
-                lights.ambient_color[2],
-                lights.ambient_color[3]
-            ),
-            format!(
-                "globals：time {}｜delta_time {}｜frame_count {}",
-                globals.time, globals.delta_time, globals.frame_count
-            ),
-            format!(
-                "clustered_lights：{} 格 × {} 字节 = {} 字节；文档 {} 盏灯写进前 {} 格，其余**全零**\
+        format!(
+            "lights：ambient_color ({}, {}, {}, {})",
+            lights.ambient_color[0],
+            lights.ambient_color[1],
+            lights.ambient_color[2],
+            lights.ambient_color[3]
+        ),
+        format!(
+            "globals：time {}｜delta_time {}｜frame_count {}",
+            globals.time, globals.delta_time, globals.frame_count
+        ),
+        format!(
+            "clustered_lights：{} 格 × {} 字节 = {} 字节；文档 {} 盏灯写进前 {} 格，其余**全零**\
                  （零 = 这盏灯不存在，内容 shader 自己判）",
-                array.count,
-                array.stride,
-                array.size,
-                cluster.len(),
-                cluster.len()
-            ),
-            // ⚠ 影图那一格要说清**绑的是哪一份**：这一帧有虚拟影图就是它，没有就是兜底图
-            //    （1×1×1 全 0）。"绑了什么"看不见的话，"影子怎么全亮/全黑"就只能猜。
-            format!(
-                "point_shadow_textures（group 0 binding {}）：**D2Array**（每面一层，层号 = 灯×6+面），\
+            array.count,
+            array.stride,
+            array.size,
+            cluster.len(),
+            cluster.len()
+        ),
+        // ⚠ 影图那一格要说清**绑的是哪一份**：这一帧有虚拟影图就是它，没有就是兜底图
+        //    （1×1×1 全 0）。"绑了什么"看不见的话，"影子怎么全亮/全黑"就只能猜。
+        format!(
+            "point_shadow_textures（group 0 binding {}）：**D2Array**（每面一层，层号 = 灯×6+面），\
                  {shadow_note}｜sampler（binding {}）：ClampToEdge×3 / Linear / Linear / Nearest / \
                  lod [0, 32] / GreaterEqual（虚拟影图改手动比较之后这一格不再被采）｜\
                  页表（binding {}）：{} 个 u32",
-                POINT_SHADOW_TEXTURES_BINDING.1,
-                POINT_SHADOW_SAMPLER_BINDING.1,
-                SHADOW_PAGE_TABLE_BINDING.1,
-                shadow_page_table.size() / 4
-            ),
+            POINT_SHADOW_TEXTURES_BINDING.1,
+            POINT_SHADOW_SAMPLER_BINDING.1,
+            SHADOW_PAGE_TABLE_BINDING.1,
+            shadow_page_table.size() / 4
+        ),
     ];
     // 逐盏把**真的填进去的那几个数**打出来：出问题时先看这几行，不必猜"是不是灯没填"。
     // ⚠ 打的是结构体里的值（不是文档里的原文）：字面量对而打包错，只有这样才看得见。
@@ -1190,7 +1185,11 @@ mod tests {
         const FIELDS: &'static [(&'static str, usize, &'static str)] = &[
             ("time", offset_of!(GlobalsUniform, time), "f32"),
             ("delta_time", offset_of!(GlobalsUniform, delta_time), "f32"),
-            ("frame_count", offset_of!(GlobalsUniform, frame_count), "u32"),
+            (
+                "frame_count",
+                offset_of!(GlobalsUniform, frame_count),
+                "u32",
+            ),
         ];
     }
 
@@ -1237,7 +1236,11 @@ mod tests {
                 offset_of!(ClusteredLight, shadow_map_near_z),
                 "f32",
             ),
-            ("decal_index", offset_of!(ClusteredLight, decal_index), "u32"),
+            (
+                "decal_index",
+                offset_of!(ClusteredLight, decal_index),
+                "u32",
+            ),
             ("range", offset_of!(ClusteredLight, range), "f32"),
         ];
     }
@@ -1351,13 +1354,17 @@ mod tests {
         ] {
             let found = table
                 .iter()
-                .find(|(binding, declaration)| {
-                    *binding == expected && declaration.ends_with(what)
-                })
+                .find(|(binding, declaration)| *binding == expected && declaration.ends_with(what))
                 .unwrap_or_else(|| {
-                    panic!("组装后的 WGSL 里没有 {what} 在 @group({}) @binding({})", expected.0, expected.1)
+                    panic!(
+                        "组装后的 WGSL 里没有 {what} 在 @group({}) @binding({})",
+                        expected.0, expected.1
+                    )
                 });
-            println!("{what:<22} @group({}) @binding({}) {}", found.0.0, found.0.1, found.1);
+            println!(
+                "{what:<22} @group({}) @binding({}) {}",
+                found.0.0, found.0.1, found.1
+            );
         }
         // 多一格都不许有：这一份探针只引了那五格。
         assert_eq!(rows.len(), 5, "探针引了五格，反射出来却是：{table:?}");
@@ -1442,7 +1449,11 @@ mod tests {
         let camera = crate::camera::probe_camera(None, 960.0 / 640.0);
         let view = ViewUniform::from_camera(&camera, [0.0, 0.0, 960.0, 640.0]);
         let bytes = to_bytes(&view);
-        assert_eq!(bytes.len(), 288, "view 是 160 + 两条逆矩阵的 128 = 288 字节");
+        assert_eq!(
+            bytes.len(),
+            288,
+            "view 是 160 + 两条逆矩阵的 128 = 288 字节"
+        );
         let word = |offset: usize| {
             u32::from_le_bytes(bytes[offset..offset + 4].try_into().expect("四个字节"))
         };
@@ -1497,10 +1508,14 @@ mod tests {
         assert_eq!(padded.len(), 16, "补齐到 16 的倍数");
         assert_eq!(&padded[..exact.len()], &exact[..], "前缀必须是同样的字节");
         assert!(padded[exact.len()..].iter().all(|byte| *byte == 0));
-        assert_eq!(to_uniform_bytes(&ViewUniform::from_camera(
-            &crate::camera::probe_camera(None, 1.5),
-            [0.0, 0.0, 1.0, 1.0],
-        )).len(), 288);
+        assert_eq!(
+            to_uniform_bytes(&ViewUniform::from_camera(
+                &crate::camera::probe_camera(None, 1.5),
+                [0.0, 0.0, 1.0, 1.0],
+            ))
+            .len(),
+            288
+        );
         assert_eq!(to_uniform_bytes(&LightsUniform::ambient(80.0)).len(), 32);
     }
 
@@ -1510,16 +1525,23 @@ mod tests {
         let bytes = to_bytes(&LightsUniform::ambient(80.0));
         for offset in [0, 4, 8, 12] {
             let word = u32::from_le_bytes(bytes[offset..offset + 4].try_into().expect("四个字节"));
-            assert_eq!(word, 80.0f32.to_bits(), "ambient_color 第 {} 格", offset / 4);
+            assert_eq!(
+                word,
+                80.0f32.to_bits(),
+                "ambient_color 第 {} 格",
+                offset / 4
+            );
         }
         assert_eq!(
             to_bytes(&ClusteredLight::absent()).len(),
             80,
             "没写过的那一格是全零 80 字节（内容 shader 靠颜色判它在不在）"
         );
-        assert!(to_bytes(&ClusteredLight::absent())
-            .iter()
-            .all(|byte| *byte == 0));
+        assert!(
+            to_bytes(&ClusteredLight::absent())
+                .iter()
+                .all(|byte| *byte == 0)
+        );
     }
 
     /// 政策常数**就是 oracle 的那几个字面量**（§109.2 那张表，出处见每个常数的注释）。
@@ -1528,7 +1550,10 @@ mod tests {
     /// 而它们一个都不来自文档 —— 漂开的那天没有任何别的地方会响。
     #[test]
     fn the_point_light_policy_numbers_are_the_oracles_literals() {
-        assert_eq!(POINT_LIGHT_DEFAULT_RANGE, 20.0, "PointLight::default().range");
+        assert_eq!(
+            POINT_LIGHT_DEFAULT_RANGE, 20.0,
+            "PointLight::default().range"
+        );
         assert_eq!(POINT_LIGHT_RADIUS, 0.0, "PointLight::default().radius");
         assert_eq!(
             POINT_LIGHT_SHADOW_DEPTH_BIAS, 0.08,
@@ -1542,11 +1567,13 @@ mod tests {
             POINT_LIGHT_SHADOW_MAP_NEAR_Z, 0.1,
             "PointLight::DEFAULT_SHADOW_MAP_NEAR_Z"
         );
-        assert_eq!(POINT_LIGHT_SHADOW_MAP_SIZE, 1024, "PointLightShadowMap 的边长");
+        assert_eq!(
+            POINT_LIGHT_SHADOW_MAP_SIZE, 1024,
+            "PointLightShadowMap 的边长"
+        );
         assert_eq!(POINT_LIGHT_FLAGS_SHADOWS_ENABLED, 1, "bit0");
         assert_eq!(
-            POINT_LIGHT_FLAGS_AFFECTS_LIGHTMAPPED_MESH_DIFFUSE,
-            8,
+            POINT_LIGHT_FLAGS_AFFECTS_LIGHTMAPPED_MESH_DIFFUSE, 8,
             "bit3 —— `PointLight::default()` 里这个开关是 true，所以它**每盏灯**都在"
         );
         // §109.2 那一格：`0.6 × (2/1024) × √2`
@@ -1564,9 +1591,10 @@ mod tests {
     #[test]
     fn the_sun_light_packs_into_the_oracles_eighty_bytes() {
         let position = [-4.2f32, 1.15, 2.35];
-        let reach = (position[0] * position[0] + position[1] * position[1] + position[2] * position[2])
-            .sqrt()
-            * 2.5;
+        let reach =
+            (position[0] * position[0] + position[1] * position[1] + position[2] * position[2])
+                .sqrt()
+                * 2.5;
         let light = px_protocol::scene::Light::point("sun", position, [1.0, 1.0, 1.0], 7.6e5)
             .with_range(reach)
             .with_shadows(true);
@@ -1616,8 +1644,9 @@ mod tests {
     /// （实测：填灯之后那一档的哈希一个位都没动）。
     #[test]
     fn an_unlit_light_is_indistinguishable_from_an_empty_slot() {
-        let dark = px_protocol::scene::Light::point("sun", [-4.2, 1.15, 2.35], [1.0, 1.0, 1.0], 0.0)
-            .with_shadows(false);
+        let dark =
+            px_protocol::scene::Light::point("sun", [-4.2, 1.15, 2.35], [1.0, 1.0, 1.0], 0.0)
+                .with_shadows(false);
         let packed = light_of(&dark).expect("点光");
         assert_eq!(
             packed.color_inverse_square_range[..3],
@@ -1694,6 +1723,9 @@ mod tests {
         assert!(err.contains("只兑现**点光源**"), "{err}");
         let mut sun = px_protocol::scene::Light::point("d", [0.0; 3], [1.0; 3], 1.0);
         sun.kind = px_protocol::scene::LightKind::Directional;
-        assert!(light_of(&sun).is_err(), "平行光在 oracle 里根本不住这个缓冲");
+        assert!(
+            light_of(&sun).is_err(),
+            "平行光在 oracle 里根本不住这个缓冲"
+        );
     }
 }

@@ -177,11 +177,8 @@ pub fn face_view(light_position: Vec3, face: u32, near_z: f32) -> Camera {
         Vec4::new(matrix3.z_axis.x, matrix3.z_axis.y, matrix3.z_axis.z, 0.0),
         Vec4::new(translation.x, translation.y, translation.z, 1.0),
     );
-    let clip_from_view = Mat4::perspective_infinite_reverse_rh(
-        core::f32::consts::FRAC_PI_2,
-        1.0,
-        near_z,
-    );
+    let clip_from_view =
+        Mat4::perspective_infinite_reverse_rh(core::f32::consts::FRAC_PI_2, 1.0, near_z);
     let view_from_world = world_from_view.inverse();
     let view_from_clip = clip_from_view.inverse();
     let clip_from_world = clip_from_view.mul_mat4(&view_from_world);
@@ -236,17 +233,41 @@ mod tests {
     }
 
     const WORLD: [u32; 16] = [
-        0x3F80_0000, 0x0000_0000, 0x0000_0000, 0x0000_0000,
-        0x0000_0000, 0x3F7C_2F4D, 0xBE30_2108, 0x0000_0000,
-        0x0000_0000, 0x3E30_2108, 0x3F7C_2F4D, 0x0000_0000,
-        0x0000_0000, 0x3F0C_CCCD, 0x4049_999A, 0x3F80_0000,
+        0x3F80_0000,
+        0x0000_0000,
+        0x0000_0000,
+        0x0000_0000,
+        0x0000_0000,
+        0x3F7C_2F4D,
+        0xBE30_2108,
+        0x0000_0000,
+        0x0000_0000,
+        0x3E30_2108,
+        0x3F7C_2F4D,
+        0x0000_0000,
+        0x0000_0000,
+        0x3F0C_CCCD,
+        0x4049_999A,
+        0x3F80_0000,
     ];
 
     const CLIP: [u32; 16] = [
-        0x3FCE_034C, 0x0000_0000, 0x0000_0000, 0x0000_0000,
-        0x0000_0000, 0x401A_8279, 0x0000_0000, 0x0000_0000,
-        0x0000_0000, 0x0000_0000, 0x0000_0000, 0xBF80_0000,
-        0x0000_0000, 0x0000_0000, 0x3DCC_CCCD, 0x0000_0000,
+        0x3FCE_034C,
+        0x0000_0000,
+        0x0000_0000,
+        0x0000_0000,
+        0x0000_0000,
+        0x401A_8279,
+        0x0000_0000,
+        0x0000_0000,
+        0x0000_0000,
+        0x0000_0000,
+        0x0000_0000,
+        0xBF80_0000,
+        0x0000_0000,
+        0x0000_0000,
+        0x3DCC_CCCD,
+        0x0000_0000,
     ];
 
     /// `world_from_view.inverse()` —— **不是**解析逆（§110.1.1）。
@@ -256,10 +277,22 @@ mod tests {
     /// **glam 的通用余子式逆**。⚠ 解析刚体逆 `[Rᵀ | −Rᵀt]` 在这里给的是
     /// `c1.y = 3F7C2F4D`（与位姿同值）、`c3.z = C04CA662` —— 差 1–2 ulp，**不是**这个常量。
     const VIEW_FROM_WORLD: [u32; 16] = [
-        0x3F80_0000, 0x8000_0000, 0x0000_0000, 0x8000_0000,
-        0x8000_0000, 0x3F7C_2F4F, 0x3E30_2109, 0x0000_0000,
-        0x0000_0000, 0xBE30_2109, 0x3F7C_2F4F, 0x8000_0000,
-        0x0000_0000, 0xB380_0001, 0xC04C_A664, 0x3F80_0000,
+        0x3F80_0000,
+        0x8000_0000,
+        0x0000_0000,
+        0x8000_0000,
+        0x8000_0000,
+        0x3F7C_2F4F,
+        0x3E30_2109,
+        0x0000_0000,
+        0x0000_0000,
+        0xBE30_2109,
+        0x3F7C_2F4F,
+        0x8000_0000,
+        0x0000_0000,
+        0xB380_0001,
+        0xC04C_A664,
+        0x3F80_0000,
     ];
 
     /// `clip_from_view.inverse()`（天空盒的片元阶段用它还原视线方向）。
@@ -269,10 +302,22 @@ mod tests {
     /// ⚠ 这一格**盖不到**上面那 6 组向量：那批的输入是位姿/一般矩阵，而投影矩阵不是刚体 ——
     /// `[Rᵀ | −Rᵀt]` 这条解析路在这儿连形式都不成立。所以它只能对着 Bevy 的读数钉。
     const VIEW_FROM_CLIP: [u32; 16] = [
-        0x3F1F_0EDA, 0x8000_0000, 0x0000_0000, 0x8000_0000,
-        0x8000_0000, 0x3ED4_13CD, 0x8000_0000, 0x0000_0000,
-        0x0000_0000, 0x8000_0000, 0x0000_0000, 0x4120_0000,
-        0x8000_0000, 0x0000_0000, 0xBF7F_FFFF, 0x0000_0000,
+        0x3F1F_0EDA,
+        0x8000_0000,
+        0x0000_0000,
+        0x8000_0000,
+        0x8000_0000,
+        0x3ED4_13CD,
+        0x8000_0000,
+        0x0000_0000,
+        0x0000_0000,
+        0x8000_0000,
+        0x0000_0000,
+        0x4120_0000,
+        0x8000_0000,
+        0x0000_0000,
+        0xBF7F_FFFF,
+        0x0000_0000,
     ];
 
     #[test]
@@ -289,7 +334,8 @@ mod tests {
         let got = bits(&cam.world_from_view);
         for i in 0..16 {
             assert_eq!(
-                got[i], WORLD[i],
+                got[i],
+                WORLD[i],
                 "world_from_view[{i}] (col {} .{}) got {:08X} want {:08X}",
                 i / 4,
                 ["x", "y", "z", "w"][i % 4],
@@ -301,7 +347,8 @@ mod tests {
         let got = bits(&cam.clip_from_view);
         for i in 0..16 {
             assert_eq!(
-                got[i], CLIP[i],
+                got[i],
+                CLIP[i],
                 "clip_from_view[{i}] (col {} .{}) got {:08X} want {:08X}",
                 i / 4,
                 ["x", "y", "z", "w"][i % 4],
@@ -319,7 +366,8 @@ mod tests {
             let got = bits(matrix);
             for i in 0..16 {
                 assert_eq!(
-                    got[i], expected[i],
+                    got[i],
+                    expected[i],
                     "{what}[{i}] (col {} .{}) got {:08X} want {:08X}",
                     i / 4,
                     ["x", "y", "z", "w"][i % 4],
@@ -362,11 +410,31 @@ mod tests {
             "位置要么逐位相同，要么这条实验不成立"
         );
         for (what, a, b) in [
-            ("world_from_view", &review.world_from_view, &probe.world_from_view),
-            ("view_from_world", &review.view_from_world, &probe.view_from_world),
-            ("clip_from_view", &review.clip_from_view, &probe.clip_from_view),
-            ("view_from_clip", &review.view_from_clip, &probe.view_from_clip),
-            ("clip_from_world", &review.clip_from_world, &probe.clip_from_world),
+            (
+                "world_from_view",
+                &review.world_from_view,
+                &probe.world_from_view,
+            ),
+            (
+                "view_from_world",
+                &review.view_from_world,
+                &probe.view_from_world,
+            ),
+            (
+                "clip_from_view",
+                &review.clip_from_view,
+                &probe.clip_from_view,
+            ),
+            (
+                "view_from_clip",
+                &review.view_from_clip,
+                &probe.view_from_clip,
+            ),
+            (
+                "clip_from_world",
+                &review.clip_from_world,
+                &probe.clip_from_world,
+            ),
         ] {
             assert_eq!(bits(a), bits(b), "{what} 不逐位相同");
         }
@@ -386,6 +454,10 @@ mod tests {
             &px_protocol::art::Camera::raw([1e-7, 0.0, 0.0], 4.0, "tiny"),
             1.0,
         );
-        assert_eq!(tiny.position.to_array(), [0.0, 0.0, 4.0], "平方 1e-14 不够 1e-12");
+        assert_eq!(
+            tiny.position.to_array(),
+            [0.0, 0.0, 4.0],
+            "平方 1e-14 不够 1e-12"
+        );
     }
 }

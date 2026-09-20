@@ -72,7 +72,10 @@ fn package_name(doc: &toml::Value, fallback: &str) -> String {
 fn protocol_dependencies_are_whitelisted_and_never_pull_the_host() {
     let doc = manifest(&Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"));
     let names = dep_names(&doc, "dependencies");
-    let allowed: BTreeSet<String> = PROTOCOL_WHITELIST.iter().map(|name| name.to_string()).collect();
+    let allowed: BTreeSet<String> = PROTOCOL_WHITELIST
+        .iter()
+        .map(|name| name.to_string())
+        .collect();
     assert_eq!(
         names, allowed,
         "px_protocol 的运行时依赖只允许 {PROTOCOL_WHITELIST:?}（协议必须是冻结且极小的）"
@@ -158,7 +161,9 @@ fn protocol_is_a_workspace_member() {
         .cloned()
         .unwrap_or_default();
     assert!(
-        members.iter().any(|item| item.as_str() == Some("px_protocol")),
+        members
+            .iter()
+            .any(|item| item.as_str() == Some("px_protocol")),
         "px_protocol 必须是 workspace 成员，否则它不会被任何门覆盖"
     );
 }

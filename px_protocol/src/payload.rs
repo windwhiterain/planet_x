@@ -199,7 +199,11 @@ impl Build for MeshData {
     const RESOLUTION_IS_CANVAS: bool = false;
 
     fn detail(payload: &Self) -> String {
-        format!("{} 顶点 / {} 三角形", payload.vertices(), payload.triangles())
+        format!(
+            "{} 顶点 / {} 三角形",
+            payload.vertices(),
+            payload.triangles()
+        )
     }
 
     fn encode(payload: &Self) -> Result<PayloadBundle, String> {

@@ -10,8 +10,8 @@
 
 use std::collections::BTreeMap;
 
-use px_graph::generate::{self, Generated};
 use px_graph::ManifestEntry;
+use px_graph::generate::{self, Generated};
 use px_protocol::art::{MeshData, TextureFormat};
 use px_protocol::wire::DType;
 
@@ -43,12 +43,7 @@ impl Baked {
         };
         let written = generate::write_texture(node, data.shape(), &data.bytes, dtype)
             .map_err(|err| format!("写贴图产物 {node} 失败：{err}"))?;
-        self.register(
-            node,
-            op,
-            &written,
-            format!("{} 字节贴图", data.bytes.len()),
-        );
+        self.register(node, op, &written, format!("{} 字节贴图", data.bytes.len()));
         Ok(px_protocol::scene::Member::new(
             GENERATED,
             node,
@@ -84,7 +79,11 @@ impl Baked {
             if written.hit { "命中" } else { "重算" },
             px_graph::hex_short(&written.key),
             written.bytes,
-            if written.hit { "（CAS 里已有）" } else { "" },
+            if written.hit {
+                "（CAS 里已有）"
+            } else {
+                ""
+            },
         );
         self.generated.push(ManifestEntry {
             node: node.to_string(),

@@ -190,7 +190,8 @@ fn layer_of(pass: &PassSpec, label: &str) -> Result<Option<u32>, String> {
 }
 
 /// 全屏 pass 的三样：组装后的 WGSL、打包好的参数、`reads` 的格位。
-fn fullscreen_of(    pass: &PassSpec,
+fn fullscreen_of(
+    pass: &PassSpec,
     label: &str,
     pcg_root: &Path,
     modules: &px_shader::ModuleTable,

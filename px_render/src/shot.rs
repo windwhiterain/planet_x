@@ -53,12 +53,7 @@ pub const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
 ///
 /// 留成显式的一条（而不是 `LoadOp::Clear` 顺手写进别处）是因为 S0 的判据就是它：
 /// 纯色能不能原样走到 PNG 上，是这条路径唯一能被单独验的机会。
-pub fn clear(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    target: &Target,
-    color: wgpu::Color,
-) {
+pub fn clear(device: &wgpu::Device, queue: &wgpu::Queue, target: &Target, color: wgpu::Color) {
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("px_render clear"),
     });
@@ -168,4 +163,3 @@ pub fn write_png(
         .map_err(|err| format!("写 PNG {} 失败：{err}", path.display()))?;
     Ok(std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0))
 }
-

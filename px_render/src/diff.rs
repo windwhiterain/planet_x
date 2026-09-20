@@ -27,7 +27,8 @@ struct Bitmap {
 
 impl Bitmap {
     fn load(path: &Path) -> Result<Bitmap, String> {
-        let bytes = std::fs::read(path).map_err(|err| format!("读 {} 失败：{err}", path.display()))?;
+        let bytes =
+            std::fs::read(path).map_err(|err| format!("读 {} 失败：{err}", path.display()))?;
         let image = image::load_from_memory_with_format(&bytes, image::ImageFormat::Png)
             .map_err(|err| format!("{} 不是一张读得动的 PNG：{err}", path.display()))?;
         let rgb = image.to_rgb8();
@@ -389,8 +390,14 @@ pub fn compare(ours: &Path, oracle: &Path) -> Result<Diff, String> {
     // 大差异的粗格地图（每一格是 `MAP_COLUMNS × MAP_ROWS` 分之一张图）。
     let mut large_map = [[0_usize; MAP_COLUMNS]; MAP_ROWS];
     // 相关系数用**整数累加器**：亮度和、平方和、乘积和都是整数，避免了浮点求和的次序问题。
-    let (mut count, mut sum_mine, mut sum_theirs, mut sum_sq_mine, mut sum_sq_theirs, mut sum_cross) =
-        (0_i64, 0_i64, 0_i64, 0_i64, 0_i64, 0_i64);
+    let (
+        mut count,
+        mut sum_mine,
+        mut sum_theirs,
+        mut sum_sq_mine,
+        mut sum_sq_theirs,
+        mut sum_cross,
+    ) = (0_i64, 0_i64, 0_i64, 0_i64, 0_i64, 0_i64);
     for y in 0..left.height {
         for x in 0..left.width {
             let mine = left.at(x, y);
@@ -413,7 +420,9 @@ pub fn compare(ours: &Path, oracle: &Path) -> Result<Diff, String> {
                 // 亮度用整数权重（Rec.601 的近似，四舍五入到整数）：相关系数对权重不敏感，
                 // 而整数让它与"谁先谁后"无关。
                 let luma = |pixel: [u8; 3]| -> i64 {
-                    (299 * i64::from(pixel[0]) + 587 * i64::from(pixel[1]) + 114 * i64::from(pixel[2]))
+                    (299 * i64::from(pixel[0])
+                        + 587 * i64::from(pixel[1])
+                        + 114 * i64::from(pixel[2]))
                         / 1000
                 };
                 let one = luma(mine);
@@ -462,7 +471,9 @@ pub fn compare(ours: &Path, oracle: &Path) -> Result<Diff, String> {
                 .iter()
                 .all(|(nx, ny)| {
                     let outside = *nx >= left.width || *ny >= left.height;
-                    outside || (x == 0 && *nx == u32::MAX) || left.at(*nx, *ny) == right.at(*nx, *ny)
+                    outside
+                        || (x == 0 && *nx == u32::MAX)
+                        || left.at(*nx, *ny) == right.at(*nx, *ny)
                 });
                 if neighbours_same {
                     isolated_count += 1;
@@ -546,8 +557,14 @@ pub fn compare(ours: &Path, oracle: &Path) -> Result<Diff, String> {
     };
 
     // 高通那一份：横向 lag-2 差分（同一行的 `x` 与 `x+2` 都在剪影里才算）。
-    let (mut count, mut sum_mine, mut sum_theirs, mut sum_sq_mine, mut sum_sq_theirs, mut sum_cross) =
-        (0_i64, 0_i64, 0_i64, 0_i64, 0_i64, 0_i64);
+    let (
+        mut count,
+        mut sum_mine,
+        mut sum_theirs,
+        mut sum_sq_mine,
+        mut sum_sq_theirs,
+        mut sum_cross,
+    ) = (0_i64, 0_i64, 0_i64, 0_i64, 0_i64, 0_i64);
     for y in 0..left.height {
         for x in 0..left.width.saturating_sub(2) {
             if left.at(x, y) == background || left.at(x + 2, y) == background {
@@ -596,7 +613,11 @@ pub fn compare(ours: &Path, oracle: &Path) -> Result<Diff, String> {
         center,
         outside_ring: ring,
         outside_far: far,
-        outside_min_radius: if min_radius.is_finite() { min_radius } else { 0.0 },
+        outside_min_radius: if min_radius.is_finite() {
+            min_radius
+        } else {
+            0.0
+        },
         outside_max_radius: max_radius,
         band_inner,
         band_limb,
@@ -755,7 +776,12 @@ impl Diff {
             ),
         ];
         // ---- 分类那几行：Δ 分档 / 边上还是平处 / 孤立像素 ----
-        let band_names = ["盘内(<0.95)", "边缘(0.95–1.00)", "环上(1.00–1.15)", "更远(≥1.15)"];
+        let band_names = [
+            "盘内(<0.95)",
+            "边缘(0.95–1.00)",
+            "环上(1.00–1.15)",
+            "更远(≥1.15)",
+        ];
         for (index, name) in band_names.iter().enumerate() {
             let buckets = self.band_buckets[index];
             if buckets.iter().all(|count| *count == 0) {
@@ -775,10 +801,7 @@ impl Diff {
         lines.push(format!(
             "剪影内差异像素**在几何边上**的：{} / {}（大差异里在边上的：{} / {}）\
              —— 边上占多数 ⇒ 指向光栅化边缘/取样位置；平处占多数 ⇒ 指向着色公式",
-            self.inside_on_edge,
-            self.inside.pixels,
-            self.large_on_edge,
-            self.large_pixels
+            self.inside_on_edge, self.inside.pixels, self.large_on_edge, self.large_pixels
         ));
         // 大差异的粗格地图：一眼看它是"贴着轮廓一圈"还是"挤在某一侧"。
         //
@@ -853,11 +876,19 @@ impl Diff {
                     pixel.x,
                     pixel.y,
                     pixel.radius,
-                    if pixel.inside { "剪影内" } else { "剪影外" },
+                    if pixel.inside {
+                        "剪影内"
+                    } else {
+                        "剪影外"
+                    },
                     pixel.delta,
                     pixel.ours,
                     pixel.oracle,
-                    if pixel.on_edge { "在边上" } else { "在平处" }
+                    if pixel.on_edge {
+                        "在边上"
+                    } else {
+                        "在平处"
+                    }
                 ));
             }
         }

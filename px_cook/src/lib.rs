@@ -46,25 +46,25 @@ use px_graph_schema::{OpId, PxInputs, PxOp, Report};
 /// 契约层那几样：图脚本从这一扇门一并拿到（`Cooked` / `Grid` / 身份哈希 / `blake3` 的 re-export）。
 pub use px_graph_schema::{Cache, Cooked, Grid, blake3, fnv1a, fnv1a_sources};
 
+/// 各域的**算子表**：声明在这里，实现在 dylib 里。
+pub use px_field_schema::ops as field;
 /// 驱动那一半（图的生命周期 + 清单 + 键）。图脚本只从这里拿机制，别处不用再开一扇门。
 pub use px_graph::{
     BakedShader, Graph, GraphSpec, ManifestEntry, SHADER_VERSION, artifact_path_of,
     bake_shader_graph, begin, cache_root, cameras, graph_manifest, hex, hex_short, manifest_key_of,
     scene_key, shader_key, workspace_root, write_graph_manifest, write_shader,
 };
-/// 各域的**算子表**：声明在这里，实现在 dylib 里。
-pub use px_field_schema::ops as field;
 pub use px_mesh_schema::ops as mesh;
-pub use px_volume_schema::ops as volume;
 /// 图脚本动不动就要写 `Domain::Cube`：从这里一并给出，省得再添一行依赖。
 pub use px_protocol::art::Domain;
+pub use px_volume_schema::ops as volume;
 
-pub use px_graph_schema::payload;
 /// 宏生成出来的代码按 `$crate::…` 走 —— 于是用宏的人不必自己依赖契约层。
 pub use px_graph_schema;
 /// ⚠ `PxInputs::collect` 的签名里就是 `blake3::Hasher` —— 实现者得拿到它，
 /// 所以从契约层 re-export，别让人为一个签名去加依赖。
 pub use px_graph_schema::HashField;
+pub use px_graph_schema::payload;
 
 /// 超参数那一侧：TOML 原文 → `(解析后的参数, 进键的规范 JSON)`。
 ///

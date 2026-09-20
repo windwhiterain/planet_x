@@ -315,7 +315,10 @@ pub const CLOSURE_LO: &str = "closure_lo";
 /// 64 位指纹 → 清单参数。f64 能精确表示 32 位整数，所以这条无损。
 pub fn closure_params(fingerprint: u64) -> [(String, f64); 2] {
     [
-        (CLOSURE_HI.to_string(), f64::from((fingerprint >> 32) as u32)),
+        (
+            CLOSURE_HI.to_string(),
+            f64::from((fingerprint >> 32) as u32),
+        ),
         (
             CLOSURE_LO.to_string(),
             f64::from((fingerprint & 0xffff_ffff) as u32),
@@ -409,8 +412,14 @@ mod tests {
             module_of("planet_x::light::sun_light", &table),
             Some("planet_x::light")
         );
-        assert_eq!(module_of("planet_x::noise", &table), Some("planet_x::noise"));
-        assert_eq!(module_of("bevy_pbr::forward_io::VertexOutput", &table), None);
+        assert_eq!(
+            module_of("planet_x::noise", &table),
+            Some("planet_x::noise")
+        );
+        assert_eq!(
+            module_of("bevy_pbr::forward_io::VertexOutput", &table),
+            None
+        );
         assert_eq!(
             module_of("bevy_pbr::mesh_view_bindings::{view, lights}", &table),
             None,
@@ -452,11 +461,20 @@ mod tests {
     fn the_fingerprint_follows_the_reachable_closure_and_not_the_whole_directory() {
         let entry = "#import planet_x::noise::fbm_3\n";
         let base = modules(&[
-            ("planet_x::noise", "#define_import_path planet_x::noise\nfn fbm_3() {}\n"),
-            ("planet_x::other", "#define_import_path planet_x::other\nfn other() {}\n"),
+            (
+                "planet_x::noise",
+                "#define_import_path planet_x::noise\nfn fbm_3() {}\n",
+            ),
+            (
+                "planet_x::other",
+                "#define_import_path planet_x::other\nfn other() {}\n",
+            ),
         ]);
         let changed_unreachable = modules(&[
-            ("planet_x::noise", "#define_import_path planet_x::noise\nfn fbm_3() {}\n"),
+            (
+                "planet_x::noise",
+                "#define_import_path planet_x::noise\nfn fbm_3() {}\n",
+            ),
             (
                 "planet_x::other",
                 "#define_import_path planet_x::other\nfn other() { /* 改了 */ }\n",
@@ -467,7 +485,10 @@ mod tests {
                 "planet_x::noise",
                 "#define_import_path planet_x::noise\nfn fbm_3() { /* 改了 */ }\n",
             ),
-            ("planet_x::other", "#define_import_path planet_x::other\nfn other() {}\n"),
+            (
+                "planet_x::other",
+                "#define_import_path planet_x::other\nfn other() {}\n",
+            ),
         ]);
         assert_eq!(
             closure(entry, &base).fingerprint(),
@@ -485,14 +506,24 @@ mod tests {
     fn external_symbols_are_part_of_the_fingerprint_by_name() {
         let table = modules(&[("planet_x::noise", "#define_import_path planet_x::noise\n")]);
         let one = closure("#import bevy_pbr::mesh_view_bindings::{view}\n", &table);
-        let two = closure("#import bevy_pbr::mesh_view_bindings::{view, lights}\n", &table);
-        let three = closure("#import bevy_pbr::mesh_view_bindings::{view, lights}\n", &table);
+        let two = closure(
+            "#import bevy_pbr::mesh_view_bindings::{view, lights}\n",
+            &table,
+        );
+        let three = closure(
+            "#import bevy_pbr::mesh_view_bindings::{view, lights}\n",
+            &table,
+        );
         assert_ne!(
             one.fingerprint(),
             two.fingerprint(),
             "点了哪些外部符号是这份 shader 的一部分"
         );
-        assert_eq!(two.fingerprint(), three.fingerprint(), "同一份必须同一个指纹");
+        assert_eq!(
+            two.fingerprint(),
+            three.fingerprint(),
+            "同一份必须同一个指纹"
+        );
     }
 
     #[test]
@@ -531,7 +562,13 @@ mod tests {
 
     #[test]
     fn the_fingerprint_survives_the_manifest_parameter_round_trip() {
-        for fingerprint in [0_u64, 1, 0x0000_0001_0000_0000, u64::MAX, 0xdead_beef_cafe_f00d] {
+        for fingerprint in [
+            0_u64,
+            1,
+            0x0000_0001_0000_0000,
+            u64::MAX,
+            0xdead_beef_cafe_f00d,
+        ] {
             let params: BTreeMap<String, f64> = closure_params(fingerprint).into_iter().collect();
             assert_eq!(closure_from_params(&params), Some(fingerprint));
         }
@@ -627,8 +664,11 @@ mod tests {
             "#define_import_path planet_x::noise\nfn fbm_3() {}\n",
         )
         .expect("写不了夹具");
-        std::fs::write(entry.join("clouds.wgsl"), "#import planet_x::noise::fbm_3\n")
-            .expect("写不了夹具");
+        std::fs::write(
+            entry.join("clouds.wgsl"),
+            "#import planet_x::noise::fbm_3\n",
+        )
+        .expect("写不了夹具");
         let roots = vec![library.clone(), entry.clone()];
         let table = module_sources(&roots).expect("模块表");
         assert_eq!(table.len(), 1, "入口没有 import_path，不算模块");
@@ -639,14 +679,21 @@ mod tests {
             files.windows(2).all(|pair| pair[0] <= pair[1]),
             "按路径排序 ⇒ 与 read_dir 的顺序无关"
         );
-        assert_eq!(files, wgsl_files(&roots).expect("文件表"), "同一棵树两次要给同一张表");
+        assert_eq!(
+            files,
+            wgsl_files(&roots).expect("文件表"),
+            "同一棵树两次要给同一张表"
+        );
         assert_eq!(
             closure("#import planet_x::noise::fbm_3\n", &table)
                 .modules
                 .len(),
             1
         );
-        assert!(module_sources(&[root.join("not-there")]).is_err(), "目录不在 ⇒ Err");
+        assert!(
+            module_sources(&[root.join("not-there")]).is_err(),
+            "目录不在 ⇒ Err"
+        );
 
         std::fs::write(
             entry.join("noise-again.wgsl"),
@@ -654,7 +701,10 @@ mod tests {
         )
         .expect("写不了夹具");
         let duplicate = module_sources(&roots).expect_err("同名两份必须报错");
-        assert!(duplicate.contains("两个真本"), "报错要说清是两个真本：{duplicate}");
+        assert!(
+            duplicate.contains("两个真本"),
+            "报错要说清是两个真本：{duplicate}"
+        );
         std::fs::remove_file(entry.join("noise-again.wgsl")).expect("清不掉夹具");
     }
 
@@ -682,10 +732,30 @@ mod tests {
         let modules = workspace_modules(workspace).expect("模块表");
         // (入口, 组装文本字节数, 组装文本 FNV-1a, 闭包指纹)
         let pinned = [
-            ("atmosphere.wgsl", 8311_usize, 0x6b67_21a2_55ce_f009_u64, 0x3388_1b68_faef_8589_u64),
-            ("clouds.wgsl", 52769, 0x7ff2_8567_aa71_6987, 0x7678_2061_a1bd_b006),
-            ("ring.wgsl", 1096, 0x59d8_22d8_f87c_d24c, 0x23d0_283f_680f_89d3),
-            ("surface.wgsl", 25915, 0xfecf_8fee_bd76_8982, 0xabed_b20f_868b_f99c),
+            (
+                "atmosphere.wgsl",
+                8311_usize,
+                0x6b67_21a2_55ce_f009_u64,
+                0x3388_1b68_faef_8589_u64,
+            ),
+            (
+                "clouds.wgsl",
+                52769,
+                0x7ff2_8567_aa71_6987,
+                0x7678_2061_a1bd_b006,
+            ),
+            (
+                "ring.wgsl",
+                1096,
+                0x59d8_22d8_f87c_d24c,
+                0x23d0_283f_680f_89d3,
+            ),
+            (
+                "surface.wgsl",
+                25915,
+                0xfecf_8fee_bd76_8982,
+                0xabed_b20f_868b_f99c,
+            ),
         ];
         for (name, bytes, fnv, closure_fingerprint) in pinned {
             let (source, _path) = workspace_source_of(workspace, name).expect("入口真本");

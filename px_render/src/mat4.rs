@@ -886,11 +886,7 @@ mod tests {
             [0.1, -0.2, 0.3, 0.92736185],
             [-0.5, 0.5, 0.5, 0.5],
         ];
-        let scales = [
-            [1.0_f32, 1.0, 1.0],
-            [1.14, 1.14, 1.14],
-            [0.5, 2.0, 1.25],
-        ];
+        let scales = [[1.0_f32, 1.0, 1.0], [1.14, 1.14, 1.14], [0.5, 2.0, 1.25]];
         let translations = [[0.0_f32, 0.0, 0.0], [1.0, -2.0, 0.5]];
         let mut mismatches = Vec::new();
         for rotation in rotations {
@@ -950,8 +946,9 @@ mod tests {
             );
             let product = Mat4::mul_mat4(&ours, &ours);
             let their_product = theirs * theirs;
-            for (column, their_column) in
-                bits16(&product).iter().zip(their_product.to_cols_array().iter())
+            for (column, their_column) in bits16(&product)
+                .iter()
+                .zip(their_product.to_cols_array().iter())
             {
                 if column.to_bits() != their_column.to_bits() {
                     mismatches.push(format!(
@@ -1034,15 +1031,34 @@ mod tests {
     }
 }
 
-
 impl Mat4 {
     /// 全零矩阵。`camera.rs` 的测试拿它当「没算出来」的哨兵。
     /// 用结构体字面量而不是 `Vec4::new(..)`：这样 `const` 一定成立，
     /// 不必去猜 `Vec4::new` 是不是 `const fn`。
     pub const ZERO: Self = Self {
-        x_axis: Vec4 { x: 0.0, y: 0.0, z: 0.0, w: 0.0 },
-        y_axis: Vec4 { x: 0.0, y: 0.0, z: 0.0, w: 0.0 },
-        z_axis: Vec4 { x: 0.0, y: 0.0, z: 0.0, w: 0.0 },
-        w_axis: Vec4 { x: 0.0, y: 0.0, z: 0.0, w: 0.0 },
+        x_axis: Vec4 {
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+            w: 0.0,
+        },
+        y_axis: Vec4 {
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+            w: 0.0,
+        },
+        z_axis: Vec4 {
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+            w: 0.0,
+        },
+        w_axis: Vec4 {
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+            w: 0.0,
+        },
     };
 }

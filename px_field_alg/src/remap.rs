@@ -165,7 +165,13 @@ pub fn map_grid<C: Cell>(
 ///   读的** —— 预置这一档没有图侧函数，所以递进去的是 `RemapParams::default()`（`Sampled`
 ///   本来也不看它）。
 pub fn remap_sampled(scale: &Scale, input: &Field, grid: Grid) -> Field {
-    remap_with(scale, &RemapParams::default(), input, grid, &Sampled { field: input })
+    remap_with(
+        scale,
+        &RemapParams::default(),
+        input,
+        grid,
+        &Sampled { field: input },
+    )
 }
 
 /// **实例库入口**：用一个**图侧给的**场函数重映射上游那张场

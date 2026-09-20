@@ -152,14 +152,12 @@ pub fn layout() -> &'static MaterialLayout {
 
 /// 进 compute shader 的那块 uniform：**按契约打包**（不是按这份 Rust 结构体的字段顺序）。
 pub fn params_bytes(params: &CloudParams) -> Vec<u8> {
-    layout()
-        .pack(&params.to_map())
-        .unwrap_or_else(|err| {
-            panic!(
-                "探针的 CloudParams 与 clouds.wgsl 的契约对不上：{err}\n  \
+    layout().pack(&params.to_map()).unwrap_or_else(|err| {
+        panic!(
+            "探针的 CloudParams 与 clouds.wgsl 的契约对不上：{err}\n  \
                  ⇒ 两边漂了：先 cargo test -p px_probe 看是哪一格"
-            )
-        })
+        )
+    })
 }
 
 /// 镜像的**名字与类型**，顺序就是 WGSL 结构体的顺序。只给测试用：

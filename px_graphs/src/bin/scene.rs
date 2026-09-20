@@ -64,12 +64,9 @@ fn main() {
     let key = px_cook::scene_key(&spec_json, &member_keys);
     let artifact = px_protocol::scene::cas_path(&root, &px_cook::hex(&key))
         .unwrap_or_else(|err| panic!("{err}"));
-    let bytes = px_protocol::scene::write_scene(
-        &artifact,
-        &compiled.document,
-        px_cook::fnv1a(&spec_json),
-    )
-    .unwrap_or_else(|err| panic!("{err}"));
+    let bytes =
+        px_protocol::scene::write_scene(&artifact, &compiled.document, px_cook::fnv1a(&spec_json))
+            .unwrap_or_else(|err| panic!("{err}"));
 
     println!("{}", compiled.document.audit());
     // ⚠ 尾巴上那一格是**内容键**（`scene_key` 算出来的、也嵌在文件名里那个），**不是文件字节的

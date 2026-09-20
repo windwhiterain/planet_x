@@ -20,7 +20,10 @@ impl std::fmt::Display for WireError {
             Self::Io(message) => write!(formatter, "IO 失败：{message}"),
             Self::MissingHeader => write!(formatter, "二进制块缺少头部行"),
             Self::BadPayloadLength { expected, actual } => {
-                write!(formatter, "二进制块长度不符：头部声明 {expected} 字节，实际 {actual} 字节")
+                write!(
+                    formatter,
+                    "二进制块长度不符：头部声明 {expected} 字节，实际 {actual} 字节"
+                )
             }
             Self::NotF32(dtype) => write!(formatter, "期望 f32 载荷，实际 {dtype:?}"),
             Self::NotU32(dtype) => write!(formatter, "期望 u32 载荷，实际 {dtype:?}"),

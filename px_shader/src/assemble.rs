@@ -149,9 +149,9 @@ pub fn bevy_stub(symbol: &str) -> Option<&'static str> {
              \x20   };\n\
              @group(0) @binding(11) var<uniform> globals: GlobalsStub;\n",
         ),
-        "bevy_pbr::view_transformations::depth_ndc_to_view_z" => {
-            Some("fn depth_ndc_to_view_z(ndc_depth: f32) -> f32 { return -1.0 / max(ndc_depth, 1e-6); }\n")
-        }
+        "bevy_pbr::view_transformations::depth_ndc_to_view_z" => Some(
+            "fn depth_ndc_to_view_z(ndc_depth: f32) -> f32 { return -1.0 / max(ndc_depth, 1e-6); }\n",
+        ),
         _ => None,
     }
 }
@@ -252,7 +252,12 @@ pub fn render_source(
                 if symbol.is_empty() {
                     continue;
                 }
-                prelude.push_str(&expand(&format!("{module}::{symbol}"), modules, stubs, seen));
+                prelude.push_str(&expand(
+                    &format!("{module}::{symbol}"),
+                    modules,
+                    stubs,
+                    seen,
+                ));
             }
             continue;
         }
@@ -314,7 +319,10 @@ mod tests {
         let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             render_source("#import nobody::knows\n", &modules, bevy_stub, &mut seen)
         }));
-        assert!(caught.is_err(), "带 :: 的未知 import 必须报错，不许静默丢掉");
+        assert!(
+            caught.is_err(),
+            "带 :: 的未知 import 必须报错，不许静默丢掉"
+        );
     }
 
     /// 桩表是**宿主给的参数**：同一个符号，两张表给两份文本。
@@ -332,7 +340,10 @@ mod tests {
             bevy_stub,
             &mut seen,
         );
-        assert!(text.contains("var<uniform> view"), "Bevy 那张表认这个符号：{text}");
+        assert!(
+            text.contains("var<uniform> view"),
+            "Bevy 那张表认这个符号：{text}"
+        );
 
         let mut other_seen = Vec::new();
         let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -361,12 +372,18 @@ mod tests {
     fn the_host_view_stub_is_bevys_five_fields_plus_two_inverses() {
         let bevy = bevy_stub("bevy_pbr::mesh_view_bindings::view").expect("Bevy 那张表认这个符号");
         let head = bevy.split("};\n").next().expect("Bevy 那份是个结构体");
-        let mine = HOST_VIEW_STUB.split("};\n").next().expect("这一份也是结构体");
+        let mine = HOST_VIEW_STUB
+            .split("};\n")
+            .next()
+            .expect("这一份也是结构体");
         assert!(
             mine.starts_with(head),
             "前五格必须与 Bevy 那张近似表逐字相同（新字段只许追加在末尾）：\n{head}\n---\n{mine}"
         );
-        for field in ["view_from_clip: mat4x4<f32>", "world_from_view: mat4x4<f32>"] {
+        for field in [
+            "view_from_clip: mat4x4<f32>",
+            "world_from_view: mat4x4<f32>",
+        ] {
             assert!(mine.contains(field), "缺了 {field}：\n{mine}");
             assert!(
                 !head.contains(field),

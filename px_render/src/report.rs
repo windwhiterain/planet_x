@@ -249,7 +249,6 @@ mod tests {
             diff: 500,
             threshold: 100,
             is_reference: false,
-
         };
         let (has_cloud, text) = cloud_verdict(&base);
         assert!(has_cloud && text.starts_with("有云 ✓"), "{text}");
@@ -290,7 +289,6 @@ mod tests {
             diff: 0,
             threshold: 1,
             is_reference: true,
-
         };
         let (has_cloud, text) = cloud_verdict(&dark);
         assert!(!has_cloud, "{text}");

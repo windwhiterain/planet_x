@@ -144,7 +144,13 @@ pub const PLANET_KEYS: [&str; 17] = [
 /// ⚠ 它**没有 shader**：灯不是物体（`PartFile.shader` 因此是可选字段）。
 pub const LIGHT_KEYS: [&str; 5] = ["position", "color", "intensity", "range", "shadows"];
 
-pub const MOON_KEYS: [&str; 5] = ["radius", "subdivisions", "position", "spin", "shadow_density"];
+pub const MOON_KEYS: [&str; 5] = [
+    "radius",
+    "subdivisions",
+    "position",
+    "spin",
+    "shadow_density",
+];
 
 /// **编译器自己消化的结构键**（云）：形状档、消融档、风 —— 这些要么进几何、要么与云影同口径。
 pub const CLOUDS_KEYS: [&str; 24] = [
@@ -256,10 +262,7 @@ pub fn cloud_params(
     shape_orientation: [f32; 4],
 ) -> BTreeMap<String, Value> {
     BTreeMap::from([
-        (
-            "orientation".to_string(),
-            Value::Quad(shape_orientation),
-        ),
+        ("orientation".to_string(), Value::Quad(shape_orientation)),
         (
             "tint".to_string(),
             Value::Quad([tint[0], tint[1], tint[2], 1.0]),
@@ -267,7 +270,10 @@ pub fn cloud_params(
         ("inner".to_string(), Value::Num(f64::from(inner))),
         ("outer".to_string(), Value::Num(f64::from(outer))),
         ("density".to_string(), Value::Num(f64::from(extinction))),
-        ("coverage".to_string(), Value::Num(f64::from(shape.coverage))),
+        (
+            "coverage".to_string(),
+            Value::Num(f64::from(shape.coverage)),
+        ),
         ("base".to_string(), Value::Num(f64::from(shape.base))),
         ("top".to_string(), Value::Num(f64::from(shape.top))),
         (

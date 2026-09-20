@@ -1,7 +1,6 @@
 #[cfg(test)]
 mod tests;
 
-
 use crate::department::{Department, Departments, Policy, Rationing};
 use crate::market::{Market, Merchandise, Trader, TraderMerchandise};
 use crate::warehouse::{Stock, Warehouse, Warehouses};
@@ -102,7 +101,11 @@ impl Spec {
     }
 
     pub fn with_specialty(mut self, factor: f32) -> Self {
-        let factor = if factor.is_finite() && factor > 0.0 { factor } else { 1.0 };
+        let factor = if factor.is_finite() && factor > 0.0 {
+            factor
+        } else {
+            1.0
+        };
         self.specialty = vec![factor; GOODS];
         self
     }
@@ -241,12 +244,10 @@ impl Spec {
     }
 
     fn transforms(&self, polity: usize, unit: usize) -> impl Iterator<Item = &Transform> {
-        self.transforms
-            .iter()
-            .filter(move |transform| {
-                (transform.polity == polity || transform.polity > self.polities)
-                    && (transform.unit == unit || transform.unit >= GOODS)
-            })
+        self.transforms.iter().filter(move |transform| {
+            (transform.polity == polity || transform.polity > self.polities)
+                && (transform.unit == unit || transform.unit >= GOODS)
+        })
     }
 
     pub fn supply(&self, polity: usize, good: usize) -> f32 {
@@ -662,8 +663,16 @@ impl Lab {
                     state.quote_buy += -net * merchandise.price;
                 }
             }
-            state.quote_sell = if sell > 0.0 { state.quote_sell / sell } else { 0.0 };
-            state.quote_buy = if buy > 0.0 { state.quote_buy / buy } else { 0.0 };
+            state.quote_sell = if sell > 0.0 {
+                state.quote_sell / sell
+            } else {
+                0.0
+            };
+            state.quote_buy = if buy > 0.0 {
+                state.quote_buy / buy
+            } else {
+                0.0
+            };
             let mut volume = 0.0;
             let mut value = 0.0;
             for i in 0..traders {
@@ -677,7 +686,11 @@ impl Lab {
             state.dealt = volume;
             state.deal_price = if volume > 0.0 { value / volume } else { 0.0 };
             for warehouse in &self.warehouses.warehouses {
-                state.stock += warehouse.stocks.get(k).map(|stock| stock.volume).unwrap_or(0.0);
+                state.stock += warehouse
+                    .stocks
+                    .get(k)
+                    .map(|stock| stock.volume)
+                    .unwrap_or(0.0);
             }
             for department in &self.departments.departments {
                 state.delivery += department.delivery().get(k).copied().unwrap_or(0.0);
@@ -733,7 +746,8 @@ impl Lab {
     }
 
     pub fn step(&mut self) {
-        self.departments.step(&mut self.warehouses, &mut self.market);
+        self.departments
+            .step(&mut self.warehouses, &mut self.market);
         for department in &self.departments.departments {
             let report = department.settlement();
             if !report.converged {

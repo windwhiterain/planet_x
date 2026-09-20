@@ -8,7 +8,7 @@
 //! `px_render/src/planet.rs` 的口径，别拿"看起来等价"的写法替。
 
 use px_field_schema::field::Field;
-use px_protocol::art::{Domain, TextureFormat, TextureShape, CUBE_COLUMNS, CUBE_FACES};
+use px_protocol::art::{CUBE_COLUMNS, CUBE_FACES, Domain, TextureFormat, TextureShape};
 
 use super::shade::{half_from_f32, push_color};
 
@@ -221,14 +221,7 @@ pub(super) fn image_from(width: u32, height: u32, data: Vec<u8>, cube: bool) -> 
     } else {
         mip_chain(width, height, &data)
     };
-    TextureData::new(
-        width,
-        height,
-        1,
-        levels,
-        TextureFormat::Rgba8Srgb,
-        chain,
-    )
+    TextureData::new(width, height, 1, levels, TextureFormat::Rgba8Srgb, chain)
 }
 
 // ---------------------------------------------------------------------------
@@ -253,14 +246,13 @@ pub fn coverage_cube(mask: &Field, slopes: [&Field; 3]) -> Result<TextureData, S
         ));
     }
     for slope in slopes {
-        if slope.projection != Domain::CubeMap || slope.width != face || slope.height != field.height
+        if slope.projection != Domain::CubeMap
+            || slope.width != face
+            || slope.height != field.height
         {
             return Err(format!(
                 "云的梯度场必须和覆盖度同形（{face}×{}），这份是 {:?} {}×{}",
-                field.height,
-                slope.projection,
-                slope.width,
-                slope.height
+                field.height, slope.projection, slope.width, slope.height
             ));
         }
     }
@@ -398,10 +390,7 @@ pub fn ring_band(width: u32, height: u32) -> TextureData {
             let edge = (t / 0.07).clamp(0.0, 1.0) * ((1.0 - t) / 0.10).clamp(0.0, 1.0);
             let alpha = (density * edge).clamp(0.0, 1.0);
             let shade = 0.70 + 0.30 * (0.5 + 0.5 * (t * 61.0).sin());
-            push_color(
-                &mut data,
-                [0.878 * shade, 0.827 * shade, 0.729 * shade],
-            );
+            push_color(&mut data, [0.878 * shade, 0.827 * shade, 0.729 * shade]);
             let last = data.len() - 1;
             data[last] = (alpha * 240.0) as u8;
         }

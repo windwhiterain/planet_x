@@ -192,7 +192,10 @@ impl PartFile {
     }
 
     /// 可选成员。
-    pub fn optional_member(&self, role: &str) -> Result<Option<px_protocol::scene::Member>, String> {
+    pub fn optional_member(
+        &self,
+        role: &str,
+    ) -> Result<Option<px_protocol::scene::Member>, String> {
         match self.members.get(role) {
             None => Ok(None),
             Some(reference) => {
@@ -228,17 +231,16 @@ pub struct Compiled {
 /// `with_graph = false` 是**兼容逃生门**（`--no-frame-graph`）：帧图那三节两栏都空，
 /// 产物因此与没有帧图时**逐字节相同**（六份冻产物的 sha256 是这条的判据）。
 /// ⚠ 它不是"另一种受支持的烘法" —— 它存在的唯一目的是证明老产物还能逐字节复现。
-pub fn compile(
-    file: &SceneFile,
-    baked: &mut Baked,
-    with_graph: bool,
-) -> Result<Compiled, String> {
+pub fn compile(file: &SceneFile, baked: &mut Baked, with_graph: bool) -> Result<Compiled, String> {
     let root = px_graph::cache_root();
     let planet = file
         .parts
         .iter()
         .find(|part| part.kind == "planet")
-        .ok_or_else(|| "场景里没有 kind planet 的 part：主体（height / mesh / palette / …）全在它身上".to_string())?;
+        .ok_or_else(|| {
+            "场景里没有 kind planet 的 part：主体（height / mesh / palette / …）全在它身上"
+                .to_string()
+        })?;
     let clouds = file.parts.iter().find(|part| part.kind == "clouds");
     let atmosphere = file.parts.iter().find(|part| part.kind == "atmosphere");
     for part in &file.parts {
@@ -374,10 +376,7 @@ pub fn compile(
             "coverage".to_string(),
             Value::Num(f64::from(cloud_shape.coverage)),
         ),
-        (
-            "shadow".to_string(),
-            Value::Num(f64::from(cloud_shadow)),
-        ),
+        ("shadow".to_string(), Value::Num(f64::from(cloud_shadow))),
         (
             "height".to_string(),
             Value::Num(planet.number_or("shadow_height", CLOUD_SHADOW_HEIGHT) as f64),
@@ -385,13 +384,7 @@ pub fn compile(
         ("gain".to_string(), Value::Num(f64::from(CLOUD_SHADOW_GAIN))),
     ]);
     computed.retain(|name, _| surface_layout.param(name).is_some());
-    let surface_params = material_params(
-        planet,
-        &surface_shader,
-        &PLANET_KEYS,
-        computed,
-        &root,
-    )?;
+    let surface_params = material_params(planet, &surface_shader, &PLANET_KEYS, computed, &root)?;
     let mut surface = Material::new(surface_shader).with_params(surface_params);
     if let Some(color) = &color_member {
         surface = surface.with_texture(
@@ -451,7 +444,7 @@ pub fn compile(
                 "part '{}' 的 primitive '{other}' 不认识（今天只有 icosphere；\
                  不写这一栏就用 members 里那个网格）",
                 planet.id
-            ))
+            ));
         }
     };
     // ⚠ 半径**在这里量**（见 `measure_radius`）：虚拟影图分页要它，而分页是烘图时做的。
@@ -686,8 +679,8 @@ pub fn compile(
         };
         let intensity = part.number_or("intensity", 1.0e4);
         let reach = part.number_or("range", math::length(position) * SUN_RANGE_FACTOR);
-        let mut light = Light::point(&part.id, position, color, intensity as f32)
-            .with_range(reach as f32);
+        let mut light =
+            Light::point(&part.id, position, color, intensity as f32).with_range(reach as f32);
         light.shadows = part.number_or("shadows", 0.0) > 0.5;
         extra_lights.push(light);
     }
@@ -695,18 +688,11 @@ pub fn compile(
     // ---- 相机：局部方向 → 世界系 ----
     let cameras: Vec<Camera> = match file.cameras.as_deref() {
         Some("review") | None => px_graph::cameras::review(),
-        Some(other) => {
-            return Err(format!(
-                "不认识的相机表 '{other}'（现在只有 review）"
-            ))
-        }
+        Some(other) => return Err(format!("不认识的相机表 '{other}'（现在只有 review）")),
     }
     .into_iter()
     .map(|camera| {
-        let world_direction = math::rotate(
-            math::quat_x(vocab::SYSTEM_TILT),
-            camera.direction,
-        );
+        let world_direction = math::rotate(math::quat_x(vocab::SYSTEM_TILT), camera.direction);
         Camera::new(world_direction, camera.distance, &camera.tag)
     })
     .collect();
@@ -917,15 +903,12 @@ fn mesh_radius(member: &px_protocol::scene::Member, root: &Path) -> Result<f32, 
     let path = member
         .resolve(root)
         .map_err(|err| format!("网格成员 {member} 的路径：{err}"))?;
-    let bytes =
-        std::fs::read(&path).map_err(|err| format!("读不到 {}：{err}", path.display()))?;
+    let bytes = std::fs::read(&path).map_err(|err| format!("读不到 {}：{err}", path.display()))?;
     let frames = px_protocol::stream::read_stream(&mut bytes.as_slice())
         .map_err(|err| format!("解 {} 的流：{err}", path.display()))?;
     // ⚠ 读法照 `px_render::mesh::load_mesh`：清单帧说 kind、后面的 blob 帧是载荷。
     let kind = frames.iter().find_map(|frame| match frame {
-        px_protocol::stream::Frame::Art(bundle) => {
-            bundle.assets.first().map(|asset| asset.kind)
-        }
+        px_protocol::stream::Frame::Art(bundle) => bundle.assets.first().map(|asset| asset.kind),
         _ => None,
     });
     if kind != Some(px_protocol::art::AssetKind::Mesh) {
@@ -982,7 +965,8 @@ fn shadow_density_of(part: &PartFile) -> Result<f32, String> {
     if part.number_or("shadows", 0.0) <= 0.5 {
         return Ok(0.0);
     }
-    Ok(part.number_or("shadow_density", DEFAULT_SHADOW_DENSITY))}
+    Ok(part.number_or("shadow_density", DEFAULT_SHADOW_DENSITY))
+}
 
 /// 环的自写材质（原来是 Bevy 的 `StandardMaterial { unlit: true, blend, cull: none }`）。
 /// 和 `shaders` 图里那三份同规矩：**include 闭包进键**（§17.1、§52.3）。
@@ -998,7 +982,11 @@ pub fn ring_shader() -> Result<px_protocol::scene::Member, String> {
     let closure = px_shader::closure(&text, &modules);
     let (key, _path, _bytes) = px_graph::write_shader("ring", &text, &closure, &modules)
         .map_err(|err| format!("写环 shader 失败：{err}"))?;
-    println!("环 shader {}｜{}", px_graph::hex_short(&key), closure.summary());
+    println!(
+        "环 shader {}｜{}",
+        px_graph::hex_short(&key),
+        closure.summary()
+    );
     Ok(px_protocol::scene::Member::new(
         "shaders",
         "ring",
@@ -1110,12 +1098,13 @@ shader = \"gasgiant\"
         )
         .expect("解得开");
         assert!(check_kind(&known).is_ok(), "`moon` 必须放行");
-        let unknown: PartFile =
-            toml::from_str("id = \"x\"
+        let unknown: PartFile = toml::from_str(
+            "id = \"x\"
 kind = \"asteroid\"
 shader = \"surface\"
-")
-                .expect("解得开");
+",
+        )
+        .expect("解得开");
         let err = check_kind(&unknown).expect_err("不认识的 kind 必须被拒");
         assert!(err.contains("asteroid"), "要点名写错的那个：{err}");
         assert!(err.contains("moon"), "要点名它认哪些（含 moon）：{err}");

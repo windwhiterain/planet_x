@@ -71,8 +71,8 @@ pub fn hash(files: &Roster) -> String {
         // ⚠ 名字也进哈希：两份内容相同但名字不同的文件不该撞。
         hasher.update(label.as_bytes());
         hasher.update(&[0]);
-        let bytes = std::fs::read(path)
-            .unwrap_or_else(|err| panic!("读不了 {}：{err}", path.display()));
+        let bytes =
+            std::fs::read(path).unwrap_or_else(|err| panic!("读不了 {}：{err}", path.display()));
         // 长度前缀：不让"两个字段拼起来相同"撞（`ab` + `c` 与 `a` + `bc`）。
         hasher.update(&(bytes.len() as u64).to_le_bytes());
         hasher.update(&bytes);
@@ -270,10 +270,7 @@ fn collect_tree(dir: &Path, root: &Path, prefix: &str, files: &mut Roster) {
 
 fn insert(files: &mut Roster, root: &Path, prefix: &str, path: PathBuf) {
     let relative = path.strip_prefix(root).unwrap_or(&path);
-    let label = format!(
-        "{prefix}/{}",
-        relative.to_string_lossy().replace('\\', "/")
-    );
+    let label = format!("{prefix}/{}", relative.to_string_lossy().replace('\\', "/"));
     files.insert(label, path);
 }
 
@@ -317,7 +314,10 @@ fn path_dependencies(manifest: &Path) -> Vec<(String, PathBuf)> {
             continue;
         };
         let relative = &after[start + 1..start + 1 + end];
-        out.push((name.trim().to_string(), normalized(&manifest.join(relative))));
+        out.push((
+            name.trim().to_string(),
+            normalized(&manifest.join(relative)),
+        ));
     }
     out
 }

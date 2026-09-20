@@ -45,48 +45,52 @@ fn a_dual_carries_the_derivative_of_the_branch_it_actually_took() {
 fn clamping_is_flat_outside_and_linear_inside() {
     let value = |x: f64| x.clamp(0.0, 1.0);
     assert!(
-        slope(|x| dclamp(x, Dual64::from_re(0.0), Dual64::from_re(1.0)), -1.0).abs() < 1e-12,
+        slope(
+            |x| dclamp(x, Dual64::from_re(0.0), Dual64::from_re(1.0)),
+            -1.0
+        )
+        .abs()
+            < 1e-12,
         "下界之外应当是平的"
     );
     assert!(
-        slope(|x| dclamp(x, Dual64::from_re(0.0), Dual64::from_re(1.0)), 2.0).abs() < 1e-12,
+        slope(
+            |x| dclamp(x, Dual64::from_re(0.0), Dual64::from_re(1.0)),
+            2.0
+        )
+        .abs()
+            < 1e-12,
         "上界之外应当是平的"
     );
     let inside = slope(
         |x| dclamp(x, Dual64::from_re(0.0), Dual64::from_re(1.0)),
         0.5,
     );
-    assert!((inside - 1.0).abs() < 1e-12, "界内斜率应当是 1，实测 {inside}");
+    assert!(
+        (inside - 1.0).abs() < 1e-12,
+        "界内斜率应当是 1，实测 {inside}"
+    );
     assert!(value(0.5) > 0.0);
 }
 fn smoothstep_kills_its_own_clamp_at_both_ends() {
     let dual = |at: f64| {
         slope(
-            |value| {
-                dsmoothstep(
-                    Dual64::from_re(0.0),
-                    Dual64::from_re(1.0),
-                    value,
-                )
-            },
+            |value| dsmoothstep(Dual64::from_re(0.0), Dual64::from_re(1.0), value),
             at,
         )
     };
     assert!(dual(0.0).abs() < 1e-12, "起点斜率应当是 0");
     assert!(dual(1.0).abs() < 1e-12, "终点斜率应当是 0");
     let middle = dual(0.5);
-    assert!((middle - 1.5).abs() < 1e-12, "中点斜率应当是 1.5，实测 {middle}");
+    assert!(
+        (middle - 1.5).abs() < 1e-12,
+        "中点斜率应当是 1.5，实测 {middle}"
+    );
 }
 fn the_dual_smoothstep_matches_the_closed_form_derivative() {
     let dual = |at: f64| {
         slope(
-            |value| {
-                dsmoothstep(
-                    Dual64::from_re(0.0),
-                    Dual64::from_re(0.3),
-                    value,
-                )
-            },
+            |value| dsmoothstep(Dual64::from_re(0.0), Dual64::from_re(0.3), value),
             at,
         )
     };
@@ -110,9 +114,8 @@ fn the_dual_smoothstep_matches_the_closed_form_derivative() {
     );
 }
 fn a_product_of_clamped_factors_differentiates_through_every_piece() {
-    let value = |x: f64| {
-        smoothstep(x, 0.0, 0.3) * (1.0 - smoothstep(x, 0.5, 0.7)) * x.clamp(0.1, 0.9)
-    };
+    let value =
+        |x: f64| smoothstep(x, 0.0, 0.3) * (1.0 - smoothstep(x, 0.5, 0.7)) * x.clamp(0.1, 0.9);
     let dual = |at: f64| {
         slope(
             |x| {
@@ -148,10 +151,25 @@ fn a_product_of_clamped_factors_differentiates_through_every_piece() {
 }
 pub fn checks() -> Vec<(&'static str, fn())> {
     vec![
-        ("a_dual_carries_the_derivative_of_the_branch_it_actually_took", a_dual_carries_the_derivative_of_the_branch_it_actually_took),
-        ("clamping_is_flat_outside_and_linear_inside", clamping_is_flat_outside_and_linear_inside),
-        ("smoothstep_kills_its_own_clamp_at_both_ends", smoothstep_kills_its_own_clamp_at_both_ends),
-        ("the_dual_smoothstep_matches_the_closed_form_derivative", the_dual_smoothstep_matches_the_closed_form_derivative),
-        ("a_product_of_clamped_factors_differentiates_through_every_piece", a_product_of_clamped_factors_differentiates_through_every_piece),
+        (
+            "a_dual_carries_the_derivative_of_the_branch_it_actually_took",
+            a_dual_carries_the_derivative_of_the_branch_it_actually_took,
+        ),
+        (
+            "clamping_is_flat_outside_and_linear_inside",
+            clamping_is_flat_outside_and_linear_inside,
+        ),
+        (
+            "smoothstep_kills_its_own_clamp_at_both_ends",
+            smoothstep_kills_its_own_clamp_at_both_ends,
+        ),
+        (
+            "the_dual_smoothstep_matches_the_closed_form_derivative",
+            the_dual_smoothstep_matches_the_closed_form_derivative,
+        ),
+        (
+            "a_product_of_clamped_factors_differentiates_through_every_piece",
+            a_product_of_clamped_factors_differentiates_through_every_piece,
+        ),
     ]
 }

@@ -544,7 +544,9 @@ impl Recorder {
             layout: &self.layout,
             frame: self.frame,
             resolve: &self.resolve,
-            resolve_offset: u64::from(frame) * u64::from(self.region_ticks) * u64::from(wgpu::QUERY_SIZE),
+            resolve_offset: u64::from(frame)
+                * u64::from(self.region_ticks)
+                * u64::from(wgpu::QUERY_SIZE),
         }
     }
 
@@ -563,7 +565,11 @@ impl Recorder {
     /// `warm` 帧只用来把时钟拉起来，不进读数 —— 而它**每一轮都有**：
     /// 轮与轮之间调用方可能去画了别的文档（交错取样），所以"上一轮结束时时钟的状态"
     /// 不是这一轮的起点。
-    pub fn finish(self, device: &wgpu::Device, queue: &wgpu::Queue) -> Result<Vec<Reading>, String> {
+    pub fn finish(
+        self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+    ) -> Result<Vec<Reading>, String> {
         // 整块搬一次、映射一次：每帧的值在**它自己那条编码器里**就已经 resolve 好了
         // （`FrameStamps::resolve_now`），这里只是一次搬运。
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -631,8 +637,9 @@ impl Recorder {
         let mut out = Vec::with_capacity((self.frames / per_block) as usize);
         for block in 0..(self.frames / per_block) {
             // 这一轮要读的那几帧（**跳过它自己的预热帧**）。
-            let measured: Vec<u32> =
-                (0..self.measured).map(|index| block * per_block + self.warm + index).collect();
+            let measured: Vec<u32> = (0..self.measured)
+                .map(|index| block * per_block + self.warm + index)
+                .collect();
 
             let mut passes = Vec::with_capacity(self.labels.len());
             for (index, (label, kind)) in self.labels.iter().enumerate() {
@@ -679,8 +686,10 @@ impl Recorder {
                     let slots = layout
                         .pass_slots(index)
                         .ok_or_else(|| format!("第 {index} 条 pass 的格不在排布里"))?;
-                    sum_envelope +=
-                        to_ms(at(*at_frame, slots.envelope.0), at(*at_frame, slots.envelope.1));
+                    sum_envelope += to_ms(
+                        at(*at_frame, slots.envelope.0),
+                        at(*at_frame, slots.envelope.1),
+                    );
                     // ⚠ copy 没有"pass 内"那一对（`PassSlots::inside` 是 `None`）⇒ 它既不进
                     //    `inside_all`、也不进匹配子集。这不是"漏了它"，是它本来就没有这个量。
                     if let Some((begin, end)) = slots.inside {

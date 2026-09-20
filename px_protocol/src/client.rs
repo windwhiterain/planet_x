@@ -31,7 +31,8 @@ pub fn write_lease(path: &Path, lease: &Lease) -> Result<(), ClientError> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(io)?;
     }
-    let text = serde_json::to_string_pretty(lease).map_err(|err| ClientError::Wire(err.to_string()))?;
+    let text =
+        serde_json::to_string_pretty(lease).map_err(|err| ClientError::Wire(err.to_string()))?;
     std::fs::write(path, text).map_err(io)
 }
 
@@ -85,10 +86,7 @@ pub fn connect() -> Result<TcpStream, ClientError> {
     if !lease.matches(&local) {
         return Err(ClientError::Refused(format!(
             "在跑的服务是 git {} / 指纹 {:016x}，本进程是 git {} / 指纹 {:016x}",
-            lease.git_rev,
-            lease.protocol_hash,
-            local.git_rev,
-            local.protocol_hash,
+            lease.git_rev, lease.protocol_hash, local.git_rev, local.protocol_hash,
         )));
     }
     let Some(mut stream) = connect_port(lease.port) else {

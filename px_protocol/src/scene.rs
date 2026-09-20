@@ -72,7 +72,13 @@ impl Member {
 
 impl std::fmt::Display for Member {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "{}/{}@{}", self.graph, self.node, self.short_key())
+        write!(
+            formatter,
+            "{}/{}@{}",
+            self.graph,
+            self.node,
+            self.short_key()
+        )
     }
 }
 
@@ -836,7 +842,13 @@ impl SceneSpec {
                 out.push(member);
             }
             out.push(&object.material.shader);
-            out.extend(object.material.textures.values().map(|texture| &texture.member));
+            out.extend(
+                object
+                    .material
+                    .textures
+                    .values()
+                    .map(|texture| &texture.member),
+            );
         }
         if let Some(skybox) = &self.environment.skybox {
             out.push(skybox);
@@ -975,18 +987,18 @@ impl SceneSpec {
                 (None, "fullscreen") => {
                     return Err(format!(
                         "{at} 是 fullscreen，却没给 shader：全屏 pass 就是它自己那支后处理"
-                    ))
+                    ));
                 }
                 (Some(_), "geometry") => {
                     return Err(format!(
                         "{at} 是 geometry，却给了 shader：几何 pass 的片元阶段属于**材质**                         （每个物体一支）"
-                    ))
+                    ));
                 }
                 (Some(_), "copy") => {
                     return Err(format!(
                         "{at} 是 copy，却给了 shader：拷贝不建管线、也没有片元阶段\
                          （片元阶段属于材质，pass 级 shader 只有全屏那一档才有）"
-                    ))
+                    ));
                 }
                 _ => {}
             }
@@ -1005,10 +1017,12 @@ impl SceneSpec {
                         return Err(format!(
                             "{at} 是 copy，却没有 writes：一次搬运必须说清**搬到哪张图**\
                              （`writes` 那一栏就是它的目标）"
-                        ))
+                        ));
                     }
                     _ => {
-                        return Err(format!("{at} 没有 writes：它不写任何东西，画了也没人看得见"))
+                        return Err(format!(
+                            "{at} 没有 writes：它不写任何东西，画了也没人看得见"
+                        ));
                     }
                 }
             }
@@ -1018,10 +1032,7 @@ impl SceneSpec {
                 } else {
                     "一条 pass 只画一个颜色附件"
                 };
-                return Err(format!(
-                    "{at} 写了 {} 个目标：{what}",
-                    pass.writes.len()
-                ));
+                return Err(format!("{at} 写了 {} 个目标：{what}", pass.writes.len()));
             }
             if labelled.contains(&label) {
                 return Err(format!("pass 标签重了：'{label}'"));
@@ -1095,7 +1106,11 @@ impl SceneSpec {
             if frame_names.contains(&material.name.as_str()) {
                 return Err(format!("帧材质名字重了：'{}'", material.name));
             }
-            if let Some(object) = self.objects.iter().find(|object| object.id == material.name) {
+            if let Some(object) = self
+                .objects
+                .iter()
+                .find(|object| object.id == material.name)
+            {
                 return Err(format!(
                     "帧材质 '{}' 与物体 '{}' 撞名：物体 id **就是**它的材质名\
                      （`draws[].material` 用的就是它）⇒ 同一个名字在两张表里。\
@@ -1127,7 +1142,9 @@ impl SceneSpec {
         for (index, instance) in self.material_instances.iter().enumerate() {
             let at = format!("第 {index} 份材质实例");
             if instance.name.trim().is_empty() {
-                return Err(format!("{at} 没给名字：`draws[].material` 是按名字引用它的"));
+                return Err(format!(
+                    "{at} 没给名字：`draws[].material` 是按名字引用它的"
+                ));
             }
             // 三张表共用一个名字空间：宿主那边材质是**按名字**查的一张平表，
             // 同一个名字在两处有真本就是歧义（它只能猜一个：画面错、没人报错）。
@@ -1304,7 +1321,8 @@ impl SceneSpec {
                 light.intensity,
                 if light.shadows { "｜阴影贴图" } else { "" },
             ));
-        }        for object in &self.objects {
+        }
+        for object in &self.objects {
             let geometry = match &object.geometry {
                 Geometry::Mesh { member, .. } => format!("网格 {member}"),
                 Geometry::Primitive { name, params, .. } => {
@@ -1427,7 +1445,10 @@ mod tests {
     /// 静默忽略一个新字段就等于「少画了东西还报成功」—— 那正是 §34 禁止的那种绿灯。
     #[test]
     fn an_unknown_field_is_refused_not_ignored() {
-        let object = DOC.replace(r#""id": "planet","#, r#""id": "planet", "cast_shadow_typo": true,"#);
+        let object = DOC.replace(
+            r#""id": "planet","#,
+            r#""id": "planet", "cast_shadow_typo": true,"#,
+        );
         let err = serde_json::from_str::<SceneSpec>(&object).expect_err("物体上的未知字段必须报错");
         assert!(err.to_string().contains("cast_shadow_typo"), "{err}");
 
@@ -1437,31 +1458,45 @@ mod tests {
         let spec: SceneSpec = serde_json::from_str(&material).expect("材质参数表按名字自由");
         assert_eq!(spec.objects[0].material.params.len(), 2);
 
-        let texture = DOC.replace(r#""binding": 1,"#, r#""binding": 1, "wrap_typo": "repeat","#);
-        let err = serde_json::from_str::<SceneSpec>(&texture).expect_err("贴图上的未知字段必须报错");
+        let texture = DOC.replace(
+            r#""binding": 1,"#,
+            r#""binding": 1, "wrap_typo": "repeat","#,
+        );
+        let err =
+            serde_json::from_str::<SceneSpec>(&texture).expect_err("贴图上的未知字段必须报错");
         assert!(err.to_string().contains("wrap_typo"), "{err}");
 
-        let spec_level = DOC.replace(r#""name": "夹具","#, r#""name": "夹具", "ambient_typo": 1.0,"#);
-        let err = serde_json::from_str::<SceneSpec>(&spec_level).expect_err("文档上的未知字段必须报错");
+        let spec_level = DOC.replace(
+            r#""name": "夹具","#,
+            r#""name": "夹具", "ambient_typo": 1.0,"#,
+        );
+        let err =
+            serde_json::from_str::<SceneSpec>(&spec_level).expect_err("文档上的未知字段必须报错");
         assert!(err.to_string().contains("ambient_typo"), "{err}");
 
         let geometry = DOC.replace(
             r#"{"source": "primitive", "name": "icosphere", "params": {"radius": 1.0}}"#,
             r#"{"source": "primitive", "name": "icosphere", "subdivisons": 64, "params": {"radius": 1.0}}"#,
         );
-        let err = serde_json::from_str::<SceneSpec>(&geometry).expect_err("几何上的未知字段必须报错");
+        let err =
+            serde_json::from_str::<SceneSpec>(&geometry).expect_err("几何上的未知字段必须报错");
         assert!(err.to_string().contains("subdivisons"), "{err}");
 
         // 新加的那几栏同样不许被静默忽略（与上面同一条裁决）。
-        let pass = old_pass_doc().replace(r#""writes": ["view"]"#, r#""writes": ["view"], "render_typo": "x""#);
+        let pass = old_pass_doc().replace(
+            r#""writes": ["view"]"#,
+            r#""writes": ["view"], "render_typo": "x""#,
+        );
         let err = serde_json::from_str::<SceneSpec>(&pass).expect_err("pass 上的未知字段必须报错");
         assert!(err.to_string().contains("render_typo"), "{err}");
 
-        let draw = geometry_doc().replace(r#""geometry": "planet""#, r#""geometry": "planet", "matrial": "surface""#);
+        let draw = geometry_doc().replace(
+            r#""geometry": "planet""#,
+            r#""geometry": "planet", "matrial": "surface""#,
+        );
         let err = serde_json::from_str::<SceneSpec>(&draw).expect_err("draw 上的未知字段必须报错");
         assert!(err.to_string().contains("matrial"), "{err}");
     }
-
 
     /// 允许漂移的名单 —— **现在是空的，而且必须一直是空的**。
     ///
@@ -1500,7 +1535,11 @@ mod tests {
             while end < bytes.len() && is_number(bytes[end]) {
                 end += 1;
             }
-            (String::from_utf8_lossy(&bytes[start..end]).to_string(), start, end)
+            (
+                String::from_utf8_lossy(&bytes[start..end]).to_string(),
+                start,
+                end,
+            )
         };
         let (left_token, left_start, left_end) = token_at(a, at);
         let (right_token, _, _) = token_at(b, at);
@@ -1517,7 +1556,9 @@ mod tests {
         }
         let ulps = (i128::from(x.to_bits()) - i128::from(y.to_bits())).abs();
         if ulps > 1 {
-            return Err(format!("'{left_token}' 与 '{right_token}' 差了 {ulps} 个 ulp"));
+            return Err(format!(
+                "'{left_token}' 与 '{right_token}' 差了 {ulps} 个 ulp"
+            ));
         }
         if (x as f32) != (y as f32) {
             return Err(format!(
@@ -1551,12 +1592,8 @@ mod tests {
         let mut spans = Vec::new();
         let mut at = 8;
         while at + 4 <= bytes.len() {
-            let len = u32::from_le_bytes([
-                bytes[at],
-                bytes[at + 1],
-                bytes[at + 2],
-                bytes[at + 3],
-            ]) as usize;
+            let len = u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
+                as usize;
             spans.push((at + 4, len));
             at += 4 + len;
         }
@@ -1595,7 +1632,8 @@ mod tests {
     /// `"draws":[]`，产物键跟着变 —— 而那正是五个锚会碎掉的方式。
     #[test]
     fn the_new_pass_fields_stay_out_of_old_documents() {
-        let spec: SceneSpec = serde_json::from_str(&old_pass_doc()).expect("老形状的 pass 要能解析");
+        let spec: SceneSpec =
+            serde_json::from_str(&old_pass_doc()).expect("老形状的 pass 要能解析");
         assert_eq!(spec.passes.len(), 1);
         assert!(spec.passes[0].draws.is_empty());
         assert!(spec.passes[0].vertex_shader.is_empty());
@@ -1609,7 +1647,10 @@ mod tests {
             "depth_target",
             "\"render\"",
         ] {
-            assert!(!text.contains(key), "老形状的 pass 落盘时不该出现 {key}：{text}");
+            assert!(
+                !text.contains(key),
+                "老形状的 pass 落盘时不该出现 {key}：{text}"
+            );
         }
         // 而且它逐字往返（键序、缺省值都不许变）。
         assert_eq!(serde_json::to_string(&spec).expect("再序列化"), text);
@@ -1625,7 +1666,10 @@ mod tests {
         assert_eq!(pass.kind, "geometry");
         assert_eq!(pass.draws.len(), 2);
         assert_eq!(pass.draws[0].material, "planet");
-        assert_eq!(pass.draws[1].material, "", "第二笔没有材质（深度-only 那一笔）");
+        assert_eq!(
+            pass.draws[1].material, "",
+            "第二笔没有材质（深度-only 那一笔）"
+        );
         assert_eq!(pass.vertex_entry, "vertex");
         assert!(pass.render.starts_with("color=none|depth=clear(0)"));
         assert_eq!(pass.depth_target.as_deref(), Some("depth"));
@@ -1732,16 +1776,16 @@ mod tests {
         assert!(err.contains("重了"), "{err}");
 
         // ③ 声明了却没人用 ⇒ 拒，并把 draws 里真正的名字列出来。
-        let unused = frame_material_doc()
-            .replace(r#""material": "skybox""#, r#""material": "planet""#);
+        let unused =
+            frame_material_doc().replace(r#""material": "skybox""#, r#""material": "planet""#);
         let spec: SceneSpec = serde_json::from_str(&unused).expect("解析");
         let err = spec.check().expect_err("没人用 ⇒ 拒");
         assert!(err.contains("skybox"), "要说清是哪一份没用上：{err}");
         assert!(err.contains("planet"), "要列出 draws 真正引用的名字：{err}");
 
         // ④ 一笔 draw 要了个两边都没有的材质 ⇒ 拒，并列出两张表。
-        let dangling = frame_material_doc()
-            .replace(r#""material": "skybox""#, r#""material": "skyboox""#);
+        let dangling =
+            frame_material_doc().replace(r#""material": "skybox""#, r#""material": "skyboox""#);
         let spec: SceneSpec = serde_json::from_str(&dangling).expect("解析");
         let err = spec.check().expect_err("解析不到的材质名 ⇒ 拒");
         assert!(err.contains("skyboox"), "{err}");
@@ -1749,16 +1793,22 @@ mod tests {
 
         // 空文本与空入口名同样是"说了没做"（`skip_serializing_if` 会把空串整个藏起来，
         // 于是文档里看起来"没这一栏"，而 draws 仍然指着它）。
-        let shader_text = "@fragment fn fs_main() -> @location(0) vec4<f32> { return vec4<f32>(1.0); }";
+        let shader_text =
+            "@fragment fn fs_main() -> @location(0) vec4<f32> { return vec4<f32>(1.0); }";
         for (field, original, fragment) in [
             ("shader", shader_text, "WGSL 全文"),
             ("entry", "fs_main", "片元入口名"),
         ] {
-            let empty = frame_material_doc()
-                .replace(&format!(r#""{field}": "{original}""#), &format!(r#""{field}": """#));
+            let empty = frame_material_doc().replace(
+                &format!(r#""{field}": "{original}""#),
+                &format!(r#""{field}": """#),
+            );
             let spec: SceneSpec = serde_json::from_str(&empty).expect("解析");
             let err = spec.check().expect_err("空的那一栏 ⇒ 拒");
-            assert!(err.contains(fragment), "要说清是哪一栏（{fragment}）：{err}");
+            assert!(
+                err.contains(fragment),
+                "要说清是哪一栏（{fragment}）：{err}"
+            );
         }
     }
 
@@ -1863,14 +1913,10 @@ mod tests {
                         .expect("工作区根")
                         .join("target/pxart-roundtrip");
                     let _ = std::fs::create_dir_all(&dump);
-                    let _ = std::fs::write(
-                        dump.join(format!("{name}.frame{index}.original")),
-                        left,
-                    );
-                    let _ = std::fs::write(
-                        dump.join(format!("{name}.frame{index}.rewritten")),
-                        right,
-                    );
+                    let _ =
+                        std::fs::write(dump.join(format!("{name}.frame{index}.original")), left);
+                    let _ =
+                        std::fs::write(dump.join(format!("{name}.frame{index}.rewritten")), right);
                     panic!(
                         "{name}：第 {index} 帧（{} → {} 字节）不是「只差一个 ulp 的数」：{err}\n  \
                          两份都落在 {}，直接 diff 就能看出是哪一格",
@@ -1888,7 +1934,12 @@ mod tests {
                 verdicts.len()
             );
             drifted.push(format!("{name}：{}", verdicts[0]));
-            println!("{name}：{} 字节 ⇒ {} 字节（{}）", original.len(), again.len(), verdicts[0]);
+            println!(
+                "{name}：{} 字节 ⇒ {} 字节（{}）",
+                original.len(),
+                again.len(),
+                verdicts[0]
+            );
         }
         println!("逐字节相同：{}", identical.join(" / "));
         for line in &drifted {

@@ -10,9 +10,9 @@ use px_field_schema::field::Field;
 use px_protocol::art::Domain;
 
 use super::palette::{
-    mix, ramp, Palette, BASIN, DUNE, FROZEN, GAS, LAND, LAVA_ROCK, MARE, REGOLITH, SHEET, WATER,
+    BASIN, DUNE, FROZEN, GAS, LAND, LAVA_ROCK, MARE, Palette, REGOLITH, SHEET, WATER, mix, ramp,
 };
-use super::texture::{image_from, pole_cap_filter, TextureData};
+use super::texture::{TextureData, image_from, pole_cap_filter};
 
 // ---------------------------------------------------------------------------
 // 着色（逐字搬自 px_render/src/planet.rs）
@@ -131,9 +131,8 @@ pub fn texel_latitude(field: &Field, x: u32, y: u32) -> f32 {
             let v = y as f32 / (field.height.max(2) - 1) as f32;
             ((v - 0.5).abs() * 2.0).clamp(0.0, 1.0)
         }
-        _ => {
-            px_protocol::art::direction_at(field.projection, field.width, field.height, x, y)[1].abs()
-        }
+        _ => px_protocol::art::direction_at(field.projection, field.width, field.height, x, y)[1]
+            .abs(),
     }
 }
 

@@ -83,13 +83,7 @@ pub fn tangent_frame(direction: [f32; 3]) -> ([f32; 3], [f32; 3]) {
     (east, north)
 }
 
-pub fn direction_at(
-    width: u32,
-    height: u32,
-    projection: Projection,
-    x: u32,
-    y: u32,
-) -> [f32; 3] {
+pub fn direction_at(width: u32, height: u32, projection: Projection, x: u32, y: u32) -> [f32; 3] {
     px_protocol::art::direction_at(projection, width, height, x, y)
 }
 

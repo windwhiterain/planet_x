@@ -40,216 +40,214 @@ pub fn eval(
     inputs: &[&Field],
     grid: Grid,
 ) -> Result<MeshData, String> {
-        let field = inputs[0];
-        let stats = field.stats();
-        let span = if (stats.max - stats.min).abs() <= f32::EPSILON {
-            1.0
-        } else {
-            stats.max - stats.min
-        };
-        let face_size = cube_face_size(grid.width).max(2);
-        let cell = cube_cell_size(grid.width);
-        let n = params.subdivisions.clamp(2, 512);
+    let field = inputs[0];
+    let stats = field.stats();
+    let span = if (stats.max - stats.min).abs() <= f32::EPSILON {
+        1.0
+    } else {
+        stats.max - stats.min
+    };
+    let face_size = cube_face_size(grid.width).max(2);
+    let cell = cube_cell_size(grid.width);
+    let n = params.subdivisions.clamp(2, 512);
 
-        let mut positions: Vec<f32> = Vec::new();
-        let mut uvs: Vec<f32> = Vec::new();
-        let mut indices: Vec<u32> = Vec::new();
-        let mut welded: HashMap<(u32, [i64; 3]), u32> = HashMap::new();
+    let mut positions: Vec<f32> = Vec::new();
+    let mut uvs: Vec<f32> = Vec::new();
+    let mut indices: Vec<u32> = Vec::new();
+    let mut welded: HashMap<(u32, [i64; 3]), u32> = HashMap::new();
 
-        for face in 0..CUBE_FACES {
-            let mut patch: Vec<u32> = Vec::with_capacity(((n + 1) * (n + 1)) as usize);
-            for j in 0..=n {
-                for i in 0..=n {
-                    let s = i as f32 / n as f32;
-                    let t = j as f32 / n as f32;
-                    let direction = cube_direction(face, s, t);
-                    let key = (face, quantize(direction));
-                    let index = match welded.get(&key) {
-                        Some(existing) => *existing,
-                        None => {
-                            let height =
-                                ((field.sample_direction(direction) - stats.min) / span).clamp(0.0, 1.0);
-                            let shaped = if params.flat_sea && height < params.sea_level {
-                                params.sea_level
-                            } else {
-                                height
-                            };
-                            let lift =
-                                params.radius * (1.0 + params.displace * (shaped - params.sea_level));
-                            let created = (positions.len() / 3) as u32;
-                            positions.extend_from_slice(&[
-                                direction[0] * lift,
-                                direction[1] * lift,
-                                direction[2] * lift,
-                            ]);
-                            let uv = cube_atlas_uv(face, s, t, face_size, CUBE_GUTTER);
-                            uvs.extend_from_slice(&uv);
-                            welded.insert(key, created);
-                            created
-                        }
-                    };
-                    patch.push(index);
-                }
-            }
-
-            let rows = n + 1;
-            let at = |i: u32, j: u32| -> u32 { patch[(j * rows + i) as usize] };
-            let corner = |i: u32, j: u32| vertex_of(&positions, at(i, j));
-            let first = (corner(0, 0), corner(1, 0), corner(0, 1));
-            let edge_one = [
-                first.1[0] - first.0[0],
-                first.1[1] - first.0[1],
-                first.1[2] - first.0[2],
-            ];
-            let edge_two = [
-                first.2[0] - first.0[0],
-                first.2[1] - first.0[1],
-                first.2[2] - first.0[2],
-            ];
-            let normal = [
-                edge_one[1] * edge_two[2] - edge_one[2] * edge_two[1],
-                edge_one[2] * edge_two[0] - edge_one[0] * edge_two[2],
-                edge_one[0] * edge_two[1] - edge_one[1] * edge_two[0],
-            ];
-            let centre = cube_direction(face, 0.5, 0.5);
-            let outward =
-                normal[0] * centre[0] + normal[1] * centre[1] + normal[2] * centre[2] > 0.0;
-
-            for j in 0..n {
-                for i in 0..n {
-                    let p00 = at(i, j);
-                    let p10 = at(i + 1, j);
-                    let p01 = at(i, j + 1);
-                    let p11 = at(i + 1, j + 1);
-                    if outward {
-                        indices.extend_from_slice(&[p00, p10, p01, p01, p10, p11]);
-                    } else {
-                        indices.extend_from_slice(&[p00, p01, p10, p01, p11, p10]);
+    for face in 0..CUBE_FACES {
+        let mut patch: Vec<u32> = Vec::with_capacity(((n + 1) * (n + 1)) as usize);
+        for j in 0..=n {
+            for i in 0..=n {
+                let s = i as f32 / n as f32;
+                let t = j as f32 / n as f32;
+                let direction = cube_direction(face, s, t);
+                let key = (face, quantize(direction));
+                let index = match welded.get(&key) {
+                    Some(existing) => *existing,
+                    None => {
+                        let height = ((field.sample_direction(direction) - stats.min) / span)
+                            .clamp(0.0, 1.0);
+                        let shaped = if params.flat_sea && height < params.sea_level {
+                            params.sea_level
+                        } else {
+                            height
+                        };
+                        let lift =
+                            params.radius * (1.0 + params.displace * (shaped - params.sea_level));
+                        let created = (positions.len() / 3) as u32;
+                        positions.extend_from_slice(&[
+                            direction[0] * lift,
+                            direction[1] * lift,
+                            direction[2] * lift,
+                        ]);
+                        let uv = cube_atlas_uv(face, s, t, face_size, CUBE_GUTTER);
+                        uvs.extend_from_slice(&uv);
+                        welded.insert(key, created);
+                        created
                     }
+                };
+                patch.push(index);
+            }
+        }
+
+        let rows = n + 1;
+        let at = |i: u32, j: u32| -> u32 { patch[(j * rows + i) as usize] };
+        let corner = |i: u32, j: u32| vertex_of(&positions, at(i, j));
+        let first = (corner(0, 0), corner(1, 0), corner(0, 1));
+        let edge_one = [
+            first.1[0] - first.0[0],
+            first.1[1] - first.0[1],
+            first.1[2] - first.0[2],
+        ];
+        let edge_two = [
+            first.2[0] - first.0[0],
+            first.2[1] - first.0[1],
+            first.2[2] - first.0[2],
+        ];
+        let normal = [
+            edge_one[1] * edge_two[2] - edge_one[2] * edge_two[1],
+            edge_one[2] * edge_two[0] - edge_one[0] * edge_two[2],
+            edge_one[0] * edge_two[1] - edge_one[1] * edge_two[0],
+        ];
+        let centre = cube_direction(face, 0.5, 0.5);
+        let outward = normal[0] * centre[0] + normal[1] * centre[1] + normal[2] * centre[2] > 0.0;
+
+        for j in 0..n {
+            for i in 0..n {
+                let p00 = at(i, j);
+                let p10 = at(i + 1, j);
+                let p01 = at(i, j + 1);
+                let p11 = at(i + 1, j + 1);
+                if outward {
+                    indices.extend_from_slice(&[p00, p10, p01, p01, p10, p11]);
+                } else {
+                    indices.extend_from_slice(&[p00, p01, p10, p01, p11, p10]);
                 }
             }
         }
+    }
 
-        let vertices = positions.len() / 3;
-        let mut accumulated = vec![0.0_f32; vertices * 3];
-        for triangle in indices.chunks_exact(3) {
-            let a = vertex_of(&positions, triangle[0]);
-            let b = vertex_of(&positions, triangle[1]);
-            let c = vertex_of(&positions, triangle[2]);
-            let edge_one = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
-            let edge_two = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
-            let cross = [
-                edge_one[1] * edge_two[2] - edge_one[2] * edge_two[1],
-                edge_one[2] * edge_two[0] - edge_one[0] * edge_two[2],
-                edge_one[0] * edge_two[1] - edge_one[1] * edge_two[0],
-            ];
-            for index in triangle {
-                let slot = *index as usize * 3;
-                accumulated[slot] += cross[0];
-                accumulated[slot + 1] += cross[1];
-                accumulated[slot + 2] += cross[2];
-            }
+    let vertices = positions.len() / 3;
+    let mut accumulated = vec![0.0_f32; vertices * 3];
+    for triangle in indices.chunks_exact(3) {
+        let a = vertex_of(&positions, triangle[0]);
+        let b = vertex_of(&positions, triangle[1]);
+        let c = vertex_of(&positions, triangle[2]);
+        let edge_one = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+        let edge_two = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+        let cross = [
+            edge_one[1] * edge_two[2] - edge_one[2] * edge_two[1],
+            edge_one[2] * edge_two[0] - edge_one[0] * edge_two[2],
+            edge_one[0] * edge_two[1] - edge_one[1] * edge_two[0],
+        ];
+        for index in triangle {
+            let slot = *index as usize * 3;
+            accumulated[slot] += cross[0];
+            accumulated[slot + 1] += cross[1];
+            accumulated[slot + 2] += cross[2];
         }
+    }
 
-        let mut normals = vec![0.0_f32; vertices * 3];
-        let mut zero = 0_usize;
-        for vertex in 0..vertices {
+    let mut normals = vec![0.0_f32; vertices * 3];
+    let mut zero = 0_usize;
+    for vertex in 0..vertices {
+        let slot = vertex * 3;
+        let sum = [
+            accumulated[slot],
+            accumulated[slot + 1],
+            accumulated[slot + 2],
+        ];
+        let length = (sum[0] * sum[0] + sum[1] * sum[1] + sum[2] * sum[2]).sqrt();
+        let unit = if length <= f32::EPSILON {
+            zero += 1;
+            normalize(vertex_of(&positions, vertex as u32))
+        } else {
+            normalize(sum)
+        };
+        normals[slot..slot + 3].copy_from_slice(&unit);
+    }
+
+    let mut by_position: HashMap<[i64; 3], Vec<usize>> = HashMap::new();
+    for vertex in 0..vertices {
+        let direction = normalize(vertex_of(&positions, vertex as u32));
+        by_position
+            .entry(quantize(direction))
+            .or_default()
+            .push(vertex);
+    }
+    let mut welds = 0_usize;
+    for group in by_position.values() {
+        if group.len() < 2 {
+            continue;
+        }
+        welds += 1;
+        let mut sum = [0.0_f32; 3];
+        for vertex in group {
             let slot = vertex * 3;
-            let sum = [
-                accumulated[slot],
-                accumulated[slot + 1],
-                accumulated[slot + 2],
-            ];
-            let length = (sum[0] * sum[0] + sum[1] * sum[1] + sum[2] * sum[2]).sqrt();
-            let unit = if length <= f32::EPSILON {
-                zero += 1;
-                normalize(vertex_of(&positions, vertex as u32))
-            } else {
-                normalize(sum)
-            };
+            sum[0] += normals[slot];
+            sum[1] += normals[slot + 1];
+            sum[2] += normals[slot + 2];
+        }
+        let unit = normalize(sum);
+        for vertex in group {
+            let slot = vertex * 3;
             normals[slot..slot + 3].copy_from_slice(&unit);
         }
+    }
 
-        let mut by_position: HashMap<[i64; 3], Vec<usize>> = HashMap::new();
-        for vertex in 0..vertices {
-            let direction = normalize(vertex_of(&positions, vertex as u32));
-            by_position
-                .entry(quantize(direction))
-                .or_default()
-                .push(vertex);
+    let mut edges: HashMap<(u32, u32), u32> = HashMap::new();
+    for triangle in indices.chunks_exact(3) {
+        for pair in 0..3 {
+            let (a, b) = (triangle[pair], triangle[(pair + 1) % 3]);
+            let key = if a < b { (a, b) } else { (b, a) };
+            *edges.entry(key).or_insert(0) += 1;
         }
-        let mut welds = 0_usize;
-        for group in by_position.values() {
-            if group.len() < 2 {
-                continue;
-            }
-            welds += 1;
-            let mut sum = [0.0_f32; 3];
-            for vertex in group {
-                let slot = vertex * 3;
-                sum[0] += normals[slot];
-                sum[1] += normals[slot + 1];
-                sum[2] += normals[slot + 2];
-            }
-            let unit = normalize(sum);
-            for vertex in group {
-                let slot = vertex * 3;
-                normals[slot..slot + 3].copy_from_slice(&unit);
-            }
+    }
+    let open = edges.values().filter(|count| **count == 1).count();
+    let mut inward = 0_usize;
+    let mut worst = 1.0_f32;
+    for vertex in 0..vertices {
+        let slot = vertex * 3;
+        let normal = [normals[slot], normals[slot + 1], normals[slot + 2]];
+        let radial = normalize(vertex_of(&positions, vertex as u32));
+        let dot = normal[0] * radial[0] + normal[1] * radial[1] + normal[2] * radial[2];
+        if dot < 0.0 {
+            inward += 1;
         }
+        worst = worst.min(dot);
+    }
+    println!(
+        "网格审计：{vertices} 顶点 / {} 三角形，面 {face_size}²、格子 {cell}、法线焊接 {welds} 组、开口边 {open}，法线朝内 {inward}、零长 {zero}、最小点积 {worst:.3}",
+        indices.len() / 3,
+    );
 
-        let mut edges: HashMap<(u32, u32), u32> = HashMap::new();
-        for triangle in indices.chunks_exact(3) {
-            for pair in 0..3 {
-                let (a, b) = (triangle[pair], triangle[(pair + 1) % 3]);
-                let key = if a < b { (a, b) } else { (b, a) };
-                *edges.entry(key).or_insert(0) += 1;
-            }
-        }
-        let open = edges.values().filter(|count| **count == 1).count();
-        let mut inward = 0_usize;
-        let mut worst = 1.0_f32;
-        for vertex in 0..vertices {
-            let slot = vertex * 3;
-            let normal = [normals[slot], normals[slot + 1], normals[slot + 2]];
-            let radial = normalize(vertex_of(&positions, vertex as u32));
-            let dot = normal[0] * radial[0] + normal[1] * radial[1] + normal[2] * radial[2];
-            if dot < 0.0 {
-                inward += 1;
-            }
-            worst = worst.min(dot);
-        }
-        println!(
-            "网格审计：{vertices} 顶点 / {} 三角形，面 {face_size}²、格子 {cell}、法线焊接 {welds} 组、开口边 {open}，法线朝内 {inward}、零长 {zero}、最小点积 {worst:.3}",
-            indices.len() / 3,
-        );
-
-        // ⚠ **法线朝内是硬失败**（2026-09-20 加）。在那之前这条审计只是**打印**：
-        //   一个顶点法线翻了 1/3 的网格照样烘得出来、场景照样编得过 —— 症状是**一颗黑球**
-        //   （实测：`moon` 图把 `displace` 从 0.045 提到 0.075，`height` 场一个字没动，
-        //   审计从"朝内 0、最小点积 0.783"变成"朝内 51858、最小点积 -1.000"，
-        //   渲染出来整个圆面是暗的、只剩轮廓一圈亮边）。
-        //   ⇒ 报错要**说得清是哪两件事**：`displace` 与"场比网格还碎"。这两条都是实测过的：
-        //     * `planet` / `desert`（平滑场）在 `displace = 0.075` 下朝内都是 0（0.769 / 0.476）；
-        //     * `moon` 的场里最小波长只有几十个格（`pits` 频率 24 × 3 层）⇒ 同一个 0.075 就翻了。
-        //   ⚠ 不做"自动把法线翻回来"：翻回来只是把**几何自交**盖住，那张网格仍然是错的
-        //     （渲染出来还会自我遮挡），错的是图，不是这一行的判据。
-        if worst < 0.0 {
-            return Err(format!(
-                "这份立方球网格有 {inward} 个顶点的**法线朝内**（最小点积 {worst:.3}）⇒ 几何在网格分辨率上已经翻转或自交，\
+    // ⚠ **法线朝内是硬失败**（2026-09-20 加）。在那之前这条审计只是**打印**：
+    //   一个顶点法线翻了 1/3 的网格照样烘得出来、场景照样编得过 —— 症状是**一颗黑球**
+    //   （实测：`moon` 图把 `displace` 从 0.045 提到 0.075，`height` 场一个字没动，
+    //   审计从"朝内 0、最小点积 0.783"变成"朝内 51858、最小点积 -1.000"，
+    //   渲染出来整个圆面是暗的、只剩轮廓一圈亮边）。
+    //   ⇒ 报错要**说得清是哪两件事**：`displace` 与"场比网格还碎"。这两条都是实测过的：
+    //     * `planet` / `desert`（平滑场）在 `displace = 0.075` 下朝内都是 0（0.769 / 0.476）；
+    //     * `moon` 的场里最小波长只有几十个格（`pits` 频率 24 × 3 层）⇒ 同一个 0.075 就翻了。
+    //   ⚠ 不做"自动把法线翻回来"：翻回来只是把**几何自交**盖住，那张网格仍然是错的
+    //     （渲染出来还会自我遮挡），错的是图，不是这一行的判据。
+    if worst < 0.0 {
+        return Err(format!(
+            "这份立方球网格有 {inward} 个顶点的**法线朝内**（最小点积 {worst:.3}）⇒ 几何在网格分辨率上已经翻转或自交，\
                  渲染出来是一颗黑球。两条路（都是实测过的方向）：\
                  ① 调小 `displace`（这一档是 {}，`moon` 图在 0.045 上朝内 0、在 0.075 上朝内 51858）；\
                  ② 把输入场做平滑 —— 场里比网格还碎的细节会被采样成尖刺\
                  （这份场 {}×{}、每面划 {n}²；`planet` 与 `desert` 那种低频场在同一个 `displace` 下不出问题）",
-                params.displace, field.width, field.height,
-            ));
-        }
+            params.displace, field.width, field.height,
+        ));
+    }
 
-        Ok(MeshData {
-            positions,
-            normals,
-            uvs,
-            indices,
-        })
+    Ok(MeshData {
+        positions,
+        normals,
+        uvs,
+        indices,
+    })
 }
-

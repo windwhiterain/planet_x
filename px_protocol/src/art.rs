@@ -151,7 +151,8 @@ impl TextureShape {
         let mut total = 0_usize;
         let (mut width, mut height) = (self.width, self.height);
         for _ in 0..self.levels {
-            total += width as usize * height as usize * self.layers as usize * self.format.texel_bytes();
+            total +=
+                width as usize * height as usize * self.layers as usize * self.format.texel_bytes();
             width = (width / 2).max(1);
             height = (height / 2).max(1);
         }
@@ -338,7 +339,11 @@ impl Camera {
     }
 
     pub fn raw(direction: [f32; 3], distance: f32, tag: impl Into<String>) -> Self {
-        Self { direction, distance, tag: tag.into() }
+        Self {
+            direction,
+            distance,
+            tag: tag.into(),
+        }
     }
 
     pub fn normalized(mut self) -> Self {
@@ -347,7 +352,11 @@ impl Camera {
             + self.direction[2] * self.direction[2])
             .sqrt();
         self.direction = if length > f32::EPSILON {
-            [self.direction[0] / length, self.direction[1] / length, self.direction[2] / length]
+            [
+                self.direction[0] / length,
+                self.direction[1] / length,
+                self.direction[2] / length,
+            ]
         } else {
             [0.0, 0.0, 1.0]
         };
@@ -454,7 +463,6 @@ pub fn cube_atlas_uv(face: u32, s: f32, t: f32, face_size: u32, gutter: u32) -> 
     [x / width, y / height]
 }
 
-
 pub fn cube_map_extent(face_size: u32) -> (u32, u32) {
     let face = face_size.max(1);
     (face, face * CUBE_FACES)
@@ -479,13 +487,7 @@ impl Domain {
     }
 }
 
-pub fn direction_at(
-    domain: Domain,
-    width: u32,
-    height: u32,
-    x: u32,
-    y: u32,
-) -> [f32; 3] {
+pub fn direction_at(domain: Domain, width: u32, height: u32, x: u32, y: u32) -> [f32; 3] {
     let u = (x as f32 + 0.5) / width.max(1) as f32;
     let v = (y as f32 + 0.5) / height.max(1) as f32;
     match domain {
@@ -525,13 +527,7 @@ pub fn uv_of(domain: Domain, direction: [f32; 3], width: u32, _height: u32) -> [
         Domain::Octahedral => octahedral_uv_y_up(direction),
         Domain::Cube => {
             let (face, s, t) = cube_face_of(direction);
-            cube_atlas_uv(
-                face,
-                s,
-                t,
-                cube_face_size(width),
-                CUBE_GUTTER,
-            )
+            cube_atlas_uv(face, s, t, cube_face_size(width), CUBE_GUTTER)
         }
         Domain::CubeMap => {
             let (face, s, t) = cube_face_of(direction);
@@ -682,7 +678,8 @@ fn classify(before: &AssetManifest, after: &AssetManifest) -> Option<AssetChange
             after: after.kind,
         });
     }
-    if before.fingerprint != 0 && after.fingerprint != 0 && before.fingerprint != after.fingerprint {
+    if before.fingerprint != 0 && after.fingerprint != 0 && before.fingerprint != after.fingerprint
+    {
         return Some(AssetChange::Content);
     }
     let keys: Vec<String> = before
@@ -817,8 +814,16 @@ mod tests {
             &[crate::stream::Frame::Blob(Blob::from_f32(vec![1], &[1.0]))],
         )
         .unwrap();
-        assert_eq!(bundle_from_prefix(&bytes), None, "第一个帧不是清单 ⇒ 交给整读兜底");
-        assert_eq!(bundle_from_prefix(&bytes[..6]), None, "前缀太短也不许 panic");
+        assert_eq!(
+            bundle_from_prefix(&bytes),
+            None,
+            "第一个帧不是清单 ⇒ 交给整读兜底"
+        );
+        assert_eq!(
+            bundle_from_prefix(&bytes[..6]),
+            None,
+            "前缀太短也不许 panic"
+        );
     }
 
     #[test]
@@ -854,15 +859,20 @@ pub fn read_shader_parts(path: &std::path::Path) -> Result<(String, Option<Strin
         _ => None,
     });
     let Some(wgsl) = blobs.next() else {
-        return Err(format!("{} 里没有 U8 blob（不是 shader 产物？）", path.display()));
+        return Err(format!(
+            "{} 里没有 U8 blob（不是 shader 产物？）",
+            path.display()
+        ));
     };
     let source = String::from_utf8(wgsl.bytes.clone())
         .map_err(|err| format!("{} 的 WGSL 不是合法 UTF-8：{err}", path.display()))?;
     let schema = match blobs.next() {
-        Some(blob) => Some(
-            String::from_utf8(blob.bytes.clone())
-                .map_err(|err| format!("{} 的 schema descriptor 不是合法 UTF-8：{err}", path.display()))?,
-        ),
+        Some(blob) => Some(String::from_utf8(blob.bytes.clone()).map_err(|err| {
+            format!(
+                "{} 的 schema descriptor 不是合法 UTF-8：{err}",
+                path.display()
+            )
+        })?),
         None => None,
     };
     Ok((source, schema))
@@ -871,7 +881,8 @@ pub fn read_shader_parts(path: &std::path::Path) -> Result<(String, Option<Strin
 /// 从 `.pxart` / `.pxstream` 里取出第一份产物清单。
 pub fn read_bundle(path: &std::path::Path) -> Result<ArtBundle, String> {
     let bytes = std::fs::read(path).map_err(|err| format!("读不到 {}：{err}", path.display()))?;
-    let frames = crate::stream::read_stream(&mut bytes.as_slice()).map_err(|err| err.to_string())?;
+    let frames =
+        crate::stream::read_stream(&mut bytes.as_slice()).map_err(|err| err.to_string())?;
     bundle_of(&frames)
         .cloned()
         .ok_or_else(|| format!("{} 里没有 Art 帧", path.display()))
@@ -887,8 +898,8 @@ pub const MANIFEST_PREFIX: usize = 64 * 1024;
 /// 而清单帧**写在流的最前面**（`px_graph::write_artifact` 如此）⇒ 读一个前缀就够，
 /// 不必把 8 MB 的场整个读进来。前缀里没解出清单帧（文件不是那么写的）⇒ 回落到整读。
 pub fn read_manifest(path: &std::path::Path) -> Result<ArtBundle, String> {
-    let mut file = std::fs::File::open(path)
-        .map_err(|err| format!("读不到 {}：{err}", path.display()))?;
+    let mut file =
+        std::fs::File::open(path).map_err(|err| format!("读不到 {}：{err}", path.display()))?;
     let mut prefix = vec![0_u8; MANIFEST_PREFIX];
     let mut filled = 0;
     while filled < prefix.len() {
@@ -921,7 +932,8 @@ fn bundle_from_prefix(prefix: &[u8]) -> Option<ArtBundle> {
 }
 
 /// 一组帧里的第一份清单。
-pub fn bundle_of(frames: &[crate::stream::Frame]) -> Option<&ArtBundle> {    frames.iter().find_map(|frame| match frame {
+pub fn bundle_of(frames: &[crate::stream::Frame]) -> Option<&ArtBundle> {
+    frames.iter().find_map(|frame| match frame {
         crate::stream::Frame::Art(bundle) => Some(bundle),
         _ => None,
     })

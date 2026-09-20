@@ -81,17 +81,18 @@ pub fn connect_with(instance: wgpu::Instance, surface: Option<&wgpu::Surface<'_>
     }
 
     let available = adapter.features();
-    let (device, queue) = match pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-        label: Some("px_render"),
-        required_features: available & wanted(),
-        required_limits: wgpu::Limits::default(),
-        experimental_features: wgpu::ExperimentalFeatures::disabled(),
-        memory_hints: wgpu::MemoryHints::MemoryUsage,
-        trace: wgpu::Trace::Off,
-    })) {
-        Ok(pair) => pair,
-        Err(err) => refuse(format!("Vulkan 设备建不出来：{err}")),
-    };
+    let (device, queue) =
+        match pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("px_render"),
+            required_features: available & wanted(),
+            required_limits: wgpu::Limits::default(),
+            experimental_features: wgpu::ExperimentalFeatures::disabled(),
+            memory_hints: wgpu::MemoryHints::MemoryUsage,
+            trace: wgpu::Trace::Off,
+        })) {
+            Ok(pair) => pair,
+            Err(err) => refuse(format!("Vulkan 设备建不出来：{err}")),
+        };
 
     // ⚠ 这一行要在**设备建好之后**打：外部仪器拿它当"设备就绪"的里程碑。
     println!("后端：{:?}｜{}｜设备就绪", info.backend, info.name);

@@ -1,10 +1,9 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use px_scene::contract::{merge_named, shader_parts_of};
 use px_protocol::scene::{Member, PassResource, PassSpec, SceneSpec};
+use px_scene::contract::{merge_named, shader_parts_of};
 use serde::Deserialize;
-
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -130,7 +129,9 @@ fn main() {
         match arg.as_str() {
             "--no-frame-graph" => with_graph = false,
             "--frame" => {
-                frame_name = args.next().unwrap_or_else(|| panic!("--frame 后面要跟帧图名"));
+                frame_name = args
+                    .next()
+                    .unwrap_or_else(|| panic!("--frame 后面要跟帧图名"));
             }
             other => positional.push(other.to_string()),
         }
@@ -146,8 +147,8 @@ fn main() {
         .join(format!("{recipe}.toml"));
     let text = std::fs::read_to_string(&path)
         .unwrap_or_else(|err| panic!("读不了 {}：{err}\n{}", path.display(), usage()));
-    let file: PassFile = toml::from_str(&text)
-        .unwrap_or_else(|err| panic!("{} 解不开：{err}", path.display()));
+    let file: PassFile =
+        toml::from_str(&text).unwrap_or_else(|err| panic!("{} 解不开：{err}", path.display()));
 
     let mut spec: SceneSpec = px_protocol::scene::read_scene(Path::new(&input))
         .unwrap_or_else(|err| panic!("读不了场景产物 {input}：{err}"));
@@ -313,8 +314,7 @@ fn main() {
     } else {
         let frame = px_scene::frame::load(&frame_name).unwrap_or_else(|err| panic!("{err}"));
         // 先核对基准产物是不是这张帧图烘的：不是就**当场拒**（说清期望什么、实际是什么）。
-        px_scene::frame::verify(&spec, &frame, &frame_name)
-            .unwrap_or_else(|err| panic!("{err}"));
+        px_scene::frame::verify(&spec, &frame, &frame_name).unwrap_or_else(|err| panic!("{err}"));
         // 插入点：`after` 段的第一条在文档里的下标。
         //
         // ⚠ **不能拿 `before.len()` 当下标**（这里原来就是这么写的，而它每一次都越界）：
@@ -515,7 +515,8 @@ fn main() {
         }
         spec.passes.splice(insert_at..insert_at, passes);
     }
-    spec.check().unwrap_or_else(|err| panic!("这份 pass 表不成立：{err}"));
+    spec.check()
+        .unwrap_or_else(|err| panic!("这份 pass 表不成立：{err}"));
 
     let spec_json = serde_json::to_string(&spec).unwrap_or_else(|err| panic!("{err}"));
     let member_keys = spec
@@ -529,9 +530,8 @@ fn main() {
         None => px_protocol::scene::cas_path(&px_cook::cache_root(), &px_cook::hex(&key))
             .unwrap_or_else(|err| panic!("{err}")),
     };
-    let bytes =
-        px_protocol::scene::write_scene(&artifact, &spec, px_cook::fnv1a(&spec_json))
-            .unwrap_or_else(|err| panic!("{err}"));
+    let bytes = px_protocol::scene::write_scene(&artifact, &spec, px_cook::fnv1a(&spec_json))
+        .unwrap_or_else(|err| panic!("{err}"));
 
     println!("{}", spec.audit());
     // ⚠ 括号里那一格是**内容键**，不是文件字节的 sha256 —— 与 `--bin scene` 同一条提醒：

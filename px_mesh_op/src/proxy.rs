@@ -18,12 +18,12 @@
 
 use std::collections::HashMap;
 
+use isosurface::MarchingCubes;
 use isosurface::distance::Signed;
 use isosurface::extractor::IndexedVertices;
 use isosurface::math::vector::Vec3;
 use isosurface::sampler::Sampler;
 use isosurface::source::ScalarSource;
-use isosurface::MarchingCubes;
 
 use px_mesh_schema::ops::Proxy;
 use px_mesh_schema::params;
@@ -157,200 +157,201 @@ fn push_vertex(
     (index, false)
 }
 
-pub fn surface(params: &params::proxy::Params, field: &dyn VolumeSampler) -> Result<MeshData, String> {
-        let depth = params.depth.clamp(1, 8);
-        let points = (1_usize << depth) + 1;
-        let weld = if params.weld > 0.0 { params.weld } else { 1e-4 };
+pub fn surface(
+    params: &params::proxy::Params,
+    field: &dyn VolumeSampler,
+) -> Result<MeshData, String> {
+    let depth = params.depth.clamp(1, 8);
+    let points = (1_usize << depth) + 1;
+    let weld = if params.weld > 0.0 { params.weld } else { 1e-4 };
 
-        let mut positions: Vec<f32> = Vec::new();
-        let mut uvs: Vec<f32> = Vec::new();
-        let mut indices: Vec<u32> = Vec::new();
-        let mut cells: HashMap<(i64, i64, i64), Vec<u32>> = HashMap::new();
-        let mut welds = 0_usize;
+    let mut positions: Vec<f32> = Vec::new();
+    let mut uvs: Vec<f32> = Vec::new();
+    let mut indices: Vec<u32> = Vec::new();
+    let mut cells: HashMap<(i64, i64, i64), Vec<u32>> = HashMap::new();
+    let mut welds = 0_usize;
 
-        for face in 0..PATCHES {
-            let source = Face {
-                field,
-                face,
-                level: params.level,
-            };
-            let sampler = Sampler::new(&source);
-            let mut mesher = MarchingCubes::<Signed>::new(points);
-            let mut local: Vec<f32> = Vec::new();
-            let mut local_indices: Vec<u32> = Vec::new();
+    for face in 0..PATCHES {
+        let source = Face {
+            field,
+            face,
+            level: params.level,
+        };
+        let sampler = Sampler::new(&source);
+        let mut mesher = MarchingCubes::<Signed>::new(points);
+        let mut local: Vec<f32> = Vec::new();
+        let mut local_indices: Vec<u32> = Vec::new();
+        {
+            let mut extractor = IndexedVertices::new(&mut local, &mut local_indices);
+            mesher.extract(&sampler, &mut extractor);
+        }
+
+        let mut remap: Vec<u32> = Vec::with_capacity(local.len() / 3);
+        for index in 0..local.len() / 3 {
+            let u = local[index * 3];
+            let v = local[index * 3 + 1];
+            let at = [u, v, local[index * 3 + 2]];
+            let point = field.point(face, at);
+            // uv 按立方球图谱的排法：面号决定行，面内 v 在行里走
+            let uv = [u, (face as f32 + v) / PATCHES as f32];
+            let (welded, merged) =
+                push_vertex(&mut cells, &mut positions, &mut uvs, point, uv, weld);
+            welds += usize::from(merged);
+            remap.push(welded);
+        }
+
+        for triangle in local_indices.chunks(3) {
+            let (a, b, c) = (
+                remap[triangle[0] as usize],
+                remap[triangle[1] as usize],
+                remap[triangle[2] as usize],
+            );
+            if a == b || b == c || a == c {
+                continue;
+            }
+            indices.extend_from_slice(&[a, b, c]);
+        }
+    }
+
+    let vertices = positions.len() / 3;
+    if vertices == 0 {
+        return Err("体积里没有这个等值面 ⇒ 代理是空的（检查 tau 与 level）".to_string());
+    }
+
+    // 法线：按三角形面积加权累加。零长的（碎片三角形凑不出面积）改用场的梯度 ——
+    // 梯度指向场增大的那一侧，取反就是代理的外法线，内壳外壳都对；再兜不住才退回径向。
+    //
+    // 顺手再累两个量，只给下面的几何外扩用（`offset = 0` 时一点不影响老路径）：
+    // `bend` = Σ|叉积| 是「顶点星成形程度」的尺子，`volume` 是有向体积（定缠绕里外）。
+    let mut accumulated = vec![0.0_f32; vertices * 3];
+    let mut bend = vec![0.0_f32; vertices];
+    let mut volume = 0.0_f32;
+    for triangle in indices.chunks_exact(3) {
+        let a = vertex_of(&positions, triangle[0]);
+        let b = vertex_of(&positions, triangle[1]);
+        let c = vertex_of(&positions, triangle[2]);
+        let edge_one = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+        let edge_two = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+        let cross = [
+            edge_one[1] * edge_two[2] - edge_one[2] * edge_two[1],
+            edge_one[2] * edge_two[0] - edge_one[0] * edge_two[2],
+            edge_one[0] * edge_two[1] - edge_one[1] * edge_two[0],
+        ];
+        volume += a[0] * (b[1] * c[2] - b[2] * c[1])
+            + a[1] * (b[2] * c[0] - b[0] * c[2])
+            + a[2] * (b[0] * c[1] - b[1] * c[0]);
+        for index in triangle {
+            let slot = *index as usize * 3;
+            accumulated[slot] += cross[0];
+            accumulated[slot + 1] += cross[1];
+            accumulated[slot + 2] += cross[2];
+            bend[*index as usize] +=
+                (cross[0] * cross[0] + cross[1] * cross[1] + cross[2] * cross[2]).sqrt();
+        }
+    }
+    volume /= 6.0;
+    let mut normals = vec![0.0_f32; vertices * 3];
+    let mut zero = 0_usize;
+    for vertex in 0..vertices {
+        let slot = vertex * 3;
+        let sum = [
+            accumulated[slot],
+            accumulated[slot + 1],
+            accumulated[slot + 2],
+        ];
+        let unit = if sum[0] * sum[0] + sum[1] * sum[1] + sum[2] * sum[2] > f32::EPSILON {
+            normalize(sum)
+        } else {
+            zero += 1;
+            let point = vertex_of(&positions, vertex as u32);
+            let gradient = radial_gradient(field, point);
+            if gradient[0] * gradient[0] + gradient[1] * gradient[1] + gradient[2] * gradient[2]
+                > f32::EPSILON
             {
-                let mut extractor = IndexedVertices::new(&mut local, &mut local_indices);
-                mesher.extract(&sampler, &mut extractor);
+                normalize([-gradient[0], -gradient[1], -gradient[2]])
+            } else {
+                normalize(point)
             }
+        };
+        normals[slot..slot + 3].copy_from_slice(&unit);
+    }
 
-            let mut remap: Vec<u32> = Vec::with_capacity(local.len() / 3);
-            for index in 0..local.len() / 3 {
-                let u = local[index * 3];
-                let v = local[index * 3 + 1];
-                let at = [u, v, local[index * 3 + 2]];
-                let point = field.point(face, at);
-                // uv 按立方球图谱的排法：面号决定行，面内 v 在行里走
-                let uv = [u, (face as f32 + v) / PATCHES as f32];
-                let (welded, merged) = push_vertex(&mut cells, &mut positions, &mut uvs, point, uv, weld);
-                welds += usize::from(merged);
-                remap.push(welded);
-            }
-
-            for triangle in local_indices.chunks(3) {
-                let (a, b, c) = (
-                    remap[triangle[0] as usize],
-                    remap[triangle[1] as usize],
-                    remap[triangle[2] as usize],
-                );
-                if a == b || b == c || a == c {
-                    continue;
-                }
-                indices.extend_from_slice(&[a, b, c]);
-            }
-        }
-
-        let vertices = positions.len() / 3;
-        if vertices == 0 {
-            return Err("体积里没有这个等值面 ⇒ 代理是空的（检查 tau 与 level）".to_string());
-        }
-
-        // 法线：按三角形面积加权累加。零长的（碎片三角形凑不出面积）改用场的梯度 ——
-        // 梯度指向场增大的那一侧，取反就是代理的外法线，内壳外壳都对；再兜不住才退回径向。
-        //
-        // 顺手再累两个量，只给下面的几何外扩用（`offset = 0` 时一点不影响老路径）：
-        // `bend` = Σ|叉积| 是「顶点星成形程度」的尺子，`volume` 是有向体积（定缠绕里外）。
-        let mut accumulated = vec![0.0_f32; vertices * 3];
-        let mut bend = vec![0.0_f32; vertices];
-        let mut volume = 0.0_f32;
-        for triangle in indices.chunks_exact(3) {
-            let a = vertex_of(&positions, triangle[0]);
-            let b = vertex_of(&positions, triangle[1]);
-            let c = vertex_of(&positions, triangle[2]);
-            let edge_one = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
-            let edge_two = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
-            let cross = [
-                edge_one[1] * edge_two[2] - edge_one[2] * edge_two[1],
-                edge_one[2] * edge_two[0] - edge_one[0] * edge_two[2],
-                edge_one[0] * edge_two[1] - edge_one[1] * edge_two[0],
-            ];
-            volume += a[0] * (b[1] * c[2] - b[2] * c[1]) + a[1] * (b[2] * c[0] - b[0] * c[2])
-                + a[2] * (b[0] * c[1] - b[1] * c[0]);
-            for index in triangle {
-                let slot = *index as usize * 3;
-                accumulated[slot] += cross[0];
-                accumulated[slot + 1] += cross[1];
-                accumulated[slot + 2] += cross[2];
-                bend[*index as usize] += (cross[0] * cross[0]
-                    + cross[1] * cross[1]
-                    + cross[2] * cross[2])
-                    .sqrt();
-            }
-        }
-        volume /= 6.0;
-        let mut normals = vec![0.0_f32; vertices * 3];
-        let mut zero = 0_usize;
+    // 几何外扩：沿外法线把每个顶点往外推 `offset`（世界单位）。
+    //
+    // 方向这里自己算一份，不读属性里那份法线：属性不能动（`offset = 0` 要与老档逐位
+    // 相同），而且它 77% 的顶点走了 `> f32::EPSILON` 那个兜底（门槛对 1e-4 量级的三角形
+    // 面积太严，弯曲面上 Σ 叉积本来就只有 Σ|叉积| 的一半）⇒ 拿它定方向会把外扩推歪。
+    // 三步：① 顶点星成形（|Σ叉积| ≥ Σ|叉积|/16）就用它 —— 那才是这张网格的几何法向，
+    // 它跟着缠绕走，所以要按有向体积翻一次；② 否则用世界空间的场梯度取反（梯度指向
+    // 云里）—— 这条天然朝外，与缠绕无关，不许再翻；③ 再退化才沿用属性里那份。
+    let mut fallback = 0_usize;
+    if params.offset != 0.0 {
+        let winding = if volume < 0.0 { -1.0 } else { 1.0 };
+        let mut moved = [0.0_f32; 3];
         for vertex in 0..vertices {
             let slot = vertex * 3;
+            let point = vertex_of(&positions, vertex as u32);
             let sum = [
                 accumulated[slot],
                 accumulated[slot + 1],
                 accumulated[slot + 2],
             ];
-            let unit = if sum[0] * sum[0] + sum[1] * sum[1] + sum[2] * sum[2] > f32::EPSILON {
-                normalize(sum)
+            let size = sum[0] * sum[0] + sum[1] * sum[1] + sum[2] * sum[2];
+            let direction = if size > 0.0 && size * 256.0 >= bend[vertex] * bend[vertex] {
+                let unit = normalize(sum);
+                [unit[0] * winding, unit[1] * winding, unit[2] * winding]
             } else {
-                zero += 1;
-                let point = vertex_of(&positions, vertex as u32);
-                let gradient = radial_gradient(field, point);
+                fallback += 1;
+                let gradient = world_gradient(field, point);
                 if gradient[0] * gradient[0] + gradient[1] * gradient[1] + gradient[2] * gradient[2]
                     > f32::EPSILON
                 {
                     normalize([-gradient[0], -gradient[1], -gradient[2]])
                 } else {
-                    normalize(point)
+                    [normals[slot], normals[slot + 1], normals[slot + 2]]
                 }
             };
-            normals[slot..slot + 3].copy_from_slice(&unit);
-        }
-
-        // 几何外扩：沿外法线把每个顶点往外推 `offset`（世界单位）。
-        //
-        // 方向这里自己算一份，不读属性里那份法线：属性不能动（`offset = 0` 要与老档逐位
-        // 相同），而且它 77% 的顶点走了 `> f32::EPSILON` 那个兜底（门槛对 1e-4 量级的三角形
-        // 面积太严，弯曲面上 Σ 叉积本来就只有 Σ|叉积| 的一半）⇒ 拿它定方向会把外扩推歪。
-        // 三步：① 顶点星成形（|Σ叉积| ≥ Σ|叉积|/16）就用它 —— 那才是这张网格的几何法向，
-        // 它跟着缠绕走，所以要按有向体积翻一次；② 否则用世界空间的场梯度取反（梯度指向
-        // 云里）—— 这条天然朝外，与缠绕无关，不许再翻；③ 再退化才沿用属性里那份。
-        let mut fallback = 0_usize;
-        if params.offset != 0.0 {
-            let winding = if volume < 0.0 { -1.0 } else { 1.0 };
-            let mut moved = [0.0_f32; 3];
-            for vertex in 0..vertices {
-                let slot = vertex * 3;
-                let point = vertex_of(&positions, vertex as u32);
-                let sum = [
-                    accumulated[slot],
-                    accumulated[slot + 1],
-                    accumulated[slot + 2],
-                ];
-                let size = sum[0] * sum[0] + sum[1] * sum[1] + sum[2] * sum[2];
-                let direction = if size > 0.0 && size * 256.0 >= bend[vertex] * bend[vertex] {
-                    let unit = normalize(sum);
-                    [unit[0] * winding, unit[1] * winding, unit[2] * winding]
-                } else {
-                    fallback += 1;
-                    let gradient = world_gradient(field, point);
-                    if gradient[0] * gradient[0]
-                        + gradient[1] * gradient[1]
-                        + gradient[2] * gradient[2]
-                        > f32::EPSILON
-                    {
-                        normalize([-gradient[0], -gradient[1], -gradient[2]])
-                    } else {
-                        [normals[slot], normals[slot + 1], normals[slot + 2]]
-                    }
-                };
-                for axis in 0..3 {
-                    moved[axis] = point[axis] + direction[axis] * params.offset;
-                }
-                positions[slot..slot + 3].copy_from_slice(&moved);
+            for axis in 0..3 {
+                moved[axis] = point[axis] + direction[axis] * params.offset;
             }
-            println!(
-                "代理外扩：沿外法线推 {:+.6} 世界单位（{vertices} 个顶点；有向体积 {:+.4} ⇒ 缠绕{}；顶点星不成形改走场梯度的 {} 个）",
-                params.offset,
-                volume,
-                if volume < 0.0 { "朝里" } else { "朝外" },
-                fallback,
-            );
+            positions[slot..slot + 3].copy_from_slice(&moved);
         }
-
-        // 审计：闭合判据就是「没有开口边」。顺带数一下缠绕方向 —— 每条有向边只该出现一次，
-        // 出现两次就说明有三角形翻面了（光栅化要背面剔除的话会在意）。
-        let mut edges: HashMap<(u32, u32), u32> = HashMap::new();
-        let mut directed: HashMap<(u32, u32), u32> = HashMap::new();
-        for triangle in indices.chunks_exact(3) {
-            for pair in 0..3 {
-                let (one, two) = (triangle[pair], triangle[(pair + 1) % 3]);
-                let key = if one < two { (one, two) } else { (two, one) };
-                *edges.entry(key).or_insert(0) += 1;
-                *directed.entry((one, two)).or_insert(0) += 1;
-            }
-        }
-        let open = edges.values().filter(|count| **count == 1).count();
-        let nonmanifold = edges.values().filter(|count| **count > 2).count();
-        let flipped = directed.values().filter(|count| **count > 1).count();
         println!(
-            "代理审计：{PATCHES} 面 × {points}³ 点（depth {depth}）→ {vertices} 顶点 / {} 三角形｜开口边 {open}、非流形边 {nonmanifold}、翻面边 {flipped}、焊接 {welds} 个重复顶点、梯度兜底法线 {zero}",
-            indices.len() / 3,
+            "代理外扩：沿外法线推 {:+.6} 世界单位（{vertices} 个顶点；有向体积 {:+.4} ⇒ 缠绕{}；顶点星不成形改走场梯度的 {} 个）",
+            params.offset,
+            volume,
+            if volume < 0.0 { "朝里" } else { "朝外" },
+            fallback,
         );
-        if open > 0 {
-            println!("⚠ 代理有 {open} 条开口边 ⇒ 相邻两面的接缝没焊严，硬表面会从缝里漏出去");
-        }
+    }
 
-        Ok(MeshData {
-            positions,
-            normals,
-            uvs,
-            indices,
-        })
+    // 审计：闭合判据就是「没有开口边」。顺带数一下缠绕方向 —— 每条有向边只该出现一次，
+    // 出现两次就说明有三角形翻面了（光栅化要背面剔除的话会在意）。
+    let mut edges: HashMap<(u32, u32), u32> = HashMap::new();
+    let mut directed: HashMap<(u32, u32), u32> = HashMap::new();
+    for triangle in indices.chunks_exact(3) {
+        for pair in 0..3 {
+            let (one, two) = (triangle[pair], triangle[(pair + 1) % 3]);
+            let key = if one < two { (one, two) } else { (two, one) };
+            *edges.entry(key).or_insert(0) += 1;
+            *directed.entry((one, two)).or_insert(0) += 1;
+        }
+    }
+    let open = edges.values().filter(|count| **count == 1).count();
+    let nonmanifold = edges.values().filter(|count| **count > 2).count();
+    let flipped = directed.values().filter(|count| **count > 1).count();
+    println!(
+        "代理审计：{PATCHES} 面 × {points}³ 点（depth {depth}）→ {vertices} 顶点 / {} 三角形｜开口边 {open}、非流形边 {nonmanifold}、翻面边 {flipped}、焊接 {welds} 个重复顶点、梯度兜底法线 {zero}",
+        indices.len() / 3,
+    );
+    if open > 0 {
+        println!("⚠ 代理有 {open} 条开口边 ⇒ 相邻两面的接缝没焊严，硬表面会从缝里漏出去");
+    }
+
+    Ok(MeshData {
+        positions,
+        normals,
+        uvs,
+        indices,
+    })
 }

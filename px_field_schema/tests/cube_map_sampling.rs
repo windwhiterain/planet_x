@@ -36,7 +36,10 @@ fn a_smooth_field_stays_smooth_across_a_face_edge() {
     }
 
     assert!(worst < 0.03, "跨 +X/+Z 棱采样偏离解析值 {worst}");
-    assert!(biggest_step < 0.02, "跨棱处出现跳变，单步最大 {biggest_step}");
+    assert!(
+        biggest_step < 0.02,
+        "跨棱处出现跳变，单步最大 {biggest_step}"
+    );
 }
 
 #[test]
@@ -58,7 +61,10 @@ fn the_other_edge_is_continuous_too() {
     }
 
     assert!(worst < 0.03, "跨 +X/+Y 棱采样偏离解析值 {worst}");
-    assert!(biggest_step < 0.02, "跨棱处出现跳变，单步最大 {biggest_step}");
+    assert!(
+        biggest_step < 0.02,
+        "跨棱处出现跳变，单步最大 {biggest_step}"
+    );
 }
 
 #[test]

@@ -136,7 +136,10 @@ fn a_graph_local_operator_is_a_first_class_operator() {
     let rings = cook::<Rings>(&graph, "rings", ()).expect("第二个现写算子");
     assert_ne!(band.key, rings.key, "两个现写算子算出同一个键 ⇒ id 没进键");
     let again = cook::<Band>(&graph, "band", ()).expect("第二次");
-    assert!(again.hit, "同一个节点再算一次没命中 ⇒ 键不稳定（现写算子的身份没钉住）");
+    assert!(
+        again.hit,
+        "同一个节点再算一次没命中 ⇒ 键不稳定（现写算子的身份没钉住）"
+    );
     assert_eq!(band.key, again.key);
 
     graph.finish();

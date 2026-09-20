@@ -162,11 +162,7 @@ impl CloudFieldParams {
         let footprint = (cover - taper * height * height).max_with(S::zero());
         let bias = footprint + noise - S::one();
         let lobed = (bias * S::from_f32(self.coverage_gain)).clamp01();
-        let floor_here = smoothstep(
-            S::zero(),
-            S::from_f32(f32::max(self.base, 1e-3)),
-            altitude,
-        );
+        let floor_here = smoothstep(S::zero(), S::from_f32(f32::max(self.base, 1e-3)), altitude);
         let ceiling = (S::from_f32(self.top)
             * mix(S::from_f32(1.0 - self.detail_strength), S::one(), noise))
         .max_with(S::from_f32(self.base + 0.02));

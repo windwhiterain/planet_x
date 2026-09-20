@@ -84,10 +84,26 @@ fn normal_cdf_is_one_half_at_the_center() {
 
 #[test]
 fn normal_cdf_matches_the_known_quantiles() {
-    assert!((normal_cdf(1.0) - 0.8413).abs() < 1e-3, "{}", normal_cdf(1.0));
-    assert!((normal_cdf(-1.0) - 0.1587).abs() < 1e-3, "{}", normal_cdf(-1.0));
-    assert!((normal_cdf(1.6449) - 0.95).abs() < 1e-3, "{}", normal_cdf(1.6449));
-    assert!((normal_cdf(2.0) - 0.9772).abs() < 1e-3, "{}", normal_cdf(2.0));
+    assert!(
+        (normal_cdf(1.0) - 0.8413).abs() < 1e-3,
+        "{}",
+        normal_cdf(1.0)
+    );
+    assert!(
+        (normal_cdf(-1.0) - 0.1587).abs() < 1e-3,
+        "{}",
+        normal_cdf(-1.0)
+    );
+    assert!(
+        (normal_cdf(1.6449) - 0.95).abs() < 1e-3,
+        "{}",
+        normal_cdf(1.6449)
+    );
+    assert!(
+        (normal_cdf(2.0) - 0.9772).abs() < 1e-3,
+        "{}",
+        normal_cdf(2.0)
+    );
 }
 
 #[test]

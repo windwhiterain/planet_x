@@ -24,7 +24,6 @@ pub struct Grid {
     pub projection: Domain,
 }
 
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ManifestEntry {
     pub node: String,

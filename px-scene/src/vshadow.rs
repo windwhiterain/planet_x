@@ -259,17 +259,23 @@ pub fn face_uv(direction: [f32; 3], face: u32) -> (f32, f32) {
 /// 物体中心投到那一面 ⇒ `[0,1]` 的归一化位置 ⇒ 折算成页格；然后让 `span × span` 的块
 /// 以它为中心、并**钳进** `[0, pages_per_side)`（中心贴边时块整体移进来，**不截断** ——
 /// 截断就是"这个物体在那一面的影缺一块"，而那在画面上看不出来是分配错了）。
-fn page_block_origin(
-    position: [f32; 3],
-    face: u32,
-    span: u32,
-    pages_per_side: u32,
-) -> (u32, u32) {
+fn page_block_origin(position: [f32; 3], face: u32, span: u32, pages_per_side: u32) -> (u32, u32) {
     let (u, v) = face_uv(position, face);
-    let major = position[0].abs().max(position[1].abs()).max(position[2].abs());
+    let major = position[0]
+        .abs()
+        .max(position[1].abs())
+        .max(position[2].abs());
     // 投影到面上之后的正切 = 面内分量 / 主轴分量；`tan(45°) = 1` 就是半个面。
-    let tan_u = if major > 0.0 { f64::from(u / major) } else { 0.0 };
-    let tan_v = if major > 0.0 { f64::from(v / major) } else { 0.0 };
+    let tan_u = if major > 0.0 {
+        f64::from(u / major)
+    } else {
+        0.0
+    };
+    let tan_v = if major > 0.0 {
+        f64::from(v / major)
+    } else {
+        0.0
+    };
     let centre_u = (tan_u * 0.5 + 0.5).clamp(0.0, 1.0);
     let centre_v = (tan_v * 0.5 + 0.5).clamp(0.0, 1.0);
     let last = i64::from(pages_per_side) - i64::from(span);
@@ -368,7 +374,14 @@ pub fn allocate(lights: &[Vec<Caster>]) -> Result<Allocation, Overflow> {
         for (face, page_y, page_x, ids) in &wanted {
             if *face != current_face {
                 if current_face != u32::MAX {
-                    flush_row(&mut table, current_face, row, row_first_slot, &words, pages_per_side);
+                    flush_row(
+                        &mut table,
+                        current_face,
+                        row,
+                        row_first_slot,
+                        &words,
+                        pages_per_side,
+                    );
                 }
                 current_face = *face;
                 slot_in_face = 0;
@@ -376,7 +389,14 @@ pub fn allocate(lights: &[Vec<Caster>]) -> Result<Allocation, Overflow> {
                 row_first_slot = 0;
                 words = vec![0_u32; table[1] as usize];
             } else if *page_y != row {
-                flush_row(&mut table, current_face, row, row_first_slot, &words, pages_per_side);
+                flush_row(
+                    &mut table,
+                    current_face,
+                    row,
+                    row_first_slot,
+                    &words,
+                    pages_per_side,
+                );
                 row = *page_y;
                 row_first_slot = slot_in_face;
                 words = vec![0_u32; table[1] as usize];
@@ -404,7 +424,14 @@ pub fn allocate(lights: &[Vec<Caster>]) -> Result<Allocation, Overflow> {
             slot_in_face += 1;
         }
         if current_face != u32::MAX {
-            flush_row(&mut table, current_face, row, row_first_slot, &words, pages_per_side);
+            flush_row(
+                &mut table,
+                current_face,
+                row,
+                row_first_slot,
+                &words,
+                pages_per_side,
+            );
         }
 
         out.table_words += table.len() as u32;
