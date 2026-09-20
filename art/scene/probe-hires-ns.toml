@@ -1,0 +1,35 @@
+# **高分辨判据档**：让"像素在光空间的足迹"**远大于 2 个 texel**，从而真正走到"选级"那一半。
+#
+# 为什么需要它：`probe-ringsun*` 那几档的足迹只有 ~1.5 texel ⇒ `want = floor(log2(足迹/texel)) = 0`
+# ⇒ 采样永远读级 0 ⇒ **级这一维在成图里几乎没被走到**（只有 20× 的少量 tap）。
+#
+# 推导（决定这一档的参数）：`texel_world ≈ 1/ρ`（因为 `pages_per_side ≈ dρ/64`，与 d 无关），
+# 所以 `want > 0 ⟺ 足迹 > 2/ρ`。足迹是"一个像素在接收面上跨多少世界单位"，由**相机距离**定
+# ⇒ **要么 ρ 很大，要么相机很近**。
+#
+# ⚠ 而 atlas 的代价按 `(ρ·R)²` 涨 ⇒ ρ 大就必须 **R 小**。所以这一档：
+# **小行星（radius 0.3）+ 高密度（ρ=1024）+ 近相机**。
+# 小行星的环（`rings = 1.45` 是最小值）跟着缩到 0.435，正好当那个"薄投影体"。
+#
+# 预期：`want ≈ 3`（足迹 ~0.0125 世界单位 ÷ texel ~1/1024）。
+# 若级机制**无效**（退到级 0），核会被 2 texel 的上限卡住 ⇒ 足迹 12 个 texel 只滤 2 个
+# ⇒ **欠 filter（走样）**，影边会出现硬折角。若有效 ⇒ 影边仍是 1–2 px 的平滑过渡。
+name = "probe-hires-ns"
+ambient = 80.0
+cameras = "review"
+
+[[parts]]
+id = "planet"
+kind = "planet"
+shader = "surface"
+graph = "planet"
+members = { height = "height", mesh = "surface", shader = "shaders::surface" }
+params = { palette = "rocky", displace = 0.0, sea_level = 0.52, radius = 0.3, spin = 0.0, rings = 1.45, shadows = 0, shadow_density = 1024, light_position = [-1.3, 0.8, 0.7], light_intensity = 2.0e5 }
+
+[[parts]]
+id = "atmosphere"
+kind = "atmosphere"
+shader = "atmosphere"
+graph = "shaders"
+members = { shader = "atmosphere" }
+params = { inner = 0.3, outer = 0.345, density = 0.3, softness = 0.5, tint = [0.44, 0.64, 0.98] }
