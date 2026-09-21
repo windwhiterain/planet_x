@@ -103,7 +103,10 @@ pub fn bake_emission(density: &VolumeData, params: &EmissionParams) -> VolumeDat
                     // 主项（高幂 ⇒ 只有浓的地方亮）是**中性**的，它的颜色由消光给
                     // （薄处自然被染成玫红）；底光（低幂 ⇒ 浓处相对更强）带自己的色相。
                     let main = d.powf(params.emission_power) * params.emission_gain * lit;
-                    let glow = d.powf(params.glow_power) * params.glow_gain * lit;
+                    // ⚠ **门控**（不是曲线）：门限以下**正好是 0** ⇒ 暗部完全交回
+                    //   "主发射 + 逐通道消光"（玫红）。见 glow_threshold 的文档。
+                    let above = (d - params.glow_threshold).max(0.0);
+                    let glow = above.powf(params.glow_power) * params.glow_gain * lit;
 
                     // ---- 消光：逐通道 + 尘埃那一笔 ----
                     let base = d.powf(params.extinction_power);
