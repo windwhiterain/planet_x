@@ -276,6 +276,19 @@ pub fn raymarch_channel(
 ///
 /// ⚠ 它**只收发射体积**（不是密度场）：搬密度、算光照是上游那两档的事，而它们与
 ///   "壳多细、半径多大"有关、与"积多细"无关 ⇒ 那些参数不该抄到这一档来。
+///
+/// ## 分级（按亮度分档的色相）
+///
+/// ⚠ 参考图的两档色相**彼此矛盾**，而体渲染里 `σ_G` 只有**一条**系数
+///   （大了核与边一起洋红、小了边不够红）⇒ 那一步只能在**分级**里做。
+///   四个常数就是这一档的全部自由度，取值都是量出来的（见下）。
+pub const SHADOW_KNEE: f32 = 0.05;
+pub const HIGHLIGHT_KNEE: f32 = 0.12;
+pub const MAGENTA_STRENGTH: f32 = 0.90;
+pub const MAGENTA_FLOOR: f32 = 0.25;
+pub const CYAN_STRENGTH: f32 = 0.55;
+pub const CYAN_BLUE: f32 = 0.16;
+
 pub fn raymarch_sky(
     emission: &VolumeData,
     stars: &Field,
@@ -287,15 +300,66 @@ pub fn raymarch_sky(
         planes.push(field.data);
     }
 
+    // ⚠ **按亮度分档的色相分级**（bake 期，最后一步）。
+    //
+    // ⚠⚠ 为什么需要它，而不是继续在体渲染里调：参考图的两档要求**彼此矛盾** ——
+    //
+    //   | 参考（线性均值） | G/R | B/R |
+    //   |---|---|---|
+    //   | 最亮 15% | **0.81** | **1.10**（白蓝的核） |
+    //   | 最暗 50% | **0.24** | 0.61（绿被压到红的 1/4，玫红） |
+    //
+    //   而体渲染里 `σ_G` 是**一条**系数：它大了核与边一起变洋红，小了边不够红
+    //   （实测 σ_G = 3.6 给 0.55 / 0.68，σ_G = 5.0 给 0.45 / 0.59）。
+    //   ⇒ 这不是物理模型能一次给出的，参考图那种"核白蓝、边玫红"更像是**后期分区调色**。
+    //   所以这一步就明明白白地做**分级**，而不是假装它来自积分。
+    //
+    // 做法：按**亮度**把中性灰推开，但**推的方向随档而变** ——
+    //   暗处推向**玫红**（压绿）、亮处推向**蓝青**（抬绿与蓝）。权重是 `l / (l + k)`，
+    //   它随亮度平滑地从 0 走到 1（用阶跃会在分界处出一条硬边）。
+    let line = |value: f32| -> f32 { value.max(0.0) };
+    let texels = planes[0].len();
+    let mut graded = vec![0.0_f32; texels * 3];
+    for index in 0..texels {
+        let rgb = [
+            planes[0][index].max(0.0),
+            planes[1][index].max(0.0),
+            planes[2][index].max(0.0),
+        ];
+        let l = rgb[0] * 0.2126 + rgb[1] * 0.7152 + rgb[2] * 0.0722;
+        // 暗处权重（l 小 ⇒ 趋 1）、亮处权重（l 大 ⇒ 趋 1）。
+        let shadow = 1.0 - l / (l + SHADOW_KNEE);
+        let highlight = l / (l + HIGHLIGHT_KNEE);
+        // 灰 = 推开的中心；`shadow` 压绿（玫红），`highlight` 抬绿（白蓝）。
+        let grey = (rgb[0] + rgb[1] + rgb[2]) / 3.0;
+        let mut out = rgb;
+        // ⚠ 玫红 = 绿被压到红蓝之下 ⇒ 把绿**朝目标值**拉（`g → g + (目标 − g) × 权重`）。
+        //
+        // ⚠⚠ 第一版写成 `(g − 灰 × 地板).max(0) × 权重`，**几乎没效果**：
+        //   那一项与 `g` 本身同阶 ⇒ `g` 本来就小的地方"要减的量"也小，
+        //   于是正是最该变玫红的暗部**动得最少**（实测 G/R 只从 0.68 挪到 0.63）。
+        //   ⇒ 写成"朝目标插值"才对：`g` 越小、往地板拉的比例越明显。
+        let target_g = grey * MAGENTA_FLOOR;
+        out[1] += (target_g - rgb[1]) * shadow * MAGENTA_STRENGTH;
+        // ⚠ 白蓝 = 绿被抬回来 ⇒ 往灰的方向拉绿（并整体往蓝偏一点点）。
+        // ⚠ 白蓝 = 绿被抬回中性 ⇒ 同样是"朝目标插值"。
+        out[1] += (grey - rgb[1]) * highlight * CYAN_STRENGTH;
+        out[2] += rgb[2].max(1e-4) * highlight * CYAN_BLUE;
+        graded[index * 3] = line(out[0]);
+        graded[index * 3 + 1] = line(out[1]);
+        graded[index * 3 + 2] = line(out[2]);
+    }
+
     // ⚠ **半精度、线性、不钳**：亮核可以超过 1，8 位会把高光砍在 1.0
     //   —— 而"亮核"正是靠超过 1 的那一段。转换走 `crate::half`（本 crate 自己的那一份：
     //   `px_graph` 的同类函数在依赖树的上面，够不到）。
     let face = sky_params.face.max(1);
-    let texels = planes[0].len();
     let mut bytes = Vec::with_capacity(texels * 8);
     for index in 0..texels {
-        for plane in &planes {
-            bytes.extend_from_slice(&crate::half::half_from_f32(plane[index]).to_le_bytes());
+        for channel in 0..3 {
+            bytes.extend_from_slice(
+                &crate::half::half_from_f32(graded[index * 3 + channel]).to_le_bytes(),
+            );
         }
         bytes.extend_from_slice(&crate::half::half_from_f32(1.0).to_le_bytes());
     }
