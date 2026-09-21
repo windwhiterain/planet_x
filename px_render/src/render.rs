@@ -754,6 +754,17 @@ impl Layer {
 /// 绑定组、布局、缓冲一个都不重建 —— 这就是"拖动不该付一次重建"的全部内容。
 struct Cell {
     zero: group0::GroupZero,
+    /// **同一份组 0，只有影子 atlas 那一格换成一张 1×1 哑图**（§本轮）。
+    ///
+    /// 为什么需要它：wgpu 不许一张纹理在同一条 pass 里**既当深度附件又被绑定**，
+    /// 而影子页 pass 正是那些「写 atlas」的 pass。让它们绑哑图 ⇒ 冲突消失，
+    /// 那条约 24 MB/帧 的 `copy_shadow_atlas` 就不再必要。
+    ///
+    /// ⚠ 它与 `zero` **共用同一个 `ZERO_LAYOUT_ID`**：布局对象虽然新造了一份
+    ///    （`group0::frame` 每次都造），但**结构逐格相同** —— 这正是 `layout_id` 由宿主
+    ///    给数、而不是从对象算出来的那条契约的意思（多相机那一档早就在靠它：
+    ///    每格一份布局对象、一条管线）。
+    zero_dummy: group0::GroupZero,
     stage: Stage,
 }
 
@@ -1377,8 +1388,12 @@ impl Session {
                 })
         };
 
+        // ⚠ `atlas_view` 是**参数**（不是捕获）：影子页 pass 要拿一张**哑图**替它
+        //    （见 `cells` 那一段），所以这一份必须能从外面换。其余几份（页表、灯偏移、
+        //    六面基、采样器）两种用法完全一样，继续捕获。
         let build_zero = |camera: &crate::camera::Camera,
                           view: &wgpu::TextureView,
+                          atlas_view: &wgpu::TextureView,
                           viewport: [f32; 4],
                           mesh_instances: &wgpu::Buffer,
                           shadow_page_offsets: &wgpu::Buffer,
@@ -1392,7 +1407,7 @@ impl Session {
                 &cluster,
                 viewport,
                 view,
-                &shadow_view,
+                atlas_view,
                 &shadow_sampler,
                 &shadow_page_table,
                 // ⚠ 每实例数据（§本轮从组 1 搬到组 0）：`vertex_mesh.wgsl` 按
@@ -1886,6 +1901,15 @@ impl Session {
                     continue;
                 };
                 pass.params[0..64].copy_from_slice(&view_bytes(&face.camera));
+                // 走到这里就是**影子页 pass**（`layer` 是凭证：层号 = 灯 × 6 + 面）。
+                // 把它的每一笔 draw 换到「组 0 绑哑图」那份材质上 ⇒ 它不再绑自己
+                // 正在写的 atlas，wgpu 那条"附件不能同时被绑"的规则就不再触发。
+                // ⚠ 先判有没有加过后缀：这个循环是**每格**跑一遍的。
+                for draw in pass.draws.iter_mut() {
+                    if !draw.material.ends_with("@shadowpage") {
+                        draw.material = format!("{}@shadowpage", draw.material);
+                    }
+                }
                 // ⚠ **诊断开关**（`PX_SHADOW_FULLPAGE=1`）：把 `view_page` 换成恒等矩形
                 //    `(0,0,1,1)` ⇒ 这一条 pass 画的是**整面**（与 `viewport` 无关地铺满）。
                 //    用它把"页参数+viewport 这一对配错了"与"这一笔画本身什么都没产出"分开：
@@ -2079,6 +2103,44 @@ impl Session {
             let zero = build_zero(
                 &placement.camera,
                 &sampled_view,
+                &shadow_view,
+                viewport,
+                &instance_buffer,
+                &shadow_page_offsets,
+                &shadow_faces,
+            )?;
+            // 影子页 pass 那一份：**只有 atlas 那一格**换成这张 1×1 哑图。
+            //
+            // ⚠ 格式必须是**深度**的：组 0 那一格的布局是 `TextureSampleType::Depth`，
+            //    拿 `Rgba8UnormSrgb` 会当场建组失败（§十五 记的那个坑）。
+            // ⚠ 视图维度必须是 `D2Array`：与真 atlas 同形，否则布局的
+            //    `view_dimension` 对不上。
+            // ⚠ 这张纹理活多久：`wgpu::BindGroup` 自己持着资源的引用，所以这里
+            //    不必把它存进 `Cell` —— 但**哑图视图**必须活到 `create_bind_group`
+            //    之后，所以它绑在下面那个 `let` 上。
+            let dummy_shadow = gpu.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("影子哑图：给影子页 pass 的组 0 用"),
+                size: wgpu::Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Depth32Float,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            });
+            let dummy_view = dummy_shadow.create_view(&wgpu::TextureViewDescriptor {
+                label: Some("影子哑图视图"),
+                dimension: Some(wgpu::TextureViewDimension::D2Array),
+                ..Default::default()
+            });
+            let zero_dummy = build_zero(
+                &placement.camera,
+                &sampled_view,
+                &dummy_view,
                 viewport,
                 &instance_buffer,
                 &shadow_page_offsets,
@@ -2091,6 +2153,7 @@ impl Session {
             );
             cells.push(Cell {
                 zero,
+                zero_dummy,
                 stage: camera_stage,
             });
         }
@@ -2434,8 +2497,16 @@ impl Session {
             } else {
                 &mut quiet
             };
+            // 影子页那一档的材质名（与 `cell_materials` 里 `scene.objects` 的顺序一致）。
+            let shadowpage_names: Vec<String> = scene
+                .objects
+                .iter()
+                .map(|object| format!("{}@shadowpage", object.id))
+                .collect();
             let table = cell_materials(
                 &cell.zero,
+                &cell.zero_dummy,
+                &shadowpage_names,
                 &cell.stage,
                 scene,
                 bindings,
@@ -3205,6 +3276,8 @@ fn read_depth_stats(
 #[allow(clippy::too_many_arguments)]
 fn cell_materials<'a>(
     zero: &'a group0::GroupZero,
+    zero_dummy: &'a group0::GroupZero,
+    shadowpage_names: &'a [String],
     camera_stage: &'a Stage,
     scene: &'a art::LoadedScene,
     bindings: &'a [material::MaterialBinding],
@@ -3279,6 +3352,25 @@ fn cell_materials<'a>(
             })
         })
         .collect::<Result<Vec<_>, String>>()?;
+    // ---- 影子页那一档：同一批材质，**只有组 0 指向哑图**（§本轮）----
+    //
+    // ⚠ 只发**物体**材质的变体（`shadowpage_names` 与 `scene.objects` 同序同长）：
+    //    帧自有材质画的全是全屏 pass，一条影子页 pass 都不是。
+    // ⚠ 布局身份不变（还是 `ZERO_LAYOUT_ID`）⇒ **不新增管线** —— 这正是"一个 id 对应
+    //    很多个结构相同的布局对象"那条契约允许的事（多相机那一档早就在靠它）。
+    // ⚠ 顺序不能改：变体**追加在末尾**，所以原来的下标一个都不动。
+    let object_materials: Vec<ResolvedMaterial<'a>> =
+        resolved_materials[..shadowpage_names.len().min(resolved_materials.len())].to_vec();
+    for (base, name) in object_materials.iter().zip(shadowpage_names.iter()) {
+        let mut variant = base.clone();
+        variant.name = name.as_str();
+        if let Some(group) = variant.groups.iter_mut().find(|group| group.group == 0) {
+            group.bind_group = &zero_dummy.bind_group;
+            group.layout = zero_dummy.layout.clone();
+            group.layout_id = ZERO_LAYOUT_ID;
+        }
+        resolved_materials.push(variant);
+    }
     resolved_materials.extend(
         frame_materials
             .iter()

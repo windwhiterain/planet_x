@@ -1545,6 +1545,11 @@ pub struct ResolvedGroup<'a> {
 }
 
 /// 宿主**解析好的材质**：`Draw::material` 那个名字 → 要设的绑定组 + 混合档 + 剔除。
+///
+/// ⚠ `Clone` 是**给"同一份材质、只有一个组不同"那种变体用的**（§本轮）：影子页 pass 要
+/// 的是"组 0 那一格换成哑图"的同一份材质，而不是另写一条。克隆复制的是**句柄**
+/// （`&BindGroup` / `BindGroupLayout` 都是引用计数），不是 GPU 资源。
+#[derive(Clone)]
 pub struct ResolvedMaterial<'a> {
     pub name: &'a str,
     pub groups: Vec<ResolvedGroup<'a>>,
