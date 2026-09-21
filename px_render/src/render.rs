@@ -248,7 +248,10 @@ const DEPTH_RESOURCES: [&str; 2] = ["scene_depth", "scene_depth_sample"];
 ///
 /// ⚠ **名字必须与帧图里那一份一致** —— 不一致的后果是这一档**悄悄退回兜底 atlas**：
 /// 采样侧照常跑、出图照常出，只有影没了（而"没影"看起来就像"这一版还没做影子"）。
-const SHADOW_TEXTURE_RESOURCE: &str = "point_shadow_atlas_sample";
+// ⚠⚠ §本轮起是**真 atlas 自己**（从前是它的拷贝 `point_shadow_atlas_sample`）。
+//    换得掉是因为影子页 pass 改绑哑图了 ⇒ 没有任何 pass 同时绑着自己写的纹理，
+//    那条拷贝整条删掉（它的代价是整份 atlas 每帧搬一遍，见帧图里那段）。
+const SHADOW_TEXTURE_RESOURCE: &str = "point_shadow_atlas";
 
 /// **写**的那张 atlas 的名字（页 pass 的深度附件）—— 两者是同一份内容的两个视图。
 ///
