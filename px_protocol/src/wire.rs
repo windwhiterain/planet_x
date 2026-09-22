@@ -20,7 +20,10 @@ impl std::fmt::Display for WireError {
             Self::Io(message) => write!(formatter, "IO 失败：{message}"),
             Self::MissingHeader => write!(formatter, "二进制块缺少头部行"),
             Self::BadPayloadLength { expected, actual } => {
-                write!(formatter, "二进制块长度不符：头部声明 {expected} 字节，实际 {actual} 字节")
+                write!(
+                    formatter,
+                    "二进制块长度不符：头部声明 {expected} 字节，实际 {actual} 字节"
+                )
             }
             Self::NotF32(dtype) => write!(formatter, "期望 f32 载荷，实际 {dtype:?}"),
             Self::NotU32(dtype) => write!(formatter, "期望 u32 载荷，实际 {dtype:?}"),
@@ -88,6 +91,16 @@ impl Blob {
     }
 
     pub fn from_f32(shape: Vec<u32>, data: &[f32]) -> Self {
+        // ⚠⚠ 这里**绕开了 `Blob::new` 的长度自检**，而绕开过一次的代价是：
+        //   `VolumeData` 曾把六通道的字节塞进单通道的形状 ⇒ 产物自相矛盾、
+        //   读回被拒，而症状只是"每次烘图都重算"（不报错、不崩溃）。
+        //   ⇒ 自检在这里也补一道（debug + 测试里都走）：形状的元素数必须等于 `data`。
+        debug_assert_eq!(
+            shape.iter().product::<u32>() as usize,
+            data.len(),
+            "blob 形状 {shape:?} 装不下 {} 个 f32",
+            data.len()
+        );
         let mut bytes = Vec::with_capacity(data.len() * 4);
         for value in data {
             bytes.extend_from_slice(&value.to_le_bytes());

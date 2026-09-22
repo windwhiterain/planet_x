@@ -357,6 +357,8 @@ pub struct VolumeData {
 }
 
 /// Volume 载荷的 blob 形状：`[面, 径向层, t, s]`。
+///
+/// ⚠ 多通道体积在**末尾多一维**（通道数，只在 > 1 时写）—— 见 [`VolumeData::blobs`]。
 pub const VOLUME_SHAPE: [u32; 4] = [CUBE_FACES, 0, 0, 0];
 
 impl VolumeData {
@@ -364,23 +366,49 @@ impl VolumeData {
         self.res as usize * self.layers as usize * self.res as usize * CUBE_FACES as usize
     }
 
+    /// 每格几条通道（`data.len() / samples()`）：密度是 1、发射是 6（3 发射 + 3 消光）。
+    ///
+    /// ⚠⚠ **通道数必须编进 blob 形状**（见 [`Self::blobs`]）—— 这一档踩过一次：
+    ///   形状只写单通道的量、字节却是 `samples × 6` ⇒ 产物**自相矛盾**、读回被拒，
+    ///   而症状只是"每次烘图都重算"（不报错、不崩溃）。
+    pub fn lanes(&self) -> usize {
+        let samples = self.samples().max(1);
+        self.data.len() / samples
+    }
+
     pub fn at(&self, face: u32, layer: u32, t: u32, s: u32) -> f32 {
+        // ⚠ 多通道体积**不能**用 `at`：布局是交错的（`data[格 × lanes + 通道]`），
+        //   单通道下标式只对 `lanes == 1` 有意义。
+        debug_assert_eq!(self.lanes(), 1, "多通道体积请逐通道取（见 `lanes`）");
         self.data[(((face * self.layers + layer) * self.res + t) * self.res + s) as usize]
     }
 
+    /// ⚠⚠ **形状要装得下所有字节**：`Blob` 的头按 `DType` 自检长度
+    ///   （`elems × 4 == 字节数`），而多通道体积的 `data` 是 `samples × lanes`。
+    ///   第一版形状只写 `[面, 层, t, s]`（单通道的量）却塞六通道的字节
+    ///   ⇒ 写出的产物自相矛盾，读回时被"长度不符"拒收
+    ///   （实测：`头部声明 6291456 字节，实际 37748736 字节` —— 正好差 6 倍）
+    ///   ⇒ **每次烘图都判未命中、每次重算**，而画面对不对完全看不出这件事。
+    ///
+    /// 规则：**第 5 维只在 `lanes > 1` 时出现** ⇒ 一份内容只有一种编码，
+    /// 而老的单通道产物（4 维形状）**照旧能读**。
     pub fn blobs(&self) -> Vec<Blob> {
-        vec![Blob::from_f32(
-            vec![CUBE_FACES, self.layers, self.res, self.res],
-            &self.data,
-        )]
+        let mut shape = vec![CUBE_FACES, self.layers, self.res, self.res];
+        if self.lanes() > 1 {
+            shape.push(self.lanes() as u32);
+        }
+        vec![Blob::from_f32(shape, &self.data)]
     }
 
     /// 只从载荷里还原数据与形状：`inner`/`outer` 住在清单参数里（`px_graph` 负责补）。
+    ///
+    /// 形状 4 维 = 单通道（老形状）；第 5 维是通道数（只在 > 1 时写 —— 见 [`Self::blobs`]）。
     pub fn from_blob(blob: &Blob) -> Result<Self, WireError> {
         let shape = &blob.header.shape;
-        if shape.len() != VOLUME_SHAPE.len() {
+        if shape.len() != 4 && shape.len() != 5 {
             return Err(WireError::NotF32(blob.header.dtype));
         }
+        let lanes = shape.get(4).copied().unwrap_or(1).max(1) as usize;
         let data = blob.f32s()?;
         let volume = Self {
             res: shape[3],
@@ -389,7 +417,7 @@ impl VolumeData {
             outer: 0.0,
             data,
         };
-        if volume.data.len() != volume.samples() {
+        if volume.data.len() != volume.samples() * lanes {
             return Err(WireError::TruncatedFrame);
         }
         Ok(volume)

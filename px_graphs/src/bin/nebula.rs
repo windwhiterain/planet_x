@@ -203,7 +203,7 @@ fn main() -> Result<(), Fault> {
         "density",
         field::MixInput {
             a: warped,
-            b: wisps,
+            b: wisps.clone(),
             mask: weight,
         },
     )?;
@@ -222,31 +222,32 @@ fn main() -> Result<(), Fault> {
     )?;
     report("shaped", shaped.value());
 
-    // ── **细丝**：与团块无关的一层高频结构 ────────────────────────────────
+    // ── **暗尘带**：沿脊线雕细缝（参考图的"暗尘埃柱与暗带"）──────────────────
     //
-    // ⚠⚠ 这一层是为**局域对比的 p90** 加的。上一轮的包络把**中位**拉到了 0.00176
-    //   （参考 0.00200，只差 14%），而 **p90 还差 2.4 倍**（0.00522 对 0.01263）
-    //   ⇒ "细节的典型量"够了，缺的是**少数地方有强反差**。
-    //   而把 `density` 压得更狠只会连同团块一起压暗（中位掉、p90 不起来）
-    //   —— 参考图的强反差来自**另一层尺度**，所以它得是**另一个场**。
+    // ⚠⚠ 与上一轮失败那版（独立的 `filaments` 高频场）的差别就是这一刀的全部要点：
+    //   失败版 `mix(0, shaped, 门)` = `shaped × 门`，而门的均值在 0.5 附近
+    //   ⇒ **整片密度被砍半**（实测均值 0.055 → 0.021，局域对比反而掉）。
+    //   这一版 `mix(shaped, 0, 脊)` = `shaped × (1 − 脊)`，而脊**又细又稀**
+    //   （只取 ridged 场的顶部）⇒ 处处保持原样、只在脊线上开缝。
+    //   ⇒ "乘（稀疏的 1−x）"与"乘（稠密的 x）"是两回事：前者不动平均，后者必然砍一半。
     //
-    // ⚠ 这里只用 `field.mix`（本仓没有乘法算子）：`filaments` 的窗口决定
-    //   "多细的地方还留得住气" ⇒ `mix(0, shaped, 门)` 等价于**门控的密度**。
-    //   门越窄（`filaments.toml` 里的窗口）丝就越细、反差就越强。
-    let filaments = cook::<field::Ridged3>(&shape_graph, "filaments", ())?;
-    // ⚠ 只在**有气的地方**加细丝（门乘上包络）：真空里出现细丝会把上一轮刚拿到的
-    //   "成片的黑"又糊掉。
-    let carved = cook::<field::Remap>(
-        &shape_graph,
-        "carved",
-        field::FieldInput { field: filaments },
-    )?;
+    // ⚠ 复用**已有的** `wisps`（ridged 场），不另造高频场：
+    //   1. 省掉一趟最贵的噪声（上一版 `filaments` 白花了 90 秒级的烘图开销，
+    //      而且它算完之后**根本没接进管线**（`density_volume` 一直吃的是 `shaped`）
+    //      —— 死重量不是无害的，它每次烘图都在收钱）；
+    //   2. 上一版 `frequency = 18` 超出 64³ 网格的奈奎斯特（≈32），
+    //      **那层细节根本产生不出来** —— 这是它的第二个败因。
+    //   `wisps` 频率 11 ⇒ 脊宽约 1 格、间距约 6 格，正是"尘带"的尺度。
+    let carved = cook::<field::Remap>(&shape_graph, "carved", field::FieldInput { field: wisps })?;
+    // ⚠ `mix(a, b, mask) = a×(1−mask) + b×mask` ⇒ `mix(shaped, 真空, 脊)`
+    //   就是"沿脊线把密度雕低"。`carved.toml` 的 `out_max = 0.8` ⇒ 缝里留 20% 的气
+    //   —— 留一点消光，挡住缝后面的星点（雕到 0 会像"破洞"，星会透出来）。
     let textured = cook::<field::Mix>(
         &shape_graph,
         "textured",
         field::MixInput {
-            a: vacuum.clone(),
-            b: shaped.clone(),
+            a: shaped,
+            b: vacuum,
             mask: carved,
         },
     )?;
@@ -255,9 +256,7 @@ fn main() -> Result<(), Fault> {
     let density_volume = cook::<volume::Density>(
         &shape_graph,
         "density_volume",
-        volume::DensityInput {
-            density: shaped.clone(),
-        },
+        volume::DensityInput { density: textured },
     )?;
     let emission = cook::<volume::Emission>(
         &shape_graph,

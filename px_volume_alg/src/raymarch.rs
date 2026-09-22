@@ -283,10 +283,10 @@ pub fn raymarch_channel(
 ///   （大了核与边一起洋红、小了边不够红）⇒ 那一步只能在**分级**里做。
 ///   四个常数就是这一档的全部自由度，取值都是量出来的（见下）。
 pub const SHADOW_KNEE: f32 = 0.05;
-pub const HIGHLIGHT_KNEE: f32 = 0.12;
+pub const HIGHLIGHT_KNEE: f32 = 0.015;
 pub const MAGENTA_STRENGTH: f32 = 0.90;
 pub const MAGENTA_FLOOR: f32 = 0.25;
-pub const CYAN_STRENGTH: f32 = 0.55;
+pub const CYAN_STRENGTH: f32 = 0.95;
 pub const CYAN_BLUE: f32 = 0.16;
 
 pub fn raymarch_sky(

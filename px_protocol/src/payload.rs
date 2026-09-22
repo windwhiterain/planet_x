@@ -291,8 +291,15 @@ impl Build for VolumeData {
 
     fn detail(payload: &Self) -> String {
         let (min, max, mean) = volume_stats(payload);
+        // ⚠ 多通道才印通道数（单通道的读数**逐字不变** —— 有快照判据钉着它）。
+        let lanes = payload.lanes();
+        let lane_text = if lanes > 1 {
+            format!(" × {lanes} 通道")
+        } else {
+            String::new()
+        };
         format!(
-            "{} 面 × {}² × {} 层｜值域 {min:.4}..{max:.4}｜均值 {mean:.4}",
+            "{} 面 × {}² × {} 层{lane_text}｜值域 {min:.4}..{max:.4}｜均值 {mean:.4}",
             CUBE_FACES, payload.res, payload.layers,
         )
     }
@@ -316,6 +323,45 @@ impl Build for VolumeData {
         volume.inner = bundle.params.get("inner").copied().unwrap_or(0.0) as f32;
         volume.outer = bundle.params.get("outer").copied().unwrap_or(0.0) as f32;
         Ok(volume)
+    }
+}
+
+#[cfg(test)]
+mod volume_tests {
+    use super::*;
+
+    /// **多通道体积往返**（6 条通道的发射体积必须编得进 blob 形状）。
+    ///
+    /// ⚠⚠ 钉的就是这一档踩过的那个坑：形状只写 `[面, 层, t, s]`（单通道的量）、
+    ///   字节却是 `samples × 6` ⇒ 产物**自相矛盾**、读回被"长度不符"拒收，
+    ///   而症状只是"每次烘图都判未命中、每次重算"（不报错、不崩溃、画面对不对也看不出）。
+    #[test]
+    fn a_six_lane_volume_survives_the_round_trip() {
+        let (res, layers) = (2_u32, 3_u32);
+        let samples = (CUBE_FACES * layers * res * res) as usize;
+        let data: Vec<f32> = (0..samples * 6).map(|index| index as f32 * 0.25).collect();
+        let volume = VolumeData {
+            res,
+            layers,
+            inner: 1.0,
+            outer: 2.5,
+            data: data.clone(),
+        };
+        let bundle = <VolumeData as Build>::encode(&volume).expect("编得出来");
+        let back =
+            <VolumeData as Build>::decode(&bundle, Domain::Volume, "emission").expect("解得回来");
+        assert_eq!(back.res, res);
+        assert_eq!(back.layers, layers);
+        assert_eq!(back.inner, 1.0);
+        assert_eq!(back.outer, 2.5);
+        assert_eq!(back.data.len(), data.len(), "字节数必须一致");
+        for index in 0..data.len() {
+            assert_eq!(
+                back.data[index].to_bits(),
+                data[index].to_bits(),
+                "第 {index} 格不是逐位相同"
+            );
+        }
     }
 }
 
