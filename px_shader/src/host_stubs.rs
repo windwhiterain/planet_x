@@ -99,6 +99,13 @@ use crate::assemble::{HOST_VIEW_STUB, bevy_stub};
 /// 那正是我们要的失败方式（同 [`DEPTH_NDC_TO_VIEW_Z`] 那条判据）。
 pub const POINT_SHADOW_STUB: &str = "\
 @group(0) @binding(2) var point_shadow_textures: texture_depth_2d_array;\n\
+// ⚠⚠ **每级一张 atlas**（用户裁决的 (ii)：降采样要「读 `atlas[k-1]` 写 `atlas[k]`」，\n\
+// 而 wgpu 不许同一张纹理在一条 pass 里既当（写的）深度附件、又当被绑的资源）。\n\
+// 级 1..3 各一张。⚠ 这三个绑定号必须与 `px_render::group0` 里\n\
+// `POINT_SHADOW_TEXTURES_L_BINDINGS` **逐字对上**。\n\
+@group(0) @binding(22) var point_shadow_textures_l1: texture_depth_2d_array;\n\
+@group(0) @binding(23) var point_shadow_textures_l2: texture_depth_2d_array;\n\
+@group(0) @binding(24) var point_shadow_textures_l3: texture_depth_2d_array;\n\
 @group(0) @binding(3) var point_shadow_textures_comparison_sampler: sampler;\n\
 @group(0) @binding(4) var<storage, read> px_shadow_pages: array<u32>;\n\
 // ⚠ 每一盏灯那一段**从第几个字开始**（前缀和）：段长跟着 `pages_per_side` 变，\n\
@@ -260,18 +267,40 @@ fn px_shadow_locate(light_id: u32, level: u32, face: u32, dir: vec3<f32>, pps0: 
 }\n\
 \n\
 // 拿一个已经查到的槽位读那一格、做**手动深度比较**。\n\
-fn px_shadow_read(light_id: u32, face: u32, slot: i32, t: vec2<f32>, atlas_pages: u32, depth: f32) -> f32 {\n\
+//\n\
+// ⚠⚠ **每级一张 atlas**（用户裁决的 (ii)：降采样要「读 `atlas[k-1]` 写 `atlas[k]`」，\n\
+// 而 wgpu 不许同一张纹理在一条 pass 里既当（写的）深度附件、又当被绑的资源）。\n\
+// 所以「读哪一张」由 `level` 定，走**定长链**（⚠ WGSL 不允许动态下标一组纹理）。\n\
+// 每一级的**页格边长**用 `textureDimensions` 现算 —— 那张纹理正好是\n\
+// 「页格边长 × PX_PAGE_SIZE」（烘图侧按分配覆盖帧图那一栏），所以两者必然一致，\n\
+// 页表头因此一个字都不用加。\n\
+fn px_shadow_grid(level: u32) -> u32 {\n\
+\x20   if (level == 1u) { return textureDimensions(point_shadow_textures_l1, 0).x / PX_PAGE_SIZE; }\n\
+\x20   if (level == 2u) { return textureDimensions(point_shadow_textures_l2, 0).x / PX_PAGE_SIZE; }\n\
+\x20   if (level == 3u) { return textureDimensions(point_shadow_textures_l3, 0).x / PX_PAGE_SIZE; }\n\
+\x20   return textureDimensions(point_shadow_textures, 0).x / PX_PAGE_SIZE;\n\
+}\n\
+\n\
+fn px_shadow_load(level: u32, texel: vec2<u32>, layer: i32) -> f32 {\n\
+\x20   if (level == 1u) { return textureLoad(point_shadow_textures_l1, texel, layer, 0); }\n\
+\x20   if (level == 2u) { return textureLoad(point_shadow_textures_l2, texel, layer, 0); }\n\
+\x20   if (level == 3u) { return textureLoad(point_shadow_textures_l3, texel, layer, 0); }\n\
+\x20   return textureLoad(point_shadow_textures, texel, layer, 0);\n\
+}\n\
+\n\
+fn px_shadow_read(light_id: u32, level: u32, face: u32, slot: i32, t: vec2<f32>, depth: f32) -> f32 {\n\
 \x20   let slot_u = u32(slot);\n\
 \x20   let px = floor(t.x / f32(PX_PAGE_SIZE));\n\
 \x20   let py = floor(t.y / f32(PX_PAGE_SIZE));\n\
 \x20   let local = t - vec2<f32>(px, py) * f32(PX_PAGE_SIZE);\n\
+\x20   let atlas_pages = px_shadow_grid(level);\n\
 \x20   let texel = vec2<u32>(\n\
 \x20       (slot_u % atlas_pages) * PX_PAGE_SIZE\n\
 \x20           + u32(clamp(local.x, 0.0, f32(PX_PAGE_SIZE) - 1.0)),\n\
 \x20       (slot_u / atlas_pages) * PX_PAGE_SIZE\n\
 \x20           + u32(clamp(local.y, 0.0, f32(PX_PAGE_SIZE) - 1.0)),\n\
 \x20   );\n\
-\x20   let stored = textureLoad(point_shadow_textures, texel, i32(light_id * PX_CUBE_FACES + face), 0);\n\
+\x20   let stored = px_shadow_load(level, texel, i32(light_id * PX_CUBE_FACES + face));\n\
 \x20   // ⚠ **无限 reverse-Z**：近处是 1.0、远处是 0.0。影图里存的是**沿这条射线最近的\n\
 \x20   //    那个表面**（离灯最近、深度最大那个）。于是：\n\
 \x20   //\n\
@@ -298,7 +327,7 @@ fn px_sample_shadow_page(light_id: u32, level: u32, dir: vec3<f32>, depth: f32) 
 \x20       if (lv >= levels) { break; }\n\
 \x20       let found = px_shadow_locate(light_id, lv, face, dir, pps0);\n\
 \x20       if (found.z >= 0.0) {\n\
-\x20           return px_shadow_read(light_id, face, i32(found.z), found.xy, atlas_pages, depth);\n\
+\x20           return px_shadow_read(light_id, lv, face, i32(found.z), found.xy, depth);\n\
 \x20       }\n\
 \x20       lv = lv + 1u;\n\
 \x20   }\n\
@@ -308,7 +337,7 @@ fn px_sample_shadow_page(light_id: u32, level: u32, dir: vec3<f32>, depth: f32) 
 \x20           lv = lv - 1u;\n\
 \x20           let found = px_shadow_locate(light_id, lv, face, dir, pps0);\n\
 \x20           if (found.z >= 0.0) {\n\
-\x20               return px_shadow_read(light_id, face, i32(found.z), found.xy, atlas_pages, depth);\n\
+\x20               return px_shadow_read(light_id, lv, face, i32(found.z), found.xy, depth);\n\
 \x20           }\n\
 \x20           if (lv == 0u) { break; }\n\
 \x20       }\n\

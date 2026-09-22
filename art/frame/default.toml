@@ -54,6 +54,37 @@ size = "4096x4096"
 layers = "shadow_faces"
 usage = ["render_attachment", "texture_binding", "copy_src"]
 
+# ---- 每级一张 atlas（用户裁决的 (ii)）：级 1..3 各一张 ----
+#
+# ⚠⚠ **名字必须与 `px-scene::vshadow::SHADOW_ATLAS_RESOURCES` 逐字对上**（`frame.rs` 靠
+#    名字认出「这是哪一级的 atlas」）。`size` 那一栏是**上限**，实际边长由分配算出来
+#    （`allocation.atlas_sides[级]`）再覆盖它 ⇒ 纹理正好是 `页格边长 × 128`，
+#    采样侧用 `textureDimensions` 就能反推页格边长 ⇒ 表头一个字都不用加。
+#
+# 为什么每级一张（而不是挤在一张里）：降采样要「读 `atlas[k-1]` 写 `atlas[k]`」，
+# 而 wgpu 不许同一张纹理在一条 pass 里既当（写的）深度附件、又当被绑的资源 ——
+# 与上面那段 `copy_shadow_atlas` 被删掉是**同一颗雷**的两面。
+[[resources]]
+name = "point_shadow_atlas_l1"
+format = "depth32float"
+size = "4096x4096"
+layers = "shadow_faces"
+usage = ["render_attachment", "texture_binding", "copy_src"]
+
+[[resources]]
+name = "point_shadow_atlas_l2"
+format = "depth32float"
+size = "4096x4096"
+layers = "shadow_faces"
+usage = ["render_attachment", "texture_binding", "copy_src"]
+
+[[resources]]
+name = "point_shadow_atlas_l3"
+format = "depth32float"
+size = "4096x4096"
+layers = "shadow_faces"
+usage = ["render_attachment", "texture_binding", "copy_src"]
+
 # ---- 影子 atlas 的**快照**（§本轮）：给"既要写它、又要采它"的两方各一份 ----
 #
 # ⚠⚠ **这里原来有一份 `point_shadow_atlas_sample` 与一条 `copy_shadow_atlas`，现已删除。**

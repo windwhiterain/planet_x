@@ -64,10 +64,42 @@ pub const MAX_PAGES_PER_SIDE: u32 = 512;
 /// 一个 cube 的面数（次序照 `px_render::camera::CUBE_MAP_FACES`：`+X −X +Y −Y +Z −Z`）。
 pub const CUBE_FACES: u32 = 6;
 
+/// **每一级**那张 atlas 的页格边长上限（= 那张 atlas 最多多少格/边）。
+///
+/// ⚠⚠ 这个数必须与 `art/frame/default.toml` 里那四条影子 atlas 资源的 `size` **逐格对上**
+/// —— 那四条都写 `4096x4096` ⇒ 页格上限 `4096 / PAGE_SIZE = 32`。两边不一致的症状是
+/// "烘图侧算出的边长超过帧图那一栏"（`frame.rs` 会当场拒）或者反过来浪费显存。
+///
+/// 为什么四条都写同一个上限、而**实际边长是现算的**：帧图那栏是**上限**（`SizeRule::Fixed`），
+/// 烘图侧按 `allocation.atlas_sides[级]` **覆盖**它（见 `frame.rs`）⇒ 纹理正好是
+/// `页格边长 × PAGE_SIZE`，采样侧用 `textureDimensions` 就能反推页格边长 ⇒ **表头一个字
+/// 都不用加**。实际边长是 `ceil_sqrt(那一级某一面上最多的页数)`（**不取 2 的幂**），
+/// 所以小场景的显存是**正好**的 —— 逐级四张加起来通常比从前那张共用的还小。
+pub const MAX_ATLAS_PAGES_PER_SIDE: u32 = 32;
+
+/// 影子 atlas 的**资源名**：每级一张（用户裁决的 (ii) 要「读 `atlas[k-1]` 写 `atlas[k]`」，
+/// 而 wgpu 不许同一张纹理在一条 pass 里既当附件又被绑 ⇒ 必须是几张不同的纹理）。
+///
+/// ⚠⚠ 必须与 `art/frame/default.toml` 里那几条 `layers = "shadow_faces"` 的资源**逐字对上**
+/// （`point_shadow_atlas` 是级 0，接着 `point_shadow_atlas_l1/l2/l3`）。
+///    `frame.rs` 靠名字认出「这一条是哪一级的 atlas」，认不出就当场拒 —— 而认错了的症状
+///    只是「影是错的」，所以它是个 `Err` 不是 `println`。
+pub const SHADOW_ATLAS_RESOURCES: [&str; MAX_LEVELS as usize] = [
+    "point_shadow_atlas",
+    "point_shadow_atlas_l1",
+    "point_shadow_atlas_l2",
+    "point_shadow_atlas_l3",
+];
+
+/// 某一级那张 atlas 的资源名。
+pub fn shadow_atlas_resource(level: u32) -> String {
+    SHADOW_ATLAS_RESOURCES[level as usize].to_string()
+}
+
 /// 一盏灯那一页表段的**头**字数（不含前缀表那一段）。
 ///
 /// ```text
-///   [0] pages_per_side（低 16 位）| **物理 atlas 的页格边长**（高 16 位）
+///   [0] pages_per_side（低 16 位）| **级 0 那张 atlas 的页格边长**（高 16 位）
 ///   [1] levels（低 16 位）| 0
 ///   [2 .. 2+levels]  level_offset[级] —— 那一级的六个面从第几个字开始（前缀和）
 ///   [2+levels ..]   级 0 的六个面，然后级 1 的六个面 ……
@@ -77,6 +109,10 @@ pub const CUBE_FACES: u32 = 6;
 /// ⚠ 页表**从这一轮起是"级优先"的两维表**（用户裁决的 (ii)）：`pps_级 = pages_per_side >> 级`。
 ///    级 0 最细（`pages_per_side = dρ_max/64`，精度要求定的），级 k 的一页盖住级 0 的
 ///    `2^k × 2^k` 格 ⇒ 一个 texel 的世界尺寸 ×`2^k`。**"细格子重新聚合成大格子"就是这一维。**
+///
+/// ⚠ **每级一张独立 atlas**（目标 ③）之后，各级的**页格边长不再相同** —— 但它们是
+///    [`ATLAS_PAGES_PER_LEVEL`] 那四个定数，采样侧按 `textureDimensions` 现算 ⇒
+///    **表头格式不变**。槽位则**每级每面各自从 0 开始**（每级一张 atlas，各自折行）。
 ///
 /// ⚠ `level_offset` 落一张前缀表而不是让采样侧自己求和：着色器每次采样都要算段首，
 ///    让它跑一遍 Σ 就是在最热的那条路径上加一个循环。
@@ -121,8 +157,11 @@ pub struct VirtualShadowMap {
     pub pages_per_side: u32,
     /// 这一盏灯有几级（`1..=MAX_LEVELS`）。级 k 的页数边长 = `pages_per_side >> k`。
     pub levels: u32,
-    /// atlas 每层的页格边长（2 的幂，≥ 那一层里最多的页数）。
-    pub atlas_pages_per_side: u32,
+    /// **每一级**那张 atlas 的页格边长（`atlas_pages[级]`，不取 2 的幂）。
+    ///
+    /// ⚠ 纹理边长就是 `atlas_pages[级] × PAGE_SIZE`（烘图侧按它覆盖帧图那栏），
+    ///    所以采样侧用 `textureDimensions` 就能反推出来 ⇒ 表头不用带它。
+    pub atlas_pages: [u32; MAX_LEVELS as usize],
     /// 这一盏灯在页表缓冲里的**字偏移**。
     pub table_offset: u32,
 }
@@ -156,7 +195,14 @@ pub struct Allocation {
     pub lights: Vec<VirtualShadowMap>,
     pub patches: Vec<PagePatch>,
     /// atlas 的尺寸：`(宽, 高, 层数)`。层 = `灯数 × 6`（层号 = 灯 × 6 + 面）。
+    ///
+    /// ⚠ 这是**级 0 那一张**的（协议里 `ShadowPlan::atlas_side` 说的也是它）。
+    ///    每级一张独立 atlas 之后各级尺寸不同，见 [`Allocation::atlas_sides`]。
     pub atlas: (u32, u32, u32),
+    /// **每一级**那张 atlas 的边长（texel），`atlas_sides[级]`。烘图侧按它覆盖帧图那栏的
+    /// `size`（见 `frame.rs`）⇒ 纹理正好是 `页格边长 × PAGE_SIZE`，采样侧用
+    /// `textureDimensions` 就能反推页格边长。
+    pub atlas_sides: Vec<u32>,
     /// 页表缓冲的 `u32` 字数。
     pub table_words: u32,
     /// 页表本体（所有灯连在一起）。
@@ -170,6 +216,7 @@ impl Allocation {
             lights: Vec::new(),
             patches: Vec::new(),
             atlas: (PAGE_SIZE, PAGE_SIZE, 0),
+            atlas_sides: Vec::new(),
             table_words: 0,
             table: Vec::new(),
         }
@@ -389,7 +436,8 @@ fn page_block_origin(position: [f32; 3], face: u32, span: u32, pages_per_side: u
 /// 所以"每帧重建"在这里的代价是几次浮点与一次排序。
 pub fn allocate(lights: &[Vec<Caster>]) -> Result<Allocation, Overflow> {
     let mut out = Allocation::empty();
-    let mut atlas_pages_side = 1_u32;
+    // 每级一张 atlas ⇒ 每级各自的页格边长上限（跨灯取 max）。
+    let mut atlas_pages_side = [1_u32; MAX_LEVELS as usize];
 
     for (index, casters) in lights.iter().enumerate() {
         let light = index as u32;
@@ -541,18 +589,50 @@ pub fn allocate(lights: &[Vec<Caster>]) -> Result<Allocation, Overflow> {
         //    槽位解码（`slot % atlas_pages`）用后者，页索引用前者。
         //    两者混用 ⇒ "格子一变细 atlas 就爆"。
         //
-        // ⚠ 槽位**在一面里跨级连续**（一层的 atlas 是那个面独占的）：级 0 的页先排，
-        //    接着级 1 的页…… ⇒ 每面一个计数器，`atlas_pages` 按**面**上最多的那个数算。
-        let mut per_face = [0_u32; CUBE_FACES as usize];
-        for (_, face, _, _, _) in &wanted {
-            per_face[*face as usize] += 1;
+        // ⚠⚠ **每级一张独立 atlas**（目标 ③）⇒ 槽位**每级每面各自从 0 开始**，
+        //    每级的页格边长是定数 [`ATLAS_PAGES_PER_LEVEL`]（与帧图那四条资源对上）。
+        //    从前是"一面内跨级连续"（所有级挤在一张 atlas 里），而降采样要
+        //    "读 `atlas[k-1]` 写 `atlas[k]`" ⇒ 两张纹理不能共享一个槽位空间。
+        //
+        //    这里只做**容量对账**：某一级某一面上分出去的页数不许超过那张 atlas 装得下的格数。
+        //    ⚠ 不静默截断 —— 截断的症状是"这个物体的影缺一块"（画面上看不出来是分配错了）。
+        let mut per_level_face = [[0_u32; CUBE_FACES as usize]; MAX_LEVELS as usize];
+        for (level, face, _, _, _) in &wanted {
+            per_level_face[*level as usize][*face as usize] += 1;
         }
-        let max_per_face = per_face.iter().copied().max().unwrap_or(1).max(1);
-        // ⚠ 要的是**边长**不是页数：一层里塞 `max_per_face` 页，边长至少 `ceil(√页数)`。
-        //    直接拿页数当边长会浪费一个平方（81 页 ⇒ 边长 128 ⇒ 16384² 的 atlas，
-        //    而 9 页边长就够）。
-        let atlas_pages = atlas_side_for(ceil_sqrt(max_per_face));
-        atlas_pages_side = atlas_pages_side.max(atlas_pages);
+        // 每级**各自**的页格边长：装得下那一级某一面上最多的页数即可。
+        //
+        // ⚠ **不取 2 的幂**（`ceil_sqrt`，不是 `atlas_side_for`）：纹理尺寸由烘图侧按
+        //    `allocation.atlas` 覆盖帧图那栏（见 `frame.rs`），所以能建得**正好**。
+        //    取 2 的幂会在小场景上把显存翻倍（`ceil_sqrt(481) = 23` 会被抬到 32 ⇒
+        //    面积多 93%），而槽位解码只是 `slot % atlas_pages`，对非 2 的幂一视同仁。
+        //    ⚠ 采样侧那**一份**数用 `textureDimensions(atlas_级).x / PAGE_SIZE` 现算 ——
+        //    纹理正好是 `atlas_pages × PAGE_SIZE`，所以两者必然一致（表头因此一个字都不用加）。
+        let mut atlas_pages_by_level = [0_u32; MAX_LEVELS as usize];
+        for level in 0..levels {
+            let max_per_face = per_level_face[level as usize]
+                .iter()
+                .copied()
+                .max()
+                .unwrap_or(0)
+                .max(1);
+            let grid = ceil_sqrt(max_per_face);
+            let cap = MAX_ATLAS_PAGES_PER_SIDE;
+            if grid > cap {
+                return Err(Overflow::PerFace {
+                    light,
+                    face: 0,
+                    wanted: max_per_face,
+                    limit: cap * cap,
+                });
+            }
+            atlas_pages_by_level[level as usize] = grid;
+        }
+        let atlas_pages = atlas_pages_by_level[0];
+        for level in 0..levels {
+            atlas_pages_side[level as usize] =
+                atlas_pages_side[level as usize].max(atlas_pages_by_level[level as usize]);
+        }
 
         // ---- 装箱：级优先 → 面 → 行（每面一条扫描线，槽位在面内跨级连续）----
         let table_offset = out.table_words;
@@ -572,8 +652,8 @@ pub fn allocate(lights: &[Vec<Caster>]) -> Result<Allocation, Overflow> {
         }
 
         let mut patches: Vec<PagePatch> = Vec::with_capacity(wanted.len());
-        // 槽位**每面一个计数器**（跨级连续）—— 因为 atlas 的一层是那个面独占的。
-        let mut slots = [0_u32; CUBE_FACES as usize];
+        // 槽位**每级每面一个计数器** —— 每级一张 atlas，各自从 0 开始折行。
+        let mut slots = [[0_u32; CUBE_FACES as usize]; MAX_LEVELS as usize];
         let mut current: Option<(u32, u32)> = None;
         let mut row = u32::MAX;
         let mut row_first_slot = 0_u32;
@@ -596,7 +676,7 @@ pub fn allocate(lights: &[Vec<Caster>]) -> Result<Allocation, Overflow> {
                 }
                 current = Some((*level, *face));
                 row = *page_y;
-                row_first_slot = slots[*face as usize];
+                row_first_slot = slots[*level as usize][*face as usize];
                 words = vec![0_u32; words_per_row as usize];
             } else if *page_y != row {
                 flush_row(
@@ -609,14 +689,14 @@ pub fn allocate(lights: &[Vec<Caster>]) -> Result<Allocation, Overflow> {
                     pages_per_side,
                 );
                 row = *page_y;
-                row_first_slot = slots[*face as usize];
+                row_first_slot = slots[*level as usize][*face as usize];
                 words = vec![0_u32; words_per_row as usize];
             }
             words[(page_x / 32) as usize] |= 1_u32 << (page_x % 32);
             let mut casters_here: Vec<String> = ids.split('|').map(str::to_string).collect();
             casters_here.sort();
             casters_here.dedup();
-            let slot = slots[*face as usize];
+            let slot = slots[*level as usize][*face as usize];
             patches.push(PagePatch {
                 light,
                 level: *level,
@@ -624,8 +704,8 @@ pub fn allocate(lights: &[Vec<Caster>]) -> Result<Allocation, Overflow> {
                 page_x: *page_x,
                 page_y: *page_y,
                 slot,
-                atlas_x: (slot % atlas_pages) * PAGE_SIZE,
-                atlas_y: (slot / atlas_pages) * PAGE_SIZE,
+                atlas_x: (slot % atlas_pages_by_level[*level as usize]) * PAGE_SIZE,
+                atlas_y: (slot / atlas_pages_by_level[*level as usize]) * PAGE_SIZE,
                 window: [
                     page_x * PAGE_SIZE,
                     page_y * PAGE_SIZE,
@@ -634,7 +714,7 @@ pub fn allocate(lights: &[Vec<Caster>]) -> Result<Allocation, Overflow> {
                 ],
                 casters: casters_here,
             });
-            slots[*face as usize] += 1;
+            slots[*level as usize][*face as usize] += 1;
         }
         if let Some((l, f)) = current {
             flush_row(
@@ -654,15 +734,19 @@ pub fn allocate(lights: &[Vec<Caster>]) -> Result<Allocation, Overflow> {
             virtual_size: pages_per_side * PAGE_SIZE,
             pages_per_side,
             levels,
-            atlas_pages_per_side: atlas_pages,
+            atlas_pages: atlas_pages_by_level,
             table_offset,
         });
         out.patches.extend(patches);
     }
 
-    let side = atlas_pages_side * PAGE_SIZE;
     let layers = (out.lights.len() as u32) * CUBE_FACES;
-    out.atlas = (side, side, layers.max(1));
+    out.atlas_sides = atlas_pages_side
+        .iter()
+        .map(|grid| grid * PAGE_SIZE)
+        .collect();
+    // `atlas` 留**级 0 那一张**的尺寸（协议里的 `atlas_side` / `layers` 说的是它）。
+    out.atlas = (out.atlas_sides[0], out.atlas_sides[0], layers.max(1));
     Ok(out)
 }
 
@@ -927,7 +1011,7 @@ mod tests {
                 patch.page_y
             );
             assert_eq!(
-                atlas_texel(patch.slot, light.atlas_pages_per_side),
+                atlas_texel(patch.slot, light.atlas_pages[patch.level as usize]),
                 (patch.atlas_x, patch.atlas_y)
             );
             assert!(patch.atlas_x + PAGE_SIZE <= allocation.atlas.0);

@@ -251,7 +251,12 @@ const DEPTH_RESOURCES: [&str; 2] = ["scene_depth", "scene_depth_sample"];
 // ⚠⚠ §本轮起是**真 atlas 自己**（从前是它的拷贝 `point_shadow_atlas_sample`）。
 //    换得掉是因为影子页 pass 改绑哑图了 ⇒ 没有任何 pass 同时绑着自己写的纹理，
 //    那条拷贝整条删掉（它的代价是整份 atlas 每帧搬一遍，见帧图里那段）。
-const SHADOW_TEXTURE_RESOURCE: &str = "point_shadow_atlas";
+const SHADOW_TEXTURE_RESOURCES: [&str; 4] = [
+    "point_shadow_atlas",
+    "point_shadow_atlas_l1",
+    "point_shadow_atlas_l2",
+    "point_shadow_atlas_l3",
+];
 
 /// **写**的那张 atlas 的名字（页 pass 的深度附件）—— 两者是同一份内容的两个视图。
 ///
@@ -680,7 +685,7 @@ pub struct Session {
     /// 采样那张影子 atlas 的**纹理本身**（`shadow_view` 是它的视图）。
     /// 只服务 `PX_AUDIT_SHADOW` 那一档的整层读回 —— 见 [`read_depth_stats`]。
     #[allow(dead_code)]
-    shadow_probe: Option<wgpu::Texture>,
+    shadow_probe: Vec<Option<wgpu::Texture>>,
     /// 开这一份用的那两个入参。**只为一件事**：换尺寸/换格数时**重开**一份
     /// （见 [`Session::draw`] 里那条判断）。
     scene_path: std::path::PathBuf,
@@ -1199,83 +1204,100 @@ impl Session {
                 })
         };
         let shadow_sampler = group0::point_shadow_sampler(&gpu.device);
-        let (shadow_texture, shadow_view, shadow_note) = match plan
-            .resource(SHADOW_TEXTURE_RESOURCE)
-        {
-            Some(resource) => {
-                let (cube_width, cube_height) = resource.size.resolve(target.0, target.1);
-                let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
-                    label: Some(resource.name.as_str()),
-                    size: wgpu::Extent3d {
-                        width: cube_width,
-                        height: cube_height,
-                        depth_or_array_layers: resource.layers,
-                    },
-                    mip_level_count: 1,
-                    sample_count: 1,
-                    dimension: wgpu::TextureDimension::D2,
-                    format: wgpu::TextureFormat::Depth32Float,
-                    // ⚠ 多一格 `COPY_SRC`：影子 atlas 是**这台仪器唯一能看见"里面到底
-                    //    写了什么"的地方**（`PX_AUDIT_SHADOW` 那一档整层读回）。
-                    //    不加它，探针那句 `copy_texture_to_buffer` 会被 wgpu 拒，
-                    //    而"拒"离"影为什么不对"还很远。
-                    usage: px_pass::texture_usage(resource) | wgpu::TextureUsages::COPY_SRC,
-                    view_formats: &[],
-                });
-                // ⚠ 和深度预通道那两张一样：**一张纹理**，`seed` 进池子 —— 六条影子 pass 的
-                //    附件（按 `PassPlan::layer` 建的单层视图）与 group 0 第 2 格（整份的
-                //    `D2Array` 视图）必须是**同一张纹理**的两个视图。各建一张就是静默错像素。
-                executor.seed(resource, cube_width, cube_height, texture.clone())?;
-                // 整份 atlas 的视图：**`D2Array` + `DepthOnly`**（§本轮从 `CubeArray` 换过来）。
-                //
-                // ⚠ 这一格从前是 `CubeArray`（每盏灯一个 cube），现在每面一层 ⇒ 采样侧是
-                //    `texture_depth_2d_array` + 手动 `textureLoad`（页要按 texel 取，
-                //    比较采样器那一路取不到"某一页里的某一格"）。
-                //    **两处写法必须同时改**：只改渲染器这一处，`create_bind_group` 会当场拒
-                //    （`binding 2 expects dimension = D2Array, but given a view with
-                //    dimension = CubeArray`）—— 那个错还算近；而只改 shader 那一处就是
-                //    "绑上了、采出来全 0"，一路静默到成图上只剩"有点暗"。
-                let view = texture.create_view(&wgpu::TextureViewDescriptor {
-                    label: Some("点光虚拟影图 atlas（D2Array/DepthOnly）"),
-                    format: None,
-                    dimension: Some(wgpu::TextureViewDimension::D2Array),
-                    usage: None,
-                    aspect: wgpu::TextureAspect::DepthOnly,
-                    base_mip_level: 0,
-                    mip_level_count: None,
-                    base_array_layer: 0,
-                    array_layer_count: Some(resource.layers),
-                });
-                let note = format!(
-                    "文档烘的那份（{cube_width}×{cube_height} × {} 层，每面一层，层号 = 灯×6 + 面）",
-                    resource.layers,
-                );
-                audit.push(format!(
-                    "  ⚠ 池子里的 '{SHADOW_TEXTURE_RESOURCE}' 现在就是**宿主建的**这一张\
+        let (shadow_textures, shadow_views, shadow_note) = {
+            let mut textures: Vec<Option<wgpu::Texture>> = Vec::with_capacity(4);
+            let mut views: Vec<wgpu::TextureView> = Vec::with_capacity(4);
+            let mut notes: Vec<String> = Vec::with_capacity(4);
+            for name in SHADOW_TEXTURE_RESOURCES {
+                let (texture, view, note) = match plan.resource(name) {
+                    Some(resource) => {
+                        let (cube_width, cube_height) = resource.size.resolve(target.0, target.1);
+                        let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
+                            label: Some(resource.name.as_str()),
+                            size: wgpu::Extent3d {
+                                width: cube_width,
+                                height: cube_height,
+                                depth_or_array_layers: resource.layers,
+                            },
+                            mip_level_count: 1,
+                            sample_count: 1,
+                            dimension: wgpu::TextureDimension::D2,
+                            format: wgpu::TextureFormat::Depth32Float,
+                            // ⚠ 多一格 `COPY_SRC`：影子 atlas 是**这台仪器唯一能看见"里面到底
+                            //    写了什么"的地方**（`PX_AUDIT_SHADOW` 那一档整层读回）。
+                            //    不加它，探针那句 `copy_texture_to_buffer` 会被 wgpu 拒，
+                            //    而"拒"离"影为什么不对"还很远。
+                            usage: px_pass::texture_usage(resource) | wgpu::TextureUsages::COPY_SRC,
+                            view_formats: &[],
+                        });
+                        // ⚠ 和深度预通道那两张一样：**一张纹理**，`seed` 进池子 —— 六条影子 pass 的
+                        //    附件（按 `PassPlan::layer` 建的单层视图）与 group 0 第 2 格（整份的
+                        //    `D2Array` 视图）必须是**同一张纹理**的两个视图。各建一张就是静默错像素。
+                        executor.seed(resource, cube_width, cube_height, texture.clone())?;
+                        // 整份 atlas 的视图：**`D2Array` + `DepthOnly`**（§本轮从 `CubeArray` 换过来）。
+                        //
+                        // ⚠ 这一格从前是 `CubeArray`（每盏灯一个 cube），现在每面一层 ⇒ 采样侧是
+                        //    `texture_depth_2d_array` + 手动 `textureLoad`（页要按 texel 取，
+                        //    比较采样器那一路取不到"某一页里的某一格"）。
+                        //    **两处写法必须同时改**：只改渲染器这一处，`create_bind_group` 会当场拒
+                        //    （`binding 2 expects dimension = D2Array, but given a view with
+                        //    dimension = CubeArray`）—— 那个错还算近；而只改 shader 那一处就是
+                        //    "绑上了、采出来全 0"，一路静默到成图上只剩"有点暗"。
+                        let view = texture.create_view(&wgpu::TextureViewDescriptor {
+                            label: Some("点光虚拟影图 atlas（D2Array/DepthOnly）"),
+                            format: None,
+                            dimension: Some(wgpu::TextureViewDimension::D2Array),
+                            usage: None,
+                            aspect: wgpu::TextureAspect::DepthOnly,
+                            base_mip_level: 0,
+                            mip_level_count: None,
+                            base_array_layer: 0,
+                            array_layer_count: Some(resource.layers),
+                        });
+                        let note = format!(
+                            "文档烘的那份（{cube_width}×{cube_height} × {} 层，每面一层，层号 = 灯×6 + 面）",
+                            resource.layers,
+                        );
+                        audit.push(format!(
+                            "  ⚠ 池子里的 '{name}' 现在就是**宿主建的**这一张\
                  （{cube_width}×{cube_height} × {} 层）：每一页各挂它的**单层**视图 + 一格 \
                  viewport，group 0 第 2 格挂整份的 **D2Array** 视图",
-                    resource.layers
-                ));
-                (Some(texture), view, note)
-            }
-            None => {
-                let (texture, view) = group0::fallback_cube(&gpu.device);
-                audit.push(format!(
-                    "⚠ 文档里没有 '{SHADOW_TEXTURE_RESOURCE}'：这一帧**没有投影的点光**\
+                            resource.layers
+                        ));
+                        (Some(texture), view, note)
+                    }
+                    None => {
+                        let (texture, view) = group0::fallback_cube(&gpu.device);
+                        audit.push(format!(
+                            "⚠ 文档里没有 '{name}'：这一帧**没有投影的点光**\
                  （帧图把那份资源与那六条 pass 一起跳过了）⇒ group 0 第 2 格绑**兜底**的\
                  1×1×6 全 0 cube。它永远不会被采到（内容 shader 只在 `shadow_maps` 那一位\
                  立起来时才进 `fetch_point_shadow`，而那个位来自 `flags`）"
-                ));
-                (
-                    Some(texture),
-                    view,
-                    "**兜底**的 1×1×6 全 0 cube（这一帧没有投影的点光）".to_string(),
-                )
+                        ));
+                        (
+                            Some(texture),
+                            view,
+                            "**兜底**的 1×1×6 全 0 cube（这一帧没有投影的点光）".to_string(),
+                        )
+                    }
+                };
+                textures.push(texture);
+                views.push(view);
+                notes.push(note);
             }
+            (textures, views, notes.join("｜"))
         };
+        // 每级一张 atlas ⇒ 组 0 那四格各挂各的视图（`shadow_views[级]`）。
+        let shadow_view_refs: [&wgpu::TextureView; 4] = [
+            &shadow_views[0],
+            &shadow_views[1],
+            &shadow_views[2],
+            &shadow_views[3],
+        ];
         // ⚠ 纹理要活到这一帧画完（`wgpu::BindGroup` 持的是视图、视图持的是纹理 ——
         //    引用计数保证它不会先死；这里留一个绑定只是让"谁活着"这件事看得见）。
         // ⚠ 保留态持有它（`shadow_probe`）—— 见那个字段那段。
+        let shadow_texture = shadow_textures.first().cloned().flatten();
         let _shadow_texture = shadow_texture.clone();
 
         // ---- group 0 的契约：从**某一份物体 shader** 反射（五格超集的那份布局）----
@@ -1396,7 +1418,7 @@ impl Session {
         //    六面基、采样器）两种用法完全一样，继续捕获。
         let build_zero = |camera: &crate::camera::Camera,
                           view: &wgpu::TextureView,
-                          atlas_view: &wgpu::TextureView,
+                          atlas_views: &[&wgpu::TextureView],
                           viewport: [f32; 4],
                           mesh_instances: &wgpu::Buffer,
                           shadow_page_offsets: &wgpu::Buffer,
@@ -1410,7 +1432,7 @@ impl Session {
                 &cluster,
                 viewport,
                 view,
-                atlas_view,
+                atlas_views,
                 &shadow_sampler,
                 &shadow_page_table,
                 // ⚠ 每实例数据（§本轮从组 1 搬到组 0）：`vertex_mesh.wgsl` 按
@@ -2106,7 +2128,7 @@ impl Session {
             let zero = build_zero(
                 &placement.camera,
                 &sampled_view,
-                &shadow_view,
+                &shadow_view_refs,
                 viewport,
                 &instance_buffer,
                 &shadow_page_offsets,
@@ -2140,10 +2162,12 @@ impl Session {
                 dimension: Some(wgpu::TextureViewDimension::D2Array),
                 ..Default::default()
             });
+            // 哑图那四格**全挂同一张** 1×1 深度图 —— 影子页 pass 才不会再绑到自己写的那张。
+            let dummy_view_refs = [&dummy_view, &dummy_view, &dummy_view, &dummy_view];
             let zero_dummy = build_zero(
                 &placement.camera,
                 &sampled_view,
-                &dummy_view,
+                &dummy_view_refs,
                 viewport,
                 &instance_buffer,
                 &shadow_page_offsets,
@@ -2196,13 +2220,15 @@ impl Session {
             material_layout,
             materials,
             instance_buffer,
-            shadow_view,
+            // ⚠ 每级一张 atlas ⇒ 审计那条读回走**级 0 那张**（`PX_AUDIT_SHADOW` 读的是它
+            //    的「层 = 灯×6 + 面」，不是「级」—— 级是另一维，各有各的纹理）。
+            shadow_view: shadow_views[0].clone(),
             shadow_sampler,
             // ⚠ 采样那张的**纹理**本身（`shadow_view` 只是它的视图）：留着只为 `PX_AUDIT_SHADOW`
             //    那一档的整层读回。为什么读"采样那张"而不是"写的那张"：着色器采的就是它
             //    （`copy_shadow_atlas` 之后两者内容相同），而"影到底按什么深度判"这个问题
             //    的答案就在它里面。
-            shadow_probe: shadow_texture,
+            shadow_probe: shadow_textures,
             scene_path: scene_path.to_path_buf(),
             pcg_root: pcg_root.to_path_buf(),
             audit_head,
@@ -2568,9 +2594,12 @@ impl Session {
         // ⚠ **必须在这一帧提交之后**（见 `read_depth_stats` 那段：放在准备阶段读到的是
         //    一张还没画过的纹理，"全 0"与"一笔没画"分不开）。
         if std::env::var_os("PX_AUDIT_SHADOW").is_some() {
-            if let Some(texture) = &self.shadow_probe {
+            for (level, texture) in self.shadow_probe.iter().enumerate() {
+                let Some(texture) = texture else {
+                    continue;
+                };
                 println!(
-                    "影子 atlas 探针：{}×{} × {} 层（**这一帧画完之后**的读数）",
+                    "影子 atlas 探针：级 {level}｜{}×{} × {} 层（**这一帧画完之后**的读数）",
                     texture.width(),
                     texture.height(),
                     texture.depth_or_array_layers()
@@ -2578,10 +2607,10 @@ impl Session {
                 for layer in 0..texture.depth_or_array_layers().min(6) {
                     match read_depth_stats(&gpu.device, &gpu.queue, texture, layer) {
                         Some((max, nonzero, total, corner)) => println!(
-                            "影子 atlas 探针：层 {layer}｜最大深度 {max:.8}｜非零 {nonzero} / {total}\
+                            "影子 atlas 探针：级 {level} 层 {layer}｜最大深度 {max:.8}｜非零 {nonzero} / {total}\
                              （左上 256² 里 {corner}）"
                         ),
-                        None => println!("影子 atlas 探针：层 {layer}｜读不回来"),
+                        None => println!("影子 atlas 探针：级 {level} 层 {layer}｜读不回来"),
                     }
                 }
             }

@@ -494,6 +494,15 @@ pub fn globals_zero() -> GlobalsUniform {
 /// （`light.rs:1416-1444`）。现在"哪一面"由采样侧按页算出来，而层号仍然是
 /// `light × 6 + face` —— 那一半没变，改的只是"层里怎么看"。
 pub const POINT_SHADOW_TEXTURES_BINDING: (u32, u32) = (0, 2);
+/// 级 1..3 **各自那张** atlas 的落点（用户裁决的 (ii)：每级一张 ⇒ 降采样才能
+///「读 `atlas[k-1]` 写 `atlas[k]`」，因为 wgpu 不许同一张纹理在一条 pass 里
+/// 既当（写的）深度附件、又当被绑的资源）。级 0 在 [`POINT_SHADOW_TEXTURES_BINDING`]。
+///
+/// ⚠⚠ 这三个号必须与 `px_shader/src/host_stubs.rs` 里那三条
+///    `@group(0) @binding(22|23|24) var point_shadow_textures_l{1,2,3}` **逐字对上**。
+///    对不上的症状是建组时的 `Expected entry with binding N not found in …`。
+///    （挑 22..24 是因为 0..21 里只有 7/9/10/12..19 空着，而 22 起离得远、好认。）
+pub const POINT_SHADOW_TEXTURES_L_BINDINGS: [(u32, u32); 3] = [(0, 22), (0, 23), (0, 24)];
 
 /// `point_shadow_textures_comparison_sampler`（group 0 binding 3）。
 ///
@@ -615,6 +624,38 @@ pub fn bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
                 ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
                 count: None,
             },
+            // 级 1..3 各自那张 atlas（目标 ③）：形状与级 0 那张**逐字相同**，
+            // 差别只是内容（那是哪一级的摘要）与页格边长（按 `textureDimensions` 现算）。
+            wgpu::BindGroupLayoutEntry {
+                binding: POINT_SHADOW_TEXTURES_L_BINDINGS[0].1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Depth,
+                    view_dimension: wgpu::TextureViewDimension::D2Array,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: POINT_SHADOW_TEXTURES_L_BINDINGS[1].1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Depth,
+                    view_dimension: wgpu::TextureViewDimension::D2Array,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: POINT_SHADOW_TEXTURES_L_BINDINGS[2].1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Depth,
+                    view_dimension: wgpu::TextureViewDimension::D2Array,
+                    multisampled: false,
+                },
+                count: None,
+            },
             // 页表（§本轮）：**storage**，因为它的长度按这一帧的页数走
             // （uniform 那块 64 KiB 的上限会把"物体多、精度高"的场景卡死）。
             buffer(
@@ -728,7 +769,9 @@ pub fn frame(
     cluster: &[ClusteredLight],
     viewport: [f32; 4],
     depth: &wgpu::TextureView,
-    shadow_cube: &wgpu::TextureView,
+    // ⚠ **每级一张 atlas**（目标 ③）⇒ `shadow_cubes[级]`（长度 = `MAX_LEVELS` = 4）。
+    //    没有虚拟影图那一档是四张**同一张**兜底图的引用。
+    shadow_cubes: &[&wgpu::TextureView],
     shadow_sampler: &wgpu::Sampler,
     shadow_page_table: &wgpu::Buffer,
     mesh_instances: &wgpu::Buffer,
@@ -817,11 +860,23 @@ pub fn frame(
             },
             wgpu::BindGroupEntry {
                 binding: POINT_SHADOW_TEXTURES_BINDING.1,
-                resource: wgpu::BindingResource::TextureView(shadow_cube),
+                resource: wgpu::BindingResource::TextureView(shadow_cubes[0]),
             },
             wgpu::BindGroupEntry {
                 binding: POINT_SHADOW_SAMPLER_BINDING.1,
                 resource: wgpu::BindingResource::Sampler(shadow_sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: POINT_SHADOW_TEXTURES_L_BINDINGS[0].1,
+                resource: wgpu::BindingResource::TextureView(shadow_cubes[1]),
+            },
+            wgpu::BindGroupEntry {
+                binding: POINT_SHADOW_TEXTURES_L_BINDINGS[1].1,
+                resource: wgpu::BindingResource::TextureView(shadow_cubes[2]),
+            },
+            wgpu::BindGroupEntry {
+                binding: POINT_SHADOW_TEXTURES_L_BINDINGS[2].1,
+                resource: wgpu::BindingResource::TextureView(shadow_cubes[3]),
             },
             wgpu::BindGroupEntry {
                 binding: SHADOW_PAGE_TABLE_BINDING.1,

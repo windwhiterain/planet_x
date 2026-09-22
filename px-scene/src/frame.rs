@@ -555,14 +555,28 @@ pub fn build(
                     resource.name
                 )
             })?;
-            size = format!("{}x{}", allocation.atlas.0, allocation.atlas.1);
+            // ⚠⚠ **每级一张 atlas**（目标 ③）⇒ 按**名字**认出这是哪一级的，各取各的边长。
+            //    认不出就当场拒：名字错了只是「影是错的」，没有任何别的门会响。
+            let level = crate::vshadow::SHADOW_ATLAS_RESOURCES
+                .iter()
+                .position(|name| *name == resource.name)
+                .ok_or_else(|| {
+                    format!(
+                        "帧图资源 '{}' 的 layers 是 'shadow_faces'，但它不在那几条影子 atlas 的\
+                         名字里（{}）—— 名字不对就认不出这是哪一级的 atlas",
+                        resource.name,
+                        crate::vshadow::SHADOW_ATLAS_RESOURCES.join(" / ")
+                    )
+                })?;
+            let side = allocation.atlas_sides[level];
+            size = format!("{}x{}", side, side);
             let declared = parse_fixed_size(&resource.size)?;
-            if allocation.atlas.0 > declared.0 || allocation.atlas.1 > declared.1 {
+            if side > declared.0 || side > declared.1 {
                 return Err(format!(
-                    "虚拟影图的 atlas 要 {}×{}，而帧图资源 '{}' 声明的是 {}：\
+                    "虚拟影图的级 {} atlas 要 {}×{}，而帧图资源 '{}' 声明的是 {}：\
                      把那一栏调大，或者把这一帧的 shadow_density 调小。\
                      这一版**不降精度** —— 降了之后画面照样出得来，只是影比要求糊",
-                    allocation.atlas.0, allocation.atlas.1, resource.name, resource.size
+                    level, side, side, resource.name, resource.size
                 ));
             }
         }
@@ -768,7 +782,13 @@ pub fn build(
                             vertex_shader: vertex_shader.clone(),
                             vertex_entry: vertex_entry.clone(),
                             render: entry.render.clone(),
-                            depth_target: entry.depth_target.clone(),
+                            // ⚠⚠ **每级一张 atlas**（目标 ③）⇒ 深度附件按 `patch.level`
+                            //    挑那一级的资源名（从前所有级都写同一张 atlas）。
+                            //    `entry.depth_target` 只当"这一族要不要附件"用：名字由级定。
+                            depth_target: entry
+                                .depth_target
+                                .as_ref()
+                                .map(|_| crate::vshadow::shadow_atlas_resource(patch.level)),
                             cube_face: Some(PassCubeFace { light, face, layer }),
                             viewport: None,
                         };

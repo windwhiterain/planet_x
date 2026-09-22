@@ -85,7 +85,17 @@ pub fn connect_with(instance: wgpu::Instance, surface: Option<&wgpu::Surface<'_>
         match pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("px_render"),
             required_features: available & wanted(),
-            required_limits: wgpu::Limits::default(),
+            // ⚠⚠ **每级一张影子 atlas**（用户裁决的 (ii)）⇒ 片元阶段的采样纹理从 14 格
+            //    涨到 17 格，而 WebGPU 缺省上限是 16。不提就会在
+            //    `Device::create_pipeline_layout` 当场拒：「Too many bindings of type
+            //    SampledTextures in Stage FRAGMENT, limit is 16, count was 17」。
+            //    显卡那一侧（Vulkan 的 `maxPerStageDescriptorSampledImages`）通常高好几个
+            //    数量级，所以这里只要 32；真有设备给不出来时 `request_device` 会**当场拒**，
+            //    而不是悄悄建出一份少绑几格的管线。
+            required_limits: wgpu::Limits {
+                max_sampled_textures_per_shader_stage: 32,
+                ..wgpu::Limits::default()
+            },
             experimental_features: wgpu::ExperimentalFeatures::disabled(),
             memory_hints: wgpu::MemoryHints::MemoryUsage,
             trace: wgpu::Trace::Off,
