@@ -823,6 +823,29 @@ fn column_density(path: &str, samples: usize) -> Result<Vec<f64>, String> {
             mean,
             max
         );
+        // ⚠⚠ 用户 2026-09-25："背景变红了，说明空旷地带没有变为 0 —— 检查一下稀疏度。"
+        //   这一行就是那个判据：**恰好等于 0 的体素占比**，以及非零那部分的分布。
+        let total_cells = volume.data.len();
+        let zero = volume.data.iter().filter(|v| **v == 0.0).count();
+        let tiny = volume.data.iter().filter(|v| **v > 0.0 && **v <= 0.01).count();
+        let mut live: Vec<f32> = volume.data.iter().copied().filter(|v| *v > 0.0).collect();
+        live.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let pick = |q: f64| -> f32 {
+            if live.is_empty() {
+                0.0
+            } else {
+                live[((live.len() - 1) as f64 * q) as usize]
+            }
+        };
+        println!(
+            "  稀疏度：恰好 0 的体素 **{:.1}%**｜(0, 0.01] 的 {:.1}%｜非零共 {} 个 ⇒ 非零分位 p10 {:.4} / p50 {:.4} / p90 {:.4}",
+            100.0 * zero as f64 / total_cells as f64,
+            100.0 * tiny as f64 / total_cells as f64,
+            live.len(),
+            pick(0.10),
+            pick(0.50),
+            pick(0.90)
+        );
     }
     let mut out = vec![0.0_f64; bins * 2 * bins];
     let golden = 2.399_963_2_f64;
