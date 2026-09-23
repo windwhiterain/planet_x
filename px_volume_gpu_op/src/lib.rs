@@ -878,3 +878,110 @@ mod star_tests {
         println!("px_volume_gpu_op：星点+底色对账最大偏差 {worst:.6}");
     }
 }
+
+/// 跑一遍档位色相：入参是**键**（每格一个亮度），出参是每个键的目标色相（3 个 f32 一组）。
+pub fn hue_of(
+    keys: &[f32],
+    ramp_luma: [f32; 4],
+    ramp_hue_table: [[f32; 4]; 4],
+) -> Result<Vec<[f32; 3]>, String> {
+    let Some(gpu) = connect() else {
+        return Err("没有可用 GPU".to_string());
+    };
+    let sky = SkyUniform {
+        counts: [0; 4],
+        scalars: [0.0; 4],
+        background: [0.0; 4],
+        tone_in: [0.0; 4],
+        tone_out: [0.0; 4],
+        ramp_luma,
+        ramp_hue: ramp_hue_table,
+        limits: [0.0; 4],
+    };
+    let mut packed: Vec<f32> = Vec::with_capacity(keys.len() * 3);
+    for key in keys {
+        packed.extend_from_slice(&[*key, 0.0, 0.0]);
+    }
+    let bytes: Vec<u8> = packed.iter().flat_map(|v| v.to_le_bytes()).collect();
+    let out = px_gpu::dispatch_slots(
+        gpu,
+        SAMPLER_WGSL,
+        "hue_of_keys",
+        &[
+            px_gpu::Slot {
+                binding: 4,
+                value: Binding::Uniform(&sky.to_bytes()),
+            },
+            px_gpu::Slot {
+                binding: 5,
+                value: Binding::Write(&bytes),
+            },
+        ],
+        workgroups(keys.len()),
+    )?;
+    Ok(out[0]
+        .chunks_exact(12)
+        .map(|chunk| {
+            [
+                f32::from_le_bytes(chunk[0..4].try_into().unwrap()),
+                f32::from_le_bytes(chunk[4..8].try_into().unwrap()),
+                f32::from_le_bytes(chunk[8..12].try_into().unwrap()),
+            ]
+        })
+        .collect())
+}
+
+#[cfg(test)]
+mod hue_tests {
+    use super::*;
+
+    /// **档位色相**：GPU 与 CPU 在同一张档位表上必须一致。
+    /// 取点铺满四档与三段过渡的**收窄带**，含 0.0279/0.028/0.034/0.058/0.35 这些边界值。
+    #[test]
+    fn the_gpu_hue_ramp_matches_the_cpu() {
+        let ramp_luma = px_volume_alg::raymarch::RAMP_LUMA;
+        let table = px_volume_alg::raymarch::RAMP_HUE;
+        let ramp_hue_table = [
+            [table[0][0], table[0][1], table[0][2], 0.0],
+            [table[1][0], table[1][1], table[1][2], 0.0],
+            [table[2][0], table[2][1], table[2][2], 0.0],
+            [table[3][0], table[3][1], table[3][2], 0.0],
+        ];
+        let mut keys: Vec<f32> = Vec::new();
+        let mut key = 1e-4_f32;
+        while key < 1.0 {
+            keys.push(key);
+            key *= 1.07;
+        }
+        for extra in [0.0_f32, 0.0279, 0.028, 0.034, 0.058, 0.35, 2.0] {
+            keys.push(extra);
+        }
+        let Ok(gpu_side) = hue_of(&keys, ramp_luma, ramp_hue_table) else {
+            println!("px_volume_gpu_op：没有可用 GPU，跳过");
+            return;
+        };
+        let mut worst = 0.0_f32;
+        let mut worst_at = 0usize;
+        for (index, key) in keys.iter().enumerate() {
+            let want = px_volume_alg::ramp_hue_at(*key);
+            for channel in 0..3 {
+                let diff = (gpu_side[index][channel] - want[channel]).abs();
+                if diff > worst {
+                    worst = diff;
+                    worst_at = index;
+                }
+            }
+        }
+        assert!(
+            worst < 3e-3,
+            "档位色相最大偏差 {worst:.6} 在键 {}（GPU {:?} 对 CPU {:?}）",
+            keys[worst_at],
+            gpu_side[worst_at],
+            px_volume_alg::ramp_hue_at(keys[worst_at])
+        );
+        println!(
+            "px_volume_gpu_op：档位色相最大偏差 {worst:.6}（{} 个键）",
+            keys.len()
+        );
+    }
+}

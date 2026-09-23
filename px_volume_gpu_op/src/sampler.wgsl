@@ -311,3 +311,46 @@ fn tone_of(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     image[id.x] = tone(image[id.x], sky.tone_in, sky.tone_out);
 }
+
+// 档位色相：按档位键的亮度取段；段间过渡**收窄到段间的 20%**（线性混色会让大量像素停在
+// 混色带上 —— 暖沙到蓝河的中点就是"薰衣草"）。与 CPU 的 ramp_hue 逐条对齐。
+// 档位表走 uniform（ramp_luma / ramp_hue_0..3），WGSL 里不复制。
+// 注意：WGSL 的保留字比 Rust 多 —— 第一版这里用 base_hue 之前叫过 from，直接编不过。
+fn hue_of(stop: u32) -> vec3<f32> {
+    if (stop == 0u) { return sky.ramp_hue_0.xyz; }
+    if (stop == 1u) { return sky.ramp_hue_1.xyz; }
+    if (stop == 2u) { return sky.ramp_hue_2.xyz; }
+    return sky.ramp_hue_3.xyz;
+}
+
+fn ramp_hue(key: f32) -> vec3<f32> {
+    if (key >= sky.ramp_luma.w) {
+        return sky.ramp_hue_3.xyz;
+    }
+    for (var stop = 0u; stop < 3u; stop = stop + 1u) {
+        let lo = pick(sky.ramp_luma, stop);
+        let hi = pick(sky.ramp_luma, stop + 1u);
+        if (key < hi) {
+            let raw = clamp(log(key / lo) / log(hi / lo), 0.0, 1.0);
+            let shaped = clamp((raw - 0.4) / 0.2, 0.0, 1.0);
+            let w = shaped * shaped * (3.0 - 2.0 * shaped);
+            let base_hue = hue_of(stop);
+            let next_hue = hue_of(stop + 1u);
+            return base_hue + (next_hue - base_hue) * w;
+        }
+    }
+    return sky.ramp_hue_3.xyz;
+}
+
+// 每格一次：键就是这一格自己的亮度（没有邻域平均 —— 烘焙离线，判据直接来自采样本身）。
+@compute @workgroup_size(64)
+fn hue_of_keys(@builtin(global_invocation_id) id: vec3<u32>) {
+    let count = arrayLength(&image) / 3u;
+    if (id.x >= count) {
+        return;
+    }
+    let hue = ramp_hue(image[id.x * 3u]);
+    image[id.x * 3u] = hue.x;
+    image[id.x * 3u + 1u] = hue.y;
+    image[id.x * 3u + 2u] = hue.z;
+}
