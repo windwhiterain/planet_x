@@ -487,3 +487,108 @@ fn bin_luma(@builtin(global_invocation_id) id: vec3<u32>) {
     let bin = u32(clamp(floor(position), 0.0, f32(BIN_COUNT) - 1.0));
     atomicAdd(&histogram[bin], 1u);
 }
+
+// ======================= 发射烘焙（逐体素，compute）=======================
+//
+// ⚠ 为什么搬这里：它是体积链上**最贵**的一处（每体素一次 `shadow_steps` 步的阴影行进），
+//   而且逐体素完全独立 —— 没有比它更像 compute 的东西。CPU 那版在 shape 192 上
+//   把 20 个核跑满还要几分钟（加了中心星团后每体素 64 步 ≈ 8 亿次采样）。
+
+struct EmissionUniform {
+    params: vec4<f32>,      // (light_radius_ratio, shadow_gain, emission_power, emission_gain)
+    light: vec4<f32>,       // (方向 xyz, 未用)
+    glow: vec4<f32>,        // (glow_gain, glow_power, glow_threshold, 未用)
+    glow_tint: vec4<f32>,
+    extinction: vec4<f32>,  // (r, g, b, extinction_power)
+    dust: vec4<f32>,        // (dust_bias, dust_threshold, 未用, 未用)
+    cluster: vec4<f32>,     // (count, gain, steps, spread)
+    cluster_tint: vec4<f32>,
+    counts: vec4<u32>,      // (res, layers, shadow_steps, 未用)
+};
+
+@group(0) @binding(8) var<uniform> emission: EmissionUniform;
+@group(0) @binding(9) var<storage, read_write> emitted: array<f32>;
+
+fn emission_world(point: vec3<f32>) -> f32 {
+    return max(sample_volume(point, 0u), 0.0);
+}
+
+@compute @workgroup_size(64)
+fn bake_emission(@builtin(global_invocation_id) id: vec3<u32>) {
+    let index = flat_index_of(id);
+    let voxels = arrayLength(&emitted) / 6u;
+    if (index >= voxels) {
+        return;
+    }
+    let res = emission.counts.x;
+    let layers = emission.counts.y;
+    let s = index % res;
+    let t = (index / res) % res;
+    let layer = (index / (res * res)) % layers;
+    let face = index / (res * res * layers);
+    let inner = volume.extent.x;
+    let outer = volume.extent.y;
+    let span = outer - inner;
+    let altitude = f32(layer) / f32(max(layers, 2u) - 1u);
+    let radius = inner + span * altitude;
+    let direction = cube_direction(face, (f32(s) + 0.5) / f32(res), (f32(t) + 0.5) / f32(res));
+    let position = direction * radius;
+    let d = emission_world(position);
+
+    // ---- 单方向光的遮挡 ----
+    let light_direction = normalize(emission.light.xyz);
+    let light_radius = inner + span * clamp(emission.params.x, 0.0, 1.0);
+    let steps = emission.counts.z;
+    let total = max(outer - light_radius, 1e-4);
+    let step = total / f32(steps);
+    var optical_depth = 0.0;
+    for (var i = 1u; i <= steps; i = i + 1u) {
+        let probe = position + light_direction * (f32(i) * step);
+        optical_depth = optical_depth + emission_world(probe) * step;
+    }
+    let lit = exp(-optical_depth * emission.params.y);
+
+    // ---- 中心星团：逐星阴影行进 + 1/r² + 色温（Fibonacci 球，确定性）----
+    var cluster_lit = 0.0;
+    let star_count = emission.cluster.x;
+    if (star_count > 0.0) {
+        let stars = u32(min(star_count, 8.0));
+        let golden = 2.3999632;
+        for (var star = 0u; star < stars; star = star + 1u) {
+            let z = 1.0 - 2.0 * (f32(star) + 0.5) / f32(stars);
+            let ring = sqrt(max(1.0 - z * z, 0.0));
+            let phi = golden * f32(star);
+            let spread = emission.cluster.w * radius;
+            let star_position = vec3<f32>(ring * cos(phi) * spread, ring * sin(phi) * spread, z * spread);
+            let to_star = star_position - position;
+            let distance = max(length(to_star), 1e-4);
+            let away = to_star / distance;
+            let count = max(u32(emission.cluster.z), 1u);
+            let through = distance / f32(count);
+            var tau = 0.0;
+            for (var k = 1u; k <= count; k = k + 1u) {
+                tau = tau + emission_world(position + away * (f32(k) * through)) * through;
+            }
+            let falloff = (inner * inner) / (distance * distance);
+            cluster_lit = cluster_lit + exp(-tau * emission.params.y) * falloff;
+        }
+        cluster_lit = cluster_lit / f32(stars);
+    }
+
+    let main = pow(d, emission.params.z) * emission.params.w * lit;
+    let above = max(d - emission.glow.z, 0.0);
+    let glow = pow(above, emission.glow.y) * emission.glow.x * lit;
+    let cluster = pow(d, emission.params.z) * emission.cluster.y * cluster_lit;
+    let base = pow(d, emission.extinction.w);
+    let dust = max(d - emission.dust.y, 0.0) * emission.dust.x;
+
+    let at = index * 6u;
+    let tint = emission.glow_tint.xyz;
+    let star_tint = emission.cluster_tint.xyz;
+    emitted[at + 0u] = main + glow * tint.x + cluster * star_tint.x;
+    emitted[at + 1u] = main + glow * tint.y + cluster * star_tint.y;
+    emitted[at + 2u] = main + glow * tint.z + cluster * star_tint.z;
+    emitted[at + 3u] = base * emission.extinction.x + dust;
+    emitted[at + 4u] = base * emission.extinction.y + dust;
+    emitted[at + 5u] = base * emission.extinction.z + dust;
+}

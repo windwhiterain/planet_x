@@ -72,3 +72,10 @@ extinction_power = 1.0
 # 尘埃那一笔：密度超过阈值之后额外加的消光（参考图里那些黑柱比周围的雾浓得多）。
 dust_bias = 0.6
 dust_threshold = 0.45
+
+# 中心星团：内缘朝心那一圈亮起来、背面暗下去（目标里的"朝光亮缘/背光暗面"）。
+cluster_count = 4
+cluster_gain = 0.8
+cluster_tint = [0.72, 0.86, 1.0]
+cluster_steps = 10
+cluster_spread = 0.35

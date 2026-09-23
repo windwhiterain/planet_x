@@ -103,6 +103,20 @@ pub mod emission {
     #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, px_derive::PxParams)]
     #[serde(default, deny_unknown_fields)]
     pub struct EmissionParams {
+        /// **中心星团**：壳心附近的几颗电离源（逐星 `1/r²` + 色温）。`0` = 关。
+        ///
+        /// ⚠ 与 `light`（单方向光）**并联**，不是替换：方向光给"整体一侧亮"，星团给
+        ///   **内缘朝心那一圈亮起来、背面暗下去** —— 目标里那四样（朝光亮缘、背光暗面、
+        ///   参差剪影、前景挡后景）主要靠它。
+        pub cluster_count: u32,
+        /// 星团的总权重（与 `emission_gain` 同一量纲，便于对照）。
+        pub cluster_gain: f32,
+        /// 星团的**色温色调**（逐通道）：热的星团偏蓝白。
+        pub cluster_tint: [f32; 3],
+        /// 逐星的阴影步数。星团有 N 颗 ⇒ 代价 ≈ `N × 这个`（与 `shadow_steps` 同量纲）。
+        pub cluster_steps: u32,
+        /// 星团在壳内的**散布半径比例**（相对当地半径）：`0` = 全部挤在壳心。
+        pub cluster_spread: f32,
         /// **光源方向**（世界空间，单位向量）：星云内部那颗电离源的方位。
         ///
         /// ⚠ 参考图里"亮脊 + 暗柱"的来源就是它：朝着光源的那一侧被照亮，背光那一侧与
@@ -187,6 +201,11 @@ pub mod emission {
             Self {
                 light: [0.3, 0.5, 0.8],
                 light_radius: 0.25,
+                cluster_count: 0,
+                cluster_gain: 0.0,
+                cluster_tint: [1.0, 1.0, 1.0],
+                cluster_steps: 0,
+                cluster_spread: 0.35,
                 shadow_steps: 24,
                 shadow_gain: 1.6,
                 emission_power: 2.2,

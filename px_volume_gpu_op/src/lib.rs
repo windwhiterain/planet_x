@@ -2073,3 +2073,143 @@ mod chain_tests {
         assert!(sampler < 2.0, "采样器这一步就 {sampler:.2}x");
     }
 }
+
+/// **GPU 版发射烘焙**：与 `px_volume_alg::bake_emission` 同一入参/产物。
+///
+/// ⚠ 为什么值得搬：这是体积链上最贵的一处（每体素一次阴影行进），而且逐体素独立。
+///   CPU 版在 shape 192 上把核跑满还要几分钟（加了中心星团后每体素 64 步）。
+#[allow(clippy::too_many_arguments)]
+pub fn bake_emission(
+    density: &px_volume_schema::VolumeData,
+    params: &px_volume_schema::params::emission::EmissionParams,
+) -> Result<px_volume_schema::VolumeData, String> {
+    let Some(gpu) = connect() else {
+        return Err("没有可用 GPU".to_string());
+    };
+    let (res, layers) = (density.res, density.layers);
+    // ⚠⚠ **密度体积是单通道**（`px_protocol::art::VolumeData::at` 里有
+    //   `debug_assert_eq!(lanes, 1)`），而 WGSL 那套采样器把通道数编成了常量 6
+    //   （它服务的是**六通道**的发射体积）。这里把单通道补成六通道：只读 lane 0
+    //   ⇒ 其余填 0。代价是临时的 6 倍内存（shape 192 下约 300 MB），换来的是
+    //   **不动那份已经逐点验过的采样器** —— 这个取舍在"搬 GPU"这一轮的性价比最高。
+    let samples = (6 * layers * res * res) as usize;
+    let wanted = if density.data.len() == samples {
+        let mut widened = vec![0.0_f32; samples * LANES];
+        for (index, value) in density.data.iter().enumerate() {
+            widened[index * LANES] = *value;
+        }
+        widened
+    } else {
+        density.data.clone()
+    };
+    let volume_uniform = [
+        res.to_le_bytes(),
+        layers.to_le_bytes(),
+        (LANES as u32).to_le_bytes(),
+        0_u32.to_le_bytes(),
+        density.inner.to_le_bytes(),
+        density.outer.to_le_bytes(),
+        0.0_f32.to_le_bytes(),
+        0.0_f32.to_le_bytes(),
+    ]
+    .concat();
+    let uniform = [
+        params.light_radius, params.shadow_gain, params.emission_power, params.emission_gain,
+        params.light[0], params.light[1], params.light[2], 0.0,
+        params.glow_gain, params.glow_power, params.glow_threshold, 0.0,
+        params.glow_tint[0], params.glow_tint[1], params.glow_tint[2], 0.0,
+        params.extinction[0], params.extinction[1], params.extinction[2], params.extinction_power,
+        params.dust_bias, params.dust_threshold, 0.0, 0.0,
+        params.cluster_count as f32, params.cluster_gain, params.cluster_steps as f32, params.cluster_spread,
+        params.cluster_tint[0], params.cluster_tint[1], params.cluster_tint[2], 0.0,
+    ]
+    .iter()
+    .flat_map(|value| value.to_le_bytes())
+    .chain(
+        [res, layers, params.shadow_steps, 0]
+            .iter()
+            .flat_map(|value| value.to_le_bytes()),
+    )
+    .collect::<Vec<u8>>();
+    let voxels = (6 * layers * res * res) as usize;
+    let bytes = |values: &[f32]| -> Vec<u8> {
+        values.iter().flat_map(|v| v.to_le_bytes()).collect()
+    };
+    let out = px_gpu::dispatch_slots(
+        gpu,
+        SAMPLER_WGSL,
+        "bake_emission",
+        &[
+            px_gpu::Slot { binding: 0, value: Binding::Uniform(&volume_uniform) },
+            px_gpu::Slot { binding: 1, value: Binding::Storage(&bytes(&wanted)) },
+            px_gpu::Slot { binding: 8, value: Binding::Uniform(&uniform) },
+            px_gpu::Slot { binding: 9, value: Binding::Write(&vec![0_u8; voxels * 6 * 4]) },
+        ],
+        workgroups(voxels),
+    )?;
+    let data: Vec<f32> = out[0]
+        .chunks_exact(4)
+        .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap()))
+        .collect();
+    Ok(px_volume_schema::VolumeData {
+        res,
+        layers,
+        inner: density.inner,
+        outer: density.outer,
+        data,
+    })
+}
+
+#[cfg(test)]
+mod emission_tests {
+    use super::*;
+    use px_volume_schema::VolumeData;
+
+    /// **发射烘焙：GPU 与 CPU 逐体素一致**（含中心星团那条路）。
+    /// 小体积即可 —— 这里验的是语义，不是性能。
+    #[test]
+    fn the_gpu_emission_matches_the_cpu() {
+        let (res, layers) = (8_u32, 4_u32);
+        let (inner, outer) = (1.0_f32, 2.0_f32);
+        // ⚠ **单通道**：密度体积就是这个形状（CPU 的 `at()` 会断言 lanes == 1）。
+        let mut data = vec![0.0_f32; (6 * layers * res * res) as usize];
+        for (index, value) in data.iter_mut().enumerate() {
+            *value = ((index.wrapping_mul(2654435761)) % 1000) as f32 / 1000.0;
+        }
+        let density = VolumeData { res, layers, inner, outer, data };
+        let params = px_volume_schema::params::emission::EmissionParams {
+            light: [0.4, 0.7, -0.3],
+            light_radius: 0.2,
+            shadow_steps: 8,
+            shadow_gain: 1.6,
+            cluster_count: 3,
+            cluster_gain: 0.8,
+            cluster_tint: [0.72, 0.86, 1.0],
+            cluster_steps: 5,
+            cluster_spread: 0.35,
+            ..Default::default()
+        };
+        let reference = px_volume_alg::bake_emission(&density, &params);
+        let gpu_side = match bake_emission(&density, &params) {
+            Ok(volume) => volume,
+            Err(message) => panic!("GPU 发射烘焙失败：{message}"),
+        };
+        assert_eq!(gpu_side.data.len(), reference.data.len(), "体素数");
+        let mut worst = 0.0_f32;
+        let mut worst_at = 0usize;
+        for (index, value) in gpu_side.data.iter().enumerate() {
+            let diff = (value - reference.data[index]).abs();
+            if diff > worst {
+                worst = diff;
+                worst_at = index;
+            }
+        }
+        assert!(
+            worst < 5e-4,
+            "发射烘焙最大偏差 {worst:.6} 在第 {worst_at} 个分量（GPU {} 对 CPU {}）",
+            gpu_side.data[worst_at],
+            reference.data[worst_at]
+        );
+        println!("px_volume_gpu_op：发射烘焙最大偏差 {worst:.6}（{} 个体素 x 6）", gpu_side.data.len() / 6);
+    }
+}

@@ -110,6 +110,61 @@ pub fn bake_emission(density: &VolumeData, params: &EmissionParams) -> VolumeDat
                 }
                 let lit = (-optical_depth * params.shadow_gain).exp();
 
+                // ---- 中心星团：逐星阴影行进 + 1/r² + 色温 ----
+                //
+                // ⚠ 与方向光**并联**（不是替换）：方向光给"整体一侧亮"，星团给
+                //   "内缘朝心那一圈亮、背面暗" —— 后者才是目标点名的四样（朝光亮缘、
+                //   背光暗面、参差剪影、前景挡后景）的主要来源。
+                // ⚠ 星位走 **Fibonacci 球**（确定性的）：烘图必须可复现，
+                //   随机星位会让同一份配方每次烘出不同的字节。
+                let mut cluster_lit = 0.0_f32;
+                if params.cluster_count > 0 {
+                    let stars = params.cluster_count.min(8);
+                    let golden = 2.399_963_2_f32;
+                    for star in 0..stars {
+                        let z = 1.0 - 2.0 * (star as f32 + 0.5) / stars as f32;
+                        let ring = (1.0 - z * z).max(0.0).sqrt();
+                        let phi = golden * star as f32;
+                        let spread = params.cluster_spread * radius;
+                        let star_position = [
+                            ring * phi.cos() * spread,
+                            ring * phi.sin() * spread,
+                            z * spread,
+                        ];
+                        let to_star = [
+                            star_position[0] - position[0],
+                            star_position[1] - position[1],
+                            star_position[2] - position[2],
+                        ];
+                        let distance = (to_star[0] * to_star[0]
+                            + to_star[1] * to_star[1]
+                            + to_star[2] * to_star[2])
+                            .sqrt()
+                            .max(1e-4);
+                        let away = [
+                            to_star[0] / distance,
+                            to_star[1] / distance,
+                            to_star[2] / distance,
+                        ];
+                        let count = params.cluster_steps.max(1);
+                        let through = distance / count as f32;
+                        let mut tau = 0.0_f32;
+                        for step_index in 1..=count {
+                            let far = step_index as f32 * through;
+                            let probe = [
+                                position[0] + away[0] * far,
+                                position[1] + away[1] * far,
+                                position[2] + away[2] * far,
+                            ];
+                            tau += sample_world(density, probe) * through;
+                        }
+                        // `1/r²` 以壳内半径为单位归一化（否则换 inner 就换亮度）。
+                        let falloff = (density.inner * density.inner) / (distance * distance);
+                        cluster_lit += (-tau * params.shadow_gain).exp() * falloff;
+                    }
+                    cluster_lit /= stars as f32;
+                }
+
                 // ---- 两份发射，逐通道 ----
                 // 主项（高幂 ⇒ 只有浓的地方亮）是**中性**的，它的颜色由消光给
                 // （薄处自然被染成玫红）；底光（低幂 ⇒ 浓处相对更强）带自己的色相。
@@ -123,9 +178,13 @@ pub fn bake_emission(density: &VolumeData, params: &EmissionParams) -> VolumeDat
                 let base = d.powf(params.extinction_power);
                 let dust = ((d - params.dust_threshold).max(0.0)) * params.dust_bias;
 
+                // 星团那一笔：与主发射同形状（只在有气的地方亮），颜色走色温。
+                let cluster = d.powf(params.emission_power) * params.cluster_gain * cluster_lit;
+
                 let at = row * width + s as usize * 6;
                 for channel in 0..3 {
-                    out[at + channel] = main + glow * params.glow_tint[channel];
+                    out[at + channel] =
+                        main + glow * params.glow_tint[channel] + cluster * params.cluster_tint[channel];
                     out[at + 3 + channel] = base * params.extinction[channel] + dust;
                 }
             }
