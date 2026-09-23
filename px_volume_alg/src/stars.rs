@@ -234,7 +234,11 @@ pub fn bake_stars(
                 let ratio = here / mean;
                 let floor = params.gas_floor.clamp(0.0, 0.999);
                 let over = ((ratio - floor) / (1.0 - floor)).clamp(0.0, 1.0);
-                let chance = over.powf(params.gas_contrast);
+                // ⚠ 再按**半径**压向外侧：越靠外，相机与星之间的气柱越长 ⇒ 越容易被遮住 ✓
+                //   （相机在壳内 ⇒ 近侧的星前面没有气，消光遮不住它们 ✗ —— 用户 2026-09-25）
+                let span = (params.outer - params.inner).max(1e-4);
+                let outward = ((r - params.inner) / span).clamp(0.0, 1.0);
+                let chance = over.powf(params.gas_contrast) * outward.powf(params.gas_depth);
                 if unit24(hash(seed ^ 0x77c1_5a3d, index as u32)) >= chance {
                     continue;
                 }

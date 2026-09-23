@@ -71,3 +71,6 @@ gas_contrast = 3.0
 # 分色诊断：星光走蓝（散射走红在 art/nebula/emission.toml 的 glow_tint）。
 star_tint = [0.12, 0.30, 1.0]
 gas_floor = 0.75
+
+# 星压向壳外侧（相机与它之间的气柱最长 ⇒ 才遮得住）。
+gas_depth = 3.0

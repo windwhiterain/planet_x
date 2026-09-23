@@ -31,3 +31,4 @@ primitive = "icosphere"
 graph = "planet"
 members = { shader = "shaders::surface", height = "height" }
 params = { palette = "rocky", radius = 1.0, displace = 0.0, sea_level = 0.5, spin = 0.0, rings = 0.0 }
+
