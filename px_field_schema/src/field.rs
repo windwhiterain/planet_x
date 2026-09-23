@@ -8,7 +8,9 @@ use px_protocol::art::AssetKind;
 use px_protocol::wire::{Blob, DType, WireError};
 
 pub use px_protocol::art::Domain as Projection;
-pub use px_protocol::art::cube_map_extent;
+pub use px_protocol::art::{
+    CUBE_FACES, cube_direction, cube_face_of, cube_map_extent, direction_at as art_direction_at,
+};
 
 pub trait ProjectionKind {
     fn asset_kind(self) -> AssetKind;
@@ -21,6 +23,12 @@ impl ProjectionKind for Projection {
             Self::Octahedral => AssetKind::OctahedralField,
             Self::Cube => AssetKind::CubeField,
             Self::CubeMap => AssetKind::CubeMap,
+            // ⚠ **必须有自己的资产种类**（不能借 `Field2D`）：`load_field` 是
+            //   "资产种类 → 域"的逆映射，两种域共用一个种类就读不回来了（体网格会被读成
+            //   `Equirect`）—— 而域决定"这一格在世界里的哪"，是影不影响像素的开关。
+            //   `AssetKind::Volume` 也不能借：那是**立方球体网格**（`VolumeData`，半径住在
+            //   清单参数里、blob 是四维的），与这一档的"二维 blob + 折叠的第三维"不同形。
+            Self::Volume => AssetKind::VoxelField,
         }
     }
 }

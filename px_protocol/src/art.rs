@@ -14,7 +14,19 @@ pub enum AssetKind {
     Instances,
     /// 立方球参数空间里的 3D 标量网格（等值面算子的输入）。
     /// **渲染器不读它**：烘代理 mesh 是 PCG 那一侧的事，渲染器只认 `Mesh`。
+    ///
+    /// ⚠ 它是**体积**（`VolumeData`：`res` / `layers` / `inner` / `outer` 住在清单参数里），
+    ///   与 [`Self::VoxelField`] 不是一回事 —— 见那一条。
     Volume,
+    /// **体网格当一张场**（`Domain::Volume`）：一张普通的 `[height, width]` f32 网格，
+    /// 第三维折进了 `height`（一面 = `res × (layers × res)` 行，见 `px_field_schema::volume`）。
+    ///
+    /// ⚠ 为什么它必须与 [`Self::Volume`] **分开**：两者的 blob 都是 f32，但**形状与含义不同**
+    ///   （体网格场是二维 blob，`VolumeData` 是四维 `[面, 层, t, s]`，且半径另存）。
+    ///   更要紧的是**域必须能从资产种类唯一还原**：`load_field` 是"资产种类 → 域"的逆映射，
+    ///   把体网格场并进 `Field2D` 就会读回 `Equirect`（静默错域），而域决定"这一格在世界里的哪"
+    ///   —— 那正是影不影响像素的开关。
+    VoxelField,
     /// 场景配方：这次要渲什么、用什么参数、用哪个 shader 槽。
     Scene,
     /// Shader 源码（U8 blob）。它和场、网格一样是内容寻址的资产。
@@ -160,6 +172,74 @@ impl TextureShape {
     }
 }
 
+/// 一份贴图的**全部字节**：整条 mip 链，与渲染器今天写进 `Image.data` 的那串逐字节相同。
+///
+/// ⚠ **它为什么住这里**（与 [`VolumeData`] / [`MeshData`] 同住一处）：`AssetKind::Texture`
+///   本来就在本模块，而"一个域的载荷类型与它的编解码住在一起"是全仓的口径
+///   （孤儿规则那条）。从前它在 `px_graph::generate`，于是**算子交不出贴图**
+///   —— 算子的 `Payload` 必须由 schema 层声明，而 schema 在 `px_graph` **下面**。
+///   搬到这里之后 `sky.nebula` 那类算子可以直接把一张烘好的天空当产物交出去。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TextureData {
+    pub width: u32,
+    pub height: u32,
+    pub layers: u32,
+    pub levels: u32,
+    pub format: TextureFormat,
+    pub bytes: Vec<u8>,
+}
+
+impl TextureData {
+    pub fn shape(&self) -> TextureShape {
+        TextureShape {
+            width: self.width,
+            height: self.height,
+            layers: self.layers,
+            levels: self.levels,
+            format: self.format,
+        }
+    }
+
+    /// **唯一的构造口**：自检「载荷字节数 = 形状算出来的整条 mip 链字节数」。
+    /// 少一级 mip、多层一层、位深写错，都会在这里当场炸，而不是等到渲染器那边采样出错。
+    ///
+    /// ⚠ `px_graph` 那边原来把它写成**私有**的（"别绕过它"）。搬过来之后私有做不到
+    ///   （跨 crate），于是它变成公开的 —— 但那条纪律没变：**要用贴图就过这一道**，
+    ///   别去手搓结构体字面量。这也是为什么它叫 `new` 而字段是公开的：
+    ///   字段公开是为了让 `Build::decode` 能从字节还原（那时字节已经是自己人写出来的）。
+    pub fn new(
+        width: u32,
+        height: u32,
+        layers: u32,
+        levels: u32,
+        format: TextureFormat,
+        bytes: Vec<u8>,
+    ) -> Self {
+        let data = Self {
+            width,
+            height,
+            layers,
+            levels,
+            format,
+            bytes,
+        };
+        let expected = data.shape().chain_bytes();
+        assert_eq!(
+            data.bytes.len(),
+            expected,
+            "贴图载荷与形状不符：{}×{}×{} 层、{} 级、{:?} 应当是 {} 字节，实际 {} 字节",
+            data.width,
+            data.height,
+            data.layers,
+            data.levels,
+            data.format,
+            expected,
+            data.bytes.len(),
+        );
+        data
+    }
+}
+
 fn sign(value: f32) -> f32 {
     if value < 0.0 { -1.0 } else { 1.0 }
 }
@@ -277,6 +357,8 @@ pub struct VolumeData {
 }
 
 /// Volume 载荷的 blob 形状：`[面, 径向层, t, s]`。
+///
+/// ⚠ 多通道体积在**末尾多一维**（通道数，只在 > 1 时写）—— 见 [`VolumeData::blobs`]。
 pub const VOLUME_SHAPE: [u32; 4] = [CUBE_FACES, 0, 0, 0];
 
 impl VolumeData {
@@ -284,23 +366,49 @@ impl VolumeData {
         self.res as usize * self.layers as usize * self.res as usize * CUBE_FACES as usize
     }
 
+    /// 每格几条通道（`data.len() / samples()`）：密度是 1、发射是 6（3 发射 + 3 消光）。
+    ///
+    /// ⚠⚠ **通道数必须编进 blob 形状**（见 [`Self::blobs`]）—— 这一档踩过一次：
+    ///   形状只写单通道的量、字节却是 `samples × 6` ⇒ 产物**自相矛盾**、读回被拒，
+    ///   而症状只是"每次烘图都重算"（不报错、不崩溃）。
+    pub fn lanes(&self) -> usize {
+        let samples = self.samples().max(1);
+        self.data.len() / samples
+    }
+
     pub fn at(&self, face: u32, layer: u32, t: u32, s: u32) -> f32 {
+        // ⚠ 多通道体积**不能**用 `at`：布局是交错的（`data[格 × lanes + 通道]`），
+        //   单通道下标式只对 `lanes == 1` 有意义。
+        debug_assert_eq!(self.lanes(), 1, "多通道体积请逐通道取（见 `lanes`）");
         self.data[(((face * self.layers + layer) * self.res + t) * self.res + s) as usize]
     }
 
+    /// ⚠⚠ **形状要装得下所有字节**：`Blob` 的头按 `DType` 自检长度
+    ///   （`elems × 4 == 字节数`），而多通道体积的 `data` 是 `samples × lanes`。
+    ///   第一版形状只写 `[面, 层, t, s]`（单通道的量）却塞六通道的字节
+    ///   ⇒ 写出的产物自相矛盾，读回时被"长度不符"拒收
+    ///   （实测：`头部声明 6291456 字节，实际 37748736 字节` —— 正好差 6 倍）
+    ///   ⇒ **每次烘图都判未命中、每次重算**，而画面对不对完全看不出这件事。
+    ///
+    /// 规则：**第 5 维只在 `lanes > 1` 时出现** ⇒ 一份内容只有一种编码，
+    /// 而老的单通道产物（4 维形状）**照旧能读**。
     pub fn blobs(&self) -> Vec<Blob> {
-        vec![Blob::from_f32(
-            vec![CUBE_FACES, self.layers, self.res, self.res],
-            &self.data,
-        )]
+        let mut shape = vec![CUBE_FACES, self.layers, self.res, self.res];
+        if self.lanes() > 1 {
+            shape.push(self.lanes() as u32);
+        }
+        vec![Blob::from_f32(shape, &self.data)]
     }
 
     /// 只从载荷里还原数据与形状：`inner`/`outer` 住在清单参数里（`px_graph` 负责补）。
+    ///
+    /// 形状 4 维 = 单通道（老形状）；第 5 维是通道数（只在 > 1 时写 —— 见 [`Self::blobs`]）。
     pub fn from_blob(blob: &Blob) -> Result<Self, WireError> {
         let shape = &blob.header.shape;
-        if shape.len() != VOLUME_SHAPE.len() {
+        if shape.len() != 4 && shape.len() != 5 {
             return Err(WireError::NotF32(blob.header.dtype));
         }
+        let lanes = shape.get(4).copied().unwrap_or(1).max(1) as usize;
         let data = blob.f32s()?;
         let volume = Self {
             res: shape[3],
@@ -309,7 +417,7 @@ impl VolumeData {
             outer: 0.0,
             data,
         };
-        if volume.data.len() != volume.samples() {
+        if volume.data.len() != volume.samples() * lanes {
             return Err(WireError::TruncatedFrame);
         }
         Ok(volume)
@@ -474,6 +582,15 @@ pub enum Domain {
     Octahedral,
     Cube,
     CubeMap,
+    /// **三维**：立方球参数空间里的体网格（`res × res × layers × 6 面`）。
+    ///
+    /// ⚠ 前四个域是"**同一张网格的四种读法**"（都是球面上的一个方向），而这一个多了一维
+    ///   —— 它不是"另一种投影"，是**另一类采样空间**。放进同一个枚举是因为算子读的
+    ///   处处都是 `Field`（`width × height` 的 f32 网格 + 一个域），而"这一格在世界里
+    ///   落在哪儿"完全由域决定 ⇒ 加一个域就让**整套场算法**多了一档可用空间，
+    ///   而不必再造一类资产、一套 crate。⚠ 代价：`direction_at` / `uv_of` 这类
+    ///   **只对球面有意义**的入口必须显式把这一档挡掉（见那两处的文档）。
+    Volume,
 }
 
 impl Domain {
@@ -483,8 +600,40 @@ impl Domain {
             Self::Octahedral => "octahedral",
             Self::Cube => "cube",
             Self::CubeMap => "cubemap",
+            Self::Volume => "volume",
         }
     }
+}
+
+/// 体网格的**画布尺寸**：`(res, res × layers × 6)`。
+///
+/// ⚠ 为什么第三维折进 `height` 而不是给 `Field` 加一个 `layers` 字段：`Field` 是
+///   `width × height` 的 f32 网格（[`Field::to_blob`] 写的就是 `[height, width]`），
+///   加一维要动线格式、动每一个消费方。折进 `height` 之后**体网格就是一张普通场**，
+///   逐元素算子（`remap` / `mix`）一行都不用改就能用。
+///
+/// ⚠ 一面是一块 `res × (layers × res)` 的平面 ⇒ **一面 `layers × res` 行**（一"层"占
+///   `res` 行），行号是 `face × (res·layers) + layer × res + t`。
+///
+/// ⚠⚠ **行数因此是 `res × layers × 6`**（原来写的是 `res² × layers × 6`，多乘了一个
+///   `res`）：行号公式只覆盖前 `1/res` 的行，其余的行 `slot_of` 会把面号夹到 5 ——
+///   也就是说**每张体积场有 98.4% 的行算了却没人读**（shape 64 时一张场 402 MB、
+///   而它描述的体积只有 157 万格），烘焙时间、内存与磁盘都跟着大 64 倍。
+pub fn volume_extent(res: u32, layers: u32) -> (u32, u32) {
+    let res = res.max(1);
+    let layers = layers.max(1);
+    (res, res * layers * CUBE_FACES)
+}
+
+/// 体网格的行数 → 层数（[`volume_extent`] 的逆）。
+pub fn volume_layers(height: u32, res: u32) -> Option<u32> {
+    let res = res.max(1);
+    let block = res.checked_mul(CUBE_FACES)?;
+    if height == 0 || height % block != 0 {
+        return None;
+    }
+    let layers = height / block;
+    (layers > 0).then_some(layers)
 }
 
 pub fn direction_at(domain: Domain, width: u32, height: u32, x: u32, y: u32) -> [f32; 3] {
@@ -514,6 +663,15 @@ pub fn direction_at(domain: Domain, width: u32, height: u32, x: u32, y: u32) -> 
             let t = ((y % face_size) as f32 + 0.5) / face_size as f32;
             cube_direction(face, s, t)
         }
+        // ⚠ 体网格**不是一个方向**：它多一维（径向层），而这一格的层号在 `height` 里
+        //   （`y = face × layers + layer`）—— 这里只有 `height`，解不出 `layers`，
+        //   于是拿不到真正的半径。⇒ 给"半径 1 的方向"会让调用方以为这是个方向场，
+        //   那是**静默的错**。体网格的世界点映射住在 `px_field_schema::volume::point_of`
+        //   （它知道 `inner` / `outer` / `res` / `layers`），球面那些入口一律走它。
+        Domain::Volume => panic!(
+            "体网格（Domain::Volume）没有「一个方向」这回事：\
+             世界点映射走 px_field_schema::volume::point_of（它知道 inner/outer/res/layers）"
+        ),
     }
 }
 
@@ -532,6 +690,12 @@ pub fn uv_of(domain: Domain, direction: [f32; 3], width: u32, _height: u32) -> [
         Domain::CubeMap => {
             let (face, s, t) = cube_face_of(direction);
             [s, (face as f32 + t) / CUBE_FACES as f32]
+        }
+        // ⚠ 体网格的那一面里，这一格的面内参数就是 `(s, t)`（径向层不在这个二元组里，
+        //   它由行号给）—— 见 [`direction_at`] 那一档的文档。
+        Domain::Volume => {
+            let (_, s, t) = cube_face_of(direction);
+            [s, t]
         }
     }
 }

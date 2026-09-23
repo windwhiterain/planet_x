@@ -16,8 +16,16 @@
 //   **外部 impl** 用的（那份源码会被 `px_jit` **`include!`** 进实例库，不是本 crate 的模块）。
 //   而 `dead_code` **只看本 crate 自己用没用**，本 crate 恰好只用 `SampleField`
 //   ⇒ 替它收声。这正是这个机制的性质：泛型参数住在**被 include 进来的外部源码**里。
+pub mod density;
+pub mod emission;
 #[allow(dead_code)]
 pub mod field_fn;
+pub mod half;
+pub mod raymarch;
+
+pub use density::{bake_density, sample_world};
+pub use emission::{bake_emission, emit_from_field};
+pub use raymarch::{raymarch_channel, raymarch_sky};
 
 use field_fn::{FieldFn, SampleField};
 use px_field_schema::field::{Field, tangent_frame};

@@ -1,9 +1,13 @@
 pub mod constant;
 pub mod craters;
 pub mod fbm;
+pub mod fbm3;
 pub mod gradient;
 pub mod mix;
 pub mod remap;
 pub mod ridged;
+pub mod ridged3;
 pub mod stamps;
+pub mod stars;
 pub mod warp;
+pub mod warp3;

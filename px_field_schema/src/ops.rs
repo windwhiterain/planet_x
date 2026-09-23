@@ -54,6 +54,20 @@ pub struct CratersInput {
     pub base: Cooked<Field>,
 }
 
+/// 体网格上的域扭曲（`Warp3` 吃它）：待扭曲的场 + **三个轴各一张偏移场**。
+///
+/// ⚠ 为什么是三张而不是一张：位移是一个三维向量，而一张场一格只有一个数。
+///   拿一张场的同一个数挪三个轴 ⇒ 位移落在体素空间的那条对角线上（图形上是"错切"，
+///   不是扭曲）；而要在一张场里塞三个分量，就得再造一种"三通道场"——
+///   那比多接两个上游节点贵得多，也更难在图侧读。
+#[derive(px_derive::PxInputs)]
+pub struct Warp3Input {
+    pub field: Cooked<Field>,
+    pub offset_a: Cooked<Field>,
+    pub offset_b: Cooked<Field>,
+    pub offset_c: Cooked<Field>,
+}
+
 // ⚠ 不吃上游的那四个 ⇒ 形状是 `()`（它没有名字问题，住在契约里）。
 px_op! {
     /// 处处同一个值的场（当权重/常量用）。
@@ -125,4 +139,45 @@ px_op! {
     ///   （每格一个、半径常数、同层不重叠）与这里完全不同 ⇒ 各自留一份，谁也别想悄悄换掉谁。
     ///   同一张图里两个都能用（大盆地用 `craters`、表面麻点用 `stamps` 也成立）。
     Stamps, "field.stamps", "px_field_op", params::StampsParams, CratersInput, Field
+}
+
+// ---------------------------------------------------------------------------
+// 体网格（`Domain::Volume`）上的三个算子
+//
+// ⚠ **它们是独立的算子，不是"给上面那几个加一档"**（用户 2026-09-20 的口径：选 B，
+//   让 `Domain::Volume` 复用整套场算法）。理由有二：
+//     1. 采样点完全不同：球面档按 `direction`（没有径向），体网格按 `(s, t, altitude)`。
+//        合成一个算子就得在**每一个**格子上分支，而那是热循环里的分支。
+//     2. 既有产物一个字节都不许动：把分支塞进 `Fbm` 就等于让它的实现换一份（键也换），
+//        而那会重算全仓所有球面噪声 —— 为了一个新功能付这个代价不值。
+//   ⇒ 复用的是**数据与布局**（`Field` + `Domain::Volume` + `Field::at` / `set`），
+//     也就是"整套场算法能用同一张网格"这件事；算子各留一份。
+// ---------------------------------------------------------------------------
+
+px_op! {
+    /// 体网格上的分形噪声（`params::Fbm3Params`）。
+    Fbm3, "field.fbm3", "px_field_op", params::Fbm3Params, (), Field
+}
+
+px_op! {
+    /// 体网格上的脊状噪声（`params::Ridged3Params`）：星云的丝。
+    Ridged3, "field.ridged3", "px_field_op", params::Ridged3Params, (), Field
+}
+
+px_op! {
+    /// 体网格上的域扭曲（`params::Warp3Params`）：按偏移场挪采样点。
+    ///
+    /// ⚠ 偏移场是一张**同形状的体网格**，它的三个通道由三个上游节点给
+    ///   （`offset_a` / `offset_b` / `offset_c` 各来自一个不同种子的 `field.fbm3`）
+    ///   —— 见 `Warp3Input`。三个轴必须**互不相关**：只给一张偏移场再用同一个值挪三个轴，
+    ///   位移就落在一条对角线上（图形上表现为"沿一个方向的错切"，不是扭曲）。
+    Warp3, "field.warp3", "px_field_op", params::Warp3Params, Warp3Input, Field
+}
+
+px_op! {
+    /// **球面上的星点**（`params::StarsParams`）：稀疏亮点，出的是**场**。
+    ///
+    /// ⚠ 与 `px_graph::generate::texture::stars`（星空**贴图**）不是一回事：星点要参与
+    ///   体渲染的积分（被气遮住、被尘埃染红）⇒ 必须是场。那一份出的是贴图字节。
+    Stars, "field.stars", "px_field_op", params::StarsParams, (), Field
 }

@@ -18,6 +18,10 @@ fn asset_kind_name(kind: AssetKind) -> &'static str {
         AssetKind::Mesh => "mesh",
         AssetKind::Instances => "instances",
         AssetKind::Volume => "volume",
+        // ⚠ 体网格**当一张场**（`Domain::Volume`）：二维 blob、第三维折进 `height`。
+        //   与上面那个 `volume`（立方球体网格、半径住清单参数、四维 blob）不是一回事
+        //   —— 两者同名不同形，所以各有各的资产种类（域必须能从种类唯一还原）。
+        AssetKind::VoxelField => "voxel_field",
         AssetKind::Scene => "scene",
         AssetKind::Shader => "shader",
         AssetKind::Texture => "texture",

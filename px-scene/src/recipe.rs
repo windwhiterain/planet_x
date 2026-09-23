@@ -41,6 +41,16 @@ pub struct SceneFile {
     /// 用哪张**帧图**（`art/frame/<名>.toml`，§128）。不写 = `default`。
     #[serde(default)]
     pub frame: Option<String>,
+    /// **天空盒换一份产物**（`"图名::节点名"`，或者配上 `skybox_graph` 写裸节点名）。
+    ///
+    /// ⚠ 不写 = 内置星空（`generate::stars`）—— 那条路是老行为，一个字节没动。
+    ///   写了的用途是"天空由 PCG 烘出来"那一档（星云背景）：烘出来的贴图是一条**正常的
+    ///   图产物**，场景这边按名字引用它即可，渲染器不必知道它是怎么来的。
+    #[serde(default)]
+    pub skybox: Option<String>,
+    /// `skybox` 写裸节点名时，它属于哪张图。
+    #[serde(default)]
+    pub skybox_graph: Option<String>,
     pub parts: Vec<PartFile>,
 }
 
@@ -313,7 +323,14 @@ pub fn compile(file: &SceneFile, baked: &mut Baked, with_graph: bool) -> Result<
     } else {
         (None, None)
     };
-    let stars_member = baked.texture("stars", generate::stars(STARS_FACE), "texture.stars")?;
+    // ⚠ 天空那一格：**不写就用内置星空**（老行为），写了就按名字取一份**烘出来的**产物
+    //   —— 后者是星云背景那条路（`sky.nebula` 交出一张 HDR 立方贴图，这里只引用它）。
+    let stars_member = match (&file.skybox, &file.skybox_graph) {
+        (Some(reference), graph) => {
+            crate::members::reference("场景的 skybox", reference, graph.as_deref())?
+        }
+        (None, _) => baked.texture("stars", generate::stars(STARS_FACE), "texture.stars")?,
+    };
 
     // ---- 云：壳、覆盖度立方图、形状档 ----
     let (cloud_inner, cloud_outer, cloud_shape, coverage_member) = match clouds {

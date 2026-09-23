@@ -1,0 +1,33 @@
+# 星云背景：**只有天空**。
+#
+# ⚠ 这一份的用途是"把它当一张通用背景图"：整幅铺满、没有中心构图。
+#   那份天空是 PCG 烘出来的 —— `sky.nebula` 交出一张 HDR 立方贴图，这里只按名字引用它。
+#
+# 烘图：cargo run --release -p px_graphs --bin nebula -- --face 256
+# 烘场景：cargo run --release -p px_graphs --bin scene nebula
+# 出图：cargo run --release -p px_render -- --offline --scene <产物.pxart> \
+#         --out nebula.png --width 960 --height 640 --cam 0,0,0.05
+
+name = "nebula"
+# ⚠ 星云**自己会发光**，不吃环境光 ⇒ 环境光给 0。
+ambient = 0.0
+cameras = "review"
+
+# 天空盒 = 烘出来的星云贴图（`nebulasky` 那张图的 `sky` 节点）。
+skybox = "nebulasky::sky"
+
+# ⚠ 这个 planet part 是**给编译器交差的**（它要求"场景里必须有 kind planet 的 part"），
+#   而画面里**不该看见它**：相机放在球**内部**（`--cam ...,0.05`），球面朝外
+#   ⇒ 背面剔除把它整个剔掉，只剩下天空。这是"纯背景"最省事的达成方式。
+#
+# ⚠ 用**内建球**（`primitive = "icosphere"`）而不是 `mesh` 成员：内建球不需要烘一张网格。
+#   但 `surface` 那个本体 shader 声明了 albedo 贴图（色板是从**高度场**烘的）
+#   ⇒ `height` 成员还得给（用 `planet` 图里现成的那张）。
+[[parts]]
+id = "occluder"
+kind = "planet"
+shader = "surface"
+primitive = "icosphere"
+graph = "planet"
+members = { shader = "shaders::surface", height = "height" }
+params = { palette = "rocky", radius = 1.0, displace = 0.0, sea_level = 0.5, spin = 0.0, rings = 0.0 }

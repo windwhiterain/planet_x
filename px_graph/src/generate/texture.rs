@@ -15,63 +15,14 @@ use super::shade::{half_from_f32, push_color};
 // ---------------------------------------------------------------------------
 // 贴图载荷
 // ---------------------------------------------------------------------------
+//
+// ⚠ `TextureData` **不在这里**（它搬去了 `px_protocol::art`，与 `VolumeData` / `MeshData`
+//   同住）：算子的 `Payload` 必须由 schema 层声明，而 schema 在 `px_graph` 下面
+//   ⇒ 载荷类型住在 `px_graph` 里的时候，**算子交不出贴图**。
+//   这一份只从上面把它引进来（下面还有一句 re-export，`px_graph::generate::TextureData`
+//   这个路径对调用方保持不变）。
 
-/// 一份贴图的**全部字节**：整条 mip 链，与渲染器今天写进 `Image.data` 的那串逐字节相同。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TextureData {
-    pub width: u32,
-    pub height: u32,
-    pub layers: u32,
-    pub levels: u32,
-    pub format: TextureFormat,
-    pub bytes: Vec<u8>,
-}
-
-impl TextureData {
-    pub fn shape(&self) -> TextureShape {
-        TextureShape {
-            width: self.width,
-            height: self.height,
-            layers: self.layers,
-            levels: self.levels,
-            format: self.format,
-        }
-    }
-
-    /// 唯一的构造口：自检「载荷字节数 = 形状算出来的整条 mip 链字节数」。
-    /// 少一级 mip、多层一层、位深写错，都会在这里当场炸，而不是等到渲染器那边采样出错。
-    fn new(
-        width: u32,
-        height: u32,
-        layers: u32,
-        levels: u32,
-        format: TextureFormat,
-        bytes: Vec<u8>,
-    ) -> Self {
-        let data = Self {
-            width,
-            height,
-            layers,
-            levels,
-            format,
-            bytes,
-        };
-        let expected = data.shape().chain_bytes();
-        assert_eq!(
-            data.bytes.len(),
-            expected,
-            "贴图载荷与形状不符：{}×{}×{} 层、{} 级、{:?} 应当是 {} 字节，实际 {} 字节",
-            data.width,
-            data.height,
-            data.layers,
-            data.levels,
-            data.format,
-            expected,
-            data.bytes.len(),
-        );
-        data
-    }
-}
+pub use px_protocol::art::TextureData;
 
 // ---------------------------------------------------------------------------
 // mip 链与极冠（逐字搬自 px_render/src/planet.rs）
@@ -267,6 +218,52 @@ pub fn coverage_cube(mask: &Field, slopes: [&Field; 3]) -> Result<TextureData, S
         ] {
             bytes.extend_from_slice(&half_from_f32(value).to_le_bytes());
         }
+    }
+
+    Ok(TextureData::new(
+        face,
+        face,
+        CUBE_FACES,
+        1,
+        TextureFormat::Rgba16Float,
+        bytes,
+    ))
+}
+
+/// **三条通道 → 一张 `Rgba16Float` 立方贴图**（HDR）。
+///
+/// ⚠ 与 [`field_cube`] 的差别：那一档把**一个标量**塞进 R、G/B 留 0（"把场当数据贴图"），
+///   这一档把**三条通道**各自塞进 R/G/B。星云那类"自己会发光"的背景要的是后者 ——
+///   它的颜色就是它积出来的颜色，而**亮度可以超过 1** ⇒ 用半精度浮点，不是 8 位 sRGB
+///   （8 位会把高光砍在 1.0，而"亮核"正是靠超过 1 的那一段）。
+///
+/// ⚠ 三张场必须是**同一张立方贴图**的形状：错一张就会把六面拼歪（判据与
+///   [`coverage_cube`] / [`field_cube`] 同一条）。
+pub fn color_cube(red: &Field, green: &Field, blue: &Field) -> Result<TextureData, String> {
+    let face = red.width.max(1);
+    for (name, field) in [("R", red), ("G", green), ("B", blue)] {
+        if field.projection != Domain::CubeMap {
+            return Err(format!(
+                "颜色立方贴图的 {name} 通道需要 CubeMap 产物，这份是 {:?}",
+                field.projection
+            ));
+        }
+        if field.width != face || field.height != face * CUBE_FACES {
+            return Err(format!(
+                "颜色立方贴图的 {name} 通道形状应当是 {face}×{}（`width × 6`），实际 {}×{}",
+                face * CUBE_FACES,
+                field.width,
+                field.height,
+            ));
+        }
+    }
+
+    let mut bytes = Vec::with_capacity(red.data.len() * 8);
+    for index in 0..red.data.len() {
+        for value in [red.data[index], green.data[index], blue.data[index]] {
+            bytes.extend_from_slice(&half_from_f32(value).to_le_bytes());
+        }
+        bytes.extend_from_slice(&half_from_f32(1.0).to_le_bytes());
     }
 
     Ok(TextureData::new(

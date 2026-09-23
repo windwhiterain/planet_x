@@ -40,6 +40,151 @@ impl Default for RemapParams {
     }
 }
 
+/// **体网格上的分形噪声**（`field.fbm3`）：采样点是"这一格的体素坐标"，不是球面方向。
+///
+/// ⚠ 它与 [`fbm`] 的差别不只是"三维"：`fbm` 的球面档按 `direction` 取噪声（**没有径向**），
+///   于是它造出来的场是"贴在球面上的一层皮"；这一档按 `(s, t, altitude)` 取噪声
+///   ⇒ 才有真正的**体内结构**（云里前中后三层各自不同）。体渲染要的正是后者。
+///
+/// ⚠ 频率的参照系是"**一整面 = 1.0**"（体素坐标是 `[0,1]³`）⇒ 与 `fbm` 的球面档
+///   （`direction` 的模长是 1）**数值口径相近**，但**不是同一把尺子**：同一个频率下
+///   这一档的格子数是 `frequency` 个/面。
+#[derive(Debug, Clone, Serialize, Deserialize, px_derive::PxParams)]
+#[serde(default, deny_unknown_fields)]
+pub struct Fbm3Params {
+    pub frequency: f32,
+    pub octaves: u32,
+    pub lacunarity: f32,
+    pub gain: f32,
+    pub seed: u32,
+    /// **各向异性**：把体素坐标的第三维（径向）乘上它 ⇒ 结构沿**径向**拉长／压扁。
+    ///
+    /// ⚠ 星云的盘状/纤维状结构是**沿视线方向拉长**的，而各向同性的噪声给的是"一坨坨圆球"
+    ///   ⇒ 这一栏是"云"与"絮"之间那个旋钮。`1.0` = 各向同性。
+    pub zonal: f32,
+}
+
+impl Default for Fbm3Params {
+    fn default() -> Self {
+        Self {
+            frequency: 3.0,
+            octaves: 6,
+            lacunarity: 2.0,
+            gain: 0.5,
+            seed: 7,
+            zonal: 1.0,
+        }
+    }
+}
+
+/// **体网格上的脊状噪声**（`field.ridged3`）：星云的"丝"就是脊。
+///
+/// ⚠ `sharpness` 越大脊越细（`1.0` = 三角波，`2` 以上 = 一根根细丝）。
+///   星云那些一丝一丝的纤维结构靠的是这一档 + 后续的域扭曲。
+#[derive(Debug, Clone, Serialize, Deserialize, px_derive::PxParams)]
+#[serde(default, deny_unknown_fields)]
+pub struct Ridged3Params {
+    pub frequency: f32,
+    pub octaves: u32,
+    pub lacunarity: f32,
+    pub gain: f32,
+    pub seed: u32,
+    pub sharpness: f32,
+    pub zonal: f32,
+}
+
+impl Default for Ridged3Params {
+    fn default() -> Self {
+        Self {
+            frequency: 6.0,
+            octaves: 5,
+            lacunarity: 2.1,
+            gain: 0.55,
+            seed: 21,
+            sharpness: 2.0,
+            zonal: 1.0,
+        }
+    }
+}
+
+/// **体网格上的域扭曲**（`field.warp3`）：按偏移场挪动采样点。
+///
+/// ⚠ 它与 [`warp`]（球面那一档）的差别：那一档在**切平面**上挪（`lateral` 决定
+///   沿视线挪多少），这一档在**体素空间**里挪三个轴 —— 没有"切平面"这回事，
+///   三格偏移就是三维位移。
+#[derive(Debug, Clone, Serialize, Deserialize, px_derive::PxParams)]
+#[serde(default, deny_unknown_fields)]
+pub struct Warp3Params {
+    /// 位移总量（**体素坐标**的单位：`1.0` = 挪一整面）。⚠ 这里不是弧度。
+    pub strength: f32,
+    /// 轴向权重：`0` = 只沿径向挪，`1` = 三个轴等权。
+    pub axial: f32,
+}
+
+impl Default for Warp3Params {
+    fn default() -> Self {
+        Self {
+            strength: 0.35,
+            axial: 1.0,
+        }
+    }
+}
+
+/// **`field.stars` 的参数**：球面上一颗颗的星点（稀疏的亮点）。
+///
+/// ⚠ 这一档与 `px_graph::generate::texture::stars`（星空**贴图**）不是一回事：那一份出的是
+///   贴图字节，而 `sky.nebula` 的星点要**参与积分**（被气遮住、被尘埃染红）⇒ 必须是**场**。
+#[derive(Debug, Clone, Serialize, Deserialize, px_derive::PxParams)]
+#[serde(default, deny_unknown_fields)]
+pub struct StarsParams {
+    /// 格的大小，单位是**纹素宽**（`1.0` ≈ 一格一个纹素）。
+    ///
+    /// ⚠ 它是"每格多大"而不是"总共多少格"：总共多少格是分辨率相关的量，而星点天生
+    ///   分辨率相关 —— 给固定格数的话，低分辨率下一格会跨住上百个纹素，一颗星的核就
+    ///   糊住半面（实测 98.3% 的纹素都被点亮）。
+    pub cells_per_texel: f32,
+    /// 有星的比例（`0..1`）：抽样决定这一格里放不放星。
+    pub fill: f32,
+    /// 星的亮度分布指数的**倒数**（越小越容易出现亮星；`1.0` = 均匀）。
+    pub brightness_power: f32,
+    pub seed: u32,
+    /// 核的半径，单位是**纹素的角宽**（`1.0` = 一个纹素）。
+    ///
+    /// ⚠ **必须按纹素、不能按绝对弧度**：星空是分辨率相关的 —— 给固定弧度的话，
+    ///   面分辨率一降，一个"0.0075 弧度"的光晕就糊住整面（实测 `face = 128` 时亮纹素
+    ///   占 66.8%，那已经不是星，是一层纱）。按纹素给 ⇒ 任何分辨率下星都是"几个像素的点"。
+    pub size: f32,
+    /// 光晕半径（同样是**纹素的角宽**倍数）与强度。
+    pub halo: f32,
+    pub halo_gain: f32,
+    /// 星系里的星比外面的亮多少（参考图里有一簇嵌在气里的亮星）。
+    pub cluster_gain: f32,
+    /// 那一簇的中心方向与角半径（弧度）。
+    pub cluster: [f32; 3],
+    pub cluster_radius: f32,
+}
+
+impl Default for StarsParams {
+    fn default() -> Self {
+        Self {
+            // ⚠ 一格 8 个纹素宽 + `fill = 0.005`：星点要**稀**。
+            //   这两个数是"每颗星占多大空间"与"多少格里有星"的乘积，而**它俩一起**才决定
+            //   星空的密度 —— 一格一纹素、或 `fill` 给到 0.1，得到的都是"一层纱"而不是星
+            //   （实测：0.25/1.0 时 82%、0.02/0.125 时 42% 的纹素被点亮）。
+            cells_per_texel: 0.125,
+            fill: 0.005,
+            brightness_power: 1.6,
+            seed: 60613,
+            size: 0.8,
+            halo: 2.2,
+            halo_gain: 0.10,
+            cluster_gain: 2.4,
+            cluster: [0.2, 0.35, 0.9],
+            cluster_radius: 0.35,
+        }
+    }
+}
+
 pub mod constant {
     use serde::{Deserialize, Serialize};
 
@@ -145,6 +290,18 @@ pub mod remap {
         pub out_min: f32,
         pub out_max: f32,
         pub smooth: bool,
+        /// **强度非线性**（`1.0` = 不弯）。
+        ///
+        /// ⚠ 为什么这一栏是**必须**的（而不是靠把 `in_min`/`in_max` 收窄来凑）：
+        ///   收窄窗口是**线性**拉伸，它只能把"中灰"搬成"中灰的另一个值"；而星云要的是
+        ///   **大片接近 0 + 少数尖峰**（参考图的线性均值/最亮 1% 只有 0.112）。
+        ///   这个形状只能靠非线性拿到。实测 fbm 的均值挤在 0.51 附近（这一档的上游
+        ///   实到 0.4085）⇒ 收窄窗口之后仍是一片中灰，画面上是"均匀的雾"。
+        ///
+        /// ⚠ 作用位置在 `out_*` **之后**（把在 `[out_min, out_max]` 上的值取 `gamma` 次幂）
+        ///   —— 于是 `out_*` 依旧管"值域"、`gamma` 只管"形状"，两者各是一件事。
+        ///   负数会取幂到 `NaN` ⇒ 非正数一律不弯（`NaN` 顺着管线传下去极难归因）。
+        pub gamma: f32,
     }
 
     impl Default for Params {
@@ -155,9 +312,24 @@ pub mod remap {
                 out_min: 0.0,
                 out_max: 1.0,
                 smooth: true,
+                gamma: 1.0,
             }
         }
     }
+}
+
+/// **强度非线性**：`value^gamma`（`gamma` 非正 ⇒ 原样返回）。
+///
+/// ⚠ 独立成一个函数是为了让"两条入口（预置 `Remap` 与 `px_inst!` 实例）**同一把尺子**"
+///   这件事仍然是唯一一条路径 —— 弯折写在循环里、只有一处。
+pub fn bend(value: f32, gamma: f32) -> f32 {
+    if !(gamma > 0.0) || (gamma - 1.0).abs() < f32::EPSILON {
+        return value;
+    }
+    if value <= 0.0 {
+        return 0.0;
+    }
+    value.powf(gamma)
 }
 
 pub mod ridged {

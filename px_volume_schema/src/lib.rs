@@ -14,5 +14,5 @@ pub mod params;
 pub mod volume;
 
 pub use params::{FieldKind, Params};
-pub use px_protocol::art::VolumeData;
+pub use px_protocol::art::{TextureData, TextureFormat, VolumeData};
 pub use volume::{PATCHES, VolumeGrid, VolumeSampler, direction_of, point_of};
