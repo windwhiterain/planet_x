@@ -33,7 +33,7 @@ min_apparent = 2.0
 # 成团：变化由星给、背景由气给（用户 2026-09-25）。
 clump_count = 64
 clump_radius = 0.25
-clump_share = 0.6
+clump_share = 0.0
 
 # 嵌在气里的那一簇亮星（参考图里那几颗明显的星）。
 # ⚠ 它们与"场的星"是**同一种东西**（同一张表、同一个格）⇒ 既直射进画面、
@@ -43,7 +43,7 @@ cluster_count = 4
 cluster = [0.50, 0.70, 1.80]
 cluster_radius = 0.35
 cluster_gain = 6.0
-cluster_tint = [0.72, 0.86, 1.0]
+cluster_tint = [0.12, 0.30, 1.0]
 
 # ── 大尺度：星跟着**气那一族噪声**走（用户 2026-09-25）────────────────────────
 # 下面这几个数**抄自 `art/nebula/envelope.toml`**（频率/种子/octaves/gain/zonal）：
@@ -67,3 +67,6 @@ sky_contrast = 2.0
 # ⚠ 拒绝采样只能变稀 ⇒ `count` 要按存活率抬上去。
 gas_biased = true
 gas_contrast = 1.5
+
+# 分色诊断：星光走蓝（散射走红在 art/nebula/emission.toml 的 glow_tint）。
+star_tint = [0.12, 0.30, 1.0]

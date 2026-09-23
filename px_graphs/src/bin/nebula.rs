@@ -373,32 +373,32 @@ fn main() -> Result<(), Fault> {
         node_params(&shape_graph, "density_volume")?,
         volume::DensityInput { density: textured },
     )?;
-    // ⚠⚠ 星场**吃密度**（用户 2026-09-25："让星星和星云在大尺度上分布近似"）：
-    //   只对低频噪声时实测相关 +0.022 ⇒ 必须按**真密度场**拒绝采样。密度在体积图里，
-    //   所以星场**只在体积图**解析；天空图那一份多余的节点删掉了，直接把这里的句柄
-    //   喂进天空节点（与 `volume` 完全同一条路）—— 顺带保证两边是同一份星场。
-    let shape_stars = cached(
-        &shape_graph,
-        "stars",
-        volume::Stars,
-        star_params()?,
-        volume::StarsInput {
-            // ⚠ 星场与发射**都要**这份密度 ⇒ 只能克隆一次句柄（`Cooked` 是 `Clone`，
-            //   而它内含的是整份体积：shape 256 时 604 MB ⇒ 克隆一次要 ~0.5 秒）。
-            //   稀疏砖那一档落地后这份内存就不再是问题了。
-            volume: density_volume.clone(),
-        },
-    )?;
+    // ⚠ 星光照亮气体那一笔**已删**（用户 2026-09-25："想当然的非物理元素，散射已经包含"）
+    //   ⇒ 发射只吃密度、不再吃星 ⇒ 依赖方向变成 `density → emission → stars → sky`。
     let emission = cached(
         &shape_graph,
         "emission",
         volume::Emission,
         node_params(&shape_graph, "emission")?,
         volume::EmissionInput {
-            volume: density_volume,
-            // ⚠ 星场句柄在发射与天空两处都要 ⇒ 克隆一次（`StarField` 只有几 MB，
-            //   与密度那份 604 MB 不是一回事）。
-            stars: shape_stars.clone(),
+            volume: density_volume.clone(),
+        },
+    )?;
+    // ⚠⚠ 星场吃的是**发射**（不是密度）：用户指出"星与气的大尺度分布仍然没 align"——
+    //   因为密度 ≠ 看得见的东西（发射 = 密度 × 点光源的 1/d² × 遮挡）。
+    //   星场只在**体积图**里解析；天空图直接用这里的句柄（与 `volume` 同一条路）。
+    let shape_stars = cached(
+        &shape_graph,
+        "stars",
+        volume::Stars,
+        star_params()?,
+        volume::StarsInput {
+            // ⚠⚠ 只能喂**单通道**体积（密度 ✓）：`sample_world` 是按"每体素一条"索引的，
+            //   而发射是**六通道交错**（`at = row*width + s*6`）⇒ 喂发射会让拒绝采样读到
+            //   错位数据（实测：星团落到没有红光的暗处 ✗）。
+            //   要改成"跟**看得见的**星云对齐"，得先给星场一侧加一条**按通道步长**取数的
+            //   读法（下一刀）；那才是"密度 align"与"看得见的 align"之间的差别。
+            volume: density_volume.clone(),
         },
     )?;
 

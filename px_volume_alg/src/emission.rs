@@ -62,11 +62,7 @@ fn normalize(v: [f32; 3]) -> [f32; 3] {
 ///
 /// ⚠ 逐星遮挡是**逐体素**的量（与视线无关），与方向光那一条同一条理由：算一遍是
 ///   `体素数 × 候选星数 × 星影步数`，塞进天空那一步进就是乘上"步数"。
-pub fn bake_emission(
-    density: &VolumeData,
-    stars: &StarField,
-    params: &EmissionParams,
-) -> VolumeData {
+pub fn bake_emission(density: &VolumeData, params: &EmissionParams) -> VolumeData {
     let res = density.res.max(2);
     let layers = density.layers.max(2);
     // ⚠ 径向律是**参数空间线性、世界等比**（与 `px_volume_schema::volume::Shell` 同一条）：
@@ -86,7 +82,7 @@ pub fn bake_emission(
 
     // 星光那一档的常数：查多远（`starlight_radius`，**物理**旋钮）、多软、逐星走几步、
     // 最多吃几颗。⚠ 它与 `stars.cell`（**存储**细格）是两个旋钮，这里只读前者。
-    let star_reach = params.starlight_radius.max(1e-4);
+    let _star_reach = params.starlight_radius.max(1e-4);
     let star_soft2 = (params.starlight_soft.max(1e-4)).powi(2);
     let star_steps = params.starlight_steps.max(1);
     let star_keep = params.starlight_max as usize;
@@ -164,50 +160,6 @@ pub fn bake_emission(
                 let reach = (light_radius / light_distance).clamp(0.0, 1.0);
                 let lit = (-optical_depth * params.shadow_gain).exp() * reach * reach;
 
-                // ---- 星光照气体：附近最亮的几颗 + 逐星遮挡 ----
-                //
-                // ⚠ 与方向光**并联**（不是替换）：方向光给"整体一侧亮"，星给
-                //   "内缘朝心那一圈亮、背面暗" —— 后者才是目标点名的四样（朝光亮缘、
-                //   背光暗面、参差剪影、前景挡后景）的主要来源。
-                // ⚠ 辐照取 `亮度 / (d² + soft²)`：`soft` 是软化半径（`d → 0` 时不发散）。
-                //   星是**幂律**亮的（少数亮星 + 大量暗星）⇒ 只吃前 `starlight_max` 颗。
-                let mut star_lit = [0.0_f32; 3];
-                if params.starlight_gain > 0.0 {
-                    brightest_near(stars, position, star_reach, star_keep, &mut candidates);
-                    for star in &candidates {
-                        let to_star = [
-                            star.position[0] - position[0],
-                            star.position[1] - position[1],
-                            star.position[2] - position[2],
-                        ];
-                        let distance2 = to_star[0] * to_star[0]
-                            + to_star[1] * to_star[1]
-                            + to_star[2] * to_star[2];
-                        let distance = distance2.sqrt().max(1e-4);
-                        let away = [
-                            to_star[0] / distance,
-                            to_star[1] / distance,
-                            to_star[2] / distance,
-                        ];
-                        let through = distance / star_steps as f32;
-                        let mut tau = 0.0_f32;
-                        for step_index in 1..=star_steps {
-                            let far = step_index as f32 * through;
-                            let probe = [
-                                position[0] + away[0] * far,
-                                position[1] + away[1] * far,
-                                position[2] + away[2] * far,
-                            ];
-                            tau += sample_world(density, probe) * through;
-                        }
-                        let falloff = star.brightness / (distance2 + star_soft2);
-                        let visible = (-tau * params.shadow_gain).exp() * falloff;
-                        for channel in 0..3 {
-                            star_lit[channel] += visible * star.tint[channel];
-                        }
-                    }
-                }
-
                 // ---- 两份发射，逐通道 ----
                 // 主项（高幂 ⇒ 只有浓的地方亮）是**中性**的，它的颜色由消光给
                 // （薄处自然被染成玫红）；底光（低幂 ⇒ 浓处相对更强）带自己的色相。
@@ -221,17 +173,17 @@ pub fn bake_emission(
                 let base = d.powf(params.extinction_power);
                 let dust = ((d - params.dust_threshold).max(0.0)) * params.dust_bias;
 
-                // 星光那一笔：与主发射同形状（只在有气的地方亮），颜色走**星自己的色温**
-                // （星簇偏蓝白 ⇒ 参考图里核心那一圈也是蓝白的）。
-                let star_emit = d.powf(params.emission_power) * params.starlight_gain;
-
                 let at = row * width + s as usize * 6;
                 for channel in 0..3 {
                     // ⚠ `scatter_tint` 只乘**发射**通道（消光通道不动）：尘埃染色是物理，
                     //   而分色是诊断（用户 2026-09-25：散射走红、星光走蓝）。
+                    // ⚠⚠ `glow_tint` 现在**也乘 `main`** ⇒ 它的含义升级为"星云散射出来的光的
+                    //   通道配比"（用户 2026-09-25："散射定为红色"）。从前它只管 `glow` 那一档
+                    //   （而那一档关着 ⇒ 等于没用）。这样"散射走红"不需要任何新 uniform。
+                    // ⚠ 用户 2026-09-25："星光照亮的气是想当然的非物理元素，删掉 ——
+                    //   散射已经将其包含。" ⇒ 这一档只剩**点光源的散射**（`main`）与 `glow`。
                     out[at + channel] =
-                        (main + glow * params.glow_tint[channel] + star_emit * star_lit[channel])
-                            * params.scatter_tint[channel];
+                        (main + glow) * params.glow_tint[channel] * params.scatter_tint[channel];
                     out[at + 3 + channel] = base * params.extinction[channel] + dust;
                 }
             }
@@ -260,7 +212,7 @@ pub fn emit_from_field(
     density_field: &px_field_schema::field::Field,
 ) -> Result<VolumeData, String> {
     let density = bake_density(density_params, canvas_width, density_field)?;
-    Ok(bake_emission(&density, stars, emission_params))
+    Ok(bake_emission(&density, &emission_params))
 }
 
 #[cfg(test)]

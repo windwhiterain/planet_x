@@ -38,13 +38,16 @@ pub struct DensityInput {
 #[derive(px_derive::PxInputs)]
 pub struct EmissionInput {
     pub volume: Cooked<VolumeData>,
-    pub stars: Cooked<StarField>,
 }
 
-/// 星场的输入：**密度体积**（星按它拒绝采样 ⇒ 与气的大尺度分布精确相关）。
+/// 星场的输入：**发射体积**（星按它拒绝采样 ⇒ 与**看得见的**气精确同分布）。
 ///
-/// ⚠ 为什么是输入而不是参数：密度得由别的节点造出来（它是 `cloud.density` 的产物），
-///   给成参数那份密度就没法进键了。给成输入，上游的键自然进星场的键。
+/// ⚠⚠ 吃的是 **`cloud.emission`**（不是 `cloud.density`）：用户 2026-09-25 指出
+///   "星星和星云的大尺度分布仍然没有 align" —— 因为密度 ≠ 看得见的东西：
+///   发射 = 密度 × 点光源的 `1/d²` × 遮挡，云的**样子**是后者定的。
+/// ⚠ 依赖方向：`density → emission → stars → sky`。这条 DAG 只有在
+///   "星光照亮气体"那一笔**删掉**之后才成立（那一笔删了 ⇒ 发射不再需要星）。
+/// ⚠ 为什么是输入而不是参数：发射得由别的节点造出来；给成参数它就没法进键了。
 #[derive(px_derive::PxInputs)]
 pub struct StarsInput {
     pub volume: Cooked<VolumeData>,

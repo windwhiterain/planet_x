@@ -2609,7 +2609,6 @@ mod chain_tests {
 #[allow(clippy::too_many_arguments)]
 pub fn bake_emission(
     density: &px_volume_schema::VolumeData,
-    stars: &px_sparse::StarField,
     params: &px_volume_schema::params::emission::EmissionParams,
 ) -> Result<px_volume_schema::VolumeData, String> {
     if params.starlight_gain > 0.0 && params.starlight_max > STAR_KEEP_MAX {
@@ -2687,11 +2686,31 @@ pub fn bake_emission(
     let voxels = (6 * layers * res * res) as usize;
     let bytes =
         |values: &[f32]| -> Vec<u8> { values.iter().flat_map(|v| v.to_le_bytes()).collect() };
-    let star_grid = StarGrid::of(stars);
+    // ⚠⚠ 星光照气体那一笔已删（用户 2026-09-25："想当然的非物理元素，散射已经包含"）
+    //   ⇒ 这张星表只剩**占位**：绑定还留着（着色器那一侧还没拆），但喂的是**空**星场
+    //   ⇒ 常量时间、也不影响结果。真正的清理（拆掉 bindings 6/10/11/12 与 `star_*`
+    //   那一整套、以及 `EmissionParams::starlight_*`）是下一刀。
+    let empty_stars = px_sparse::StarField {
+        grid: px_sparse::grid::Grid {
+            meta: px_sparse::grid::GridMeta {
+                cell: 1.0,
+                origin: [0.0; 3],
+                dims: [px_sparse::grid::CHUNK_CELLS; 3],
+            },
+            chunk_start: Vec::new(),
+            brick_slot: Vec::new(),
+            brick_mask: Vec::new(),
+            brick_sub: Vec::new(),
+            sub_start: Vec::new(),
+            items: 0,
+        },
+        stars: Vec::new(),
+    };
+    let star_grid = StarGrid::of(&empty_stars);
     let star_meta = StarMeta::emission(&star_grid, params);
     let star_slots = StarSlots::of(&MarchExtras {
         star_grid: Some(&star_grid),
-        star_table: &stars.stars,
+        star_table: &empty_stars.stars,
         star_meta,
         background: [0.0; 3],
     });
@@ -2791,8 +2810,8 @@ mod emission_tests {
                 starlight_max: keep,
                 ..Default::default()
             };
-            let reference = px_volume_alg::bake_emission(&density, &stars, &params);
-            let gpu_side = match bake_emission(&density, &stars, &params) {
+            let reference = px_volume_alg::bake_emission(&density, &params);
+            let gpu_side = match bake_emission(&density, &params) {
                 Ok(volume) => volume,
                 Err(message) => panic!("GPU 发射烘焙失败：{message}"),
             };

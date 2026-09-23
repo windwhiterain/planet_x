@@ -962,22 +962,22 @@ fn bake_emission(@builtin(global_invocation_id) id: vec3<u32>) {
     let reach = clamp(light_radius / light_distance, 0.0, 1.0);
     let lit = exp(-optical_depth * emission.params.y) * (reach * reach);
 
-    // ---- 星光照气体：R3 星场里附近最亮的几颗 + 逐星遮挡 ----
-    let star_lit = star_light(position);
+    // ⚠ 用户 2026-09-25：星光照气体那一档**删掉**（"想当然的非物理元素，散射已经包含"）。
 
     let main = pow(d, emission.params.z) * emission.params.w * lit;
     let above = max(d - emission.glow.z, 0.0);
     let glow = pow(above, emission.glow.y) * emission.glow.x * lit;
     // 星光那一笔与主发射**同形状**（只在有气的地方亮），颜色走星自己的色温。
-    let star_emit = pow(d, emission.params.z) * star_meta.light.z;
     let base = pow(d, emission.extinction.w);
     let dust = max(d - emission.dust.y, 0.0) * emission.dust.x;
 
     let at = index * 6u;
     let tint = emission.glow_tint.xyz;
-    emitted[at + 0u] = main + glow * tint.x + star_emit * star_lit.x;
-    emitted[at + 1u] = main + glow * tint.y + star_emit * star_lit.y;
-    emitted[at + 2u] = main + glow * tint.z + star_emit * star_lit.z;
+    // ⚠⚠ `tint`（= `glow_tint`）现在**也乘 `main`**：它的含义是"星云散射出来的光的通道配比"
+    //   （用户 2026-09-25："散射定为红色"）。与 CPU 的 `bake_emission` 逐条对齐。
+    emitted[at + 0u] = (main + glow) * tint.x;
+    emitted[at + 1u] = (main + glow) * tint.y;
+    emitted[at + 2u] = (main + glow) * tint.z;
     emitted[at + 3u] = base * emission.extinction.x + dust;
     emitted[at + 4u] = base * emission.extinction.y + dust;
     emitted[at + 5u] = base * emission.extinction.z + dust;

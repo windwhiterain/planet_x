@@ -258,7 +258,7 @@ pub fn bake_stars(
         }
         positions.push(position);
         values.push(value);
-        tints.push([1.0, 1.0, 1.0]);
+        tints.push(params.star_tint);
     }
 
     // 星簇：参考图里那几颗嵌在气里的亮星。它们与"场的星"**是同一种东西**（同一张表、

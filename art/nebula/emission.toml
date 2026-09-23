@@ -52,7 +52,7 @@ emission_gain = 150.0
 glow_gain = 0.0
 glow_power = 1.6
 glow_threshold = 0.48
-glow_tint = [0.35, 0.85, 1.15]
+glow_tint = [1.0, 0.03, 0.03]
 
 # 消光：**逐通道**（R, G, B）。
 #

@@ -387,6 +387,15 @@ pub mod stars {
         pub clump_radius: f32,
         /// 归到簇里的比例（`0` = 全均匀、`1` = 全部成团）。
         pub clump_share: f32,
+        /// **场星自己的颜色**（写进星表，逐星一份）。
+        ///
+        /// ⚠ 用户 2026-09-25："星光用蓝色、散射用红色。" 星表里的颜色同时喂**两处**：
+        ///   * 直射那一档（`raymarch` 里 `power = 亮度 × tint`）⇒ 画面上的星走这个色；
+        ///   * 照亮气体那一档（`bake_emission` 的 `star_lit`）⇒ 气被染成这个色，
+        ///     而散射整体还要乘 `EmissionParams::glow_tint`（红）⇒ 蓝 × 红 ≈ 只剩一成。
+        ///   ⚠ 想让"星光照亮的气"完整保留，就得给直射那一档单开一个通道配比
+        ///     （一份新 uniform）—— 现在这条是零管道成本的版本。
+        pub star_tint: [f32; 3],
         /// **大尺度**：星按这一族 fbm 的密度偏置（与气用同一个噪声 ⇒ 星云在哪、星就在哪）。
         ///
         /// ⚠ 把这几个数写成 `art/nebula/envelope.toml`（或 `blobs.toml`）那一份，
@@ -427,6 +436,7 @@ pub mod stars {
                 clump_count: 0,
                 clump_radius: 0.25,
                 clump_share: 0.0,
+                star_tint: [1.0, 1.0, 1.0],
                 sky_biased: false,
                 sky_frequency: 0.35,
                 sky_octaves: 3,

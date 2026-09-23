@@ -3,8 +3,9 @@
 //! ⚠ 光深要按**世界点**采样（`sample_world`），不能拿体素格点凑：格点上的 τ 有台阶，
 //!   而台阶在画面上就是一圈圈等值线。这一份只是把"按体素算一遍"接到声明上。
 //!
-//! ⚠ **星光**那一笔（`starlight_*`）也在这里：它吃的是**星场**（`i.stars`，R3 稀疏格里的
-//!   一批点光源）—— 与方向光同一条口径（逐体素的量，与看它的视线无关）。
+//! ⚠⚠ 2026-09-25：**星光照气体那一笔删掉了**（用户："想当然的非物理元素，散射已经包含"）。
+//!   它曾经吃一份星场（`i.stars`）；删掉之后这一档只吃密度 ⇒ 依赖方向变成
+//!   `density → emission → stars → sky`（星场反过来吃发射，见 `px_volume_op::stars`）。
 
 use px_volume_schema::ops::Emission;
 
@@ -13,13 +14,12 @@ use px_volume_schema::ops::Emission;
 /// （判据 `the_gpu_emission_matches_the_cpu` 逐体素对到 0.000000），图脚本不改。
 fn px_volume_op_gpu_emission(
     density: &px_volume_schema::VolumeData,
-    stars: &px_sparse::StarField,
     params: &px_volume_schema::params::emission::EmissionParams,
 ) -> Result<px_volume_schema::VolumeData, String> {
-    px_volume_gpu_op::bake_emission(density, stars, params)
+    px_volume_gpu_op::bake_emission(density, params)
 }
 
 px_graph_schema::px_body! {
     Emission,
-    |p, i, _g| px_volume_op_gpu_emission(i.volume.value(), i.stars.value(), p)?
+    |p, i, _g| px_volume_op_gpu_emission(i.volume.value(), p)?
 }
