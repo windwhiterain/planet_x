@@ -434,15 +434,21 @@ impl VolumeData {
     /// ⚠⚠ **通道数必须编进 blob 形状**（见 [`Self::blobs`]）—— 这一档踩过一次：
     ///   形状只写单通道的量、字节却是 `samples × 6` ⇒ 产物**自相矛盾**、读回被拒，
     ///   而症状只是"每次烘图都重算"（不报错、不崩溃）。
+    /// 通道数（`usize` 版，方便按 index 用）。
+    ///
+    /// ⚠⚠ 从前它是 `data.len() / samples()`（**反推**）✗ —— 那正是"通道数没进类型"
+    ///   的残余：只要有一个构造点忘了写对，反推就会跟着错，而错法是完全静默的。
+    ///   现在唯一来源是字段 [`Self::lanes`]（`1` = 密度、`6` = 发射）。
     pub fn lanes(&self) -> usize {
-        let samples = self.samples().max(1);
-        self.data.len() / samples
+        self.lanes.max(1) as usize
     }
 
     pub fn at(&self, face: u32, layer: u32, t: u32, s: u32) -> f32 {
         // ⚠ 多通道体积**不能**用 `at`：布局是交错的（`data[格 × lanes + 通道]`），
         //   单通道下标式只对 `lanes == 1` 有意义。
-        debug_assert_eq!(self.lanes(), 1, "多通道体积请逐通道取（见 `lanes`）");
+        // ⚠ 从前是 `debug_assert` ⇒ release 里**静默**按单通道下标读六通道体积 ✗。
+        //   这一档踩过真实的坑（星场吃掉发射体积）⇒ 改成硬断言。
+        assert_eq!(self.lanes(), 1, "多通道体积请逐通道取（见 `lanes`）");
         self.data[(((face * self.layers + layer) * self.res + t) * self.res + s) as usize]
     }
 
@@ -457,8 +463,9 @@ impl VolumeData {
     /// 而老的单通道产物（4 维形状）**照旧能读**。
     pub fn blobs(&self) -> Vec<Blob> {
         let mut shape = vec![CUBE_FACES, self.layers, self.res, self.res];
-        if self.lanes() > 1 {
-            shape.push(self.lanes() as u32);
+        // ⚠ 用**字段**（不是 `lanes()`）：编码路径从此不含任何反推。
+        if self.lanes > 1 {
+            shape.push(self.lanes);
         }
         vec![Blob::from_f32(shape, &self.data)]
     }

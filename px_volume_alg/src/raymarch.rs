@@ -814,6 +814,7 @@ mod tests {
             chunk[5] = alpha[2];
         }
         VolumeData {
+            lanes: 1,
             res,
             layers,
             inner: 1.0,
@@ -860,6 +861,7 @@ mod tests {
             }
         }
         let volume = VolumeData {
+            lanes: 1,
             res,
             layers,
             inner: 1.0,

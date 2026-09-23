@@ -444,6 +444,7 @@ mod tests {
     #[test]
     fn sampling_by_world_point_respects_the_shell() {
         let volume = VolumeData {
+            lanes: 1,
             res: 8,
             layers: 6,
             inner: 1.0,
