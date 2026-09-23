@@ -4,6 +4,9 @@ version = "0.0.0"
 edition = "2024"
 
 [dependencies]
+px_volume_schema = { path = "../px_volume_schema" }
+px_field_schema = { path = "../px_field_schema" }
+px_volume_alg = { path = "../px_volume_alg" }
 px_gpu = { path = "../px_gpu" }
 
 [dev-dependencies]

@@ -12,7 +12,20 @@
 
 use px_volume_schema::ops::SkyNebula;
 
+/// 这一档的实现**在 GPU 上**（`px_volume_gpu_op::raymarch_sky`）：天穹是最贵的一段，
+/// 而它逐 texel 独立、正是 compute 的形状。输入/产物与从前完全一样（`VolumeData` + 星图
+/// → `TextureData`）⇒ 图脚本一行不改。
+fn px_volume_op_gpu(
+    emission: &px_volume_schema::VolumeData,
+    stars: &px_field_schema::field::Field,
+    params: &px_volume_schema::params::sky::SkyParams,
+) -> Result<px_volume_schema::TextureData, String> {
+    px_volume_gpu_op::raymarch_sky(emission, stars, params)
+}
+
 px_graph_schema::px_body! {
     SkyNebula,
+    // ⚠ 待切：GPU 档在**真实体积尺寸**下会触发 wgpu 校验错并 abort（见提交信息）。
+    //   切回来只要把这行换成 `px_volume_op_gpu(...)?`；语义已由 9 条判据对过。
     |p, i, _g| px_volume_alg::raymarch_sky(i.volume.value(), i.stars.value(), p)?
 }

@@ -1634,6 +1634,7 @@ dependencies = [
  "px_fingerprint",
  "px_graph_schema",
  "px_volume_alg",
+ "px_volume_gpu_op",
  "px_volume_schema",
 ]
 

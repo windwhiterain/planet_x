@@ -47,9 +47,11 @@ fn build() -> Option<Gpu> {
     let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
         label: Some("px_gpu"),
         required_features: adapter.features() & wgpu::Features::FLOAT32_FILTERABLE,
-        // ⚠ `downlevel_defaults`：这一档的 storage buffer 上限比默认低，够放星点与体积；
-        //   要求更高时**在调用处**按需申请，别在这里悄悄抬高所有算子的门槛。
-        required_limits: wgpu::Limits::downlevel_defaults(),
+        // ⚠⚠ 用**适配器自己的上限**，不用 `downlevel_defaults`：后者的 storage buffer 上限只有
+        //   128 MB，而 shape 128 的体积（6 面 x 128^2 x 128 层 x 6 通道 x 4 B）就有 300 MB
+        //   ⇒ 校验错。而校验错走 wgpu 默认的错误处理会 **panic**，panic 再穿过算子的 dylib
+        //   边界 ⇒ `Rust cannot catch foreign exceptions` ⇒ **整个烘焙进程 abort**（实测踩过）。
+        required_limits: adapter.limits(),
         experimental_features: wgpu::ExperimentalFeatures::disabled(),
         memory_hints: wgpu::MemoryHints::MemoryUsage,
         trace: wgpu::Trace::Off,
@@ -247,6 +249,9 @@ pub fn dispatch_slots(
         }));
     }
 
+    // ⚠ 待办：这里该压一层校验错误域（出错返回 Err 而不是 panic —— panic 穿过算子的
+    //   dylib 边界会 abort 整个烘焙进程，实测踩过）。wgpu 29 的这个位置没有
+    //   `pop_error_scope`，留到搞清 API 之后再补。
     let mut encoder = gpu
         .device
         .create_command_encoder(&wgpu::CommandEncoderDescriptor {

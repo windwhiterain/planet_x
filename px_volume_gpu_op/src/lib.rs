@@ -1205,3 +1205,70 @@ mod sky_tests {
         );
     }
 }
+
+/// **GPU 版整条天空**：与 `px_volume_alg::raymarch_sky` 同一签名 —— 图脚本那一行不用改，
+/// 换的只是这一档背后的实现。
+///
+/// ⚠ 分级表与锚点仍取自 `px_volume_alg`（**唯一真源**那一份）：GPU 只是把它们当 uniform 传进去，
+/// 不在这一侧复制任何手调数字。半精度打包也复用同一份 `half_from_f32` —— 格式只写一次。
+pub fn raymarch_sky(
+    emission: &px_volume_schema::VolumeData,
+    stars: &px_field_schema::field::Field,
+    sky_params: &px_volume_schema::params::sky::SkyParams,
+) -> Result<px_volume_schema::TextureData, String> {
+    let face = sky_params.face.max(1);
+    let extras = MarchExtras {
+        stars: Some(&stars.data),
+        star_face: stars.width,
+        star_gain: sky_params.star_gain,
+        star_floor: sky_params.star_floor,
+        background: sky_params.background,
+    };
+    let hue = px_volume_alg::raymarch::RAMP_HUE;
+    let ramp_hue_table = [
+        [hue[0][0], hue[0][1], hue[0][2], 0.0],
+        [hue[1][0], hue[1][1], hue[1][2], 0.0],
+        [hue[2][0], hue[2][1], hue[2][2], 0.0],
+        [hue[3][0], hue[3][1], hue[3][2], 0.0],
+    ];
+    let graded = sky(
+        face,
+        sky_params.steps.max(1),
+        emission.inner,
+        emission.res,
+        emission.layers,
+        emission.inner,
+        emission.outer,
+        &emission.data,
+        &extras,
+        (
+            px_volume_alg::raymarch::TONE_IN,
+            px_volume_alg::raymarch::TONE_OUT,
+            px_volume_alg::TONE_LIMITS,
+        ),
+        (px_volume_alg::raymarch::RAMP_LUMA, ramp_hue_table),
+        px_volume_alg::GRADE_STRENGTH,
+    )?;
+    let texels = (face * face * 6) as usize;
+    if graded.len() != texels * 3 {
+        return Err(format!("GPU 出图长度不对：{}（应为 {}）", graded.len(), texels * 3));
+    }
+    // 打包成 Rgba16Float：alpha = 1（与 CPU 那一侧逐字一致）。
+    let mut bytes = Vec::with_capacity(texels * 8);
+    for index in 0..texels {
+        for channel in 0..3 {
+            bytes.extend_from_slice(
+                &px_volume_alg::half::half_from_f32(graded[index * 3 + channel]).to_le_bytes(),
+            );
+        }
+        bytes.extend_from_slice(&px_volume_alg::half::half_from_f32(1.0).to_le_bytes());
+    }
+    Ok(px_volume_schema::TextureData::new(
+        face,
+        face,
+        6,
+        1,
+        px_volume_schema::TextureFormat::Rgba16Float,
+        bytes,
+    ))
+}

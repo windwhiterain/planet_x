@@ -10,6 +10,7 @@ edition = "2024"
 crate-type = ["dylib"]
 
 [dependencies]
+px_volume_gpu_op = { path = "../px_volume_gpu_op" }
 # 契约（`PxOp` / 装载 / `Build`）+ 体积域的数据与**声明**（算法不吃声明，但符号签名要用它）。
 px_graph_schema = { path = "../px_graph_schema" }
 px_volume_schema = { path = "../px_volume_schema" }
