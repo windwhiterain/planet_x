@@ -1048,7 +1048,7 @@ pub fn sky(
     let out = px_gpu::dispatch_slots(
         gpu,
         SAMPLER_WGSL,
-        "sky_grade",
+        "sky_radiance",
         &[
             px_gpu::Slot { binding: 0, value: Binding::Uniform(&volume_uniform) },
             px_gpu::Slot { binding: 1, value: Binding::Storage(&bytes(data)) },
@@ -1064,10 +1064,86 @@ pub fn sky(
         ],
         workgroups(texels),
     )?;
+    let radiance = out[0]
+        .chunks_exact(4)
+        .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap()))
+        .collect::<Vec<f32>>();
+    grade_pixels(gpu, &radiance, &sky_uniform)
+}
+
+/// 分级那一趟（就地）：拿 `sky_radiance` 的输出再走一遍响应曲线 + 色相斜坡。
+fn grade_pixels(
+    gpu: &px_gpu::Gpu,
+    radiance: &[f32],
+    sky_uniform: &SkyUniform,
+) -> Result<Vec<f32>, String> {
+    let bytes: Vec<u8> = radiance.iter().flat_map(|v| v.to_le_bytes()).collect();
+    let out = px_gpu::dispatch_slots(
+        gpu,
+        SAMPLER_WGSL,
+        "grade_pixels",
+        &[
+            px_gpu::Slot { binding: 4, value: Binding::Uniform(&sky_uniform.to_bytes()) },
+            px_gpu::Slot { binding: 5, value: Binding::Write(&bytes) },
+        ],
+        workgroups(radiance.len() / 3),
+    )?;
     Ok(out[0]
         .chunks_exact(4)
         .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap()))
         .collect())
+}
+
+/// **烘焙时量出来的输入锚点**：辐射亮度的分位（对数分箱直方图）。
+///
+/// ⚠ 锚点的定义就是"本次烘焙的输入分位 -> 参考的输出分位" ⇒ 只有**量**出来才与分辨率、
+///   面数、体积解耦；写死一组常数的话，换分辨率就得回来重拟（实测：192^3/face 4096 时
+///   p50 从 0.0194 漂到 0.0246）。
+pub fn anchors_from_radiance(
+    gpu: &px_gpu::Gpu,
+    radiance: &[f32],
+    sky_uniform: &SkyUniform,
+) -> Result<[f32; 4], String> {
+    const BIN_COUNT: usize = 512;
+    let bytes: Vec<u8> = radiance.iter().flat_map(|v| v.to_le_bytes()).collect();
+    let out = px_gpu::dispatch_slots(
+        gpu,
+        SAMPLER_WGSL,
+        "bin_luma",
+        &[
+            px_gpu::Slot { binding: 4, value: Binding::Uniform(&sky_uniform.to_bytes()) },
+            px_gpu::Slot { binding: 5, value: Binding::Write(&bytes) },
+            px_gpu::Slot { binding: 7, value: Binding::Write(&vec![0_u8; BIN_COUNT * 4]) },
+        ],
+        workgroups(radiance.len() / 3),
+    )?;
+    let counts: Vec<u32> = out[1]
+        .chunks_exact(4)
+        .map(|chunk| u32::from_le_bytes(chunk.try_into().unwrap()))
+        .collect();
+    let (log_min, log_max) = (-16.0_f32, 4.0_f32);
+    let total: u64 = counts.iter().map(|c| *c as u64).sum();
+    if total == 0 {
+        return Err("直方图是空的（辐射全零？）".to_string());
+    }
+    let targets = [0.10_f64, 0.50, 0.85, 0.99];
+    let mut anchors = [0.0_f32; 4];
+    let mut cumulative = 0_u64;
+    let mut next = 0;
+    for (bin, count) in counts.iter().enumerate() {
+        cumulative += *count as u64;
+        while next < 4 && cumulative as f64 >= targets[next] * total as f64 {
+            let position = (bin as f32 + 0.5) / BIN_COUNT as f32;
+            anchors[next] = 2.0_f32.powf(log_min + position * (log_max - log_min));
+            next += 1;
+        }
+    }
+    for value in anchors.iter_mut() {
+        if *value <= 0.0 {
+            *value = 1e-4;
+        }
+    }
+    Ok(anchors)
 }
 
 #[cfg(test)]
@@ -1218,14 +1294,21 @@ mod sky_tests {
 /// **GPU 版整条天空**：与 `px_volume_alg::raymarch_sky` 同一签名 —— 图脚本那一行不用改，
 /// 换的只是这一档背后的实现。
 ///
-/// ⚠ 分级表与锚点仍取自 `px_volume_alg`（**唯一真源**那一份）：GPU 只是把它们当 uniform 传进去，
-/// 不在这一侧复制任何手调数字。半精度打包也复用同一份 `half_from_f32` —— 格式只写一次。
+/// 三个阶段（都是 GPU 上的独立派发）：
+/// 1. `sky_radiance`：三条通道各积一遍，得到**未分级**的辐射；
+/// 2. `bin_luma` + `anchors_from_radiance`：**量出本次烘焙的输入分位**当响应曲线的锚点
+///    （锚点的定义就是"本次输入分位 -> 参考输出分位"，所以必须量、不能写死）；
+/// 3. `grade_pixels`：亮度响应 + 色相斜坡，逐格亮度守恒。
+///
+/// ⚠ 分级表与参考分位仍取自 `px_volume_alg`（唯一真源那一份）；半精度打包复用同一份
+///   `half_from_f32` —— 格式只写一次。
 pub fn raymarch_sky(
     emission: &px_volume_schema::VolumeData,
     stars: &px_field_schema::field::Field,
     sky_params: &px_volume_schema::params::sky::SkyParams,
 ) -> Result<px_volume_schema::TextureData, String> {
     let face = sky_params.face.max(1);
+    let steps = sky_params.steps.max(1);
     let extras = MarchExtras {
         stars: Some(&stars.data),
         star_face: stars.width,
@@ -1240,37 +1323,86 @@ pub fn raymarch_sky(
         [hue[2][0], hue[2][1], hue[2][2], 0.0],
         [hue[3][0], hue[3][1], hue[3][2], 0.0],
     ];
-    let graded = sky(
-        face,
-        sky_params.steps.max(1),
-        emission.inner,
-        emission.res,
-        emission.layers,
-        emission.inner,
-        emission.outer,
-        &emission.data,
-        &extras,
-        (
-            px_volume_alg::raymarch::TONE_IN,
-            px_volume_alg::raymarch::TONE_OUT,
-            px_volume_alg::TONE_LIMITS,
-        ),
-        (px_volume_alg::raymarch::RAMP_LUMA, ramp_hue_table),
-        px_volume_alg::GRADE_STRENGTH,
-    )?;
+    let Some(gpu) = connect() else {
+        return Err("没有可用 GPU：这一档现在完全跑在 GPU 上".to_string());
+    };
+    let volume_uniform = [
+        emission.res.to_le_bytes(),
+        emission.layers.to_le_bytes(),
+        (LANES as u32).to_le_bytes(),
+        0_u32.to_le_bytes(),
+        emission.inner.to_le_bytes(),
+        emission.outer.to_le_bytes(),
+        0.0_f32.to_le_bytes(),
+        0.0_f32.to_le_bytes(),
+    ]
+    .concat();
+    let mut uniform = SkyUniform {
+        counts: [steps, face, 0, extras.star_face],
+        scalars: [0.0, extras.star_gain, extras.star_floor, emission.inner],
+        background: [
+            extras.background[0],
+            extras.background[1],
+            extras.background[2],
+            0.0,
+        ],
+        tone_in: [0.0; 4],
+        tone_out: px_volume_alg::raymarch::TONE_OUT,
+        ramp_luma: px_volume_alg::raymarch::RAMP_LUMA,
+        ramp_hue: ramp_hue_table,
+        limits: [
+            px_volume_alg::TONE_LIMITS[0],
+            px_volume_alg::TONE_LIMITS[1],
+            px_volume_alg::GRADE_STRENGTH,
+            0.0,
+        ],
+    };
+    let bytes = |values: &[f32]| -> Vec<u8> {
+        values.iter().flat_map(|v| v.to_le_bytes()).collect()
+    };
     let texels = (face * face * 6) as usize;
+    let star_bytes = bytes(&extras.stars.map(|s| s.to_vec()).unwrap_or_else(|| vec![0.0; 1]));
+
+    // 1) 辐射。
+    let out = px_gpu::dispatch_slots(
+        gpu,
+        SAMPLER_WGSL,
+        "sky_radiance",
+        &[
+            px_gpu::Slot { binding: 0, value: Binding::Uniform(&volume_uniform) },
+            px_gpu::Slot { binding: 1, value: Binding::Storage(&bytes(&emission.data)) },
+            px_gpu::Slot { binding: 4, value: Binding::Uniform(&uniform.to_bytes()) },
+            px_gpu::Slot { binding: 5, value: Binding::Write(&vec![0_u8; texels * 12]) },
+            px_gpu::Slot { binding: 6, value: Binding::Storage(&star_bytes) },
+        ],
+        workgroups(texels),
+    )?;
+    let radiance: Vec<f32> = out[0]
+        .chunks_exact(4)
+        .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap()))
+        .collect();
+
+    // 2) 量输入分位 ⇒ 响应曲线的锚点。
+    uniform.tone_in = anchors_from_radiance(gpu, &radiance, &uniform)?;
+
+    // 3) 分级（响应 + 色相斜坡）。
+    let graded = grade_pixels(gpu, &radiance, &uniform)?;
     if graded.len() != texels * 3 {
-        return Err(format!("GPU 出图长度不对：{}（应为 {}）", graded.len(), texels * 3));
+        return Err(format!(
+            "GPU 出图长度不对：{}（应为 {}）",
+            graded.len(),
+            texels * 3
+        ));
     }
     // 打包成 Rgba16Float：alpha = 1（与 CPU 那一侧逐字一致）。
-    let mut bytes = Vec::with_capacity(texels * 8);
+    let mut packed = Vec::with_capacity(texels * 8);
     for index in 0..texels {
         for channel in 0..3 {
-            bytes.extend_from_slice(
+            packed.extend_from_slice(
                 &px_volume_alg::half::half_from_f32(graded[index * 3 + channel]).to_le_bytes(),
             );
         }
-        bytes.extend_from_slice(&px_volume_alg::half::half_from_f32(1.0).to_le_bytes());
+        packed.extend_from_slice(&px_volume_alg::half::half_from_f32(1.0).to_le_bytes());
     }
     Ok(px_volume_schema::TextureData::new(
         face,
@@ -1278,9 +1410,12 @@ pub fn raymarch_sky(
         6,
         1,
         px_volume_schema::TextureFormat::Rgba16Float,
-        bytes,
+        packed,
     ))
 }
+
+
+
 
 #[cfg(test)]
 mod size_tests {

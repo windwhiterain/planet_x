@@ -394,10 +394,10 @@ fn grade_pixel(rgb: vec3<f32>) -> vec3<f32> {
     return out;
 }
 
-// 整条天空：三条通道各积一遍（入口名避开模块级的 sky uniform）（逐通道消光不同 => 透过率也不同），再分级。
+// 整条天空的**辐射**（未分级）：三条通道各积一遍（入口名避开模块级的 sky uniform）（逐通道消光不同 => 透过率也不同），再分级。
 // image 每格 3 个 f32（分级就地覆盖）。
 @compute @workgroup_size(64)
-fn sky_grade(@builtin(global_invocation_id) id: vec3<u32>) {
+fn sky_radiance(@builtin(global_invocation_id) id: vec3<u32>) {
     let index = flat_index_of(id);
     let count = arrayLength(&image) / 3u;
     if (index >= count) {
@@ -436,7 +436,22 @@ fn sky_grade(@builtin(global_invocation_id) id: vec3<u32>) {
         if (c == 2u) { rgb.z = max(radiance, 0.0); }
     }
 
-    // 先亮度响应（tone(l)/l 保色相），后色相斜坡（档位常数在输出域量的，顺序不能反）。
+    image[index * 3u] = rgb.x;
+    image[index * 3u + 1u] = rgb.y;
+    image[index * 3u + 2u] = rgb.z;
+}
+
+// 分级（就地）：先亮度响应（tone(l)/l 保色相），后色相斜坡。
+// ⚠ 锚点由宿主在烘焙时**量出来**（见 bin_luma）：档位常数在输出域量与响应之后对齐，
+//   顺序反了整片色偏。
+@compute @workgroup_size(64)
+fn grade_pixels(@builtin(global_invocation_id) id: vec3<u32>) {
+    let index = flat_index_of(id);
+    let count = arrayLength(&image) / 3u;
+    if (index >= count) {
+        return;
+    }
+    let rgb = vec3<f32>(image[index * 3u], image[index * 3u + 1u], image[index * 3u + 2u]);
     let l = luma_of(rgb);
     var response = 0.0;
     if (l > 1e-9) {
@@ -446,4 +461,29 @@ fn sky_grade(@builtin(global_invocation_id) id: vec3<u32>) {
     image[index * 3u] = graded.x;
     image[index * 3u + 1u] = graded.y;
     image[index * 3u + 2u] = graded.z;
+}
+
+// 亮度直方图（对数分箱）：宿主据此在**烘焙时**量出响应曲线的输入锚点 ——
+// 锚点的定义就是"本次烘焙的输入分位 -> 参考的输出分位"，量出来才与分辨率解耦。
+const BIN_COUNT: u32 = 512u;
+const LOG_MIN: f32 = -16.0;
+const LOG_MAX: f32 = 4.0;
+
+@group(0) @binding(7) var<storage, read_write> histogram: array<atomic<u32>>;
+
+@compute @workgroup_size(64)
+fn bin_luma(@builtin(global_invocation_id) id: vec3<u32>) {
+    let index = flat_index_of(id);
+    let count = arrayLength(&image) / 3u;
+    if (index >= count) {
+        return;
+    }
+    let l = luma_of(vec3<f32>(image[index * 3u], image[index * 3u + 1u], image[index * 3u + 2u]));
+    if (l <= 0.0) {
+        atomicAdd(&histogram[0u], 1u);
+        return;
+    }
+    let position = (log2(l) - LOG_MIN) / (LOG_MAX - LOG_MIN) * f32(BIN_COUNT);
+    let bin = u32(clamp(floor(position), 0.0, f32(BIN_COUNT) - 1.0));
+    atomicAdd(&histogram[bin], 1u);
 }
