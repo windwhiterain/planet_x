@@ -173,3 +173,57 @@ fn sample_points(@builtin(global_invocation_id) id: vec3<u32>) {
     let point = vec3<f32>(points[id.x * 3u], points[id.x * 3u + 1u], points[id.x * 3u + 2u]);
     out[id.x] = sample_volume(point, volume.shape.w);
 }
+
+// ------------------------------- 步进入口 -------------------------------
+// binding 4/5：与采样入口的 0..3 分开（同一模块里同一号只能有一种类型）。
+// 0/1（体积 uniform 与体数据）两个入口同类型，直接复用。
+
+struct Sky {
+    counts: vec4<u32>,        // (steps, face, channel, 未用)
+    scalars: vec4<f32>,       // (jitter, star_gain, star_floor, enter)
+    background: vec4<f32>,
+    tone_in: vec4<f32>,
+    tone_out: vec4<f32>,
+    ramp_luma: vec4<f32>,
+    ramp_hue_0: vec4<f32>,
+    ramp_hue_1: vec4<f32>,
+    ramp_hue_2: vec4<f32>,
+    ramp_hue_3: vec4<f32>,
+};
+
+@group(0) @binding(4) var<uniform> sky: Sky;
+@group(0) @binding(5) var<storage, read_write> image: array<f32>;
+
+// 单通道步进：每条视线从 enter 走到 outer，中点取样的黎曼和。
+// 布局与星点查表同一套：row = 面 * face_size + y。
+@compute @workgroup_size(64)
+fn march(@builtin(global_invocation_id) id: vec3<u32>) {
+    let count = arrayLength(&image);
+    if (id.x >= count) {
+        return;
+    }
+    let face_size = sky.counts.y;
+    let row = id.x / face_size;
+    let x = id.x % face_size;
+    let face = row / face_size;
+    let y = row % face_size;
+    let s = (f32(x) + 0.5) / f32(face_size);
+    let t = (f32(y) + 0.5) / f32(face_size);
+    let direction = cube_direction(face, s, t);
+    let steps = sky.counts.x;
+    let lane = sky.counts.z;
+    let enter = sky.scalars.w;
+    let outer = volume.extent.y;
+    let h = (outer - enter) / f32(steps);
+    var transmittance = 1.0;
+    var radiance = 0.0;
+    for (var i = 0u; i < steps; i = i + 1u) {
+        let distance = enter + (f32(i) + 0.5) * h;
+        let point = direction * distance;
+        let emit = sample_volume(point, lane);
+        let sigma = sample_volume(point, lane + 3u);
+        radiance = radiance + transmittance * emit * h;
+        transmittance = transmittance * exp(-sigma * h);
+    }
+    image[id.x] = radiance;
+}

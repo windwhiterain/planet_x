@@ -456,3 +456,106 @@ mod uniform_tests {
 // 行进结果应当收敛到 (e/s)(1 - exp(-s*L))。它不依赖任何 CPU 实现，因而能先把
 // 「步长约定 / 透过率递推 / 起点 enter」这三件事单独钉死；等这一条绿了，
 // 再拿真体积与 px_volume_alg::raymarch_channel 对账。
+
+/// 跑一遍步进核（单通道）；返回 面 x 面 x 6 个 texel 的辐射，布局 row = 面 * face + y。
+///
+/// ⚠ 起点约定（与 CPU 那份对齐前先自己说清）：中点取样，第 i 步在
+/// enter + (i + 0.5) * h，h = (outer - enter) / steps。先有这条约定，才谈得上对账。
+pub fn march(
+    face: u32,
+    steps: u32,
+    lane: u32,
+    enter: f32,
+    res: u32,
+    layers: u32,
+    inner: f32,
+    outer: f32,
+    data: &[f32],
+) -> Result<Vec<f32>, String> {
+    let Some(gpu) = connect() else {
+        return Err("没有可用 GPU".to_string());
+    };
+    let volume_uniform = [
+        res.to_le_bytes(),
+        layers.to_le_bytes(),
+        (LANES as u32).to_le_bytes(),
+        0_u32.to_le_bytes(),
+        inner.to_le_bytes(),
+        outer.to_le_bytes(),
+        0.0_f32.to_le_bytes(),
+        0.0_f32.to_le_bytes(),
+    ]
+    .concat();
+    let sky = SkyUniform {
+        counts: [steps, face, lane, 0],
+        scalars: [0.0, 0.0, 0.0, enter],
+        background: [0.0; 4],
+        tone_in: [0.0; 4],
+        tone_out: [0.0; 4],
+        ramp_luma: [0.0; 4],
+        ramp_hue: [[0.0; 4]; 4],
+    };
+    let texels = (face * face * 6) as usize;
+    let bytes =
+        |values: &[f32]| -> Vec<u8> { values.iter().flat_map(|v| v.to_le_bytes()).collect() };
+    let out = px_gpu::dispatch_slots(
+        gpu,
+        SAMPLER_WGSL,
+        "march",
+        &[
+            px_gpu::Slot {
+                binding: 0,
+                value: Binding::Uniform(&volume_uniform),
+            },
+            px_gpu::Slot {
+                binding: 1,
+                value: Binding::Storage(&bytes(data)),
+            },
+            px_gpu::Slot {
+                binding: 4,
+                value: Binding::Uniform(&sky.to_bytes()),
+            },
+            px_gpu::Slot {
+                binding: 5,
+                value: Binding::Write(&vec![0_u8; texels * 4]),
+            },
+        ],
+        workgroups(texels),
+    )?;
+    Ok(out[0]
+        .chunks_exact(4)
+        .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap()))
+        .collect())
+}
+
+#[cfg(test)]
+mod march_tests {
+    use super::*;
+
+    /// 步进入口的第一条判据走**解析解**：常发射 e、常消光 s、路径 L = outer - enter 时
+    /// 积分应当收敛到 (e/s)(1 - exp(-s*L))。它不依赖任何 CPU 实现，因而能把
+    /// 「步长约定 / 透过率递推 / 起点 enter」这三件事**单独**钉死。
+    /// 中点黎曼和的误差是 O(h^2)，256 步时远小于容差。
+    #[test]
+    fn the_march_converges_to_the_analytic_solution() {
+        let (res, layers) = (8_u32, 4_u32);
+        let (inner, outer) = (1.0_f32, 2.0_f32);
+        // e = s = 1（六条通道同值），于是解析值是 1 - 1/e。
+        let data = vec![1.0_f32; (6 * layers * res * res * LANES as u32) as usize];
+        let Ok(gpu_side) = march(8, 256, 0, inner, res, layers, inner, outer, &data) else {
+            println!("px_volume_gpu_op：没有可用 GPU，跳过");
+            return;
+        };
+        assert_eq!(gpu_side.len(), 8 * 8 * 6, "texel 数");
+        let want = 1.0 - (-1.0_f32).exp();
+        let worst = gpu_side
+            .iter()
+            .map(|value| (value - want).abs())
+            .fold(0.0_f32, f32::max);
+        assert!(
+            worst < 2e-3,
+            "步进结果应当收敛到解析解 {want:.6}，最大偏差 {worst:.6}"
+        );
+        println!("px_volume_gpu_op：步进 {worst:.6} 偏差（解析解 {want:.6}）");
+    }
+}

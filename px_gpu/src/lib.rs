@@ -78,6 +78,17 @@ pub enum Binding<'a> {
     Write(&'a [u8]),
 }
 
+/// 一个绑定 + 它的**显式 binding 号**。
+///
+/// 为什么需要显式号：WGSL 的 `@group(0) @binding(n)` 是**模块级**的，一个模块里同一个 n
+/// 只能有一种类型。两个入口（采样 / 步进）想共用同一份函数时，最省事的办法是让它们
+/// 用**互不冲突的号**（采样 0..3、步进 0/1 复用同类型 + 4/5 放自己的），
+/// 而 wgpu 的管线布局只覆盖入口**实际用到**的那些绑定。
+pub struct Slot<'a> {
+    pub binding: u32,
+    pub value: Binding<'a>,
+}
+
 /// 跑一遍计算着色器；回读**所有 `Binding::Write`**，顺序同声明顺序。
 ///
 /// ⚠ 每段字节的长度必须是 4 的倍数（`write_buffer` 的要求）—— 不满足时当场说清，
@@ -89,7 +100,31 @@ pub fn dispatch(
     bindings: &[Binding<'_>],
     workgroups: (u32, u32, u32),
 ) -> Result<Vec<Vec<u8>>, String> {
-    for (index, binding) in bindings.iter().enumerate() {
+    let slots: Vec<Slot<'_>> = bindings
+        .iter()
+        .enumerate()
+        .map(|(index, binding)| Slot {
+            binding: index as u32,
+            value: match binding {
+                Binding::Uniform(bytes) => Binding::Uniform(bytes),
+                Binding::Storage(bytes) => Binding::Storage(bytes),
+                Binding::Write(bytes) => Binding::Write(bytes),
+            },
+        })
+        .collect();
+    dispatch_slots(gpu, wgsl, entry, &slots, workgroups)
+}
+
+/// 同 [`dispatch`]，但每个绑定的 `binding` 号由调用者给（见 [`Slot`]）。
+pub fn dispatch_slots(
+    gpu: &Gpu,
+    wgsl: &str,
+    entry: &str,
+    slots: &[Slot<'_>],
+    workgroups: (u32, u32, u32),
+) -> Result<Vec<Vec<u8>>, String> {
+    for (index, slot) in slots.iter().enumerate() {
+        let binding = &slot.value;
         let bytes = match binding {
             Binding::Uniform(bytes) | Binding::Storage(bytes) | Binding::Write(bytes) => *bytes,
         };
@@ -108,10 +143,12 @@ pub fn dispatch(
             source: wgpu::ShaderSource::Wgsl(wgsl.into()),
         });
 
-    let mut entries = Vec::with_capacity(bindings.len());
-    let mut buffers = Vec::with_capacity(bindings.len());
+    let mut entries = Vec::with_capacity(slots.len());
+    let mut buffers = Vec::with_capacity(slots.len());
     let mut readback = Vec::new();
-    for (index, binding) in bindings.iter().enumerate() {
+    for slot in slots.iter() {
+        let index = slot.binding as usize;
+        let binding = &slot.value;
         let (ty, usage, bytes) = match binding {
             Binding::Uniform(bytes) => (
                 wgpu::BufferBindingType::Uniform,
@@ -152,7 +189,9 @@ pub fn dispatch(
         }
         buffers.push(buffer);
         if matches!(binding, Binding::Write(_)) {
-            readback.push((index, bytes.len()));
+            // ⚠ 这里要的是**缓冲区下标**（buffers 里的位置），不是槽位号：
+            //   槽位号可以是 4/5，而 buffers 只有 0..n-1。混用就是越界 panic。
+            readback.push((buffers.len() - 1, bytes.len()));
         }
     }
 
@@ -162,11 +201,14 @@ pub fn dispatch(
             label: Some("px_gpu"),
             entries: &entries,
         });
+    // ⚠ 条目号必须用**槽位号**（不是 0..n 的顺序号）：布局是按槽位号建的，
+    //   两边一旦不同，wgpu 报的是「binding 2 找不到对应声明」——措辞指向绑定，
+    //   病因却在"我把顺序号当成了号"。
     let bindings_ref: Vec<wgpu::BindGroupEntry> = buffers
         .iter()
         .enumerate()
         .map(|(index, buffer)| wgpu::BindGroupEntry {
-            binding: index as u32,
+            binding: slots[index].binding,
             resource: buffer.as_entire_binding(),
         })
         .collect();
