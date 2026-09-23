@@ -1557,6 +1557,8 @@ dependencies = [
  "px_protocol",
  "px_shader",
  "px_verify",
+ "px_volume_alg",
+ "px_volume_schema",
  "wgpu",
 ]
 

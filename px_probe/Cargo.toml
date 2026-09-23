@@ -21,3 +21,8 @@ px_protocol = { path = "../px_protocol" }
 wgpu = "29"
 bytemuck = { version = "1", features = ["derive"] }
 pollster = "0.4"
+# ⚠ `seam_probe` 用：读一份烘好的体网格 `.pxart`（`px_protocol::stream`），
+#   再用**真源**的 `px_volume_alg::sample_volume` 量它的跨面折痕 —— 探针只搬几何与差分，
+#   重建那一份**不复制**（复制出来的就是"量自己的抄本"）。
+px_volume_schema = { path = "../px_volume_schema" }
+px_volume_alg = { path = "../px_volume_alg" }

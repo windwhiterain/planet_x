@@ -99,6 +99,15 @@ fn field_row(shape: &VolumeShape, face: u32, layer: u32, t: u32) -> u32 {
 ///   写成插值会引入两种必须自己保证的精度陷阱（浮点反解跳层、面偏移往返丢低位）
 ///   —— 那是白付的代价。
 ///
+/// ⚠⚠ **行号里必须带面偏移**（`shape.row_of(face, 0)`）：上游的行号是
+///   `面 × (res × layers) + 层号 × res + 面内行`，而这里算出来的
+///   `层号 × res + 面内行` 只是**面内**行号（`local_voxel_of` 那个口径）。
+///   少了面偏移，六个面都读到**第 0 面**的同一段行 —— 传进来的 `face` 从头到尾没被用过。
+///   实测（2026-09-23，`--shape 128 --layers 64`）：密度体积六个面**逐位相同**
+///   （面间最大差 0.000000，判据 `the_faces_survive_a_resampling_density_bake`），
+///   于是天空立方贴图六面长得一模一样、只是亮度不同，相机正对一条面棱时
+///   画面正中裂开一道通高直缝（行平均棱比 5.87x，参考图 0.35x）。
+///
 /// ⚠ 面内两维**不跨面**：两个面在公共棱上的方向虽然相同，但它们的体素坐标带着不同的
 ///   面偏移 ⇒ 在参数空间里是两块分开的区域。跨面取样会读到另一块噪声（错位的云）。
 ///   边缘一律**钳制**：这是"最多把边界糊住"，方向是安全的那一边。
@@ -110,6 +119,7 @@ fn sample_field_local(
     t: f32,
     altitude: f32,
 ) -> f32 {
+    // ⚠ 这两个量是**上游场**的，与调用方那个产物的 `res` / `layers` 无关。
     let res = shape.res.max(1);
     let last_layer = shape.layers.max(2) - 1;
     let snap = |fraction: f32| {
@@ -141,8 +151,14 @@ fn sample_field_local(
     let (ya, yb) = (clamp_cell(y0), clamp_cell(y0 + 1.0));
     let layer_at = |step: f32| (layer0 + step).clamp(0.0, last_layer as f32) as u32;
     let (la, lb) = (layer_at(0.0), layer_at(1.0));
-    // 行号 = 层号 × res + 面内行（⚠ 面偏移不加：读**网格**走面内坐标）。
-    let corner = |cell_x: u32, cell_t: u32, layer: u32| field.at(cell_x, layer * res + cell_t);
+    // ⚠⚠ **面偏移必须加上**：行号是 `面 × (res × layers) + 层号 × res + 面内行`，
+    //   而这里算出来的 `层号 × res + 面内行` 只是**面内**行号（`local_voxel_of`
+    //   那个口径）。少了 `shape.row_of(face, 0)`，六个面都读到**第 0 面**的同一段行 ——
+    //   参数里的 `face` 从头到尾没被用过（实测 2026-09-23：`--shape 128 --layers 64`
+    //   烘出来的密度体积六个面**逐位相同**，面间最大差 0.000000）。
+    //   那是"星云六面长得一模一样、只是亮度不同"与画面正中那道通高直缝的根因。
+    let row_of = |layer: u32, cell_t: u32| field_row(shape, face, layer, cell_t);
+    let corner = |cell_x: u32, cell_t: u32, layer: u32| field.at(cell_x, row_of(layer, cell_t));
     let top = (corner(xa, ya, la) * (1.0 - tx) + corner(xb, ya, la) * tx) * (1.0 - ty)
         + (corner(xa, yb, la) * (1.0 - tx) + corner(xb, yb, la) * tx) * ty;
     let bottom = (corner(xa, ya, lb) * (1.0 - tx) + corner(xb, ya, lb) * tx) * (1.0 - ty)
@@ -374,6 +390,48 @@ mod tests {
             }
         }
         assert_eq!(checked, volume.samples(), "必须逐格都对过");
+    }
+
+    /// **上游场与产物不同网格时，六个面仍然是六个面**（走 `sample_field_local` 那条重采样路）。
+    ///
+    /// ⚠ 这条判据为什么必须存在：`sample_field_local` 里的行号是
+    ///   `层号 × 面内分辨率 + 面内行`，而那两个量都是**上游那张场**的形状。
+    ///   写成产物那一份（`res` / `layers`）时，行号会跨过一整个面甚至更远 ——
+    ///   实测（2026-09-23，`--shape 128 --layers 64`：上游 128 层、产物 64 层）
+    ///   六个面**逐位相同**（面间最大差 0.000000），六面读到的都是同一段行。
+    ///   后果不是"图糊了"而是：天空立方贴图的六个面**长得一模一样、只是亮度不同**，
+    ///   而相机正对一条面棱时左右两半取到两个不同的"同一张图" ⇒ 画面正中一道通高直缝。
+    ///
+    /// ⚠ 夹具刻意让**面与层都进值**（`face × 1000 + layer × 10`）：只带面号的话，
+    ///   行号错到"另一层"仍然可能碰巧读到同一个值。
+    #[test]
+    fn the_faces_survive_a_resampling_density_bake() {
+        // 上游：8×8 面内、32 层；产物：8×8 面内、8 层 ⇒ 面内同、径向不同 ⇒ 走重采样。
+        let source = VolumeShape { res: 8, layers: 32 };
+        let field = grid_field(&source, |_x, y| {
+            let face = y / (source.res * source.layers);
+            let layer = (y % (source.res * source.layers)) / source.res;
+            (face as f32) * 1000.0 + (layer as f32) * 10.0
+        });
+        let params = DensityParams {
+            layers: 8,
+            res_ratio: 1.0,
+            ..Default::default()
+        };
+        let volume = bake_density(&params, source.res, &field).expect("烘密度");
+        assert_eq!((volume.res, volume.layers), (8, 8), "产物形状按参数走");
+        // 取中段层（两壁的渐隐窗在那里是 1，值就是搬运过来的那一个）。
+        for layer in [2_u32, 4, 6] {
+            let base = volume.at(0, layer, 0, 0);
+            for face in 1..CUBE_FACES {
+                let got = volume.at(face, layer, 0, 0);
+                assert!(
+                    (got - base).abs() > 1.0,
+                    "面 {face} 层 {layer} 读成 {got}，与面 0 的 {base} 相同 —— \
+                     六个面塌成了一个（重采样的行号用了产物的形状）"
+                );
+            }
+        }
     }
 
     /// **壳外与壳内都是零；壳里是那个常数（再乘两壁的渐隐窗）**（按世界点采样）。

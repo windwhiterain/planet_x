@@ -183,8 +183,9 @@ pub fn bake_emission(density: &VolumeData, params: &EmissionParams) -> VolumeDat
 
                 let at = row * width + s as usize * 6;
                 for channel in 0..3 {
-                    out[at + channel] =
-                        main + glow * params.glow_tint[channel] + cluster * params.cluster_tint[channel];
+                    out[at + channel] = main
+                        + glow * params.glow_tint[channel]
+                        + cluster * params.cluster_tint[channel];
                     out[at + 3 + channel] = base * params.extinction[channel] + dust;
                 }
             }
