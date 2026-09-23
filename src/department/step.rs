@@ -118,8 +118,8 @@ pub(super) fn plan(department: &mut Department, warehouse: &mut Warehouse, ratio
     let mut ceilings = Vec::with_capacity(department.policies.len());
     let mut reference = 0.0f32;
     for policy in department.policies.iter() {
-        let ceiling = material_ceiling(policy, warehouse)
-            .min(capacity_ceiling(policy, department.capacity));
+        let ceiling =
+            material_ceiling(policy, warehouse).min(capacity_ceiling(policy, department.capacity));
         if ceiling.is_finite() {
             reference = reference.max(ceiling);
         }
@@ -224,7 +224,12 @@ pub(super) fn plan(department: &mut Department, warehouse: &mut Warehouse, ratio
     let unbounded: Vec<bool> = department
         .policies
         .iter()
-        .map(|policy| policy.consumptions.iter().all(|consumption| *consumption <= 0.0))
+        .map(|policy| {
+            policy
+                .consumptions
+                .iter()
+                .all(|consumption| *consumption <= 0.0)
+        })
         .collect();
     let capacity_use: Vec<f64> = department
         .policies
@@ -312,10 +317,7 @@ pub(super) fn plan(department: &mut Department, warehouse: &mut Warehouse, ratio
         .x
     };
     let (_rates, eaten, delivered, wanted_volume, settlement) = match rationing {
-        Rationing::Interior {
-            barrier,
-            curvature,
-        } => {
+        Rationing::Interior { barrier, curvature } => {
             let outcome = settlement::solve(
                 &willingness,
                 &plans,
@@ -336,11 +338,7 @@ pub(super) fn plan(department: &mut Department, warehouse: &mut Warehouse, ratio
             );
             let wanted = desire(barrier, curvature);
             let wanted_volume: Vec<f64> = (0..goods)
-                .map(|k| {
-                    (0..plans.len())
-                        .map(|p| plans[p][k] * wanted[p])
-                        .sum()
-                })
+                .map(|k| (0..plans.len()).map(|p| plans[p][k] * wanted[p]).sum())
                 .collect();
             (
                 outcome.x,

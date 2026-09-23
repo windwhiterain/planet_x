@@ -23,14 +23,12 @@ pub fn eval(params: &params::gradient::Params, inputs: &[&Field], grid: Grid) ->
         for x in 0..grid.width {
             let direction = grid.direction(x, y);
             let (east, north) = tangent_frame(direction);
-            let slope_east =
-                (input.sample_direction(step(direction, east, epsilon))
-                    - input.sample_direction(step(direction, east, -epsilon)))
-                    / (2.0 * epsilon);
-            let slope_north =
-                (input.sample_direction(step(direction, north, epsilon))
-                    - input.sample_direction(step(direction, north, -epsilon)))
-                    / (2.0 * epsilon);
+            let slope_east = (input.sample_direction(step(direction, east, epsilon))
+                - input.sample_direction(step(direction, east, -epsilon)))
+                / (2.0 * epsilon);
+            let slope_north = (input.sample_direction(step(direction, north, epsilon))
+                - input.sample_direction(step(direction, north, -epsilon)))
+                / (2.0 * epsilon);
             let tangent = [
                 slope_east * east[0] + slope_north * north[0],
                 slope_east * east[1] + slope_north * north[1],
@@ -98,9 +96,8 @@ mod tests {
             for y in 0..grid.height {
                 for x in 0..grid.width {
                     let direction = grid.direction(x, y);
-                    let along = axis[0] * direction[0]
-                        + axis[1] * direction[1]
-                        + axis[2] * direction[2];
+                    let along =
+                        axis[0] * direction[0] + axis[1] * direction[1] + axis[2] * direction[2];
                     let wanted = axis[component as usize] - along * direction[component as usize];
                     worst = worst.max((baked.at(x, y) - wanted).abs());
                 }
@@ -140,7 +137,9 @@ mod tests {
             }
         }
 
-        let baked: Vec<Field> = (0..3).map(|component| bake(grid, &input, component)).collect();
+        let baked: Vec<Field> = (0..3)
+            .map(|component| bake(grid, &input, component))
+            .collect();
         let mut previous: Option<[f32; 3]> = None;
         let mut worst = 0.0_f32;
         let steps = 400;

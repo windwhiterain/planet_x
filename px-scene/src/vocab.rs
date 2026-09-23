@@ -241,10 +241,7 @@ pub fn cloud_params(
     shape_orientation: [f32; 4],
 ) -> BTreeMap<String, Value> {
     BTreeMap::from([
-        (
-            "orientation".to_string(),
-            Value::Quad(shape_orientation),
-        ),
+        ("orientation".to_string(), Value::Quad(shape_orientation)),
         (
             "tint".to_string(),
             Value::Quad([tint[0], tint[1], tint[2], 1.0]),
@@ -252,7 +249,10 @@ pub fn cloud_params(
         ("inner".to_string(), Value::Num(f64::from(inner))),
         ("outer".to_string(), Value::Num(f64::from(outer))),
         ("density".to_string(), Value::Num(f64::from(extinction))),
-        ("coverage".to_string(), Value::Num(f64::from(shape.coverage))),
+        (
+            "coverage".to_string(),
+            Value::Num(f64::from(shape.coverage)),
+        ),
         ("base".to_string(), Value::Num(f64::from(shape.base))),
         ("top".to_string(), Value::Num(f64::from(shape.top))),
         (

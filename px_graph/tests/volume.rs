@@ -8,10 +8,7 @@ fn volume(res: u32, layers: u32) -> VolumeData {
             for t in 0..res {
                 for s in 0..res {
                     data.push(
-                        face as f32 * 100.0
-                            + layer as f32 * 10.0
-                            + t as f32
-                            + s as f32 / 1000.0,
+                        face as f32 * 100.0 + layer as f32 * 10.0 + t as f32 + s as f32 / 1000.0,
                     );
                 }
             }

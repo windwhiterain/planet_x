@@ -26,10 +26,6 @@ fn every_domain_round_trips_through_its_own_uv() {
                 }
             }
         }
-        assert!(
-            worst < 0.08,
-            "{:?} 的 UV 往返偏差过大：{worst}",
-            domain
-        );
+        assert!(worst < 0.08, "{:?} 的 UV 往返偏差过大：{worst}", domain);
     }
 }

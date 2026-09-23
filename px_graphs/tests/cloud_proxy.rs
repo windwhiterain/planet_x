@@ -12,13 +12,13 @@ use std::collections::HashMap;
 use px_field_schema::field::{Field, Projection};
 use px_graph_schema::{Cooked, Grid, PxOp};
 use px_graphs::cloud_proxy;
+use px_mesh_schema::MeshData;
 use px_mesh_schema::ops as mesh_ops;
 use px_mesh_schema::params as mesh_params;
-use px_mesh_schema::MeshData;
+use px_verify::cloud_field::CloudFieldParams;
 use px_volume_schema::ops as volume_ops;
 use px_volume_schema::params::{self as volume_params, Params};
 use px_volume_schema::{PATCHES, VolumeData};
-use px_verify::cloud_field::CloudFieldParams;
 
 const FACE: u32 = 64;
 
@@ -153,8 +153,15 @@ fn the_proxy_encloses_the_coarse_field() {
     let cloud: CloudFieldParams = px_verify::proxy::from_volume(&params);
     let report = cloud_proxy::containment(&mesh, &cloud, &coverage, &params, 96, 2048);
     cloud_proxy::print_containment(&report, &params);
-    assert!(report.rays_with_surface > 20, "粗场有交点的方向太少，这个测试没在测东西");
-    assert_eq!(report.missing, 0, "有 {} 条方向粗场有交点、代理一个交点都没有", report.missing);
+    assert!(
+        report.rays_with_surface > 20,
+        "粗场有交点的方向太少，这个测试没在测东西"
+    );
+    assert_eq!(
+        report.missing, 0,
+        "有 {} 条方向粗场有交点、代理一个交点都没有",
+        report.missing
+    );
     assert!(
         report.worst_slack > -report.worst_cell,
         "最差余量 {:+.6} 超过了一个单元对角线 {:.6}",
@@ -210,7 +217,8 @@ fn the_final_field_makes_a_tighter_proxy() {
 
     // 网格也必须照样闭合：缺几何是硬失败。
     let mesh = surface(&surface_params(), &final_volume);
-    let (open, nonmanifold) = audit(&mesh);    println!(
+    let (open, nonmanifold) = audit(&mesh);
+    println!(
         "真场代理：{} 顶点 / {} 三角形｜开口边 {open}、非流形边 {nonmanifold}",
         mesh.vertices(),
         mesh.triangles(),
@@ -228,9 +236,19 @@ fn the_gradient_bound_is_above_the_measured_gradient() {
     let bound = cloud_proxy::measure_gradient_bound(&cloud, &coverage, &params, 6, 24, 16);
     println!(
         "|∇粗场| ≤ {:.3}（三轴 {:.1} / {:.1} / {:.1}，在面 {} 参数 {:?}）；参数里的 scale = {:.3}",
-        bound.bound, bound.axes[0], bound.axes[1], bound.axes[2], bound.face, bound.at, params.scale,
+        bound.bound,
+        bound.axes[0],
+        bound.axes[1],
+        bound.axes[2],
+        bound.face,
+        bound.at,
+        params.scale,
     );
-    assert!(bound.bound > 1.0, "量出来的梯度只有 {:.3}，这个测试没在测东西", bound.bound);
+    assert!(
+        bound.bound > 1.0,
+        "量出来的梯度只有 {:.3}，这个测试没在测东西",
+        bound.bound
+    );
     assert!(
         bound.bound <= params.scale,
         "量到的 |∇粗场| {:.3} 超过参数里的 scale {:.3}",

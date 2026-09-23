@@ -35,56 +35,79 @@ fn main() -> Result<(), Fault> {
     let carved = cook::<field::Warp>(
         &graph,
         "carved",
-        field::FieldPairInput { field: billows, offset: flow },
+        field::FieldPairInput {
+            field: billows,
+            offset: flow,
+        },
     )?;
     let weight = cook::<field::Constant>(&graph, "weight", ())?;
     let mixed = cook::<field::Mix>(
         &graph,
         "mixed",
-        field::MixInput { a: clusters, b: carved, mask: weight },
+        field::MixInput {
+            a: clusters,
+            b: carved,
+            mask: weight,
+        },
     )?;
 
     let coverage = cook::<field::Remap>(
         &graph,
         "coverage",
-        field::FieldInput { field: mixed.clone() },
+        field::FieldInput {
+            field: mixed.clone(),
+        },
     )?;
     let slope_x = cook::<field::Gradient>(
         &graph,
         "slope_x",
-        field::FieldInput { field: mixed.clone() },
+        field::FieldInput {
+            field: mixed.clone(),
+        },
     )?;
     let slope_y = cook::<field::Gradient>(
         &graph,
         "slope_y",
-        field::FieldInput { field: mixed.clone() },
+        field::FieldInput {
+            field: mixed.clone(),
+        },
     )?;
     let slope_z = cook::<field::Gradient>(
         &graph,
         "slope_z",
-        field::FieldInput { field: mixed.clone() },
+        field::FieldInput {
+            field: mixed.clone(),
+        },
     )?;
 
     // ── 体积：粗场（包住真场）与含细节的真场，参数文件不同、算子同一个 ─────────
     let coarse = cook::<volume::CloudCoarse>(
         &graph,
         "coarse",
-        volume::CloudCoarseInput { coverage: mixed.clone() },
+        volume::CloudCoarseInput {
+            coverage: mixed.clone(),
+        },
     )?;
     let proxy = cook::<mesh::Proxy>(
         &graph,
         "proxy",
-        mesh::ProxyInput { volume: coarse.clone() },
+        mesh::ProxyInput {
+            volume: coarse.clone(),
+        },
     )?;
     let fine = cook::<volume::CloudCoarse>(
         &graph,
         "coarse_fine",
-        volume::CloudCoarseInput { coverage: mixed.clone() },
+        volume::CloudCoarseInput {
+            coverage: mixed.clone(),
+        },
     )?;
     let proxy_fine = cook::<mesh::Proxy>(
         &graph,
         "proxy_fine",
-        mesh::ProxyInput { volume: fine.clone() },
+        mesh::ProxyInput {
+            volume: fine.clone(),
+        },
     )?;
 
     report(
@@ -211,7 +234,9 @@ fn check(
         bound.axes[2],
         bound.face,
         bound.at.map(|value| (value * 1000.0).round() / 1000.0),
-        bound.direction.map(|value| (value * 1000.0).round() / 1000.0),
+        bound
+            .direction
+            .map(|value| (value * 1000.0).round() / 1000.0),
         bound.value,
         params.scale,
     );

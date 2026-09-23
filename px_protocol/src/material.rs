@@ -412,7 +412,10 @@ mod tests {
             .expect("再序列化");
         assert_eq!(once, twice, "同一份布局两次序列化必须逐字节相同");
         assert_eq!(once, layout().to_json().expect("序列化"));
-        assert!(once.contains("\"binding\":5"), "贴图格要进 descriptor：{once}");
+        assert!(
+            once.contains("\"binding\":5"),
+            "贴图格要进 descriptor：{once}"
+        );
         assert!(!once.contains('\n'), "规范 JSON 不带换行");
         assert!(MaterialLayout::from_json("{").is_err(), "坏 JSON 要报错");
     }
@@ -430,9 +433,7 @@ mod tests {
             "清单要覆盖全表：{listed}"
         );
         assert!(
-            TEXTURE_SLOTS
-                .iter()
-                .all(|(binding, _)| binding % 2 == 1),
+            TEXTURE_SLOTS.iter().all(|(binding, _)| binding % 2 == 1),
             "贴图占奇数格、采样器占 +1"
         );
         assert_eq!(

@@ -8,9 +8,9 @@
 
 use px_field_schema::field::Field;
 use px_mesh_schema::MeshData;
-use px_volume_schema::{PATCHES, params::Params, point_of};
 use px_verify::cloud_field::CloudFieldParams;
 use px_verify::proxy;
+use px_volume_schema::{PATCHES, params::Params, point_of};
 
 fn sub(one: [f32; 3], two: [f32; 3]) -> [f32; 3] {
     [one[0] - two[0], one[1] - two[1], one[2] - two[2]]
@@ -325,8 +325,7 @@ pub fn measure_gradient_bound(
                             if delta <= 0.0 {
                                 continue;
                             }
-                            let slope =
-                                (value(face, other[0], other[1], other[2]) - here) / delta;
+                            let slope = (value(face, other[0], other[1], other[2]) - here) / delta;
                             if slope.abs() > worst[axis].abs() {
                                 worst[axis] = slope;
                             }
@@ -359,7 +358,9 @@ pub fn print_containment(report: &Containment, params: &Params) {
     );
     println!(
         "  最差方向 {:?}：内边界余量 {:+.6}、外边界余量 {:+.6}（世界单位，正 = 包住）｜该方向一格的单元对角线 {:.6}｜余量/对角线 {:+.3}",
-        report.worst_direction.map(|value| (value * 1000.0).round() / 1000.0),
+        report
+            .worst_direction
+            .map(|value| (value * 1000.0).round() / 1000.0),
         report.worst_inner,
         report.worst_outer,
         report.worst_cell,

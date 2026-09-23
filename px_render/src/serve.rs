@@ -27,10 +27,10 @@ use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use px_protocol::client as client;
+use px_protocol::ProtocolId;
+use px_protocol::client;
 use px_protocol::frame::{self, Frame};
 use px_protocol::render::{Job, Lease, Report, Request, Response, Scene, ShotReport};
-use px_protocol::ProtocolId;
 
 use crate::digest;
 use crate::gpu::Gpu;
@@ -48,8 +48,7 @@ const IO_TIMEOUT: Duration = Duration::from_secs(300);
 /// 经济世界（`Scene::World`）那条路的拒词。**一份真本、两处引用**：服务端对协议客户端拒它，
 /// 客户端在没有 `--scene` 时也用它 —— 抄成两份措辞就会漂开，而漂开的那一天读的人会被指向
 /// 错的原因（"没有在跑的渲染服务" ≠ "这条路本宿主没有"）。
-pub const WORLD_REFUSAL: &str =
-    "经济世界（`Scene::World` / `--stream`）那一路没有搬到这个宿主：\
+pub const WORLD_REFUSAL: &str = "经济世界（`Scene::World` / `--stream`）那一路没有搬到这个宿主：\
      它画的是 sim 的世界视图，不是渲染文档（`.pxart`）";
 
 /// 常驻服务：一台设备 + 一个 CAS 根。**没有别的状态**（见模块头那段）。
@@ -97,12 +96,12 @@ pub fn serve(port: u16, pcg_root: PathBuf, width: u32, height: u32) -> Result<()
     // ⚠ 这一行**必须在**：`tools/harness.ps1::Start-RenderServer` 等的就是它
     // （`Select-String -Pattern '渲染管线全部就绪'`）。措辞里的"共 0 条"不是省事：
     // 本宿主此刻确实一条待编的管线都没有，而"编不出来"这件事在请求里当场就拒了。
-    println!(
-        "渲染管线全部就绪：本宿主是**同步**建管线（没有队列可等），此刻待编 0 条、失败 0 条"
-    );
+    println!("渲染管线全部就绪：本宿主是**同步**建管线（没有队列可等），此刻待编 0 条、失败 0 条");
     // 尺寸这一栏在本宿主里**不参与出图**（每条请求自带 width/height）。与其让它变成一个
     // 谁也不看的旗标，不如当场说清：§106 那条"文档里写着的命令必须真的被跑过一次"。
-    println!("尺寸以请求里的为准（--width/--height 是 Bevy 宿主那一路的初始画布，这里只收不用）：{width}×{height}");
+    println!(
+        "尺寸以请求里的为准（--width/--height 是 Bevy 宿主那一路的初始画布，这里只收不用）：{width}×{height}"
+    );
 
     spawn_lease_watch(lease_path, lease.pid);
 

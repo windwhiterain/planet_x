@@ -418,9 +418,24 @@ impl TriangleContents {
                 let bc = &sides[side_length..side_length * 2];
                 let ca = &sides[side_length * 2..];
 
-                geometric_slerp_multiple(points[a_idx as usize], points[b_idx as usize], ab, points);
-                geometric_slerp_multiple(points[b_idx as usize], points[c_idx as usize], bc, points);
-                geometric_slerp_multiple(points[c_idx as usize], points[a_idx as usize], ca, points);
+                geometric_slerp_multiple(
+                    points[a_idx as usize],
+                    points[b_idx as usize],
+                    ab,
+                    points,
+                );
+                geometric_slerp_multiple(
+                    points[b_idx as usize],
+                    points[c_idx as usize],
+                    bc,
+                    points,
+                );
+                geometric_slerp_multiple(
+                    points[c_idx as usize],
+                    points[a_idx as usize],
+                    ca,
+                    points,
+                );
 
                 contents.calculate(
                     Slice::Forward(ab),

@@ -181,16 +181,15 @@ pub fn reflect_assembled(assembled: &str, name: &str) -> Result<MaterialLayout, 
     })
 }
 
-fn kind_of(
-    module: &naga::Module,
-    handle: naga::Handle<naga::Type>,
-) -> Result<ParamKind, String> {
+fn kind_of(module: &naga::Module, handle: naga::Handle<naga::Type>) -> Result<ParamKind, String> {
     match &module.types[handle].inner {
         naga::TypeInner::Scalar(scalar) => scalar_kind(*scalar, 1),
         naga::TypeInner::Vector { size, scalar } => {
             let width = match size {
                 naga::VectorSize::Bi => {
-                    return Err("vec2 参数还没有产物能表达（Value 只有 数 / 三数 / 四数）".to_string());
+                    return Err(
+                        "vec2 参数还没有产物能表达（Value 只有 数 / 三数 / 四数）".to_string()
+                    );
                 }
                 naga::VectorSize::Tri => 3,
                 naga::VectorSize::Quad => 4,
@@ -238,7 +237,12 @@ mod tests {
         )
         .unwrap_or_else(|err| panic!("读不了 {name}：{err}"));
         let mut seen = Vec::new();
-        let assembled = crate::assemble::render_source(&source, &modules, crate::assemble::bevy_stub, &mut seen);
+        let assembled = crate::assemble::render_source(
+            &source,
+            &modules,
+            crate::assemble::bevy_stub,
+            &mut seen,
+        );
         reflect_assembled(&assembled, name).unwrap_or_else(|err| panic!("{err}"))
     }
 
@@ -263,16 +267,25 @@ mod tests {
         assert_eq!(layout.params[0].offset, 0);
         assert_eq!(layout.params[0].kind, ParamKind::Vec4);
         assert_eq!(layout.param("tint").expect("tint 在").kind, ParamKind::Vec4);
-        assert_eq!(layout.param("steps").expect("steps 在").kind, ParamKind::U32);
+        assert_eq!(
+            layout.param("steps").expect("steps 在").kind,
+            ParamKind::U32
+        );
         assert_eq!(layout.param("seed").expect("seed 在").kind, ParamKind::U32);
-        assert_eq!(layout.param("wind_skin").expect("wind_skin 在").kind, ParamKind::F32);
+        assert_eq!(
+            layout.param("wind_skin").expect("wind_skin 在").kind,
+            ParamKind::F32
+        );
         assert_eq!(layout.params_bytes % PARAMS_ALIGN, 0, "参数块按 16 对齐");
         assert!(
             layout.params_bytes as usize >= layout.params.last().expect("有参数").offset as usize,
             "参数块装得下最后一个参数"
         );
         assert!(
-            layout.params.iter().all(|slot| slot.offset % slot.kind.width().min(4) == 0),
+            layout
+                .params
+                .iter()
+                .all(|slot| slot.offset % slot.kind.width().min(4) == 0),
             "每个参数都落在自己类型的对齐上"
         );
         assert!(
@@ -295,8 +308,14 @@ mod tests {
         let surface = reflect("surface.wgsl");
         let bindings: Vec<u32> = surface.textures.iter().map(|slot| slot.binding).collect();
         assert_eq!(bindings, vec![1, 3, 5]);
-        assert_eq!(surface.texture(1).expect("在").dimension, TextureDimension::D2);
-        assert_eq!(surface.texture(5).expect("在").dimension, TextureDimension::Cube);
+        assert_eq!(
+            surface.texture(1).expect("在").dimension,
+            TextureDimension::D2
+        );
+        assert_eq!(
+            surface.texture(5).expect("在").dimension,
+            TextureDimension::Cube
+        );
     }
 
     #[test]

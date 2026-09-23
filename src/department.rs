@@ -1,10 +1,8 @@
-
 mod settlement;
 mod step;
 
 #[cfg(test)]
 mod tests;
-
 
 use crate::market::Market;
 use crate::warehouse::Warehouses;

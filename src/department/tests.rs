@@ -32,10 +32,7 @@ fn warehouses(stocks: &[&[(f32, f32)]]) -> Warehouses {
     )
 }
 
-fn setup(
-    stocks: &[&[(f32, f32)]],
-    policies: &[Vec<Policy>],
-) -> (Departments, Warehouses, Market) {
+fn setup(stocks: &[&[(f32, f32)]], policies: &[Vec<Policy>]) -> (Departments, Warehouses, Market) {
     let goods = stocks[0].len();
     let departments = Departments::new(
         policies
@@ -60,11 +57,7 @@ fn setup(
             })
             .collect(),
     );
-    (
-        departments,
-        warehouses(stocks),
-        market(goods, stocks.len()),
-    )
+    (departments, warehouses(stocks), market(goods, stocks.len()))
 }
 
 fn consumption(good: usize, goods: usize, motive: f32) -> Policy {
@@ -112,10 +105,7 @@ fn the_higher_motive_policy_takes_the_larger_share() {
     warehouses.warehouses[0].stocks[1].price = 1.0;
     departments.plan(&mut warehouses, &market);
     let taken = intake(&departments, 0);
-    assert!(
-        taken[1] > taken[0],
-        "意愿更强的那种应当吃得更多：{taken:?}",
-    );
+    assert!(taken[1] > taken[0], "意愿更强的那种应当吃得更多：{taken:?}",);
 }
 
 #[test]
@@ -134,10 +124,8 @@ fn execution_is_bounded_by_the_stock_on_hand() {
 #[test]
 fn the_cash_row_limits_consumption() {
     let stocks: &[&[(f32, f32)]] = &[&[(100.0, 1.0)]];
-    let (mut poor, mut poor_stocks, poor_market) =
-        setup(stocks, &[vec![consumption(0, 1, 1e6)]]);
-    let (mut rich, mut rich_stocks, rich_market) =
-        setup(stocks, &[vec![consumption(0, 1, 1e6)]]);
+    let (mut poor, mut poor_stocks, poor_market) = setup(stocks, &[vec![consumption(0, 1, 1e6)]]);
+    let (mut rich, mut rich_stocks, rich_market) = setup(stocks, &[vec![consumption(0, 1, 1e6)]]);
     poor_stocks.warehouses[0].stocks[0].price = 2.0;
     rich_stocks.warehouses[0].stocks[0].price = 2.0;
     poor.departments[0].currency = 3.0;
@@ -182,26 +170,33 @@ fn a_producer_earns_and_a_consumer_spends() {
         .iter()
         .map(|department| department.currency)
         .collect();
-    assert!(after[0] > before[0], "生产者应当挣到钱：{before:?} -> {after:?}");
-    assert!(after[1] < before[1], "消费者应当花钱：{before:?} -> {after:?}");
+    assert!(
+        after[0] > before[0],
+        "生产者应当挣到钱：{before:?} -> {after:?}"
+    );
+    assert!(
+        after[1] < before[1],
+        "消费者应当花钱：{before:?} -> {after:?}"
+    );
 }
 
 #[test]
 fn the_transfer_equalizes_balances() {
-    let (mut departments, _, _) =
-        setup(&[&[(1.0, 1.0)], &[(1.0, 1.0)]], &[vec![], vec![]]);
+    let (mut departments, _, _) = setup(&[&[(1.0, 1.0)], &[(1.0, 1.0)]], &[vec![], vec![]]);
     departments.departments[0].currency = 100.0;
     departments.departments[1].currency = 0.0;
     departments.transfer(1.0);
     let a = departments.departments[0].currency;
     let b = departments.departments[1].currency;
-    assert!((a - 50.0).abs() < 1e-3 && (b - 50.0).abs() < 1e-3, "{a} {b}");
+    assert!(
+        (a - 50.0).abs() < 1e-3 && (b - 50.0).abs() < 1e-3,
+        "{a} {b}"
+    );
 }
 
 #[test]
 fn the_transfer_conserves_the_total() {
-    let (mut departments, _, _) =
-        setup(&[&[(1.0, 1.0)], &[(1.0, 1.0)]], &[vec![], vec![]]);
+    let (mut departments, _, _) = setup(&[&[(1.0, 1.0)], &[(1.0, 1.0)]], &[vec![], vec![]]);
     departments.departments[0].currency = 7.0;
     departments.departments[1].currency = 3.0;
     departments.transfer(0.5);
@@ -215,8 +210,7 @@ fn the_transfer_conserves_the_total() {
 
 #[test]
 fn the_money_stock_is_held_at_its_target() {
-    let (mut departments, _, _) =
-        setup(&[&[(1.0, 1.0)], &[(1.0, 1.0)]], &[vec![], vec![]]);
+    let (mut departments, _, _) = setup(&[&[(1.0, 1.0)], &[(1.0, 1.0)]], &[vec![], vec![]]);
     departments.departments[0].currency = 1000.0;
     departments.departments[1].currency = 1.0;
     departments.money_target = 200.0;

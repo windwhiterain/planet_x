@@ -435,7 +435,10 @@ pub fn parse_call(file: &Path, body: &str) -> Result<Invocation, String> {
     })?;
     let decl = parts[2].clone();
     if decl.is_empty() {
-        return Err(format!("{}：`px_inst` 第三段（声明）是空的", file.display()));
+        return Err(format!(
+            "{}：`px_inst` 第三段（声明）是空的",
+            file.display()
+        ));
     }
     let source = unquote(&parts[4]).ok_or_else(|| {
         format!(
@@ -535,7 +538,10 @@ fn unquote(text: &str) -> Option<String> {
 
 /// 一棵目录树里的全部 `.rs`（跳过 `target/` 与 `.` 开头的目录）。
 pub fn collect_rs(dir: &Path, out: &mut Vec<PathBuf>) {
-    let name = dir.file_name().and_then(|value| value.to_str()).unwrap_or("");
+    let name = dir
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("");
     if name == "target" || name.starts_with('.') {
         return;
     }
@@ -616,7 +622,10 @@ pub fn declaration_crate(root: &Path, name: &str) -> Result<Option<(String, Path
 /// 收一个 crate **自己的** `.rs`（跳过 `target/` 与 `.` 开头的目录；碰到带 `Cargo.toml`
 /// 的子目录就停）。
 fn walk_crate(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
-    let name = dir.file_name().and_then(|value| value.to_str()).unwrap_or("");
+    let name = dir
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("");
     if name == "target" || name.starts_with('.') {
         return Ok(());
     }

@@ -66,15 +66,10 @@ pub enum Job {
     Shots,
     /// 老性能路（v10）：每个场景先出一张图，再收 `windows` 个干净窗口（前面丢 `drop` 个）。
     /// **回退路径**：`--windows` 显式给了才走它，老脚本因此一个字节都不用改。
-    Perf {
-        windows: u32,
-        drop: u32,
-    },
+    Perf { windows: u32, drop: u32 },
     /// 新性能主路径（v11）：等到「管线就绪 + 资产装完 + 重建后已渲染 K 帧」成立，
     /// 再**逐帧**采 `frames` 帧。窗口、丢窗、热身这三个经验常数在这一路上不存在。
-    Stable {
-        frames: u32,
-    },
+    Stable { frames: u32 },
 }
 
 impl Job {
@@ -335,8 +330,3 @@ impl std::fmt::Display for ClientError {
 }
 
 impl std::error::Error for ClientError {}
-
-
-
-
-

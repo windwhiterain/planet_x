@@ -66,7 +66,12 @@ fn point_at(direction: [f32; 3], altitude: f32, cloud: &CloudFieldParams) -> [f3
 
 /// 场值（= shader `cloud_field` 里那一串）与重映射前的 `b`：`b = noise²`，
 /// 因为 `noise = √b`。
-fn field_and_b(cloud: &CloudFieldParams, direction: [f32; 3], altitude: f32, cover: f32) -> (f32, f32) {
+fn field_and_b(
+    cloud: &CloudFieldParams,
+    direction: [f32; 3],
+    altitude: f32,
+    cover: f32,
+) -> (f32, f32) {
     let point = point_at(direction, altitude, cloud);
     let medium = cloud.medium_of(point);
     let noise = cloud.billows(medium.direction, medium.altitude);
@@ -84,7 +89,10 @@ fn the_slope_helper_is_the_derivative_of_the_remap() {
         let analytic = detail_curve_slope(b);
         worst = worst.max((numeric - analytic).abs() / analytic.max(1e-6));
     }
-    assert!(worst < 1e-2, "detail_curve_slope 与 d√b/db 差得太远：{worst:e}");
+    assert!(
+        worst < 1e-2,
+        "detail_curve_slope 与 d√b/db 差得太远：{worst:e}"
+    );
 }
 
 #[test]
@@ -109,9 +117,10 @@ fn the_reference_gradient_follows_the_remap_chain_rule() {
                 [point[0] as f64, point[1] as f64, point[2] as f64],
                 cover as f64,
             );
-            let size = (analytic[0] * analytic[0] + analytic[1] * analytic[1] + analytic[2] * analytic[2])
-                .sqrt()
-                .max(1.0) as f32;
+            let size =
+                (analytic[0] * analytic[0] + analytic[1] * analytic[1] + analytic[2] * analytic[2])
+                    .sqrt()
+                    .max(1.0) as f32;
             // 差商步长取几档取最小的那个：h 大了会跨过 clamp 的折点，小了被 f32 的舍入盖住。
             let mut gap = f32::INFINITY;
             for h in [1e-5_f32, 3e-5, 1e-4] {
@@ -145,7 +154,10 @@ fn the_reference_gradient_follows_the_remap_chain_rule() {
             worst = worst.max(gap);
         }
     }
-    assert!(sampled > 20, "贴着 τ 的采样点太少（{sampled} 个），这条判据没量到东西");
+    assert!(
+        sampled > 20,
+        "贴着 τ 的采样点太少（{sampled} 个），这条判据没量到东西"
+    );
     assert!(
         worst < 5e-2,
         "解析梯度（Dual，含 sqrt 链式法则）与中心差商不一致：最差相对差 {worst:e}"

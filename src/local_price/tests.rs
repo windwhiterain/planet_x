@@ -1,4 +1,4 @@
-use super::{Kind, Lab, Spec, GOODS};
+use super::{GOODS, Kind, Lab, Spec};
 
 fn modern() -> Lab {
     Lab::new(&Spec::modern(3).with_specialty(2.0))
@@ -32,8 +32,16 @@ fn the_initial_state_is_finite_and_positive() {
     let mut lab = modern();
     lab.step();
     for state in lab.good_states() {
-        assert!(state.index.is_finite() && state.index > 0.0, "{}", state.index);
-        assert!(state.stock.is_finite() && state.stock > 0.0, "{}", state.stock);
+        assert!(
+            state.index.is_finite() && state.index > 0.0,
+            "{}",
+            state.index
+        );
+        assert!(
+            state.stock.is_finite() && state.stock > 0.0,
+            "{}",
+            state.stock
+        );
     }
     for department in &lab.departments.departments {
         assert!(department.currency.is_finite() && department.currency > 0.0);
@@ -62,8 +70,16 @@ fn a_modern_economy_stays_bounded() {
     let mut lab = modern();
     lab.run(400);
     for state in lab.good_states() {
-        assert!(state.index.is_finite() && state.index > 0.0, "指数 {}", state.index);
-        assert!(state.stock.is_finite() && state.stock >= 0.0, "库存 {}", state.stock);
+        assert!(
+            state.index.is_finite() && state.index > 0.0,
+            "指数 {}",
+            state.index
+        );
+        assert!(
+            state.stock.is_finite() && state.stock >= 0.0,
+            "库存 {}",
+            state.stock
+        );
         assert!(state.dealt.is_finite() && state.dealt >= 0.0);
     }
     let stock = total_stock(&lab);
@@ -190,7 +206,13 @@ fn a_sanctioned_department_gets_less_than_an_open_one() {
             .intake()
             .iter()
             .zip(warehouse.stocks.iter())
-            .map(|(taken, stock)| if stock.wanted > 0.0 { taken / stock.wanted } else { 1.0 })
+            .map(|(taken, stock)| {
+                if stock.wanted > 0.0 {
+                    taken / stock.wanted
+                } else {
+                    1.0
+                }
+            })
             .sum::<f32>()
             / GOODS as f32
     };

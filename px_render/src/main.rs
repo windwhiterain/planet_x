@@ -295,10 +295,12 @@ fn parse_cam(flag: &str, text: &str) -> Result<[f32; 3], String> {
 fn parse_spans(text: &str) -> Result<(u32, u32, u32), String> {
     let parts: Vec<&str> = text.split(',').map(str::trim).collect();
     let [warm, measured, rounds] = parts.as_slice() else {
-        return Err("--spans 要 `预热,测量,轮数` 三个数（例如 --spans 8,24,4）：\
+        return Err(
+            "--spans 要 `预热,测量,轮数` 三个数（例如 --spans 8,24,4）：\
                     ⚠ 三个都**必须**写 —— 不给缺省，因为「预热几帧、交错几轮」是这个读数的一部分，\
                     而轮数还是整批代价的一部分"
-            .to_string());
+                .to_string(),
+        );
     };
     let warm: u32 = warm
         .parse()
@@ -684,7 +686,10 @@ fn run_scene(
         bytes,
         digest::short(out)
     );
-    println!("首像素：R={} G={} B={} A={}", first[0], first[1], first[2], first[3]);
+    println!(
+        "首像素：R={} G={} B={} A={}",
+        first[0], first[1], first[2], first[3]
+    );
     if let Some(text) = stats_text {
         println!("{text}");
     }
@@ -874,7 +879,9 @@ fn main() {
     // ⚠ `--time` 与 `--stats` 同一族：它读的是**本进程**准备一次、连画 N 帧的墙钟。
     //    服务那条路一条请求只画一帧，那里没有"后续帧"可量 —— 收下不说就是"说了没做"。
     if options.time > 0 {
-        eprintln!("--time 是离线那条路（--offline）的读数：它量的是「准备一次、连画 N 帧」，而服务那条路一条请求只画一帧");
+        eprintln!(
+            "--time 是离线那条路（--offline）的读数：它量的是「准备一次、连画 N 帧」，而服务那条路一条请求只画一帧"
+        );
         std::process::exit(64);
     }
 
@@ -882,7 +889,9 @@ fn main() {
     //    GPU 时间戳。服务那条路一条请求画一帧、按需渲染，`--perf` 那条路要的是
     //    "逐帧采样的帧循环"（§147.2 的 R 判据靠的正是服务里没有这个循环）。
     if options.spans.is_some() {
-        eprintln!("--spans 是离线那条路（--offline）的仪器：它量的是本进程那些编码器上的 GPU 时间戳，而服务那条路一条请求只画一帧");
+        eprintln!(
+            "--spans 是离线那条路（--offline）的仪器：它量的是本进程那些编码器上的 GPU 时间戳，而服务那条路一条请求只画一帧"
+        );
         std::process::exit(64);
     }
 
@@ -907,11 +916,15 @@ fn main() {
 /// `--report`（报告是服务算的）、`--perf`/`--windows`/`--frames`（要帧循环）、多份 `--scene`（批量是请求的概念）。
 fn run_offline(options: &Options) -> i32 {
     if !options.report.is_empty() {
-        eprintln!("--report 是**服务端**产出的（sha256 / 网格差分 / 兜底像素数都由它算）；离线那条路要读数就加 --stats");
+        eprintln!(
+            "--report 是**服务端**产出的（sha256 / 网格差分 / 兜底像素数都由它算）；离线那条路要读数就加 --stats"
+        );
         return 64;
     }
     if options.perf || options.windows_given {
-        eprintln!("--perf/--windows 要的是**计时用的帧循环**（服务那条路的活），而离线这条路一次只画一帧");
+        eprintln!(
+            "--perf/--windows 要的是**计时用的帧循环**（服务那条路的活），而离线这条路一次只画一帧"
+        );
         return 64;
     }
     // ⚠ `--spans` 与 `--sheet` 互斥：时间戳槽是按**单张**排的（见 `Session::draw_stamps`），
@@ -973,7 +986,8 @@ fn run_frames(
 ) -> Result<render::Rendered, String> {
     use std::time::Instant;
     let started = Instant::now();
-    let mut session = render::Session::open(gpu, scene, &art::default_pcg_root(), views, width, height)?;
+    let mut session =
+        render::Session::open(gpu, scene, &art::default_pcg_root(), views, width, height)?;
     println!(
         "[计时] 准备 = {:.1} ms（文档 → CAS 成员 → 计划 → 句柄 → 第一层）",
         started.elapsed().as_secs_f64() * 1e3
@@ -1078,34 +1092,37 @@ fn run_spans(
     );
     let started = Instant::now();
     // ---- 每份文档**只开一次**（`Session::open` 是重 CPU 的那一半）----
-    let mut sessions: Vec<(String, render::Session, spans::Recorder, Option<render::Rendered>)> =
-        Vec::with_capacity(shots.len());
+    let mut sessions: Vec<(
+        String,
+        render::Session,
+        spans::Recorder,
+        Option<render::Rendered>,
+    )> = Vec::with_capacity(shots.len());
     for (scene, _) in &shots {
         let opened = Instant::now();
-        let session =
-            match render::Session::open(&gpu, scene, &art::default_pcg_root(), views, width, height)
-            {
-                Ok(session) => session,
-                Err(message) => {
-                    eprintln!("打开 {} 失败：{message}", scene.display());
-                    return 1;
-                }
-            };
-        let labels = session.pass_kinds();
-        let recorder = match spans::Recorder::new(
-            &gpu.device,
-            &gpu.queue,
-            labels,
-            rounds,
-            warm,
-            measured,
+        let session = match render::Session::open(
+            &gpu,
+            scene,
+            &art::default_pcg_root(),
+            views,
+            width,
+            height,
         ) {
-            Ok(recorder) => recorder,
+            Ok(session) => session,
             Err(message) => {
-                eprintln!("{} 的时间戳槽建不出来：{message}", scene.display());
+                eprintln!("打开 {} 失败：{message}", scene.display());
                 return 1;
             }
         };
+        let labels = session.pass_kinds();
+        let recorder =
+            match spans::Recorder::new(&gpu.device, &gpu.queue, labels, rounds, warm, measured) {
+                Ok(recorder) => recorder,
+                Err(message) => {
+                    eprintln!("{} 的时间戳槽建不出来：{message}", scene.display());
+                    return 1;
+                }
+            };
         println!(
             "[spans-plan] 档 {}｜pass {} 条｜一帧 {} 格｜准备 {:.1} ms｜时间戳周期 {} ns",
             scene.display(),
@@ -1198,11 +1215,7 @@ fn run_spans(
         "⚠ 这个数**不是** Bevy 报告里的 `gpu_ms`（那个是 `render/**/elapsed_gpu` 七段之和）：\
          这里报的是本文档那些 pass 的编码器级 span，同名会让人以为它们是一回事（§147）"
     );
-    if failed > 0 {
-        1
-    } else {
-        0
-    }
+    if failed > 0 { 1 } else { 0 }
 }
 
 /// 命令行那一档「怎么看」→ `render::Views`（**离线**那条路的翻译；服务那条路在

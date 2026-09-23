@@ -241,11 +241,7 @@ impl System {
 
     /// 这一行的障碍权重：商品行 1，产能行 [`BOX_WEIGHT`]
     fn row_weight(&self, k: usize) -> f64 {
-        if k < self.rows {
-            1.0
-        } else {
-            self.box_weight
-        }
+        if k < self.rows { 1.0 } else { self.box_weight }
     }
 
     /// 严格可行的起点：每条政策先取**边际项 = 影子价格**的领头平衡，再逐样货压到可行。
@@ -395,7 +391,9 @@ impl System {
                 true,
             ),
             None => (
-                (0..policies).map(|p| rhs[p] / schur[p][p]).collect::<Vec<f64>>(),
+                (0..policies)
+                    .map(|p| rhs[p] / schur[p][p])
+                    .collect::<Vec<f64>>(),
                 false,
             ),
         };
@@ -437,10 +435,7 @@ impl System {
                 dual = dual.min(-point.lambda[k] / step.lambda[k]);
             }
         }
-        (
-            (BOUNDARY * primal).min(1.0),
-            (BOUNDARY * dual).min(1.0),
-        )
+        ((BOUNDARY * primal).min(1.0), (BOUNDARY * dual).min(1.0))
     }
 }
 
@@ -626,8 +621,7 @@ pub(super) fn solve(
             let mut theta = 1.0f64;
             let mut accepted = false;
             for _ in 0..BACKTRACK {
-                let trial =
-                    system.norm(&point, &step, theta * limit_p, theta * limit_d, mu_bar);
+                let trial = system.norm(&point, &step, theta * limit_p, theta * limit_d, mu_bar);
                 if trial <= (1.0 - SUFFICIENT * theta) * residual {
                     accepted = true;
                     break;
@@ -705,7 +699,10 @@ mod tests {
 
     impl Lcg {
         fn next(&mut self) -> f64 {
-            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             ((self.0 >> 11) as f64) / ((1u64 << 53) as f64)
         }
 
@@ -716,15 +713,7 @@ mod tests {
 
     fn run(w: &[f64], plans: &[Vec<f64>], supply: &[f64]) -> Outcome {
         let outputs = vec![vec![0.0; supply.len()]; w.len()];
-        solve(
-            w,
-            plans,
-            &outputs,
-            supply,
-            &[],
-            BARRIER,
-            CURVATURE,
-        )
+        solve(w, plans, &outputs, supply, &[], BARRIER, CURVATURE)
     }
 
     fn consumed(plans: &[Vec<f64>], x: &[f64], k: usize) -> f64 {
@@ -770,7 +759,10 @@ mod tests {
                 "存量 {supply}：数值 {} vs 解析根 {expected}",
                 outcome.x[0],
             );
-            assert!(outcome.x[0] > 0.0 && outcome.x[0] <= supply * (1.0 + 1e-9), "超取");
+            assert!(
+                outcome.x[0] > 0.0 && outcome.x[0] <= supply * (1.0 + 1e-9),
+                "超取"
+            );
         }
     }
 
@@ -828,9 +820,7 @@ mod tests {
                 .map(|_| (0..goods).map(|_| rng.range(0.0, 3.0)).collect())
                 .collect();
             // 存量跨 12 个数量级，复现实际系统里的量纲
-            let supply: Vec<f64> = (0..goods)
-                .map(|_| rng.range(1e-9, 1e3))
-                .collect();
+            let supply: Vec<f64> = (0..goods).map(|_| rng.range(1e-9, 1e3)).collect();
             let outcome = run(&w, &plans, &supply);
             assert!(outcome.report.converged, "第 {trial} 例未收敛");
             for k in 0..goods {
@@ -914,9 +904,7 @@ mod tests {
             assert!(
                 outcome.report.converged,
                 "供给 1e{exponent}：残差 {:e}、{} 步、{} 档",
-                outcome.report.residual,
-                outcome.report.iterations,
-                outcome.report.phases,
+                outcome.report.residual, outcome.report.iterations, outcome.report.phases,
             );
         }
     }

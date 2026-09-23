@@ -16,8 +16,12 @@ use px_protocol::scene::{Member, Value};
 /// "读哪个文件"的知识。
 pub fn shader_parts_of(member: &Member, root: &Path) -> Result<(String, MaterialLayout), String> {
     let path = px_protocol::scene::cas_path(root, &member.key)?;
-    let (source, schema) = px_protocol::art::read_shader_parts(&path)
-        .map_err(|err| format!("读 shader 成员 {member} 的产物失败（{}）：{err}", path.display()))?;
+    let (source, schema) = px_protocol::art::read_shader_parts(&path).map_err(|err| {
+        format!(
+            "读 shader 成员 {member} 的产物失败（{}）：{err}",
+            path.display()
+        )
+    })?;
     let text = schema.ok_or_else(|| {
         format!(
             "shader 成员 {member} 的产物没有 schema descriptor：那是契约收口（§80）之前烘的。\n  \
@@ -212,9 +216,14 @@ mod tests {
     fn a_structural_key_is_left_to_the_compiler() {
         let mut given = toml_of("strength = 0.5\ntint = [1.0, 1.0, 1.0]\n");
         given.insert("radius".to_string(), toml::Value::Float(1.0));
-        let params =
-            merge_named("pass 'grade'", &given, &["radius"], &layout(), Default::default())
-                .expect("结构键跳过，不进 shader 参数表");
+        let params = merge_named(
+            "pass 'grade'",
+            &given,
+            &["radius"],
+            &layout(),
+            Default::default(),
+        )
+        .expect("结构键跳过，不进 shader 参数表");
         assert!(!params.contains_key("radius"), "{params:?}");
         assert_eq!(params["strength"], Value::Num(0.5));
     }

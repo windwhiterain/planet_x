@@ -74,7 +74,10 @@ fn a_direction_comes_back_to_the_row_that_produced_it() {
                 let uv = uv_of(Domain::CubeMap, direction, width, height);
                 let back_x = ((uv[0] * width as f32) as u32).min(width - 1);
                 let back_y = ((uv[1] * height as f32) as u32).min(height - 1);
-                assert_eq!(back_x, column, "面 {face} 第 {row} 行第 {column} 列回到了第 {back_x} 列");
+                assert_eq!(
+                    back_x, column,
+                    "面 {face} 第 {row} 行第 {column} 列回到了第 {back_x} 列"
+                );
                 assert_eq!(back_y, y, "面 {face} 第 {row} 行回到了第 {back_y} 行");
             }
         }

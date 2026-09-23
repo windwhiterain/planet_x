@@ -1,9 +1,9 @@
 use crate::probe;
 
 use crate::params::{CLOUD_BASE, CLOUD_TOP, CloudParams};
+use crate::probe::{MASK_GRADIENT, Mask, POINTS, STEPS, quantised};
 use px_verify::cloud_field::CloudFieldParams;
 use px_verify::noise::{FbmSettings, fbm_3, gradient_noise_3};
-use crate::probe::{MASK_GRADIENT, Mask, POINTS, STEPS, quantised};
 
 const SWEEP: [f32; STEPS] = [8e-5, 4e-5, 2e-5, 1e-5, 5e-6];
 const MASK: f32 = 153.0 / 255.0;
@@ -259,7 +259,10 @@ fn the_reference_and_the_shader_agree_on_the_field_value() {
     println!("  {:<11} {noise_worst:e}", "noise");
     println!("  {:<11} {cover_worst:e}", "两条覆盖度路径");
     println!("  {:<11} {value_worst:e}（在 {value_at:?}）", "场值");
-    println!("  {:<11} {tower_single_worst:e} / {skin_single_worst:e}", "单八度");
+    println!(
+        "  {:<11} {tower_single_worst:e} / {skin_single_worst:e}",
+        "单八度"
+    );
     println!("  {:<11} {tower_worst:e} / {skin_worst:e}", "多八度");
 
     assert!(
@@ -280,10 +283,7 @@ fn the_reference_and_the_shader_agree_on_the_field_value() {
         skin_single_worst < 1e-4,
         "单八度 skin 对不上（{skin_single_worst:e}）⇒ 差在采样坐标而不是八度累加"
     );
-    assert!(
-        tower_worst < 1e-4,
-        "多八度 tower 对不上（{tower_worst:e}）"
-    );
+    assert!(tower_worst < 1e-4, "多八度 tower 对不上（{tower_worst:e}）");
     assert!(skin_worst < 1e-4, "多八度 skin 对不上（{skin_worst:e}）");
 
     assert!(
@@ -375,7 +375,10 @@ fn the_shader_coverage_term_matches_the_exact_band_gradient() {
         "变覆盖度：可用点 {} 个；探针读到的 baked.g 对烘焙值最大出入 {baked_worst:e}",
         broken.len()
     );
-    println!("  修复后的覆盖度项：中位相对偏差 {fixed_median:e}（最大 {:e}）", fixed.iter().fold(0.0_f64, |worst, value| worst.max(*value)));
+    println!(
+        "  修复后的覆盖度项：中位相对偏差 {fixed_median:e}（最大 {:e}）",
+        fixed.iter().fold(0.0_f64, |worst, value| worst.max(*value))
+    );
     println!("  修复前的覆盖度项：中位相对偏差 {broken_median:e}");
 
     assert!(
@@ -455,11 +458,18 @@ fn the_shader_analytic_gradient_matches_the_exact_field_gradient() {
         println!(
             "  差商 h={:e}：中位相对偏差 {value:e}，最大 {:e}",
             SWEEP[slot],
-            bucket.iter().fold(0.0_f64, |worst, entry| worst.max(*entry)),
+            bucket
+                .iter()
+                .fold(0.0_f64, |worst, entry| worst.max(*entry)),
         );
     }
-    let fd_best = fd_medians.iter().fold(f64::MAX, |best, value| best.min(*value));
-    println!("解析式 {analytic_median:e} 对最好的差商 {fd_best:e}（h={:e}）", SWEEP[0]);
+    let fd_best = fd_medians
+        .iter()
+        .fold(f64::MAX, |best, value| best.min(*value));
+    println!(
+        "解析式 {analytic_median:e} 对最好的差商 {fd_best:e}（h={:e}）",
+        SWEEP[0]
+    );
 
     assert!(
         analytic_median < 1e-4,

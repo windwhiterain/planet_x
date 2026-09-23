@@ -18,6 +18,9 @@ fn check() {
 fn main() {
     px_probe::common::run_checks(
         "device",
-        vec![("a_headless_device_comes_up_with_no_window_and_no_swapchain", check)],
+        vec![(
+            "a_headless_device_comes_up_with_no_window_and_no_swapchain",
+            check,
+        )],
     );
 }

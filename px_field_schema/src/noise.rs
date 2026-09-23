@@ -5,7 +5,12 @@
 use std::ops::{Add, Div, Mul, Sub};
 
 pub trait Scalar:
-    Copy + Add<Output = Self> + Sub<Output = Self> + Mul<Output = Self> + Div<Output = Self> + PartialOrd
+    Copy
+    + Add<Output = Self>
+    + Sub<Output = Self>
+    + Mul<Output = Self>
+    + Div<Output = Self>
+    + PartialOrd
 {
     fn from_f32(value: f32) -> Self;
     fn real(self) -> f32;
@@ -18,10 +23,18 @@ pub trait Scalar:
         Self::from_f32(1.0)
     }
     fn min_with(self, other: Self) -> Self {
-        if self.real() <= other.real() { self } else { other }
+        if self.real() <= other.real() {
+            self
+        } else {
+            other
+        }
     }
     fn max_with(self, other: Self) -> Self {
-        if self.real() >= other.real() { self } else { other }
+        if self.real() >= other.real() {
+            self
+        } else {
+            other
+        }
     }
 }
 

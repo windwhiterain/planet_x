@@ -19,11 +19,8 @@ use libloading::Library;
 use crate::{Grid, PxOp};
 
 /// 实现库里那个函数的签名 —— 从算子的三个关联类型推，**编译期就检查得住**。
-pub type Body<O> = fn(
-    &<O as PxOp>::Params,
-    &<O as PxOp>::Inputs,
-    Grid,
-) -> Result<<O as PxOp>::Payload, String>;
+pub type Body<O> =
+    fn(&<O as PxOp>::Params, &<O as PxOp>::Inputs, Grid) -> Result<<O as PxOp>::Payload, String>;
 
 /// 取 `O` 的实现函数。装载失败当场说清楚该跑什么命令，不静默。
 pub fn body<O: PxOp>() -> Result<Body<O>, String> {
@@ -43,8 +40,8 @@ pub fn load_at<O: PxOp>(library: &str, symbol: &str) -> Result<Body<O>, String> 
     //   （`env!("CARGO_PKG_NAME")`）。前缀从`SYMBOL`里取（它就是 `包名__类型名`）。
     let prefix = symbol.split("__").next().unwrap_or(library);
     let opened = open(library, prefix)?;
-    let pointer = raw::<*mut c_void>(opened, symbol)
-        .map_err(|err| format!("{err}{}", hint(library)))?;
+    let pointer =
+        raw::<*mut c_void>(opened, symbol).map_err(|err| format!("{err}{}", hint(library)))?;
     // ⚠ 全仓**唯一**一处 `transmute`：把符号地址当成"签名由算子钉死的函数"。
     //   它不是类型擦除（那会丢类型检查）—— `Body<O>` 的签名是编译期写死的，
     //   运行期只解析"这个地址在不在"。
@@ -91,14 +88,15 @@ fn open(name: &str, prefix: &str) -> Result<&'static Library, String> {
 
     // ⚠ **契约握手**：DLL 与图程序必须是同一份契约编出来的（类型布局才谈得上一致）。
     //   对不上说明改了 `px_graph_schema` 而 DLL 没重编 —— 当场拒，绝不拿错的布局去调。
-    let contract = raw::<extern "Rust" fn() -> &'static str>(&loaded, &format!("{prefix}__contract_hash"))
-        .map_err(|err| {
-            format!(
-                "{} 不是一份实现库（没有身份符号）：{err}{}",
-                path.display(),
-                hint(name)
-            )
-        })?;
+    let contract =
+        raw::<extern "Rust" fn() -> &'static str>(&loaded, &format!("{prefix}__contract_hash"))
+            .map_err(|err| {
+                format!(
+                    "{} 不是一份实现库（没有身份符号）：{err}{}",
+                    path.display(),
+                    hint(name)
+                )
+            })?;
     if contract() != crate::SOURCE_HASH {
         return Err(format!(
             "{} 与契约**不是同一份**编出来的（DLL {} / 图程序 {}）—— 先 `cargo build -p {name}`",
@@ -110,14 +108,16 @@ fn open(name: &str, prefix: &str) -> Result<&'static Library, String> {
 
     // ⚠ **工具链握手**：契约一致还不够 —— `extern "Rust"` 的 ABI 由**编译器**定。
     //   实例库（`px_jit build` 生成的）尤其需要这一道：它不是 cargo 沿主 workspace 编的。
-    let toolchain =
-        raw::<extern "Rust" fn() -> &'static str>(&loaded, &format!("{prefix}__toolchain_hash"))
-            .map_err(|err| {
-                format!(
-                    "{} 没有工具链身份符号（{err}）—— 它是旧形状的实现库，重编：cargo build -p {name}",
-                    path.display(),
-                )
-            })?;
+    let toolchain = raw::<extern "Rust" fn() -> &'static str>(
+        &loaded,
+        &format!("{prefix}__toolchain_hash"),
+    )
+    .map_err(|err| {
+        format!(
+            "{} 没有工具链身份符号（{err}）—— 它是旧形状的实现库，重编：cargo build -p {name}",
+            path.display(),
+        )
+    })?;
     if toolchain() != crate::TOOLCHAIN_HASH {
         return Err(format!(
             "{} 与图程序**不是同一套工具链**编出来的\n  DLL {} / 图程序 {}\n  \

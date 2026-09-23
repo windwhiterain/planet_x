@@ -277,17 +277,71 @@ pub fn raymarch_channel(
 /// ⚠ 它**只收发射体积**（不是密度场）：搬密度、算光照是上游那两档的事，而它们与
 ///   "壳多细、半径多大"有关、与"积多细"无关 ⇒ 那些参数不该抄到这一档来。
 ///
-/// ## 分级（按亮度分档的色相）
+/// ## 分级（按亮度走色相斜坡）
 ///
-/// ⚠ 参考图的两档色相**彼此矛盾**，而体渲染里 `σ_G` 只有**一条**系数
-///   （大了核与边一起洋红、小了边不够红）⇒ 那一步只能在**分级**里做。
-///   四个常数就是这一档的全部自由度，取值都是量出来的（见下）。
-pub const SHADOW_KNEE: f32 = 0.05;
-pub const HIGHLIGHT_KNEE: f32 = 0.015;
-pub const MAGENTA_STRENGTH: f32 = 0.90;
-pub const MAGENTA_FLOOR: f32 = 0.25;
-pub const CYAN_STRENGTH: f32 = 0.95;
-pub const CYAN_BLUE: f32 = 0.16;
+/// ⚠⚠ **全部量自参考图的区域均值**（线性空间、归一到 R=1），不是拧出来的：
+///
+/// | 档 | 参考图的区域 | 该区 luma | 色相 R:G:B |
+/// |---|---|---|---|
+/// | 暗 | 左缘红尘 | 0.016 | **1.00 : 0.24 : 0.41** |
+/// | 中 | 河畔暖沙 | 0.055 | **1.00 : 0.38 : 0.45** |
+/// | 亮 | **蓝气河** | 0.12 | **1.00 : 1.14 : 2.17** |
+/// | 极亮 | 星核 | 0.35+ | **1.00 : 0.95 : 1.05** |
+///
+/// ⚠⚠ 之前用"亮 15% 的均值"当目标（1.00 : 0.81 : 1.10）——
+///   **那把白色星点平均进了蓝气**，于是"蓝"被稀释成中性灰（画面一片灰紫）。
+///   参考图里**星是白的、气是深青蓝的**（星核 1:0.92:1.07 对蓝河 1:1.14:2.17）——
+///   两者亮度相近、颜色完全不同 ⇒ **目标必须按区域取，不能按亮度分位取**。
+///   这一版的四档是按亮度**分段**走的（对数域插值），但端点来自区域。
+///
+/// ⚠ 亮度逐格守恒（目标先缩到这一格的 luma）⇒ 亮度那一维仍只由体渲染的参数管。
+pub const RAMP_LUMA: [f32; 4] = [0.010, 0.055, 0.12, 0.35];
+pub const RAMP_HUE: [[f32; 3]; 4] = [
+    [1.00, 0.24, 0.41], // 暗：红尘
+    [1.00, 0.38, 0.45], // 中：暖沙（实测 (1,0.34,0.40) 与 (1,0.51,0.55) 之间）
+    [1.00, 1.14, 2.17], // 亮：蓝气河
+    [1.00, 0.95, 1.05], // 极亮：星核（白）
+];
+/// 朝目标色相走多满（`1` = 完全替换；`< 1` 保留一点原色变化）。
+pub const GRADE_STRENGTH: f32 = 0.9;
+
+/// **按亮度走色相斜坡**（一格）：朝对应档的目标色相推，**不动亮度**。
+fn grade_pixel(rgb: [f32; 3]) -> [f32; 3] {
+    let luma = |color: &[f32; 3]| color[0] * 0.2126 + color[1] * 0.7152 + color[2] * 0.0722;
+    let measured = luma(&rgb);
+    // ⚠ 纯黑**原样出去**：目标色会把零格染上一点暗档色相 —— 数值虽小，
+    //   但"深黑太空"就靠这些格是**正好 0**。
+    if measured <= 1e-6 {
+        return rgb;
+    }
+    let l = measured;
+    // 档位：在 `RAMP_LUMA` 的相邻两档之间**对数域**插值色相（亮度差都是倍数关系）。
+    let mut target = RAMP_HUE[0];
+    if l >= RAMP_LUMA[3] {
+        target = RAMP_HUE[3];
+    } else {
+        for stop in 0..3 {
+            let (lo, hi) = (RAMP_LUMA[stop], RAMP_LUMA[stop + 1]);
+            if l < hi {
+                let w = ((l / lo).ln() / (hi / lo).ln()).clamp(0.0, 1.0);
+                for channel in 0..3 {
+                    target[channel] = RAMP_HUE[stop][channel]
+                        + (RAMP_HUE[stop + 1][channel] - RAMP_HUE[stop][channel]) * w;
+                }
+                break;
+            }
+        }
+    }
+    // ⚠ 目标先缩到**这一格的 luma** 再插值 ⇒ 输出 luma 与输入逐格相同
+    //   （判据 `grading_keeps_the_luma_and_heads_for_the_band_hue` 钉着）。
+    let scale = l / luma(&target);
+    let mut out = rgb;
+    for channel in 0..3 {
+        out[channel] += (target[channel] * scale - rgb[channel]) * GRADE_STRENGTH;
+        out[channel] = out[channel].max(0.0);
+    }
+    out
+}
 
 pub fn raymarch_sky(
     emission: &VolumeData,
@@ -300,23 +354,13 @@ pub fn raymarch_sky(
         planes.push(field.data);
     }
 
-    // ⚠ **按亮度分档的色相分级**（bake 期，最后一步）。
+    // ⚠ **按亮度分档的色相分级**（bake 期，最后一步）—— 动机与常数见文件头，
+    //   逐格的那点事在 [`grade_pixel`]（判据 `grading_keeps_the_luma` 钉着它的亮度守恒）。
     //
-    // ⚠⚠ 为什么需要它，而不是继续在体渲染里调：参考图的两档要求**彼此矛盾** ——
-    //
-    //   | 参考（线性均值） | G/R | B/R |
-    //   |---|---|---|
-    //   | 最亮 15% | **0.81** | **1.10**（白蓝的核） |
-    //   | 最暗 50% | **0.24** | 0.61（绿被压到红的 1/4，玫红） |
-    //
-    //   而体渲染里 `σ_G` 是**一条**系数：它大了核与边一起变洋红，小了边不够红
-    //   （实测 σ_G = 3.6 给 0.55 / 0.68，σ_G = 5.0 给 0.45 / 0.59）。
-    //   ⇒ 这不是物理模型能一次给出的，参考图那种"核白蓝、边玫红"更像是**后期分区调色**。
-    //   所以这一步就明明白白地做**分级**，而不是假装它来自积分。
-    //
-    // 做法：按**亮度**把中性灰推开，但**推的方向随档而变** ——
-    //   暗处推向**玫红**（压绿）、亮处推向**蓝青**（抬绿与蓝）。权重是 `l / (l + k)`，
-    //   它随亮度平滑地从 0 走到 1（用阶跃会在分界处出一条硬边）。
+    //   ⚠⚠ 上一版在这里按通道各推一把（压绿 / 抬绿 / 偏蓝三个补丁），两档**都差着**
+    //   （暗档 G/R 0.43 对参考 0.24、亮档 0.77 对 0.81）——
+    //   因为三个补丁没有共同的目标，只是各自往"感觉对"的方向挪。
+    //   这一版把**参考图实测的两档色相当成目标**直接解，不再是拧旋钮。
     let line = |value: f32| -> f32 { value.max(0.0) };
     let texels = planes[0].len();
     let mut graded = vec![0.0_f32; texels * 3];
@@ -326,25 +370,7 @@ pub fn raymarch_sky(
             planes[1][index].max(0.0),
             planes[2][index].max(0.0),
         ];
-        let l = rgb[0] * 0.2126 + rgb[1] * 0.7152 + rgb[2] * 0.0722;
-        // 暗处权重（l 小 ⇒ 趋 1）、亮处权重（l 大 ⇒ 趋 1）。
-        let shadow = 1.0 - l / (l + SHADOW_KNEE);
-        let highlight = l / (l + HIGHLIGHT_KNEE);
-        // 灰 = 推开的中心；`shadow` 压绿（玫红），`highlight` 抬绿（白蓝）。
-        let grey = (rgb[0] + rgb[1] + rgb[2]) / 3.0;
-        let mut out = rgb;
-        // ⚠ 玫红 = 绿被压到红蓝之下 ⇒ 把绿**朝目标值**拉（`g → g + (目标 − g) × 权重`）。
-        //
-        // ⚠⚠ 第一版写成 `(g − 灰 × 地板).max(0) × 权重`，**几乎没效果**：
-        //   那一项与 `g` 本身同阶 ⇒ `g` 本来就小的地方"要减的量"也小，
-        //   于是正是最该变玫红的暗部**动得最少**（实测 G/R 只从 0.68 挪到 0.63）。
-        //   ⇒ 写成"朝目标插值"才对：`g` 越小、往地板拉的比例越明显。
-        let target_g = grey * MAGENTA_FLOOR;
-        out[1] += (target_g - rgb[1]) * shadow * MAGENTA_STRENGTH;
-        // ⚠ 白蓝 = 绿被抬回来 ⇒ 往灰的方向拉绿（并整体往蓝偏一点点）。
-        // ⚠ 白蓝 = 绿被抬回中性 ⇒ 同样是"朝目标插值"。
-        out[1] += (grey - rgb[1]) * highlight * CYAN_STRENGTH;
-        out[2] += rgb[2].max(1e-4) * highlight * CYAN_BLUE;
+        let out = grade_pixel(rgb);
         graded[index * 3] = line(out[0]);
         graded[index * 3 + 1] = line(out[1]);
         graded[index * 3 + 2] = line(out[2]);
@@ -534,12 +560,19 @@ mod tests {
                 for t in 0..res {
                     for s in 0..res {
                         let slot = (((face * layers + layer) * res + t) * res + s) as usize;
+                        // ⚠ 布局是**六通道** `[发射 R, G, B, σ_R, σ_G, σ_B]`。
+                        //
+                        // ⚠⚠ 这几行曾是 `slot * 4`（四通道时代的步长）—— 六通道改造时
+                        //   没跟上（改的是"四行连写"的另一处，这处分写在 if/else 里、没匹配上）。
+                        //   于是写出去的 0.3 **散布到别的格与别的通道上**，而判据的断言很宽
+                        //   （结果落在 `(0, 0.3 × 弦长)` 之间）⇒ **照样通过**。
+                        //   ⇒ "布局变了而判据没变"最坏的样子：测的是别的东西、且显示绿色。
                         if layer < layers / 2 {
-                            volume.data[slot * 4] = 0.3;
+                            volume.data[slot * 6] = 0.3;
                         } else {
-                            volume.data[slot * 4 + 1] = 0.3;
-                            volume.data[slot * 4 + 2] = 0.3;
-                            volume.data[slot * 4 + 3] = 0.3;
+                            volume.data[slot * 6 + 3] = 0.3;
+                            volume.data[slot * 6 + 4] = 0.3;
+                            volume.data[slot * 6 + 5] = 0.3;
                         }
                     }
                 }
@@ -558,5 +591,54 @@ mod tests {
         }
         assert!(worst_high < 1e-3, "不该超过光学薄上界，超出 {worst_high}");
         assert!(saw_dimmer, "外层有消光 ⇒ 必须有一部分被吃掉");
+    }
+
+    /// **分级：亮度守恒、色相朝对应档的目标走、纯黑原样**。
+    ///
+    /// ⚠ 亮度守恒是那条硬性质（色相与亮度互不干扰 ⇒ 亮度那一维仍只由体渲染的参数管）。
+    ///   浮点求和顺序变了 ⇒ 不是逐位恒等，用紧容差。
+    #[test]
+    fn grading_keeps_the_luma_and_heads_for_the_band_hue() {
+        let luma = |color: &[f32; 3]| color[0] * 0.2126 + color[1] * 0.7152 + color[2] * 0.0722;
+        // ⚠ 纯黑必须**正好**是纯黑（判据用逐位：这里恒等成立）。
+        assert_eq!(grade_pixel([0.0, 0.0, 0.0]), [0.0, 0.0, 0.0]);
+        for rgb in [
+            [0.004, 0.002, 0.003],
+            [0.01, 0.01, 0.01],
+            [0.05, 0.03, 0.06],
+            [0.2, 0.16, 0.22],
+            [1.5, 0.9, 1.2],
+        ] {
+            let out = grade_pixel(rgb);
+            let drift = (luma(&out) - luma(&rgb)).abs();
+            assert!(
+                drift <= 1e-6 + luma(&rgb) * 1e-4,
+                "{rgb:?} 分级之后亮度漂了 {drift}"
+            );
+        }
+        // 暗的往暗档色相走（目标 G/R = 0.24、B/R = 0.61；起点是中性的 1/1）。
+        let dark = grade_pixel([0.006, 0.006, 0.006]);
+        assert!(
+            dark[1] / dark[0] < 0.4,
+            "暗档的绿没压下去（{:.3}）",
+            dark[1] / dark[0]
+        );
+        assert!(
+            dark[2] / dark[0] < 0.75,
+            "暗档的蓝没压过绿（{:.3}）",
+            dark[2] / dark[0]
+        );
+        // 亮的往亮档色相走（目标 G/R = 0.81、B/R = 1.10）。
+        let bright = grade_pixel([0.2, 0.2, 0.2]);
+        assert!(
+            bright[2] / bright[0] > 1.0,
+            "亮档的蓝没高过红（{:.3}）",
+            bright[2] / bright[0]
+        );
+        assert!(
+            bright[1] / bright[0] > 0.7,
+            "亮档的绿没抬起来（{:.3}）",
+            bright[1] / bright[0]
+        );
     }
 }

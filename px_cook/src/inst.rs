@@ -12,8 +12,8 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use px_graph_schema::blake3;
 use px_graph_schema::PxOp;
+use px_graph_schema::blake3;
 
 /// 实例库的包名：生成的 crate 固定用它 ⇒ 符号名是**编译期字面量**（两边都写得出）。
 pub const PACKAGE: &str = "px_inst";
@@ -73,12 +73,7 @@ pub struct InstInfo {
 /// 从**类型本身**取接口哈希与声明指纹（图侧唯一能算这两样的地方）。
 ///
 /// ⚠ `template` 用 `<T as …>::INST_TEMPLATE`（宏发出来的那份），别手抄。
-pub fn info_of<O: PxOp>(
-    op_id: &str,
-    alg_roots: &[&str],
-    source: &str,
-    template: &str,
-) -> InstInfo {
+pub fn info_of<O: PxOp>(op_id: &str, alg_roots: &[&str], source: &str, template: &str) -> InstInfo {
     InstInfo {
         op_id: op_id.to_string(),
         interface: O::interface(),
@@ -201,8 +196,12 @@ pub fn key(inst: &Inst<'_>) -> Result<String, String> {
 
     // ⚠ 泛型参数：读**内容**（不是路径）—— 改它必换 key，把它挪个位置不换。
     let source_path = root.join(inst.source);
-    let source = std::fs::read(&source_path)
-        .map_err(|err| format!("实例 key：读不了泛型参数源 {}：{err}", source_path.display()))?;
+    let source = std::fs::read(&source_path).map_err(|err| {
+        format!(
+            "实例 key：读不了泛型参数源 {}：{err}",
+            source_path.display()
+        )
+    })?;
     hasher.update(&(source.len() as u64).to_le_bytes());
     hasher.update(&source);
 
@@ -580,8 +579,13 @@ fn compile_generated(info: &InstInfo, key: &str, codegen: &InstCodegen) -> Resul
         std::fs::create_dir_all(parent)
             .map_err(|err| format!("建不了 {}：{err}", parent.display()))?;
     }
-    std::fs::copy(&produced, &library)
-        .map_err(|err| format!("拷 {} → {} 失败：{err}", produced.display(), library.display()))?;
+    std::fs::copy(&produced, &library).map_err(|err| {
+        format!(
+            "拷 {} → {} 失败：{err}",
+            produced.display(),
+            library.display()
+        )
+    })?;
 
     // sidecar 与库**并排**（`target/pcg/inst/<key>.json`）：库删了它也就没有意义。
     let sidecar = library.with_extension("json");
@@ -730,7 +734,9 @@ pub fn inst_env(name: &str) -> &'static str {
         "PX_TARGET" => env!("PX_TARGET"),
         "PX_RUSTFLAGS" => env!("PX_RUSTFLAGS"),
         "PX_CARGO" => env!("PX_CARGO"),
-        other => panic!("px_cook::inst 只认识 PX_PROFILE / PX_TARGET / PX_RUSTFLAGS / PX_CARGO，不认识 {other}"),
+        other => panic!(
+            "px_cook::inst 只认识 PX_PROFILE / PX_TARGET / PX_RUSTFLAGS / PX_CARGO，不认识 {other}"
+        ),
     }
 }
 

@@ -503,8 +503,7 @@ fn coverage_cube(
                     4 => [u, -v, 1.0],
                     _ => [-u, -v, -1.0],
                 };
-                let length =
-                    (axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2]).sqrt();
+                let length = (axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2]).sqrt();
                 let direction = [axis[0] / length, axis[1] / length, axis[2] / length];
                 let (baked, slope) = match mask {
                     Mask::Varying => (coverage_mask(direction), coverage_mask_gradient()),
@@ -553,12 +552,7 @@ fn coverage_cube(
     (texture, view)
 }
 
-fn probe(
-    points: &[[f32; 3]],
-    params: &CloudParams,
-    sweep: [f32; STEPS],
-    mask: Mask,
-) -> Vec<Row> {
+fn probe(points: &[[f32; 3]], params: &CloudParams, sweep: [f32; STEPS], mask: Mask) -> Vec<Row> {
     let Some(gpu) = connect() else {
         return Vec::new();
     };
@@ -969,7 +963,9 @@ fn the_probe_harness_runs_the_production_shader_headless() {
         SWEEP[0],
         SWEEP[1],
     );
-    println!("探针能跑、能回读、能落进壳里 —— 梯度对不对由 field_dual 的 arbiter 断言，这里不断言收敛");
+    println!(
+        "探针能跑、能回读、能落进壳里 —— 梯度对不对由 field_dual 的 arbiter 断言，这里不断言收敛"
+    );
 }
 
 fn the_analytic_gradient_keeps_the_kink_convention() {
@@ -1010,7 +1006,9 @@ fn the_analytic_gradient_keeps_the_kink_convention() {
         worst_flat = worst_flat.max(magnitude(&row.analytic));
     }
 
-    println!("壳内点 {live} 个；被门归零且解析梯度为零 {zeroed} 个（最大 |解析梯度| {worst_flat:e}）");
+    println!(
+        "壳内点 {live} 个；被门归零且解析梯度为零 {zeroed} 个（最大 |解析梯度| {worst_flat:e}）"
+    );
     assert!(zeroed > 0, "这组点里没有一个被门归零，测试没测到约定");
     assert!(live > 0, "这组点里没有一个落在云里，测试没测到场");
 }
@@ -1060,7 +1058,12 @@ fn simple_rows(rows: &[Row]) -> Vec<&Row> {
 
 fn the_five_point_stencil_reproduces_a_known_derivative() {
     let points = simple_points();
-    let rows = probe(&points, &simple_params(), SIMPLE_SWEEP, Mask::Constant(SIMPLE_MASK));
+    let rows = probe(
+        &points,
+        &simple_params(),
+        SIMPLE_SWEEP,
+        Mask::Constant(SIMPLE_MASK),
+    );
     assert!(
         !rows.is_empty(),
         "探针没拿到数据（设备/管线失败）——不要把它读成通过"
@@ -1085,7 +1088,12 @@ fn the_five_point_stencil_reproduces_a_known_derivative() {
 
 fn the_simplified_field_keeps_every_gate_open() {
     let points = simple_points();
-    let rows = probe(&points, &simple_params(), SIMPLE_SWEEP, Mask::Constant(SIMPLE_MASK));
+    let rows = probe(
+        &points,
+        &simple_params(),
+        SIMPLE_SWEEP,
+        Mask::Constant(SIMPLE_MASK),
+    );
     assert!(
         !rows.is_empty(),
         "探针没拿到数据（设备/管线失败）——不要把它读成通过"
@@ -1177,7 +1185,12 @@ fn the_simplified_field_keeps_every_gate_open() {
 
 fn the_noise_term_coefficient_matches_a_single_octave_oracle() {
     let points = simple_points();
-    let rows = probe(&points, &simple_params(), SIMPLE_SWEEP, Mask::Constant(SIMPLE_MASK));
+    let rows = probe(
+        &points,
+        &simple_params(),
+        SIMPLE_SWEEP,
+        Mask::Constant(SIMPLE_MASK),
+    );
     assert!(
         !rows.is_empty(),
         "探针没拿到数据（设备/管线失败）——不要把它读成通过"
@@ -1204,7 +1217,9 @@ fn the_noise_term_coefficient_matches_a_single_octave_oracle() {
                 .map(|row| relative_error(&row.axis[kind], &noise_oracle(row, slot)))
                 .collect();
             medians[kind][slot] = median(&mut errors);
-            maxima[kind][slot] = errors.iter().fold(0.0_f32, |worst, value| worst.max(*value));
+            maxima[kind][slot] = errors
+                .iter()
+                .fold(0.0_f32, |worst, value| worst.max(*value));
         }
         println!(
             "候选 {kind}（{name}）：中位 {:?}，最大 {:?}",
@@ -1249,9 +1264,7 @@ fn the_f16_coverage_bake_cannot_resolve_the_production_stencil() {
         threshold = step;
         step *= 0.5;
     }
-    println!(
-        "掩码在 4h 模板跨度上的行程 {travel:e}，f16 在 0.5 附近的舍入阈值 {threshold:e}"
-    );
+    println!("掩码在 4h 模板跨度上的行程 {travel:e}，f16 在 0.5 附近的舍入阈值 {threshold:e}");
     assert!(
         travel < threshold,
         "f16 的舍入阈值 {threshold:e} 没有盖过掩码行程 {travel:e} ⇒ 生产那张 f16 覆盖度图在这套步长下量不出覆盖度梯度，这个结论不成立"
@@ -1305,7 +1318,9 @@ fn the_coverage_term_is_measurable_and_its_scalar_is_wrong() {
         if live <= 8 {
             println!(
                 "点 {live}：oracle 掩码偏差 {:e}；预期 {:?}，实测 {:?}",
-                oracle[live - 1], expected, row.mask_fd,
+                oracle[live - 1],
+                expected,
+                row.mask_fd,
             );
         }
         let mut first = 0.0_f32;
@@ -1340,13 +1355,22 @@ fn the_coverage_term_is_measurable_and_its_scalar_is_wrong() {
         "覆盖度项：cover 偏导非零的点 {live} / {}，normalized 范围 [{normalized_low:e}, {normalized_high:e}]，under_live 冗余性最大出入 {under_gap_worst:e}",
         rows.len(),
     );
-    assert!(live >= 8, "cover 偏导非零的点只有 {live} 个，这个测试没在测覆盖度项");
+    assert!(
+        live >= 8,
+        "cover 偏导非零的点只有 {live} 个，这个测试没在测覆盖度项"
+    );
     let shader_median = median(&mut shader);
     let bad_median = median(&mut candidate);
     let oracle_median = median(&mut oracle);
-    let oracle_worst = oracle.iter().fold(0.0_f32, |worst, value| worst.max(*value));
-    let shader_worst = shader.iter().fold(0.0_f32, |worst, value| worst.max(*value));
-    let bad_worst = candidate.iter().fold(0.0_f32, |worst, value| worst.max(*value));
+    let oracle_worst = oracle
+        .iter()
+        .fold(0.0_f32, |worst, value| worst.max(*value));
+    let shader_worst = shader
+        .iter()
+        .fold(0.0_f32, |worst, value| worst.max(*value));
+    let bad_worst = candidate
+        .iter()
+        .fold(0.0_f32, |worst, value| worst.max(*value));
     let mut ratio_sorted = ratio;
     let ratio_median = median(&mut ratio_sorted);
     println!(
@@ -1381,7 +1405,9 @@ fn the_coverage_term_is_measurable_and_its_scalar_is_wrong() {
     let sampler_median = median(&mut sampler);
     println!(
         "掩码差商在 h 与 h/2 之间的相对差（采样器自证）：中位 {sampler_median:e} 最大 {:e}",
-        sampler.iter().fold(0.0_f32, |worst, value| worst.max(*value)),
+        sampler
+            .iter()
+            .fold(0.0_f32, |worst, value| worst.max(*value)),
     );
     println!(
         "现式 ③ 仍差 {shader_median:e}（中位），而差分 oracle 的分辨极限是 {oracle_median:e} 中位 / {oracle_worst:e} 最大：双线性插值在每个纹素里的斜率与解析梯度不同，这一步的残差就是它，不是公式"
@@ -1389,7 +1415,12 @@ fn the_coverage_term_is_measurable_and_its_scalar_is_wrong() {
 }
 
 fn the_residual_is_attributed_to_one_channel() {
-    let simple = probe(&simple_points(), &simple_params(), SIMPLE_SWEEP, Mask::Constant(SIMPLE_MASK));
+    let simple = probe(
+        &simple_points(),
+        &simple_params(),
+        SIMPLE_SWEEP,
+        Mask::Constant(SIMPLE_MASK),
+    );
     assert!(
         !simple.is_empty(),
         "探针没拿到数据（设备/管线失败）——不要把它读成通过"
@@ -1397,7 +1428,12 @@ fn the_residual_is_attributed_to_one_channel() {
     assert_eq!(simple.len(), POINTS, "回读的点数不对");
     let production = probe(&shell_points(), &production_params(), SWEEP, Mask::Varying);
     assert_eq!(production.len(), POINTS, "回读的点数不对");
-    let flat = probe(&shell_points(), &production_params(), SWEEP, Mask::Constant(PRODUCTION_MASK));
+    let flat = probe(
+        &shell_points(),
+        &production_params(),
+        SWEEP,
+        Mask::Constant(PRODUCTION_MASK),
+    );
     assert_eq!(flat.len(), POINTS, "回读的点数不对");
 
     attribute("简化", &simple, SIMPLE_SWEEP, KINK_FACTOR);
@@ -1425,7 +1461,11 @@ fn attribute(label: &str, rows: &[Row], sweep: [f32; STEPS], factor: f32) {
         rows.len(),
         sweep[0],
     );
-    assert!(usable.len() >= 8, "[{label}] 可用点只有 {} 个", usable.len());
+    assert!(
+        usable.len() >= 8,
+        "[{label}] 可用点只有 {} 个",
+        usable.len()
+    );
 
     let names = ["高度 ①", "噪声 ②", "覆盖 ③"];
     let mut mirror_worst = 0.0_f32;
@@ -1440,8 +1480,7 @@ fn attribute(label: &str, rows: &[Row], sweep: [f32; STEPS], factor: f32) {
             .map(|row| {
                 let mut error = 0.0_f32;
                 for axis in 0..3 {
-                    error = error
-                        .max((row.term[which][axis] - row.channel[which][axis]).abs());
+                    error = error.max((row.term[which][axis] - row.channel[which][axis]).abs());
                 }
                 error
             })
@@ -1456,10 +1495,8 @@ fn attribute(label: &str, rows: &[Row], sweep: [f32; STEPS], factor: f32) {
                 let mut first = 0.0_f32;
                 let mut second = 0.0_f32;
                 for axis in 0..3 {
-                    first = first
-                        .max((one.term[which][axis] - one.channel[which][axis]).abs());
-                    second = second
-                        .max((two.term[which][axis] - two.channel[which][axis]).abs());
+                    first = first.max((one.term[which][axis] - one.channel[which][axis]).abs());
+                    second = second.max((two.term[which][axis] - two.channel[which][axis]).abs());
                 }
                 first.partial_cmp(&second).expect("残差里出现了 NaN")
             })
@@ -1470,8 +1507,7 @@ fn attribute(label: &str, rows: &[Row], sweep: [f32; STEPS], factor: f32) {
                 let mut error = 0.0_f32;
                 let mut scale = 1e-9_f32;
                 for axis in 0..3 {
-                    error = error
-                        .max((row.term[which][axis] - row.channel[which][axis]).abs());
+                    error = error.max((row.term[which][axis] - row.channel[which][axis]).abs());
                     scale = scale.max(row.channel[which][axis].abs());
                 }
                 error / scale
@@ -1479,7 +1515,10 @@ fn attribute(label: &str, rows: &[Row], sweep: [f32; STEPS], factor: f32) {
             .collect();
         println!(
             "[{label}] {which}（{}）解析项对通道差商的偏差：中位 {:e}，最大 {:e}，相对中位 {:e}",
-            names[which], chan_medians[which][0], chan_maxima[which][0], median(&mut relative),
+            names[which],
+            chan_medians[which][0],
+            chan_maxima[which][0],
+            median(&mut relative),
         );
         println!(
             "[{label}] {which} 最坏点：解析 {:?} 差商 {:?}（半径 {:e}，altitude {:e}）",
@@ -1490,8 +1529,8 @@ fn attribute(label: &str, rows: &[Row], sweep: [f32; STEPS], factor: f32) {
             .map(|row| {
                 let mut error = 0.0_f32;
                 for axis in 0..3 {
-                    error = error
-                        .max((row.term[which][axis] - row.channel_fine[which][axis]).abs());
+                    error =
+                        error.max((row.term[which][axis] - row.channel_fine[which][axis]).abs());
                 }
                 error
             })
@@ -1528,9 +1567,12 @@ fn attribute(label: &str, rows: &[Row], sweep: [f32; STEPS], factor: f32) {
         "[{label}] 探针算的场值和 cloud_field 差 {face_worst:e} ⇒ 差商 oracle 不是这条值路径"
     );
     assert!(
-        mirror_worst < 1e-5 * (1.0 + usable.iter().fold(0.0_f32, |worst, row| {
-            worst.max(magnitude(&row.analytic))
-        })),
+        mirror_worst
+            < 1e-5
+                * (1.0
+                    + usable.iter().fold(0.0_f32, |worst, row| {
+                        worst.max(magnitude(&row.analytic))
+                    })),
         "[{label}] 探针里复算的三项加起来和 shader 返回值差 {mirror_worst:e} ⇒ 拆项没抄对，归因无效"
     );
 
@@ -1557,8 +1599,7 @@ fn attribute(label: &str, rows: &[Row], sweep: [f32; STEPS], factor: f32) {
         .map(|row| {
             let mut error = 0.0_f32;
             for axis in 0..3 {
-                error = error
-                    .max((row.noise_candidate[axis] - row.channel[1][axis]).abs());
+                error = error.max((row.noise_candidate[axis] - row.channel[1][axis]).abs());
             }
             error
         })
@@ -1588,7 +1629,6 @@ fn attribute(label: &str, rows: &[Row], sweep: [f32; STEPS], factor: f32) {
         );
     }
 }
-
 
 /// 全部 check，按「先便宜后贵」排。原来这些是 `#[test]`，现在由 bin 逐个跑。
 pub fn checks() -> Vec<(&'static str, fn())> {

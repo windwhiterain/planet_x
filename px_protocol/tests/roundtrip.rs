@@ -89,7 +89,10 @@ fn blob_length_and_dtype_are_checked() {
         },
         bytes: vec![0; 8],
     };
-    assert!(matches!(u32_blob.f32s(), Err(WireError::NotF32(DType::U32))));
+    assert!(matches!(
+        u32_blob.f32s(),
+        Err(WireError::NotF32(DType::U32))
+    ));
 }
 
 #[test]

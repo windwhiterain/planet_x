@@ -226,11 +226,7 @@ impl SceneBuilder {
     /// `material_instances` 四节由 [`frame::build`] 算出来。
     ///
     /// `sources` 是**内容**那一边的值（帧配方里写的是来源，值在这里给）。
-    pub fn bake(
-        self,
-        frame: &frame::FrameFile,
-        sources: &Sources,
-    ) -> Result<SceneSpec, String> {
+    pub fn bake(self, frame: &frame::FrameFile, sources: &Sources) -> Result<SceneSpec, String> {
         let mut document = self.build()?;
         let baked = frame::build(frame, &document.objects, sources, true)?;
         document.resources = baked.resources;
@@ -312,7 +308,12 @@ impl MaterialBuilder {
     pub fn vec3(mut self, name: &str, value: [f32; 3]) -> Self {
         self.given.insert(
             name.to_string(),
-            toml::Value::Array(value.iter().map(|x| toml::Value::Float(f64::from(*x))).collect()),
+            toml::Value::Array(
+                value
+                    .iter()
+                    .map(|x| toml::Value::Float(f64::from(*x)))
+                    .collect(),
+            ),
         );
         self
     }
@@ -320,7 +321,12 @@ impl MaterialBuilder {
     pub fn vec4(mut self, name: &str, value: [f32; 4]) -> Self {
         self.given.insert(
             name.to_string(),
-            toml::Value::Array(value.iter().map(|x| toml::Value::Float(f64::from(*x))).collect()),
+            toml::Value::Array(
+                value
+                    .iter()
+                    .map(|x| toml::Value::Float(f64::from(*x)))
+                    .collect(),
+            ),
         );
         self
     }
@@ -448,7 +454,9 @@ mod tests {
     /// 一个空场景不是"能烘的场景"：当场拒，而不是烘出一份没有物体的文档。
     #[test]
     fn an_empty_scene_is_refused() {
-        let err = SceneBuilder::new("夹具").build().expect_err("一个物体都没有");
+        let err = SceneBuilder::new("夹具")
+            .build()
+            .expect_err("一个物体都没有");
         assert!(err.contains("一个物体都没有"), "{err}");
     }
 
@@ -536,7 +544,10 @@ mod tests {
             vec![Transparent::STAGE_NAME],
             "只点名了一档"
         );
-        assert_eq!(registration.freeze(Transparent::STAGE_NAME)["density"], Value::Num(0.7));
+        assert_eq!(
+            registration.freeze(Transparent::STAGE_NAME)["density"],
+            Value::Num(0.7)
+        );
     }
 
     /// 环那一份内容只要一个 `tint` —— 表是按**内容类型**给的。

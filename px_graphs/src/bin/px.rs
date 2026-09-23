@@ -30,10 +30,7 @@ fn main() {
         Some("list") => list(),
         Some("build") => build(&args[1..]),
         Some("run") => run(&args[1..]),
-        Some(other) => Err(format!(
-            "不认识的子命令 `{other}`\n{}",
-            usage()
-        )),
+        Some(other) => Err(format!("不认识的子命令 `{other}`\n{}", usage())),
         None => Err(usage()),
     };
     if let Err(err) = result {
@@ -94,10 +91,7 @@ fn build(flags: &[String]) -> Result<(), String> {
     let target = flags.iter().any(|flag| flag == "--target");
     for flag in flags {
         if !matches!(flag.as_str(), "--gc" | "--deep" | "--target") {
-            return Err(format!(
-                "不认识的开关 `{flag}`\n{}",
-                usage()
-            ));
+            return Err(format!("不认识的开关 `{flag}`\n{}", usage()));
         }
     }
     if (deep || target) && !gc {
@@ -176,7 +170,10 @@ fn collect_garbage(graph: &BuildGraph, deep: bool, target: bool) -> Result<(), S
         entries.sort();
         for path in entries {
             let key = stem(&path);
-            let suffix = path.extension().and_then(|value| value.to_str()).unwrap_or("");
+            let suffix = path
+                .extension()
+                .and_then(|value| value.to_str())
+                .unwrap_or("");
             if suffix != "dll" && suffix != "json" {
                 println!("  跳过 {}（不是实例构件）", path.display());
                 skipped += 1;
@@ -189,7 +186,11 @@ fn collect_garbage(graph: &BuildGraph, deep: bool, target: bool) -> Result<(), S
             let size = std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
             std::fs::remove_file(&path)
                 .map_err(|err| format!("删不了 {}：{err}", path.display()))?;
-            println!("  删 {}（{:.1} MB）", path.display(), size as f64 / 1_048_576.0);
+            println!(
+                "  删 {}（{:.1} MB）",
+                path.display(),
+                size as f64 / 1_048_576.0
+            );
             deleted += 1;
             freed += size;
         }

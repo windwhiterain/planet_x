@@ -45,7 +45,13 @@ fn the_gutter_extends_into_the_neighbouring_direction() {
     let face_size = 256;
     let gutter = 2;
     let inside = cube_atlas_uv(0, 0.0, 0.5, face_size, gutter);
-    let outside = cube_atlas_uv(0, -(gutter as f32) / face_size as f32, 0.5, face_size, gutter);
+    let outside = cube_atlas_uv(
+        0,
+        -(gutter as f32) / face_size as f32,
+        0.5,
+        face_size,
+        gutter,
+    );
     assert!(outside[0] < inside[0], "gutter 应当落在面的外侧");
 
     let extended = cube_direction(0, -0.5 / face_size as f32, 0.5);
@@ -56,5 +62,3 @@ fn the_gutter_extends_into_the_neighbouring_direction() {
         "gutter 应当落在邻面贴边处，实际 ({s}, {t})"
     );
 }
-
-

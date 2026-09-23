@@ -7,7 +7,7 @@
 //! "没有在跑的渲染服务"后面跟的用法提示：仪器（`tools/harness.ps1::Invoke-Client`）
 //! 判的是**退出码**，而人判的是这两行字。
 
-use px_protocol::client as client;
+use px_protocol::client;
 use px_protocol::render::Request;
 
 /// 发一条请求。返回进程退出码（0 成功）。

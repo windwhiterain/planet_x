@@ -96,7 +96,12 @@ mod tests {
                 "{} 的方向没归一化：{length}",
                 camera.tag
             );
-            assert!(camera.distance > 1.0, "{} 的相机在球里：{}", camera.tag, camera.distance);
+            assert!(
+                camera.distance > 1.0,
+                "{} 的相机在球里：{}",
+                camera.tag,
+                camera.distance
+            );
         }
     }
 }

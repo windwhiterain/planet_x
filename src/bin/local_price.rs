@@ -1,7 +1,7 @@
 use planet_x::department::{DEFAULT_BARRIER, DEFAULT_CURVATURE, Rationing};
 use planet_x::local_price::{
-    bloc_relations, Kind, Lab, Spec, GOODS, LADDER_CAPACITY, LADDER_FAST, LADDER_THRIFTY, NAMES,
-    SECTOR_MOTIVE,
+    GOODS, Kind, LADDER_CAPACITY, LADDER_FAST, LADDER_THRIFTY, Lab, NAMES, SECTOR_MOTIVE, Spec,
+    bloc_relations,
 };
 use planet_x::warehouse::Warehouses;
 
@@ -157,7 +157,9 @@ fn parse() -> Option<Args> {
 }
 
 fn usage() {
-    println!("用法：local_price [--scenario modern|sectors|scarce|symmetric|blockade|sanction|ladder|sweep]");
+    println!(
+        "用法：local_price [--scenario modern|sectors|scarce|symmetric|blockade|sanction|ladder|sweep]"
+    );
     println!("  --polities N         政权数（默认 3）");
     println!("  --rounds, -n N       轮数（默认 120）");
     println!("  --every K            每 K 轮打印一行（默认 10）");
@@ -190,8 +192,12 @@ fn usage() {
     println!("  --specialty F        各部门对自己那一层的产出乘数（比较优势）");
     println!("  --capacity N         部门产能预算");
     println!("  --w W                政权间的配对权重（默认 1.0）");
-    println!("  --block-from A --block-to B --block-polity P [--block-weight W]   在 [A,B) 轮封锁 P（W 默认 0 = 完全掐断）");
-    println!("  --sanction-polity P --sanction-unit U --sanction-from A --sanction-to B   定向制裁一个部门");
+    println!(
+        "  --block-from A --block-to B --block-polity P [--block-weight W]   在 [A,B) 轮封锁 P（W 默认 0 = 完全掐断）"
+    );
+    println!(
+        "  --sanction-polity P --sanction-unit U --sanction-from A --sanction-to B   定向制裁一个部门"
+    );
     println!("  --trace              逐轮逐商品打印指数/挂价/成交/库存/投入产出");
     println!("  --json               每个采样轮次打一行 JSONL（全精度）");
 }
@@ -222,12 +228,7 @@ fn raw_spec(args: &Args) -> Spec {
         let mut outputs = vec![0.0; GOODS];
         inputs[args.transform_in] = args.transform_rate * args.transform_scale;
         outputs[args.transform_out] = args.transform_scale;
-        base.with_transform(
-            args.transform_polity,
-            args.transform_unit,
-            inputs,
-            outputs,
-        )
+        base.with_transform(args.transform_polity, args.transform_unit, inputs, outputs)
     } else {
         base
     }
@@ -328,11 +329,7 @@ fn break_even(lab: &Lab, good: usize, prices: &[f32]) -> f32 {
             best = best.min(cost / output);
         }
     }
-    if best.is_finite() {
-        best
-    } else {
-        0.0
-    }
+    if best.is_finite() { best } else { 0.0 }
 }
 
 fn report_by_good(lab: &Lab) {
@@ -340,11 +337,23 @@ fn report_by_good(lab: &Lab) {
     let prices: Vec<f32> = states.iter().map(|state| state.index).collect();
     let bids: Vec<f32> = states
         .iter()
-        .map(|state| if state.bid > 0.0 { state.bid } else { state.index })
+        .map(|state| {
+            if state.bid > 0.0 {
+                state.bid
+            } else {
+                state.index
+            }
+        })
         .collect();
     let asks: Vec<f32> = states
         .iter()
-        .map(|state| if state.ask > 0.0 { state.ask } else { state.index })
+        .map(|state| {
+            if state.ask > 0.0 {
+                state.ask
+            } else {
+                state.index
+            }
+        })
         .collect();
     let added: Vec<f32> = states
         .iter()
@@ -372,7 +381,10 @@ fn report_by_good(lab: &Lab) {
     row("指数", &prices, number);
     row(
         "相对一产",
-        &prices.iter().map(|price| price / first).collect::<Vec<f32>>(),
+        &prices
+            .iter()
+            .map(|price| price / first)
+            .collect::<Vec<f32>>(),
         number,
     );
     row("买价 bid", &bids, number);
@@ -386,12 +398,18 @@ fn report_by_good(lab: &Lab) {
     );
     row(
         "产出入库",
-        &states.iter().map(|state| state.delivery).collect::<Vec<f32>>(),
+        &states
+            .iter()
+            .map(|state| state.delivery)
+            .collect::<Vec<f32>>(),
         number,
     );
     row(
         "投入消耗",
-        &states.iter().map(|state| state.consumed).collect::<Vec<f32>>(),
+        &states
+            .iter()
+            .map(|state| state.consumed)
+            .collect::<Vec<f32>>(),
         number,
     );
     row(
@@ -407,7 +425,10 @@ fn report_by_good(lab: &Lab) {
     row("增值", &added, |value| format!("{value:>9.2}"));
     row(
         "增值占比",
-        &added.iter().map(|value| share(*value)).collect::<Vec<f32>>(),
+        &added
+            .iter()
+            .map(|value| share(*value))
+            .collect::<Vec<f32>>(),
         |value| format!("{:>8.1}%", 100.0 * value),
     );
 }
@@ -424,7 +445,12 @@ fn summary(lab: &Lab) {
     for (p, polity) in lab.polities.iter().enumerate() {
         let row = snapshot.local_ratios.get(p).cloned().unwrap_or_default();
         let local = (0..GOODS)
-            .map(|k| format!("{:.3}", snapshot.prices[k] * row.get(k).copied().unwrap_or(1.0)))
+            .map(|k| {
+                format!(
+                    "{:.3}",
+                    snapshot.prices[k] * row.get(k).copied().unwrap_or(1.0)
+                )
+            })
             .collect::<Vec<String>>()
             .join(" ");
         println!(
@@ -621,7 +647,10 @@ fn json_line(lab: &Lab) -> String {
                     format!("[{bid:e},{ask:e}]")
                 })
                 .collect();
-            format!("{{\"locality\":{locality},\"quote\":[{}]}}", cells.join(","))
+            format!(
+                "{{\"locality\":{locality},\"quote\":[{}]}}",
+                cells.join(",")
+            )
         })
         .collect();
     let (total, low, high) = money(lab);
@@ -684,11 +713,7 @@ fn sectors(args: &Args) {
             continue;
         }
         let snapshot = lab.history.last().unwrap();
-        let consumed: f32 = lab
-            .good_states()
-            .iter()
-            .map(|state| state.consumed)
-            .sum();
+        let consumed: f32 = lab.good_states().iter().map(|state| state.consumed).sum();
         let dealt: f32 = lab.good_states().iter().map(|state| state.dealt).sum();
         let stock: f32 = lab.good_states().iter().map(|state| state.stock).sum();
         println!(
@@ -784,7 +809,11 @@ fn ladder(args: &Args) {
     );
     println!(
         "{:>9} {:>10} {:>26} {:>26} {:>12}",
-        "粮食供给", "工/粮价", "省料但慢 份额/单位产能利润", "费料但快 份额/单位产能利润", "粮食指数"
+        "粮食供给",
+        "工/粮价",
+        "省料但慢 份额/单位产能利润",
+        "费料但快 份额/单位产能利润",
+        "粮食指数"
     );
     for supply in [0.4f32, 0.6, 0.8, 1.0, 1.5, 2.5, 4.0] {
         let mut local = args.clone();
@@ -794,7 +823,9 @@ fn ladder(args: &Args) {
         let department = lab.department_of(0, 0, Kind::Producer);
         let processes = lab.process_state(department);
         let report = |index: usize| match processes.get(index) {
-            Some((share, potential, _)) => format!("{:>10.1}% / {:>+10.3}", 100.0 * share, potential),
+            Some((share, potential, _)) => {
+                format!("{:>10.1}% / {:>+10.3}", 100.0 * share, potential)
+            }
             None => String::from("—"),
         };
         let food = lab.good_states()[0].index;

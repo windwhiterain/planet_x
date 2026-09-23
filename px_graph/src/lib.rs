@@ -15,10 +15,10 @@ pub use driver::{
     graph_manifest, manifest_key_of, scene_key, shader_key, workspace_root, write_graph_manifest,
     write_shader,
 };
+pub use px_field_schema::field::{Field, Projection, Stats};
 pub use px_graph_schema::{
     Cache, GraphSpec, Grid, Key, ManifestEntry, OpId, Report, canonical_params, fnv1a,
     fnv1a_sources, hex, hex_short, node_key, payload_fingerprint,
 };
-pub use px_field_schema::field::{Field, Projection, Stats};
 pub use px_mesh_schema::MeshData;
 pub use px_volume_schema::{PATCHES, VolumeData};

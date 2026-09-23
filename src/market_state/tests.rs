@@ -28,7 +28,11 @@ fn a_geometric_decay_shows_up_as_a_negative_drift() {
     }
     assert_near(state.drift(0), 0.9f32.ln(), 1e-3);
     assert_near(state.level(0), price, 1e-6);
-    assert!(state.volatility(0) < 1e-3, "单调衰减没有波动：{}", state.volatility(0));
+    assert!(
+        state.volatility(0) < 1e-3,
+        "单调衰减没有波动：{}",
+        state.volatility(0)
+    );
 }
 
 #[test]
@@ -48,7 +52,11 @@ fn alternating_prices_raise_the_volatility() {
     for step in 0..200 {
         state.observe(0, if step % 2 == 0 { 1.1 } else { 0.9 });
     }
-    assert!(state.volatility(0) > 0.05, "来回震荡应当有波动：{}", state.volatility(0));
+    assert!(
+        state.volatility(0) > 0.05,
+        "来回震荡应当有波动：{}",
+        state.volatility(0)
+    );
     assert!(state.drift(0).abs() < state.volatility(0));
 }
 

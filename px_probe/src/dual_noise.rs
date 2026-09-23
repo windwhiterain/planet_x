@@ -190,8 +190,14 @@ fn the_noise_value_is_clamped_so_its_gradient_is_zero_outside() {
 }
 pub fn checks() -> Vec<(&'static str, fn())> {
     vec![
-        ("the_dual_gradient_of_the_noise_matches_its_own_values", the_dual_gradient_of_the_noise_matches_its_own_values),
-        ("the_noise_value_is_clamped_so_its_gradient_is_zero_outside", the_noise_value_is_clamped_so_its_gradient_is_zero_outside),
+        (
+            "the_dual_gradient_of_the_noise_matches_its_own_values",
+            the_dual_gradient_of_the_noise_matches_its_own_values,
+        ),
+        (
+            "the_noise_value_is_clamped_so_its_gradient_is_zero_outside",
+            the_noise_value_is_clamped_so_its_gradient_is_zero_outside,
+        ),
     ]
 }
 

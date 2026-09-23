@@ -48,13 +48,7 @@ pub fn recipe_path(name: &str) -> PathBuf {
 
 /// `select` 认的取值。**这是烘图侧的词汇**，不是渲染器的：它按物体自己带着的
 /// 材质 alpha 档（或者"投不投影"那一格）分组，而那正是 oracle 分相位的依据。
-const SELECTS: [&str; 5] = [
-    "opaque",
-    "transparent",
-    "shadow_casters",
-    "skybox",
-    "none",
-];
+const SELECTS: [&str; 5] = ["opaque", "transparent", "shadow_casters", "skybox", "none"];
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -152,12 +146,18 @@ fn toml_of(value: &Value) -> toml::Value {
     match value {
         Value::Num(number) => toml::Value::Float(*number),
         Value::Text(text) => toml::Value::String(text.clone()),
-        Value::Triple(items) => {
-            toml::Value::Array(items.iter().map(|v| toml::Value::Float(f64::from(*v))).collect())
-        }
-        Value::Quad(items) => {
-            toml::Value::Array(items.iter().map(|v| toml::Value::Float(f64::from(*v))).collect())
-        }
+        Value::Triple(items) => toml::Value::Array(
+            items
+                .iter()
+                .map(|v| toml::Value::Float(f64::from(*v)))
+                .collect(),
+        ),
+        Value::Quad(items) => toml::Value::Array(
+            items
+                .iter()
+                .map(|v| toml::Value::Float(f64::from(*v)))
+                .collect(),
+        ),
     }
 }
 
@@ -279,22 +279,24 @@ impl FrameFile {
                         "{at} 的 kind 是 copy：拷贝不画东西，`vertex_shader` / `vertex_entry` / \
                          `fragment_shader` / `entry` 四栏都该是空的\
                          （顶点阶段是几何 pass 那一栏，片元成员是全屏 pass 那一栏）"
-                    ))
+                    ));
                 }
                 (Some(_), Some(_)) => {
                     return Err(format!(
                         "{at} 同时给了顶点阶段与片元成员：几何 pass 只给顶点阶段\
                          （片元阶段属于材质），全屏 pass 只给片元成员"
-                    ))
+                    ));
                 }
                 (None, None) if entry.kind == "fullscreen" => {
-                    return Err(format!("{at} 是 fullscreen，却没给 fragment_shader"))
+                    return Err(format!("{at} 是 fullscreen，却没给 fragment_shader"));
                 }
                 (None, None) => {
-                    return Err(format!("{at} 是几何 pass，却没给 vertex_shader（WGSL 文件）"))
+                    return Err(format!(
+                        "{at} 是几何 pass，却没给 vertex_shader（WGSL 文件）"
+                    ));
                 }
                 (Some(_), None) if entry.vertex_entry.trim().is_empty() => {
-                    return Err(format!("{at} 给了顶点阶段却没给 vertex_entry"))
+                    return Err(format!("{at} 给了顶点阶段却没给 vertex_entry"));
                 }
                 _ => {}
             }
@@ -319,7 +321,9 @@ impl FrameFile {
         for material in &self.materials {
             let at = format!("帧图材质 '{}'", material.name);
             if material.name.trim().is_empty() {
-                return Err("帧图有一份 `[[materials]]` 没给 name：draws 是按名字引用它的".to_string());
+                return Err(
+                    "帧图有一份 `[[materials]]` 没给 name：draws 是按名字引用它的".to_string(),
+                );
             }
             if names.contains(&material.name.as_str()) {
                 return Err(format!(
@@ -506,7 +510,7 @@ pub fn build(
                     "帧图资源 '{}' 的 layers 来源是 '{other}'：这一版只认 'shadow_cubes'\
                      （每盏投影的点光一个 cube）",
                     resource.name
-                ))
+                ));
             }
         };
         if layers == 0 {
@@ -903,7 +907,8 @@ pub fn verify(spec: &SceneSpec, frame: &FrameFile, name: &str) -> Result<(), Str
                 loop {
                     let mut matched = 0_u32;
                     for face in 0..CUBE_FACES {
-                        let want = format!("{}_{}_{}", entry.label, light, FACE_NAMES[face as usize]);
+                        let want =
+                            format!("{}_{}_{}", entry.label, light, FACE_NAMES[face as usize]);
                         if found.get(at) == Some(&want.as_str()) {
                             at += 1;
                             matched += 1;
@@ -1025,7 +1030,10 @@ mod tests {
         ];
         let opaque = draws_of(&objects, "opaque");
         assert_eq!(
-            opaque.iter().map(|d| d.geometry.as_str()).collect::<Vec<_>>(),
+            opaque
+                .iter()
+                .map(|d| d.geometry.as_str())
+                .collect::<Vec<_>>(),
             vec!["planet"]
         );
         let transparent = draws_of(&objects, "transparent");
@@ -1120,7 +1128,9 @@ mod tests {
             .collect();
         assert_eq!(
             cubes,
-            (0..CUBE_FACES).map(|face| (0, face, face)).collect::<Vec<_>>(),
+            (0..CUBE_FACES)
+                .map(|face| (0, face, face))
+                .collect::<Vec<_>>(),
             "一条 `cube_faces = 6` 的条目要展开成六个 (灯, 面, 层)"
         );
         // ⚠ 帧自有材质（§135）：配方里声明了几份，文档里就该有几份，而且**全文内联**。
@@ -1184,15 +1194,17 @@ mod tests {
         assert!(err.contains("来源"), "{err}");
 
         // ②′ 给的**是值不是来源** ⇒ 拒（这正是"参数要说来源"那条规矩的钉子）。
-        let err =
-            bake_material(&material("brightness = 900.0"), &sources(), &modules).expect_err("给值 ⇒ 拒");
+        let err = bake_material(&material("brightness = 900.0"), &sources(), &modules)
+            .expect_err("给值 ⇒ 拒");
         assert!(err.contains("brightness"), "{err}");
         assert!(err.contains("来源"), "{err}");
 
         // ③ 类型不符：`brightness` 在 WGSL 里是 `f32`，而 `environment.ambient` 也是 f32
         //    ⇒ 这一档得换个法子造：把参数名换成一个不存在的（那就变成 ④ 了）。
         //    真正的类型不符要一份声明了别的类型的 WGSL —— 用一个临时夹具文本。
-        let dir = px_graph::workspace_root().join("target").join("frame-material-fixture");
+        let dir = px_graph::workspace_root()
+            .join("target")
+            .join("frame-material-fixture");
         std::fs::create_dir_all(&dir).expect("建夹具目录");
         let fixture = dir.join("vec3_param.wgsl");
         std::fs::write(
@@ -1234,7 +1246,10 @@ mod tests {
         )
         .expect_err("多给参数 ⇒ 拒");
         assert!(err.contains("gain"), "{err}");
-        assert!(err.contains("brightness"), "要列出 shader 声明的参数：{err}");
+        assert!(
+            err.contains("brightness"),
+            "要列出 shader 声明的参数：{err}"
+        );
 
         // ⑤ 正面：来源取的就是**环境里的值**（换个亮度，文档里的数就跟着变）。
         let dim = Sources {

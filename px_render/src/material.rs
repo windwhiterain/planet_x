@@ -755,7 +755,10 @@ mod tests {
             .unwrap_or_else(|err| panic!("读不了 {}：{err}", list.display()));
         let path = PathBuf::from(text.trim());
         if !path.exists() {
-            println!("⚠ 跳过：场景产物 {} 不在（target/ 不入 git）", path.display());
+            println!(
+                "⚠ 跳过：场景产物 {} 不在（target/ 不入 git）",
+                path.display()
+            );
             return None;
         }
         Some(path)
@@ -1030,15 +1033,14 @@ mod tests {
                 // 点光影子那个**比较采样器**（group 0 binding 3，§109）：
                 // ⚠ 必须反射成 `SamplerBindingType::Comparison` —— `fetch_point_shadow` 走的是
                 // `textureSampleCompareLevel`，普通采样器在那条路上是"类型不符"。
-                (
-                    naga::AddressSpace::Handle,
-                    naga::TypeInner::Sampler { comparison: true },
-                ) => wgpu::BindGroupLayoutEntry {
-                    binding: binding.binding,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
-                    count: None,
-                },
+                (naga::AddressSpace::Handle, naga::TypeInner::Sampler { comparison: true }) => {
+                    wgpu::BindGroupLayoutEntry {
+                        binding: binding.binding,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
+                        count: None,
+                    }
+                }
                 (space, inner) => panic!("组 0 多了个不认识的全局变量 {name}：{space:?} {inner:?}"),
             };
             entries.push(entry);
@@ -1077,11 +1079,7 @@ mod tests {
     }
 
     /// 读回一张纹理头几个字节（判据用；渲染路径不做这件事）。
-    fn read_pixel(
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        texture: &wgpu::Texture,
-    ) -> [u8; 4] {
+    fn read_pixel(device: &wgpu::Device, queue: &wgpu::Queue, texture: &wgpu::Texture) -> [u8; 4] {
         let buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("fallback readback"),
             size: wgpu::COPY_BYTES_PER_ROW_ALIGNMENT as u64,
@@ -1162,12 +1160,20 @@ mod tests {
             "上传前的那四个字节"
         );
         assert_eq!(
-            read_pixel(&gpu.device, &gpu.queue, materials.fallbacks().texture(TextureDimension::D2)),
+            read_pixel(
+                &gpu.device,
+                &gpu.queue,
+                materials.fallbacks().texture(TextureDimension::D2)
+            ),
             [255, 255, 255, 255],
             "兜底 2D 图上真的那一个像素"
         );
         assert_eq!(
-            read_pixel(&gpu.device, &gpu.queue, materials.fallbacks().texture(TextureDimension::Cube)),
+            read_pixel(
+                &gpu.device,
+                &gpu.queue,
+                materials.fallbacks().texture(TextureDimension::Cube)
+            ),
             [255, 255, 255, 255],
             "兜底 cube 的第一层"
         );
@@ -1187,11 +1193,9 @@ mod tests {
         let mut keys = Vec::new();
         for id in ["planet", "atmosphere"] {
             let object = scene.object(id).expect("物体在");
-            let module = crate::shader::validate(
-                &format!("{id}（组装后）"),
-                &object.shader.assembled,
-            )
-            .unwrap_or_else(|err| panic!("{id} 的组装文本过不了 naga：{err}"));
+            let module =
+                crate::shader::validate(&format!("{id}（组装后）"), &object.shader.assembled)
+                    .unwrap_or_else(|err| panic!("{id} 的组装文本过不了 naga：{err}"));
 
             // ① 布局（超集）必须是 shader 第 3 组声明的**超集**。
             let declared = declared_material_slots(&module);
@@ -1206,10 +1210,7 @@ mod tests {
                     wgpu::BindingType::Texture {
                         view_dimension: found,
                         ..
-                    } => assert_eq!(
-                        found, *dimension,
-                        "{id} 第 {binding} 格的维度与布局不一致"
-                    ),
+                    } => assert_eq!(found, *dimension, "{id} 第 {binding} 格的维度与布局不一致"),
                     ref other => panic!("{id} 第 {binding} 格在布局里不是贴图：{other:?}"),
                 }
                 assert!(
@@ -1320,7 +1321,9 @@ mod tests {
                 },
             );
             assert_eq!(
-                materials.cached(material.key).map(|found| Arc::as_ptr(&found)),
+                materials
+                    .cached(material.key)
+                    .map(|found| Arc::as_ptr(&found)),
                 Some(Arc::as_ptr(&pipeline)),
                 "{id}：同一个键必须拿回同一个 Arc（缓存命中，不重编）"
             );

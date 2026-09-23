@@ -43,8 +43,8 @@ fn the_same_values_give_the_same_key_however_they_were_written() {
 #[test]
 fn comments_and_spacing_do_not_change_the_key() {
     let plain: Params = toml::from_str("frequency = 6.0\noctaves = 4\n").expect("解析失败");
-    let noisy: Params =
-        toml::from_str("# 注释\nfrequency   =   6.0   # 行内注释\n\noctaves = 4\n").expect("解析失败");
+    let noisy: Params = toml::from_str("# 注释\nfrequency   =   6.0   # 行内注释\n\noctaves = 4\n")
+        .expect("解析失败");
     assert_eq!(canonical_params(&plain), canonical_params(&noisy));
     assert_eq!(key_of(&plain, &[]), key_of(&noisy, &[]));
 }
@@ -106,7 +106,10 @@ fn nothing_about_the_graph_itself_is_in_the_key() {
     let params = Params::default();
     let once = key_of(&params, &[]);
     let twice = key_of(&params, &[]);
-    assert_eq!(once, twice, "键只由算子身份 + 参数 + 上游（+ 该域的画布）决定");
+    assert_eq!(
+        once, twice,
+        "键只由算子身份 + 参数 + 上游（+ 该域的画布）决定"
+    );
 }
 
 /// 画布**由调用点**决定给不给（域自己声明 `RESOLUTION_IS_CANVAS`）：
@@ -195,10 +198,9 @@ fn a_shader_key_follows_its_include_closure() {
 }
 
 fn closure_of(entry: &str, library: &str) -> px_shader::Closure {
-    let modules: px_shader::ModuleTable =
-        [("planet_x::noise".to_string(), library.to_string())]
-            .into_iter()
-            .collect();
+    let modules: px_shader::ModuleTable = [("planet_x::noise".to_string(), library.to_string())]
+        .into_iter()
+        .collect();
     px_shader::closure(entry, &modules)
 }
 

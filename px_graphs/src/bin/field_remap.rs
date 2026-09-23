@@ -38,7 +38,9 @@ fn main() -> Result<(), Fault> {
     let bands = cook::<Waves>(
         &graph,
         "bands",
-        field::FieldRemapInput { input: source.clone() },
+        field::FieldRemapInput {
+            input: source.clone(),
+        },
     )?;
 
     let source_stats = source.value().stats();

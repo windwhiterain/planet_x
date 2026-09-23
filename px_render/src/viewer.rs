@@ -177,7 +177,11 @@ fn now_nanos() -> u64 {
 
 /// 租约有多旧。`None` = 没有租约文件（没有窗口在跑，或者它收工了）。
 fn lease_age() -> Option<Duration> {
-    let stamp: u64 = std::fs::read_to_string(VIEW_LEASE).ok()?.trim().parse().ok()?;
+    let stamp: u64 = std::fs::read_to_string(VIEW_LEASE)
+        .ok()?
+        .trim()
+        .parse()
+        .ok()?;
     Some(Duration::from_nanos(now_nanos().saturating_sub(stamp)))
 }
 
@@ -196,7 +200,11 @@ fn read_request() -> Option<ViewRequest> {
 /// "同一份产物"会被判成两份。
 fn fingerprint_of(path: &Path) -> Result<u64, String> {
     let bundle = px_protocol::art::read_manifest(path)?;
-    Ok(bundle.assets.first().map(|asset| asset.fingerprint).unwrap_or(0))
+    Ok(bundle
+        .assets
+        .first()
+        .map(|asset| asset.fingerprint)
+        .unwrap_or(0))
 }
 
 /// 把 `--cam` / `--place` 那三个数收成窗口能用的状态：pitch 夹到**相机自己**的范围
@@ -244,8 +252,12 @@ pub fn show(scene: &Path, shot: Option<PathBuf>) -> Result<(), String> {
 
     println!("已推给常驻窗口：{scene}（键 {key:016x}）");
     match lease_age() {
-        Some(age) if age < LEASE_FRESH => println!("窗口在线（心跳 {:.1} s 前）", age.as_secs_f32()),
-        _ => println!("⚠ 没检测到在跑的窗口；先执行 `px_render --view --scene …` 开一个，它会一直留着"),
+        Some(age) if age < LEASE_FRESH => {
+            println!("窗口在线（心跳 {:.1} s 前）", age.as_secs_f32())
+        }
+        _ => println!(
+            "⚠ 没检测到在跑的窗口；先执行 `px_render --view --scene …` 开一个，它会一直留着"
+        ),
     }
     if request.shot {
         println!(
@@ -309,7 +321,10 @@ pub fn camera_query(place: Option<[f32; 3]>) -> Result<(), String> {
                         );
                     }
                     // 这一行能直接粘回命令行：换个窗口也能摆到同一个视角。
-                    println!("--place {:.4},{:.4},{:.4}", reply.yaw, reply.pitch, reply.distance);
+                    println!(
+                        "--place {:.4},{:.4},{:.4}",
+                        reply.yaw, reply.pitch, reply.distance
+                    );
                     return Ok(());
                 }
             }
@@ -441,7 +456,9 @@ pub fn view(options: &crate::Options) -> Result<(), String> {
     // ⚠ 反过来说：`--where` / `--place` 因此要等窗口真的起来才有东西可读 ——
     //    那是实话（"窗口没起来"与"窗口起来了但没回话"是两件事），不是缺陷。
 
-    println!("操作：左键拖动 = 转视角、滚轮 = 缩放；s = 存一张图（落到 --shot 那条路径）；q / Esc = 退出");
+    println!(
+        "操作：左键拖动 = 转视角、滚轮 = 缩放；s = 存一张图（落到 --shot 那条路径）；q / Esc = 退出"
+    );
     println!("  推一份新场景进来：px_render --show --scene <SCENE.pxart> [--shot PNG]");
     println!("  问/摆相机：px_render --where ｜ px_render --place yaw,pitch,distance");
     println!("  截图落点：{}（--shot 不给路径时）", VIEW_SHOT);
@@ -632,7 +649,14 @@ impl Present {
     /// 拿 sRGB 视图采样、再写进 sRGB 目标 ⇒ 硬件会做一次"解码再编码"，
     /// 而 8 位下那条往返**不是**恒等（有几个值差 1）。非 sRGB 视图把两端都变成
     /// "字节进、字节出"，于是屏幕上的像素与 PNG 里的字节**逐个相等**。
-    fn upload(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, width: u32, height: u32, rgba: &[u8]) {
+    fn upload(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        width: u32,
+        height: u32,
+        rgba: &[u8],
+    ) {
         if self.texture.is_none() || self.size != (width, height) {
             let texture = device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("px_render 呈现源"),
@@ -1038,9 +1062,11 @@ impl Viewer {
 
     /// 窗口尺寸变了：交换链重建，画面**必须**重画（长宽比变了 ⇒ 换了一台相机）。
     fn resize(&mut self, size: PhysicalSize<u32>) {
-        let (Some(surface), Some(config), Some(gpu)) =
-            (self.surface.as_ref(), self.config.as_mut(), self.gpu.as_ref())
-        else {
+        let (Some(surface), Some(config), Some(gpu)) = (
+            self.surface.as_ref(),
+            self.config.as_mut(),
+            self.gpu.as_ref(),
+        ) else {
             return;
         };
         if size.width == 0 || size.height == 0 {
@@ -1296,7 +1322,10 @@ impl Viewer {
                 self.key = fingerprint;
                 self.dirty = true;
                 self.update_title();
-                println!("场景产物更新，重载：{}（键 {fingerprint:016x}）", self.scene);
+                println!(
+                    "场景产物更新，重载：{}（键 {fingerprint:016x}）",
+                    self.scene
+                );
             }
             Err(err) => println!("场景产物动过，读不到清单：{err}"),
         }
@@ -1383,7 +1412,13 @@ impl Viewer {
                     }
                     if let Some(gpu) = self.gpu.as_ref() {
                         if let Some(present) = self.present.as_mut() {
-                            present.upload(&gpu.device, &gpu.queue, width, height, &rendered.pixels);
+                            present.upload(
+                                &gpu.device,
+                                &gpu.queue,
+                                width,
+                                height,
+                                &rendered.pixels,
+                            );
                         }
                     }
                     // ⚠ 上传之后**另起一段**计时：截图那一笔（PNG 编码，dev 档实测上百毫秒）
@@ -1629,7 +1664,11 @@ impl ApplicationHandler for Viewer {
                 self.dragging = state == ElementState::Pressed;
                 if !self.dragging {
                     // 松手时把方位打一行：它能直接粘回 `--place`，也是"人看到了什么"的读数。
-                    println!("拖到：{}｜{}", describe_orbit(self.orbit), place_line(self.orbit));
+                    println!(
+                        "拖到：{}｜{}",
+                        describe_orbit(self.orbit),
+                        place_line(self.orbit)
+                    );
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
@@ -1764,7 +1803,10 @@ mod tests {
     /// 与没拦住一样贵）。
     #[test]
     fn a_place_angle_is_clamped_to_what_the_camera_will_actually_use() {
-        assert_eq!(orbit_of("--place", [0.0, 8.0, 3.15]).unwrap(), [0.0, 8.0, 3.15]);
+        assert_eq!(
+            orbit_of("--place", [0.0, 8.0, 3.15]).unwrap(),
+            [0.0, 8.0, 3.15]
+        );
         assert_eq!(
             orbit_of("--place", [10.0, 120.0, 5.0]).unwrap(),
             [10.0, PITCH_DEGREES_LIMIT, 5.0]
@@ -1773,8 +1815,14 @@ mod tests {
             orbit_of("--place", [10.0, -120.0, 5.0]).unwrap(),
             [10.0, -PITCH_DEGREES_LIMIT, 5.0]
         );
-        assert!(orbit_of("--place", [f32::NAN, 0.0, 3.0]).is_err(), "NaN 的 yaw 要当场拒");
-        assert!(orbit_of("--place", [0.0, 0.0, f32::INFINITY]).is_err(), "无穷远要当场拒");
+        assert!(
+            orbit_of("--place", [f32::NAN, 0.0, 3.0]).is_err(),
+            "NaN 的 yaw 要当场拒"
+        );
+        assert!(
+            orbit_of("--place", [0.0, 0.0, f32::INFINITY]).is_err(),
+            "无穷远要当场拒"
+        );
     }
 
     /// 探针位姿 → 轨道角：**反推不是恒等**，但必须是那条构造的逆（位置量级上对得上）。
@@ -1792,8 +1840,16 @@ mod tests {
 
         let angles = seed_orbit(position);
         assert_eq!(angles[0], 0.0, "正前方 ⇒ yaw 0");
-        assert!((angles[1] - 9.9042).abs() < 0.001, "pitch 约 9.9°：{}", angles[1]);
-        assert!((angles[2] - 3.1977).abs() < 0.001, "distance 约 3.1977：{}", angles[2]);
+        assert!(
+            (angles[1] - 9.9042).abs() < 0.001,
+            "pitch 约 9.9°：{}",
+            angles[1]
+        );
+        assert!(
+            (angles[2] - 3.1977).abs() < 0.001,
+            "distance 约 3.1977：{}",
+            angles[2]
+        );
 
         let back = crate::camera::probe_camera(Some(angles), 960.0 / 640.0);
         for (what, a, b) in [
@@ -1801,7 +1857,11 @@ mod tests {
             ("y", back.position.y, position[1]),
             ("z", back.position.z, position[2]),
         ] {
-            assert!((a - b).abs() < 1e-3, "{what} 反推回去差了 {}：{a} vs {b}", (a - b).abs());
+            assert!(
+                (a - b).abs() < 1e-3,
+                "{what} 反推回去差了 {}：{a} vs {b}",
+                (a - b).abs()
+            );
         }
 
         // 正下方/正上方那种退化输入不该给出 NaN（`asin` 的定义域）。
@@ -1831,11 +1891,17 @@ mod tests {
     fn the_mouse_deltas_are_radians_converted_to_the_degrees_we_store() {
         // 100 像素 × 0.006 rad/px = 0.6 rad = 34.377°（**不是** 0.6°）
         let turned = drag_degrees(YAW_PER_PIXEL, 100.0);
-        assert!((turned - 34.377_47).abs() < 0.001, "100 像素该转约 34.38°，实得 {turned}");
+        assert!(
+            (turned - 34.377_47).abs() < 0.001,
+            "100 像素该转约 34.38°，实得 {turned}"
+        );
 
         // 夹取：Bevy 的 ±1.25 rad ⇒ ±71.6197°
         let limit = pitch_limit_degrees();
-        assert!((limit - 71.619_73).abs() < 0.001, "夹取该是 ±71.62°，实得 {limit}");
+        assert!(
+            (limit - 71.619_73).abs() < 0.001,
+            "夹取该是 ±71.62°，实得 {limit}"
+        );
         assert!(
             limit < PITCH_DEGREES_LIMIT,
             "鼠标的夹取比相机自己的 ±89.5° 紧（Bevy 就是这么定的），两条不是同一个数"
@@ -1844,7 +1910,10 @@ mod tests {
         // 往上/往下拖都落在同一个范围里，而且不会因为单位错了而"一碰到底"
         let mut pitch = 0.0_f32;
         pitch = (pitch + drag_degrees(PITCH_PER_PIXEL, 50.0)).clamp(-limit, limit);
-        assert!((pitch - 17.188_73).abs() < 0.001, "往下拖 50 像素该到约 17.19°，实得 {pitch}");
+        assert!(
+            (pitch - 17.188_73).abs() < 0.001,
+            "往下拖 50 像素该到约 17.19°，实得 {pitch}"
+        );
         assert!(pitch < limit, "还没到夹取点");
     }
 

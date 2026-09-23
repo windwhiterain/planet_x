@@ -110,7 +110,8 @@ pub(super) fn step(warehouses: &mut Warehouses, market: &mut Market) {
 
     for (i, warehouse) in list.iter_mut().enumerate() {
         for (k, stock) in warehouse.stocks.iter_mut().enumerate() {
-            stock.volume = (stock.volume - market.traders[i].merchandises[k].deal_volume()).max(0.0);
+            stock.volume =
+                (stock.volume - market.traders[i].merchandises[k].deal_volume()).max(0.0);
         }
     }
 }

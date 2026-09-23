@@ -150,17 +150,14 @@ impl Cache for Graph {
 
     fn record_params(&self, node: &str, op: &str, params_json: &str, from_file: bool) {
         let value = serde_json::from_str(params_json).unwrap_or(serde_json::Value::Null);
-        self.params_used
-            .lock()
-            .expect("参数表锁坏了")
-            .insert(
-                node.to_string(),
-                ParamsUsed {
-                    op: op.to_string(),
-                    from_file,
-                    params: value,
-                },
-            );
+        self.params_used.lock().expect("参数表锁坏了").insert(
+            node.to_string(),
+            ParamsUsed {
+                op: op.to_string(),
+                from_file,
+                params: value,
+            },
+        );
     }
 
     fn fetch(&self, key: Key) -> Option<PayloadBundle> {
@@ -388,7 +385,6 @@ pub fn write_graph_manifest(graph: &str, entries: &[ManifestEntry]) -> Result<Pa
     Ok(path)
 }
 
-
 pub const SHADER_VERSION: u32 = 1;
 
 /// 场景的键 = 场景描述 JSON + 它引用的全部成员键。
@@ -487,8 +483,12 @@ fn shader_schema(id: &str, text: &str, modules: &px_shader::ModuleTable) -> Resu
     let mut seen = Vec::new();
     // 烘图侧是 **Bevy 那一侧**：它烘出来的契约要给运行期那个宿主用，
     // 所以桩表必须是 Bevy 那张（`bevy_stub`），不能是裸 wgpu 宿主那张。
-    let assembled =
-        px_shader::assemble::render_source(text, modules, px_shader::assemble::bevy_stub, &mut seen);
+    let assembled = px_shader::assemble::render_source(
+        text,
+        modules,
+        px_shader::assemble::bevy_stub,
+        &mut seen,
+    );
     px_shader::reflect::reflect_assembled(&assembled, id)?.to_json()
 }
 
@@ -504,10 +504,7 @@ fn shader_params(
     let mut params = BTreeMap::from([
         ("wgsl_bytes".to_string(), text.len() as f64),
         ("shader_version".to_string(), f64::from(SHADER_VERSION)),
-        (
-            "closure_modules".to_string(),
-            closure.modules.len() as f64,
-        ),
+        ("closure_modules".to_string(), closure.modules.len() as f64),
         (
             "closure_externals".to_string(),
             closure.externals.len() as f64,

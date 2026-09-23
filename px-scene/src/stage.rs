@@ -439,9 +439,10 @@ pub mod runtime {
         use RuntimeContent as C;
         use RuntimeStage as S;
         let checked = match (stage, content) {
-            (S::Opaque, C::Surface) => {
-                check_given::<Opaque, Surface>(<Opaque as StageParams<Opaque, Surface>>::GIVEN, params)
-            }
+            (S::Opaque, C::Surface) => check_given::<Opaque, Surface>(
+                <Opaque as StageParams<Opaque, Surface>>::GIVEN,
+                params,
+            ),
             (S::Transparent, C::Clouds) => check_given::<Transparent, Clouds>(
                 <Transparent as StageParams<Transparent, Clouds>>::GIVEN,
                 params,
@@ -526,7 +527,11 @@ impl<S: Stage, M: Content> Registration<S, M> {
             stage: T::STAGE_NAME,
             params,
         };
-        match self.slots.iter_mut().find(|known| known.stage == slot.stage) {
+        match self
+            .slots
+            .iter_mut()
+            .find(|known| known.stage == slot.stage)
+        {
             Some(existing) => *existing = slot,
             None => self.slots.push(slot),
         }
@@ -694,12 +699,10 @@ mod tests {
         Registration::<Sky, Skybox>::single(params(&[("brightness", Value::Num(900.0))]))
             .check_all()
             .expect("skybox 只要 brightness");
-        let err = Registration::<Sky, Skybox>::single(params(&[(
-            "brightness",
-            Value::Triple([0.0; 3]),
-        )]))
-        .check_all()
-        .expect_err("vec3 不是 f32");
+        let err =
+            Registration::<Sky, Skybox>::single(params(&[("brightness", Value::Triple([0.0; 3]))]))
+                .check_all()
+                .expect_err("vec3 不是 f32");
         assert!(err.contains("brightness"), "{err}");
     }
 
@@ -727,9 +730,24 @@ mod tests {
             ("tint", Value::Quad([1.0, 1.0, 1.0, 1.0])),
         ]);
         for name in [
-            "inner", "outer", "density", "coverage", "base", "top", "detail_scale",
-            "detail_strength", "erode", "phase", "shadow", "bump", "slope_scale", "taper",
-            "coverage_gain", "surface_level", "wind", "wind_skin",
+            "inner",
+            "outer",
+            "density",
+            "coverage",
+            "base",
+            "top",
+            "detail_scale",
+            "detail_strength",
+            "erode",
+            "phase",
+            "shadow",
+            "bump",
+            "slope_scale",
+            "taper",
+            "coverage_gain",
+            "surface_level",
+            "wind",
+            "wind_skin",
         ] {
             clouds.insert(name.to_string(), Value::Num(1.0));
         }
@@ -749,9 +767,24 @@ mod tests {
             ("tint", Value::Quad([1.0, 1.0, 1.0, 1.0])),
         ]);
         for name in [
-            "inner", "outer", "density", "coverage", "base", "top", "detail_scale",
-            "detail_strength", "erode", "phase", "shadow", "bump", "slope_scale", "taper",
-            "coverage_gain", "surface_level", "wind", "wind_skin",
+            "inner",
+            "outer",
+            "density",
+            "coverage",
+            "base",
+            "top",
+            "detail_scale",
+            "detail_strength",
+            "erode",
+            "phase",
+            "shadow",
+            "bump",
+            "slope_scale",
+            "taper",
+            "coverage_gain",
+            "surface_level",
+            "wind",
+            "wind_skin",
         ] {
             clouds.insert(name.to_string(), Value::Num(1.0));
         }
@@ -772,7 +805,10 @@ mod tests {
         assert!(satisfies(&Value::Quad([0.0; 4]), ParamKind::Vec4).is_ok());
         assert!(satisfies(&Value::Triple([0.0; 3]), ParamKind::Vec3).is_ok());
         assert!(satisfies(&Value::Num(2.0), ParamKind::U32).is_ok());
-        assert!(satisfies(&Value::Num(-1.0), ParamKind::U32).is_err(), "u32 不收负数");
+        assert!(
+            satisfies(&Value::Num(-1.0), ParamKind::U32).is_err(),
+            "u32 不收负数"
+        );
         assert!(satisfies(&Value::Triple([0.0; 3]), ParamKind::Vec4).is_err());
         assert!(satisfies(&Value::Quad([0.0; 4]), ParamKind::Vec3).is_err());
         assert!(satisfies(&Value::Text("x".to_string()), ParamKind::F32).is_err());

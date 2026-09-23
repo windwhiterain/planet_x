@@ -140,7 +140,11 @@ fn plan_instances(root: &Path) -> Result<Vec<Planned>, String> {
         //    那个类型在不在"）。
         let source_path = root.join(item.source);
         if !source_path.is_file() {
-            return Err(format!("{}：源文件不在盘上：{}", at(), source_path.display()));
+            return Err(format!(
+                "{}：源文件不在盘上：{}",
+                at(),
+                source_path.display()
+            ));
         }
         let source_text = std::fs::read_to_string(&source_path)
             .map_err(|err| format!("{}：读不了 {}：{err}", at(), source_path.display()))?;

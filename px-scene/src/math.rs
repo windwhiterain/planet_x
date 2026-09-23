@@ -74,9 +74,7 @@ mod tests {
         let rotated = rotate(composed, [0.0, 0.0, 1.0]);
         // 先绕 Y 转 90°（Z → X），再绕 X 转 90°（X 不动）⇒ 结果是 X 轴。
         assert!(
-            (rotated[0] - 1.0).abs() < 1e-5
-                && rotated[1].abs() < 1e-5
-                && rotated[2].abs() < 1e-5,
+            (rotated[0] - 1.0).abs() < 1e-5 && rotated[1].abs() < 1e-5 && rotated[2].abs() < 1e-5,
             "合成朝向不对：{rotated:?}"
         );
         assert!((rotate(quat_x(0.0), [0.0, 1.0, 0.0])[1] - 1.0).abs() < 1e-6);

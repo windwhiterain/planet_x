@@ -103,7 +103,12 @@ pub fn watch_files() -> Result<Vec<PathBuf>, String> {
 }
 
 /// 内容 shader（入口）的名字。判据只认这几个 —— 目录里多出来的东西不该悄悄进判据。
-pub const CONTENT_SHADERS: [&str; 4] = ["surface.wgsl", "atmosphere.wgsl", "clouds.wgsl", "ring.wgsl"];
+pub const CONTENT_SHADERS: [&str; 4] = [
+    "surface.wgsl",
+    "atmosphere.wgsl",
+    "clouds.wgsl",
+    "ring.wgsl",
+];
 
 /// `naga` 解析 + 校验。**返回**错误而不是 panic：调用方决定这是"门"还是"探针"。
 pub fn validate(name: &str, assembled: &str) -> Result<naga::Module, String> {
@@ -135,7 +140,14 @@ pub fn bindings(module: &naga::Module) -> Vec<(u32, u32, String, String)> {
                 naga::AddressSpace::Uniform => "uniform",
                 naga::AddressSpace::Storage { .. } => "storage",
                 naga::AddressSpace::Handle => "handle",
-                other => return Some((binding.group, binding.binding, format!("{other:?}"), "?".into())),
+                other => {
+                    return Some((
+                        binding.group,
+                        binding.binding,
+                        format!("{other:?}"),
+                        "?".into(),
+                    ));
+                }
             };
             Some((
                 binding.group,

@@ -59,10 +59,7 @@ fn numeric(field: &CloudFieldParams, point: [f32; 3], cover: f32, axis: usize, s
     let mut behind = ahead;
     ahead[axis] += step;
     behind[axis] -= step;
-    let plus = field.density(
-        [ahead[0] as f32, ahead[1] as f32, ahead[2] as f32],
-        cover,
-    ) as f64;
+    let plus = field.density([ahead[0] as f32, ahead[1] as f32, ahead[2] as f32], cover) as f64;
     let minus = field.density(
         [behind[0] as f32, behind[1] as f32, behind[2] as f32],
         cover,
@@ -102,7 +99,8 @@ fn the_dual_gradient_of_the_field_matches_the_fields_own_values() {
             let mut error = 0.0_f64;
             let mut size = 0.0_f64;
             for axis in 0..3 {
-                error = error.max((exact[axis] - numeric(&field, *point, cover, axis, *step)).abs());
+                error =
+                    error.max((exact[axis] - numeric(&field, *point, cover, axis, *step)).abs());
                 size = size.max(exact[axis].abs());
             }
             if slot == 0 {
@@ -133,7 +131,9 @@ fn the_dual_gradient_of_the_field_matches_the_fields_own_values() {
         "梯度量级只有 {magnitude}，这个测试没在测东西"
     );
 
-    let best = medians.iter().fold(f64::MAX, |lowest, value| lowest.min(*value));
+    let best = medians
+        .iter()
+        .fold(f64::MAX, |lowest, value| lowest.min(*value));
     assert!(
         medians[1] < medians[0] * 0.1,
         "偏差没有随步长缩小，这正说明公式错了而不是步长太大：各步长中位相对偏差 {medians:?}"
@@ -160,7 +160,10 @@ fn the_field_gradient_is_flat_outside_the_shell() {
     for point in scatter(0x2545_f491_4f6c_dd1d, 2000, 0.5, 1.7) {
         let value = field.density(point, cover) as f64;
         let gradient = field.gradient(lifted(point), cover as f64);
-        let size = gradient[0].abs().max(gradient[1].abs()).max(gradient[2].abs());
+        let size = gradient[0]
+            .abs()
+            .max(gradient[1].abs())
+            .max(gradient[2].abs());
         if value <= 0.0 {
             assert_eq!(
                 size, 0.0,
@@ -178,7 +181,13 @@ fn the_field_gradient_is_flat_outside_the_shell() {
 }
 pub fn checks() -> Vec<(&'static str, fn())> {
     vec![
-        ("the_dual_gradient_of_the_field_matches_the_fields_own_values", the_dual_gradient_of_the_field_matches_the_fields_own_values),
-        ("the_field_gradient_is_flat_outside_the_shell", the_field_gradient_is_flat_outside_the_shell),
+        (
+            "the_dual_gradient_of_the_field_matches_the_fields_own_values",
+            the_dual_gradient_of_the_field_matches_the_fields_own_values,
+        ),
+        (
+            "the_field_gradient_is_flat_outside_the_shell",
+            the_field_gradient_is_flat_outside_the_shell,
+        ),
     ]
 }

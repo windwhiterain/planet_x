@@ -13,8 +13,8 @@
 //! ⚠ 前提：实现库得先在盘上（`cargo build` / `cargo test`（默认 members）会编它们；
 //! 只 `-p px_graphs` 时不会 —— 那时这道门会给你一句带命令的报错）。
 
-use px_graph_schema::ops;
 use px_graph_schema::PxOp;
+use px_graph_schema::ops;
 
 /// 每一个声明过的算子：从它的库里取符号。取不到就是"声明与实现分了家"。
 #[test]
@@ -61,7 +61,10 @@ fn the_three_libraries_have_distinct_identities() {
     let field = ops::source_hash("px_field_op").expect("field 库身份");
     let volume = ops::source_hash("px_volume_op").expect("volume 库身份");
     let mesh = ops::source_hash("px_mesh_op").expect("mesh 库身份");
-    assert_ne!(field, volume, "场库与体积库的身份相同 —— 指纹没覆盖到各自的源码");
+    assert_ne!(
+        field, volume,
+        "场库与体积库的身份相同 —— 指纹没覆盖到各自的源码"
+    );
     assert_ne!(field, mesh, "场库与网格库的身份相同");
     assert_ne!(volume, mesh, "体积库与网格库的身份相同");
 }

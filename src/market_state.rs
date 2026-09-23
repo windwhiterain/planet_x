@@ -51,7 +51,8 @@ impl MarketState {
     }
 
     pub fn volatility(&self, merchandise: usize) -> f32 {
-        self.state(merchandise).map_or(0.0, |state| state.volatility)
+        self.state(merchandise)
+            .map_or(0.0, |state| state.volatility)
     }
 
     pub fn observe(&mut self, merchandise: usize, price: f32) {

@@ -50,9 +50,17 @@ fn volumes(warehouse: &Warehouses, k: usize) -> Vec<f32> {
 fn assert_finite(warehouse: &Warehouses) {
     for warehouse in &warehouse.warehouses {
         for stock in &warehouse.stocks {
-            assert!(stock.price.is_finite() && stock.price > 0.0, "挂价 {}", stock.price);
+            assert!(
+                stock.price.is_finite() && stock.price > 0.0,
+                "挂价 {}",
+                stock.price
+            );
             assert!(stock.volume.is_finite(), "库存 {}", stock.volume);
-            assert!(stock.target_volume.is_finite(), "目标 {}", stock.target_volume);
+            assert!(
+                stock.target_volume.is_finite(),
+                "目标 {}",
+                stock.target_volume
+            );
         }
     }
 }
@@ -206,8 +214,16 @@ fn local_quotes_report_the_minimum_and_maximum_posted_price() {
     }
     let mut market = market(1, 2);
     warehouse.step(&mut market);
-    assert!((warehouse.ask[0][0] - 3.0).abs() < 1e-4, "{:?}", warehouse.ask);
-    assert!((warehouse.bid[0][0] - 7.0).abs() < 1e-4, "{:?}", warehouse.bid);
+    assert!(
+        (warehouse.ask[0][0] - 3.0).abs() < 1e-4,
+        "{:?}",
+        warehouse.ask
+    );
+    assert!(
+        (warehouse.bid[0][0] - 7.0).abs() < 1e-4,
+        "{:?}",
+        warehouse.bid
+    );
 }
 
 #[test]
