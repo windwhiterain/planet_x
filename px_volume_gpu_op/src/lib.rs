@@ -201,3 +201,139 @@ mod tests {
         assert_eq!(index, data.len(), "必须逐格都对过");
     }
 }
+
+/// 跑一遍采样核：points 是 [x, y, z] 一串，返回每个点在第 lane 条通道上的值。
+pub fn sample_points(
+    res: u32,
+    layers: u32,
+    inner: f32,
+    outer: f32,
+    data: &[f32],
+    points: &[[f32; 3]],
+    lane: u32,
+) -> Result<Vec<f32>, String> {
+    let Some(gpu) = connect() else {
+        return Err("没有可用 GPU".to_string());
+    };
+    let uniform = [
+        res.to_le_bytes(),
+        layers.to_le_bytes(),
+        (LANES as u32).to_le_bytes(),
+        lane.to_le_bytes(),
+        inner.to_le_bytes(),
+        outer.to_le_bytes(),
+        0.0_f32.to_le_bytes(),
+        0.0_f32.to_le_bytes(),
+    ]
+    .concat();
+    let bytes =
+        |values: &[f32]| -> Vec<u8> { values.iter().flat_map(|v| v.to_le_bytes()).collect() };
+    let flat: Vec<f32> = points.iter().flat_map(|p| p.iter().copied()).collect();
+    let output = vec![0_u8; points.len() * 4];
+    let out = dispatch(
+        gpu,
+        SAMPLER_WGSL,
+        "sample_points",
+        &[
+            Binding::Uniform(&uniform),
+            Binding::Storage(&bytes(data)),
+            Binding::Storage(&bytes(&flat)),
+            Binding::Write(&output),
+        ],
+        workgroups(points.len()),
+    )?;
+    Ok(out[0]
+        .chunks_exact(4)
+        .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap()))
+        .collect())
+}
+
+#[cfg(test)]
+mod sampler_tests {
+    use super::*;
+    use px_volume_schema::VolumeData;
+
+    /// 一份**光滑**的体：值只随"格心方向"变（三线性插值才有意义），六条通道同值。
+    fn smooth_volume(res: u32, layers: u32, inner: f32, outer: f32) -> VolumeData {
+        let mut data = vec![0.0_f32; (6 * layers * res * res * LANES as u32) as usize];
+        for face in 0..6_u32 {
+            for layer in 0..layers {
+                let altitude = layer as f32 / (layers - 1).max(1) as f32;
+                let radius = inner + (outer - inner) * altitude;
+                for t in 0..res {
+                    for s in 0..res {
+                        let d = px_volume_schema::direction_of(
+                            face,
+                            (s as f32 + 0.5) / res as f32,
+                            (t as f32 + 0.5) / res as f32,
+                        );
+                        let value = 0.3
+                            + 0.2 * (5.0 * d[0]).sin() * (5.0 * d[1]).sin() * (5.0 * d[2]).sin()
+                            + 0.05 * (radius - inner);
+                        let at = flat_index(res, layers, face, layer, t, s, 0);
+                        for lane in 0..LANES {
+                            data[at + lane] = value * radius;
+                        }
+                    }
+                }
+            }
+        }
+        VolumeData {
+            res,
+            layers,
+            inner,
+            outer,
+            data,
+        }
+    }
+
+    /// ⚠⚠ **GPU 的采样必须与 CPU 逐点一致**（容差内）。
+    ///
+    /// 取点刻意分成三档，因为它们的错法各不相同：
+    ///  * **面内一般点** —— 三线性权重、ltitude → layer0 的错法；
+    ///  * **面棱上的点**（s = 0 / 	 = 0 那一列）—— 这正是那道竖缝的现场：
+    ///    八个角里有一半必须落到**相邻面**上去；
+    ///  * **壳壁附近**（inner / outer 一个纹素之内）—— 边界容差与 clamp 的错法。
+    #[test]
+    fn the_gpu_sampler_agrees_with_the_cpu_point_by_point() {
+        let (res, layers) = (8_u32, 4_u32);
+        let (inner, outer) = (1.0_f32, 2.0_f32);
+        let volume = smooth_volume(res, layers, inner, outer);
+        let mut points: Vec<[f32; 3]> = Vec::new();
+        // 面内一般点 + 棱上取点：扫一遍方向，其中 s/t 取 0 与 1 就是棱。
+        for face in 0..6_u32 {
+            for &s in &[0.0_f32, 0.13, 0.5, 0.87, 1.0] {
+                for &t in &[0.0_f32, 0.13, 0.5, 0.87, 1.0] {
+                    for &radius in &[inner + 0.01, 1.5, outer - 0.01] {
+                        let d = px_volume_schema::direction_of(face, s, t);
+                        points.push([d[0] * radius, d[1] * radius, d[2] * radius]);
+                    }
+                }
+            }
+        }
+        let Ok(gpu_side) = sample_points(res, layers, inner, outer, &volume.data, &points, 0)
+        else {
+            println!("px_volume_gpu_op：没有可用 GPU，跳过");
+            return;
+        };
+        assert_eq!(gpu_side.len(), points.len(), "点数");
+        let mut worst = 0.0_f32;
+        let mut worst_at = 0;
+        for (index, point) in points.iter().enumerate() {
+            let want = px_volume_alg::sample_volume(&volume, *point, 0);
+            let got = gpu_side[index];
+            let diff = (got - want).abs();
+            if diff > worst {
+                worst = diff;
+                worst_at = index;
+            }
+        }
+        assert!(
+            worst < 2e-3,
+            "最大偏差 {worst:.6} 在第 {worst_at} 个点（GPU {} 对 CPU {}）—— 两侧的采样语义不一致",
+            gpu_side[worst_at],
+            px_volume_alg::sample_volume(&volume, points[worst_at], 0)
+        );
+        println!("px_volume_gpu_op：{} 个点最大偏差 {worst:.6}", points.len());
+    }
+}

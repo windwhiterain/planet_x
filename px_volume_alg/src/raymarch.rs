@@ -107,6 +107,14 @@ fn snap(fraction: f32) -> f32 {
 }
 
 /// 世界点 → **一次采样的几何**（见 [`Sample`] 那条性能说明）。
+/// **判据用**：按世界点采一条通道的值 —— 就是 sample_at 那一份语义的公开口。
+///
+/// ⚠ 它的存在只为"GPU 侧要和 CPU 逐点对账"这件事：sample_at 本身是私有实现细节，
+///   而 GPU 那份 WGSL 是同一套语义的**第二份实现** ⇒ 必须有一条能直接对照的口。
+pub fn sample_volume(volume: &VolumeData, point: [f32; 3], lane: usize) -> f32 {
+    sample_at(volume, point).gather(&volume.data, lane)
+}
+
 fn sample_at(volume: &VolumeData, point: [f32; 3]) -> Sample {
     let radius = (point[0] * point[0] + point[1] * point[1] + point[2] * point[2]).sqrt();
     let span = volume.outer - volume.inner;

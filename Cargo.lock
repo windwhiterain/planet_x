@@ -1621,6 +1621,8 @@ name = "px_volume_gpu_op"
 version = "0.0.0"
 dependencies = [
  "px_gpu",
+ "px_volume_alg",
+ "px_volume_schema",
 ]
 
 [[package]]
