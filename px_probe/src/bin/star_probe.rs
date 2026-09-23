@@ -827,7 +827,11 @@ fn column_density(path: &str, samples: usize) -> Result<Vec<f64>, String> {
         //   这一行就是那个判据：**恰好等于 0 的体素占比**，以及非零那部分的分布。
         let total_cells = volume.data.len();
         let zero = volume.data.iter().filter(|v| **v == 0.0).count();
-        let tiny = volume.data.iter().filter(|v| **v > 0.0 && **v <= 0.01).count();
+        let tiny = volume
+            .data
+            .iter()
+            .filter(|v| **v > 0.0 && **v <= 0.01)
+            .count();
         let mut live: Vec<f32> = volume.data.iter().copied().filter(|v| *v > 0.0).collect();
         live.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         let pick = |q: f64| -> f32 {
