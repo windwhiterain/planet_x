@@ -1257,10 +1257,15 @@ fn run_spans(
 ///   * 出图/回读/PNG（纯色清屏图完全均匀）；
 ///   * `Views::Single` 的拼装（它只有**一项 placement、整幅视口** ⇒ 只画一幅，
 ///     没有"两幅各占半幅"那回事 —— 我先前那条猜测作废）。
-/// ⇒ 下一步：查**天空盒那一 pass 的 uv / 视口数学**——屏幕锁定、与相机无关、
-///   与图宽成比例、且纯色路径干净，这四条合起来最像"uv 用了与 width 成比例的分母"。
-///   （注意：`scene.skybox` 的采样器是**显式 clamped** 的，所以"uv 越界回绕"那种写法
-///   会表现为右半被夹住 —— 而实测右半是有细节的，不是夹边。）
+/// ⇒ 已排除的还有：**天空盒那一 pass 的方向重建**（`art/frame/skybox.wgsl`
+///   `coords_to_ray_direction`：`(position - viewport.xy) / viewport.zw` 是 Bevy 那一套，
+///   没有与 width 成比例的分母；立方图只做了整体 z 取反）。
+///
+/// ⇒ **剩下的最窄一处**：三个全屏后处理 pass（`px_grade` / `px_vignette` / `blit`）
+///   的片元都吃 `@location(0) uv`，而 `art/frame/` 下的顶点着色器只有
+///   `vertex_sky.wgsl`（**只输出 `@builtin(position)`、没有 uv**）与
+///   `vertex_mesh.wgsl`（要顶点缓冲）⇒ **那个 uv 的生产者还没找到**，它就是下一个要看的地方。
+///   判法：把生产 uv 的那几句找出来，看分母是不是 `width`（或 `width/2`）。
 ///
 /// ⚠ 在这条修好之前，**质量线的一切全图统计**（亮/暗/四分位/缝比）都带这条台阶，
 ///   不能拿来对参考图。
