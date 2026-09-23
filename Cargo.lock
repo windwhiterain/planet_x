@@ -1617,6 +1617,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "px_volume_gpu_op"
+version = "0.0.0"
+dependencies = [
+ "px_gpu",
+]
+
+[[package]]
 name = "px_volume_op"
 version = "0.1.0"
 dependencies = [

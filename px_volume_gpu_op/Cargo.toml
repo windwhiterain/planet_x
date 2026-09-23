@@ -1,0 +1,7 @@
+[package]
+name = "px_volume_gpu_op"
+version = "0.0.0"
+edition = "2024"
+
+[dependencies]
+px_gpu = { path = "../px_gpu" }
