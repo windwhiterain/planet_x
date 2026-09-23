@@ -7,5 +7,6 @@ edition = "2024"
 px_gpu = { path = "../px_gpu" }
 
 [dev-dependencies]
+px_field_schema = { path = "../px_field_schema" }
 px_volume_alg = { path = "../px_volume_alg" }
 px_volume_schema = { path = "../px_volume_schema" }

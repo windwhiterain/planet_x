@@ -457,6 +457,21 @@ mod uniform_tests {
 // 「步长约定 / 透过率递推 / 起点 enter」这三件事单独钉死；等这一条绿了，
 // 再拿真体积与 px_volume_alg::raymarch_channel 对账。
 
+/// 步进的**可选**输入（星图与底色）：与分级表一样，参数只有一处真源。
+#[derive(Default, Clone, Copy)]
+pub struct MarchExtras<'a> {
+    /// 星图（立方贴图场，行主序：下标 = y * face_size + x）。`face_size = 0` 表示没有星。
+    pub stars: Option<&'a [f32]>,
+    /// 星图一面多大（0 = 没有星图）。
+    pub star_face: u32,
+    /// 星点增益（`SkyParams::star_gain`）。
+    pub star_gain: f32,
+    /// 星点地板（`SkyParams::star_floor`）。
+    pub star_floor: f32,
+    /// 太空底色（`SkyParams::background`）。
+    pub background: [f32; 3],
+}
+
 /// 跑一遍步进核（单通道）；返回 面 x 面 x 6 个 texel 的辐射，布局 row = 面 * face + y。
 ///
 /// ⚠ 起点约定（与 CPU 那份对齐前先自己说清）：中点取样，第 i 步在
@@ -471,6 +486,7 @@ pub fn march(
     inner: f32,
     outer: f32,
     data: &[f32],
+    extras: &MarchExtras<'_>,
 ) -> Result<Vec<f32>, String> {
     let Some(gpu) = connect() else {
         return Err("没有可用 GPU".to_string());
@@ -487,9 +503,14 @@ pub fn march(
     ]
     .concat();
     let sky = SkyUniform {
-        counts: [steps, face, lane, 0],
-        scalars: [0.0, 0.0, 0.0, enter],
-        background: [0.0; 4],
+        counts: [steps, face, lane, extras.star_face],
+        scalars: [0.0, extras.star_gain, extras.star_floor, enter],
+        background: [
+            extras.background[0],
+            extras.background[1],
+            extras.background[2],
+            0.0,
+        ],
         tone_in: [0.0; 4],
         tone_out: [0.0; 4],
         ramp_luma: [0.0; 4],
@@ -519,6 +540,13 @@ pub fn march(
                 binding: 5,
                 value: Binding::Write(&vec![0_u8; texels * 4]),
             },
+            px_gpu::Slot {
+                binding: 6,
+                value: Binding::Storage(&match extras.stars {
+                    Some(stars) => bytes(stars),
+                    None => vec![0_u8; 4],
+                }),
+            },
         ],
         workgroups(texels),
     )?;
@@ -542,7 +570,18 @@ mod march_tests {
         let (inner, outer) = (1.0_f32, 2.0_f32);
         // e = s = 1（六条通道同值），于是解析值是 1 - 1/e。
         let data = vec![1.0_f32; (6 * layers * res * res * LANES as u32) as usize];
-        let Ok(gpu_side) = march(8, 256, 0, inner, res, layers, inner, outer, &data) else {
+        let Ok(gpu_side) = march(
+            8,
+            256,
+            0,
+            inner,
+            res,
+            layers,
+            inner,
+            outer,
+            &data,
+            &MarchExtras::default(),
+        ) else {
             println!("px_volume_gpu_op：没有可用 GPU，跳过");
             return;
         };
@@ -630,6 +669,7 @@ mod crosscheck_tests {
             inner,
             outer,
             &volume.data,
+            &MarchExtras::default(),
         ) else {
             println!("px_volume_gpu_op：没有可用 GPU，跳过");
             return;
@@ -654,5 +694,86 @@ mod crosscheck_tests {
             "px_volume_gpu_op：真体积对账最大偏差 {worst:.6}（{} 个 texel）",
             gpu_side.len()
         );
+    }
+}
+
+#[cfg(test)]
+mod star_tests {
+    use super::*;
+    use px_field_schema::field::{Field, Projection};
+    use px_volume_schema::VolumeData;
+
+    /// **星点 + 底色**也要与 CPU 一致：这一条把"加性部分"（乘透射率的星与背景）
+    /// 与已对上的步进语义分开钉住。
+    #[test]
+    fn the_gpu_march_matches_the_cpu_with_stars_and_background() {
+        let (res, layers) = (8_u32, 4_u32);
+        let (inner, outer) = (1.0_f32, 2.0_f32);
+        let mut data = vec![0.0_f32; (6 * layers * res * res * LANES as u32) as usize];
+        for lane in 0..LANES {
+            for (index, value) in data.iter_mut().enumerate() {
+                if index % LANES == lane {
+                    *value = if lane < 3 { 0.5 } else { 0.8 };
+                }
+            }
+        }
+        let volume = VolumeData {
+            res,
+            layers,
+            inner,
+            outer,
+            data,
+        };
+        // 星图：一面 4 格，值散开（含低于地板的一档，测地板分支）。
+        let star_face = 4_u32;
+        let stars: Vec<f32> = (0..(star_face * star_face * 6) as usize)
+            .map(|index| {
+                if index % 7 == 0 {
+                    0.1
+                } else {
+                    0.2 + (index % 5) as f32 * 0.15
+                }
+            })
+            .collect();
+        let stars_field =
+            Field::with_projection(star_face, star_face * 6, stars.clone(), Projection::CubeMap);
+        let params = px_volume_schema::params::sky::SkyParams {
+            face: 8,
+            steps: 32,
+            jitter: 0.0,
+            star_gain: 0.07,
+            star_floor: 0.25,
+            background: [0.0011, 0.0007, 0.0009],
+            ..Default::default()
+        };
+        let reference = px_volume_alg::raymarch_channel(&volume, Some(&stars_field), &params, 0);
+        let extras = MarchExtras {
+            stars: Some(&stars),
+            star_face,
+            star_gain: params.star_gain,
+            star_floor: params.star_floor,
+            background: params.background,
+        };
+        let Ok(gpu_side) = march(
+            params.face,
+            params.steps,
+            0,
+            inner,
+            res,
+            layers,
+            inner,
+            outer,
+            &volume.data,
+            &extras,
+        ) else {
+            println!("px_volume_gpu_op：没有可用 GPU，跳过");
+            return;
+        };
+        let mut worst = 0.0_f32;
+        for (index, value) in gpu_side.iter().enumerate() {
+            worst = worst.max((value - reference.data[index]).abs());
+        }
+        assert!(worst < 5e-3, "星点+底色对账最大偏差 {worst:.6}");
+        println!("px_volume_gpu_op：星点+底色对账最大偏差 {worst:.6}");
     }
 }

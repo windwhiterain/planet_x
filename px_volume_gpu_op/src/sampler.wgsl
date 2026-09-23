@@ -225,5 +225,37 @@ fn march(@builtin(global_invocation_id) id: vec3<u32>) {
         radiance = radiance + transmittance * emit * h;
         transmittance = transmittance * exp(-sigma * h);
     }
+    // 星点与背景：乘透射率 —— 被前面的气遮住、被尘埃染红（与 CPU 同一口径）。
+    radiance = radiance + transmittance * star_level(direction) * sky.scalars.y;
+    radiance = radiance + transmittance * channel_of(sky.background, lane);
     image[id.x] = radiance;
+}
+
+// 星点：方向 -> 立方贴图格 -> 扣地板并归一化。face_size = 0 表示没有星图。
+// 取法与 CPU 的 star_level 逐条对齐（含 min 截断与 height = face_size * 6）。
+@group(0) @binding(6) var<storage, read> stars: array<f32>;
+
+fn channel_of(v: vec4<f32>, lane: u32) -> f32 {
+    if (lane == 0u) { return v.x; }
+    if (lane == 1u) { return v.y; }
+    if (lane == 2u) { return v.z; }
+    return v.w;
+}
+
+fn star_level(direction: vec3<f32>) -> f32 {
+    let face_size = sky.counts.w;
+    if (face_size == 0u) {
+        return 0.0;
+    }
+    let mapped = cube_face_of(direction);
+    let face = u32(mapped.x);
+    let x = min(u32(mapped.y * f32(face_size)), face_size - 1u);
+    let height = face_size * 6u;
+    let y = min(face * face_size + u32(mapped.z * f32(face_size)), height - 1u);
+    let raw = stars[y * face_size + x];
+    let floor_value = sky.scalars.z;
+    if (raw <= floor_value) {
+        return 0.0;
+    }
+    return (raw - floor_value) / max(1.0 - floor_value, 1e-4);
 }

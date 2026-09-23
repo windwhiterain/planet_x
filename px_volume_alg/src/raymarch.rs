@@ -42,6 +42,11 @@ fn jitter_at(texel: u32, step: u32, seed: u32) -> f32 {
 }
 
 /// 星点的亮度（给一个方向，回它压到多少）。星图是 `CubeMap` 场。
+/// **判据用**：星点查表的公开口（GPU 那份是同一套语义的第二份实现）。
+pub fn star_level_at(stars: &Field, direction: [f32; 3], params: &SkyParams) -> f32 {
+    star_level(stars, direction, params)
+}
+
 fn star_level(stars: &Field, direction: [f32; 3], params: &SkyParams) -> f32 {
     if stars.projection != Projection::CubeMap {
         return 0.0;
