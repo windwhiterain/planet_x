@@ -1302,6 +1302,17 @@ fn run_spans(
 ///   与 CLI 的 `--diff`）把每一步的输出各存一张，看**台阶是从哪一步开始出现的**：
 ///   `opaque` 之后有 ⇒ 病在几何/材质那条路；只有 `sky` 之后才出现 ⇒ 病在天空那一步；
 ///   `blit` 之后才有 ⇒ 病在最后搬运。这一步能把候选从"整个场景渲染"缩到**一个 pass**。
+/// ---- 续（第 63 轮）----
+///
+/// * `px_protocol::art` 里有**两种**立方图布局：`cube_map_extent` 是"竖码"
+///   （`face x face*6`，6 面竖着排）与 `cube_atlas_uv` 是**图集**
+///   （`CUBE_COLUMNS = 3` 列 x 2 行 + `CUBE_GUTTER = 2`）。图集的边界在 1/3，
+///   与实测的 **1/2 不符** ⇒ 台阶不是图集边界。
+/// * 装载那条路（`px_render/src/art.rs:745`）自己写着"立方图把 6 个面**竖着码**
+///   （`height * layers`）"，并在这一带做"半精度 -> f32 -> **8 位**"的转换。
+///   ⇒ **下一轮读 `px_render/src/art.rs:745-800` 这个转换**：它是逐行处理一张
+///   `width x (height*layers)` 的图，行步长/目标宽度算错正好表现为"按宽的一半"分裂，
+///   而且它只在**有内容**时生效（这解释了为什么纯色清屏图完全均匀）。
 fn views_of(options: &Options) -> render::Views {
     if options.sheet {
         render::Views::Sheet {
