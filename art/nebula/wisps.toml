@@ -5,9 +5,9 @@
 # ⚠ `sharpness` 越大脊越细：`1.0` 是三角波（宽脊），`2` 以上是一根根细丝。
 #   参考图里的纤维是细的 ⇒ 先给 2.6。
 frequency = 15.0
-octaves = 4
+octaves = 2
 lacunarity = 2.1
-gain = 0.5
+gain = 0.2
 seed = 20461
 sharpness = 3.2
 zonal = 0.8
