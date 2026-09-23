@@ -559,3 +559,100 @@ mod march_tests {
         println!("px_volume_gpu_op：步进 {worst:.6} 偏差（解析解 {want:.6}）");
     }
 }
+
+#[cfg(test)]
+mod crosscheck_tests {
+    use super::*;
+    use px_volume_schema::VolumeData;
+
+    /// 一份发射与消光**各自不同**的体：让透过率递推真正参与进来（常值体测不出递推）。
+    /// 六条通道都填：lane 0..2 发射、3..5 消光。
+    fn varying_volume(res: u32, layers: u32, inner: f32, outer: f32) -> VolumeData {
+        let mut data = vec![0.0_f32; (6 * layers * res * res * LANES as u32) as usize];
+        for face in 0..6_u32 {
+            for layer in 0..layers {
+                let altitude = layer as f32 / (layers - 1).max(1) as f32;
+                let radius = inner + (outer - inner) * altitude;
+                for t in 0..res {
+                    for s in 0..res {
+                        let d = px_volume_schema::direction_of(
+                            face,
+                            (s as f32 + 0.5) / res as f32,
+                            (t as f32 + 0.5) / res as f32,
+                        );
+                        let wave = (3.0 * d[0]).sin() * (4.0 * d[1]).cos() * (5.0 * d[2]).sin();
+                        let at = flat_index(res, layers, face, layer, t, s, 0);
+                        for lane in 0..LANES {
+                            data[at + lane] = match lane {
+                                0..=2 => (0.4 + 0.3 * wave).max(0.0) * (1.0 + 0.1 * lane as f32),
+                                _ => (0.2 + 0.5 * (wave * 0.5 + 0.5)).max(0.0),
+                            };
+                        }
+                    }
+                }
+            }
+        }
+        VolumeData {
+            res,
+            layers,
+            inner,
+            outer,
+            data,
+        }
+    }
+
+    /// 真体积上与 CPU 对账：同一步进参数下，GPU 与 `raymarch_channel` 必须一致。
+    ///
+    /// 这条判据的价值在于它**同时**校验四件事：方向参数化（`art_direction_at` 对
+    /// `cube_direction`）、格点布局、跨面采样、以及步进的起点/步长约定。
+    /// 前三条已各自单测过，这里是它们合起来的结果。
+    #[test]
+    fn the_gpu_march_matches_the_cpu_channel_on_a_real_volume() {
+        let (res, layers) = (8_u32, 4_u32);
+        let (inner, outer) = (1.0_f32, 2.0_f32);
+        let volume = varying_volume(res, layers, inner, outer);
+        let face = 8_u32;
+        let steps = 64_u32;
+        let params = px_volume_schema::params::sky::SkyParams {
+            face,
+            steps,
+            jitter: 0.0,
+            ..Default::default()
+        };
+        let reference = px_volume_alg::raymarch_channel(&volume, None, &params, 0);
+        let Ok(gpu_side) = march(
+            face,
+            steps,
+            0,
+            inner,
+            res,
+            layers,
+            inner,
+            outer,
+            &volume.data,
+        ) else {
+            println!("px_volume_gpu_op：没有可用 GPU，跳过");
+            return;
+        };
+        assert_eq!(gpu_side.len(), reference.data.len(), "texel 数");
+        let mut worst = 0.0_f32;
+        let mut worst_at = 0usize;
+        for (index, value) in gpu_side.iter().enumerate() {
+            let want = reference.data[index];
+            if (value - want).abs() > worst {
+                worst = (value - want).abs();
+                worst_at = index;
+            }
+        }
+        assert!(
+            worst < 5e-3,
+            "最大偏差 {worst:.6} 在第 {worst_at} 个 texel（GPU {} 对 CPU {}）",
+            gpu_side[worst_at],
+            reference.data[worst_at]
+        );
+        println!(
+            "px_volume_gpu_op：真体积对账最大偏差 {worst:.6}（{} 个 texel）",
+            gpu_side.len()
+        );
+    }
+}
