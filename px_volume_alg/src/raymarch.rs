@@ -374,7 +374,13 @@ fn ramp_hue(key: f32) -> [f32; 3] {
     for stop in 0..3 {
         let (lo, hi) = (RAMP_LUMA[stop], RAMP_LUMA[stop + 1]);
         if key < hi {
-            let w = ((key / lo).ln() / (hi / lo).ln()).clamp(0.0, 1.0);
+            // ⚠⚠ 段间过渡**收窄**（压到段间的 20%）：线性混合会让大量像素停在混色带上
+            //   （暖沙→蓝河的中点 = **薰衣草**；盲看："蓝色是灰蓝/薰衣草"）。
+            //   参考图的过渡是**空间性**的（暖沙只占河缘的窄带）⇒ 键在段间快速换档，
+            //   混色只剩一条窄带。
+            let raw = ((key / lo).ln() / (hi / lo).ln()).clamp(0.0, 1.0);
+            let shaped = ((raw - 0.4) / 0.2).clamp(0.0, 1.0);
+            let w = shaped * shaped * (3.0 - 2.0 * shaped);
             let mut target = [0.0_f32; 3];
             for channel in 0..3 {
                 target[channel] = RAMP_HUE[stop][channel]
