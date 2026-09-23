@@ -354,3 +354,79 @@ fn hue_of_keys(@builtin(global_invocation_id) id: vec3<u32>) {
     image[id.x * 3u + 1u] = hue.y;
     image[id.x * 3u + 2u] = hue.z;
 }
+
+// 每格一次分级：先亮度响应、后色相斜坡，逐格亮度守恒；纯黑原样出去。
+// 与 CPU 的 grade_pixel + raymarch_sky 的装配逐条对齐。
+fn luma_of(rgb: vec3<f32>) -> f32 {
+    return rgb.x * 0.2126 + rgb.y * 0.7152 + rgb.z * 0.0722;
+}
+
+fn grade_pixel(rgb: vec3<f32>) -> vec3<f32> {
+    let measured = luma_of(rgb);
+    if (measured <= 1e-6) {
+        return rgb;
+    }
+    // 注意：WGSL 的保留字比 Rust 多 —— target / from / to 这些都不能当标识符。
+    let band_hue = ramp_hue(measured);
+    let band_luma = luma_of(band_hue);
+    let scale = measured / max(band_luma, 1e-9);
+    let strength = sky.limits.z;
+    var out = rgb;
+    out.x = max(out.x + (band_hue.x * scale - rgb.x) * strength, 0.0);
+    out.y = max(out.y + (band_hue.y * scale - rgb.y) * strength, 0.0);
+    out.z = max(out.z + (band_hue.z * scale - rgb.z) * strength, 0.0);
+    return out;
+}
+
+// 整条天空：三条通道各积一遍（入口名避开模块级的 sky uniform）（逐通道消光不同 => 透过率也不同），再分级。
+// image 每格 3 个 f32（分级就地覆盖）。
+@compute @workgroup_size(64)
+fn sky_grade(@builtin(global_invocation_id) id: vec3<u32>) {
+    let count = arrayLength(&image) / 3u;
+    if (id.x >= count) {
+        return;
+    }
+    let face_size = sky.counts.y;
+    let row = id.x / face_size;
+    let x = id.x % face_size;
+    let face = row / face_size;
+    let y = row % face_size;
+    let s = (f32(x) + 0.5) / f32(face_size);
+    let t = (f32(y) + 0.5) / f32(face_size);
+    let direction = cube_direction(face, s, t);
+    let steps = sky.counts.x;
+    let enter = sky.scalars.w;
+    let outer = volume.extent.y;
+    let h = (outer - enter) / f32(steps);
+    let star = star_level(direction) * sky.scalars.y;
+
+    var rgb = vec3<f32>(0.0, 0.0, 0.0);
+    for (var c = 0u; c < 3u; c = c + 1u) {
+        var transmittance = 1.0;
+        var radiance = 0.0;
+        for (var i = 0u; i < steps; i = i + 1u) {
+            let point = direction * (enter + (f32(i) + 0.5) * h);
+            let emit = sample_volume(point, c);
+            let sigma = sample_volume(point, c + 3u);
+            radiance = radiance + transmittance * emit * h;
+            transmittance = transmittance * exp(-sigma * h);
+        }
+        // 星点与底色：乘透射率（被前面的气遮住、被尘埃染红），与 CPU 同一口径。
+        let channel_background = channel_of(sky.background, c);
+        radiance = radiance + transmittance * star + transmittance * channel_background;
+        if (c == 0u) { rgb.x = max(radiance, 0.0); }
+        if (c == 1u) { rgb.y = max(radiance, 0.0); }
+        if (c == 2u) { rgb.z = max(radiance, 0.0); }
+    }
+
+    // 先亮度响应（tone(l)/l 保色相），后色相斜坡（档位常数在输出域量的，顺序不能反）。
+    let l = luma_of(rgb);
+    var response = 0.0;
+    if (l > 1e-9) {
+        response = tone(l, sky.tone_in, sky.tone_out) / l;
+    }
+    let graded = grade_pixel(rgb * response);
+    image[id.x * 3u] = graded.x;
+    image[id.x * 3u + 1u] = graded.y;
+    image[id.x * 3u + 2u] = graded.z;
+}

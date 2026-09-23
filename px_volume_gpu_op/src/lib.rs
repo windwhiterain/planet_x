@@ -985,3 +985,78 @@ mod hue_tests {
         );
     }
 }
+
+/// 跑一遍**整条天空**（GPU 版 `raymarch_sky` 的辐射+分级部分）：
+/// 返回每个 texel 三个 f32（分级后的线性 RGB，尚未打包成 Rgba16Float）。
+#[allow(clippy::too_many_arguments)]
+pub fn sky(
+    face: u32,
+    steps: u32,
+    enter: f32,
+    res: u32,
+    layers: u32,
+    inner: f32,
+    outer: f32,
+    data: &[f32],
+    extras: &MarchExtras<'_>,
+    tone: ([f32; 4], [f32; 4], [f32; 2]),
+    ramp: ([f32; 4], [[f32; 4]; 4]),
+    grade_strength: f32,
+) -> Result<Vec<f32>, String> {
+    let Some(gpu) = connect() else {
+        return Err("没有可用 GPU".to_string());
+    };
+    let volume_uniform = [
+        res.to_le_bytes(),
+        layers.to_le_bytes(),
+        (LANES as u32).to_le_bytes(),
+        0_u32.to_le_bytes(),
+        inner.to_le_bytes(),
+        outer.to_le_bytes(),
+        0.0_f32.to_le_bytes(),
+        0.0_f32.to_le_bytes(),
+    ]
+    .concat();
+    let sky_uniform = SkyUniform {
+        counts: [steps, face, 0, extras.star_face],
+        scalars: [0.0, extras.star_gain, extras.star_floor, enter],
+        background: [
+            extras.background[0],
+            extras.background[1],
+            extras.background[2],
+            0.0,
+        ],
+        tone_in: tone.0,
+        tone_out: tone.1,
+        ramp_luma: ramp.0,
+        ramp_hue: ramp.1,
+        limits: [tone.2[0], tone.2[1], grade_strength, 0.0],
+    };
+    let texels = (face * face * 6) as usize;
+    let bytes = |values: &[f32]| -> Vec<u8> {
+        values.iter().flat_map(|v| v.to_le_bytes()).collect()
+    };
+    let out = px_gpu::dispatch_slots(
+        gpu,
+        SAMPLER_WGSL,
+        "sky_grade",
+        &[
+            px_gpu::Slot { binding: 0, value: Binding::Uniform(&volume_uniform) },
+            px_gpu::Slot { binding: 1, value: Binding::Storage(&bytes(data)) },
+            px_gpu::Slot { binding: 4, value: Binding::Uniform(&sky_uniform.to_bytes()) },
+            px_gpu::Slot { binding: 5, value: Binding::Write(&vec![0_u8; texels * 12]) },
+            px_gpu::Slot {
+                binding: 6,
+                value: Binding::Storage(&match extras.stars {
+                    Some(stars) => bytes(stars),
+                    None => vec![0_u8; 4],
+                }),
+            },
+        ],
+        workgroups(texels),
+    )?;
+    Ok(out[0]
+        .chunks_exact(4)
+        .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap()))
+        .collect())
+}
