@@ -421,6 +421,11 @@ fn tone(l: f32) -> f32 {
 }
 
 /// 斜坡上的目标色相（按**档位键**的亮度取段）。
+/// **判据用**：色相档位插值的公开口（GPU 那份是同一套语义的第二份实现）。
+pub fn ramp_hue_at(key: f32) -> [f32; 3] {
+    ramp_hue(key)
+}
+
 fn ramp_hue(key: f32) -> [f32; 3] {
     if key >= RAMP_LUMA[3] {
         return RAMP_HUE[3];
