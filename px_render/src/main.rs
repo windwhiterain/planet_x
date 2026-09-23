@@ -1313,6 +1313,20 @@ fn run_spans(
 ///   ⇒ **下一轮读 `px_render/src/art.rs:745-800` 这个转换**：它是逐行处理一张
 ///   `width x (height*layers)` 的图，行步长/目标宽度算错正好表现为"按宽的一半"分裂，
 ///   而且它只在**有内容**时生效（这解释了为什么纯色清屏图完全均匀）。
+/// ---- 续（第 64 轮）----
+///
+/// `px_render/src/art.rs:745` 那条"半精度 -> f32 -> 8 位"**是预览专用的有损路径**
+/// （注释自己写着"只服务预览"，上传走 `LoadedTexture::bytes`）⇒ 与离屏渲染无关，排除。
+///
+/// ⇒ **最可能的一处（下一个我直接看这里）**：天空 pass 用的 `view.viewport`。
+///   若写进 `ViewStub` 的 viewport 是 `(0, 0, width/2, height)`，那么
+///   `coords_to_viewport_uv` 算出的 uv 在左半幅就扫满 `[0,1]`、右半幅继续外推
+///   ⇒ 两半各是一幅完整视图、边界**恰在 width/2**、且随内容变化 —— 与全部五条实测吻合：
+///   屏幕锁定 ✓、与相机无关（相机变、边界不变）✓、按宽的一半 ✓、与高无关 ✓、
+///   纯色清屏图干净（不走这个 pass）✓。
+///   要核对的地方：`placement.uniform_viewport((width, height))` 的结果**是否真的**
+///   写进了天空 pass 用的那份 `ViewStub`（`Cell::set_view` / 组 0 的 view 缓冲），
+///   而不是在某处被换成格子尺寸或 `width/2`。
 fn views_of(options: &Options) -> render::Views {
     if options.sheet {
         render::Views::Sheet {
