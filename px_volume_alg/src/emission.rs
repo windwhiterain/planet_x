@@ -69,59 +69,68 @@ pub fn bake_emission(density: &VolumeData, params: &EmissionParams) -> VolumeDat
     //   于是"核白蓝 + 边玫红"（参考图的定义性特征）**根本给不出来** ——
     //   把 `σ_G` 调大能让薄处玫红、浓处也跟着变紫（前几轮"要么全灰、要么全紫"的根因）。
     //   逐通道之后，**底光**可以带自己的色相（`glow_tint`）⇒ 核里那层蓝白就有了。
-    let mut data = vec![0.0_f32; (CUBE_FACES * layers * res * res * 6) as usize];
-    let mut position = [0.0_f32; 3];
-    for face in 0..CUBE_FACES {
-        for layer in 0..layers {
+    // ⚠⚠ **按行带并行**（`px_field_schema::parallel`，与场算子同一套口径，逐位相同）：
+    //   一行 = 一个 `(面, 层, t)` 上的全部 `s` 与六条通道（`res × 6` 个 f32），
+    //   行号 = `(face × layers + layer) × res + t` —— 与 [`VolumeData`] 的摊平顺序逐字相同。
+    //   每格只写自己那一段 ⇒ 结果与串行**完全一致**（缓存键不受影响）。
+    //   ⚠ 这一档是体积链上最贵的一处（每格一次 `shadow_steps` 步的阴影行进）：
+    //     实测 shape 64 单线程 **56.8 秒** —— 占整轮"改发射模型 → 看图"迭代的大头。
+    let width = res as usize * 6;
+    let height = (CUBE_FACES * layers * res) as usize;
+    let data = px_field_schema::parallel::rows(width, height, |first, count, out| {
+        for row in 0..count {
+            let row_index = (first + row) as u32;
+            let face = row_index / (layers * res);
+            let layer = (row_index % (layers * res)) / res;
+            let t = row_index % res;
             let altitude = layer as f32 / (layers - 1) as f32;
             let radius = density.inner + span * altitude;
-            for t in 0..res {
-                let s_t = (t as f32 + 0.5) / res as f32;
-                for s in 0..res {
-                    let s_s = (s as f32 + 0.5) / res as f32;
-                    let direction = cube_direction(face, s_s, s_t);
-                    position[0] = direction[0] * radius;
-                    position[1] = direction[1] * radius;
-                    position[2] = direction[2] * radius;
+            let s_t = (t as f32 + 0.5) / res as f32;
+            for s in 0..res {
+                let s_s = (s as f32 + 0.5) / res as f32;
+                let direction = cube_direction(face, s_s, s_t);
+                let position = [
+                    direction[0] * radius,
+                    direction[1] * radius,
+                    direction[2] * radius,
+                ];
 
-                    let d = sample_world(density, position).max(0.0);
+                let d = sample_world(density, position).max(0.0);
 
-                    // ---- 朝光源的遮挡 ----
-                    let mut optical_depth = 0.0_f32;
-                    for step_index in 1..=steps {
-                        let distance = step_index as f32 * step;
-                        let probe = [
-                            position[0] + light_direction[0] * distance,
-                            position[1] + light_direction[1] * distance,
-                            position[2] + light_direction[2] * distance,
-                        ];
-                        optical_depth += sample_world(density, probe) * step;
-                    }
-                    let lit = (-optical_depth * params.shadow_gain).exp();
+                // ---- 朝光源的遮挡 ----
+                let mut optical_depth = 0.0_f32;
+                for step_index in 1..=steps {
+                    let distance = step_index as f32 * step;
+                    let probe = [
+                        position[0] + light_direction[0] * distance,
+                        position[1] + light_direction[1] * distance,
+                        position[2] + light_direction[2] * distance,
+                    ];
+                    optical_depth += sample_world(density, probe) * step;
+                }
+                let lit = (-optical_depth * params.shadow_gain).exp();
 
-                    // ---- 两份发射，逐通道 ----
-                    // 主项（高幂 ⇒ 只有浓的地方亮）是**中性**的，它的颜色由消光给
-                    // （薄处自然被染成玫红）；底光（低幂 ⇒ 浓处相对更强）带自己的色相。
-                    let main = d.powf(params.emission_power) * params.emission_gain * lit;
-                    // ⚠ **门控**（不是曲线）：门限以下**正好是 0** ⇒ 暗部完全交回
-                    //   "主发射 + 逐通道消光"（玫红）。见 glow_threshold 的文档。
-                    let above = (d - params.glow_threshold).max(0.0);
-                    let glow = above.powf(params.glow_power) * params.glow_gain * lit;
+                // ---- 两份发射，逐通道 ----
+                // 主项（高幂 ⇒ 只有浓的地方亮）是**中性**的，它的颜色由消光给
+                // （薄处自然被染成玫红）；底光（低幂 ⇒ 浓处相对更强）带自己的色相。
+                let main = d.powf(params.emission_power) * params.emission_gain * lit;
+                // ⚠ **门控**（不是曲线）：门限以下**正好是 0** ⇒ 暗部完全交回
+                //   "主发射 + 逐通道消光"（玫红）。见 glow_threshold 的文档。
+                let above = (d - params.glow_threshold).max(0.0);
+                let glow = above.powf(params.glow_power) * params.glow_gain * lit;
 
-                    // ---- 消光：逐通道 + 尘埃那一笔 ----
-                    let base = d.powf(params.extinction_power);
-                    let dust = ((d - params.dust_threshold).max(0.0)) * params.dust_bias;
+                // ---- 消光：逐通道 + 尘埃那一笔 ----
+                let base = d.powf(params.extinction_power);
+                let dust = ((d - params.dust_threshold).max(0.0)) * params.dust_bias;
 
-                    let slot = (((face * layers + layer) * res + t) * res + s) as usize;
-                    for channel in 0..3 {
-                        let emit = main + glow * params.glow_tint[channel];
-                        data[slot * 6 + channel] = emit;
-                        data[slot * 6 + 3 + channel] = base * params.extinction[channel] + dust;
-                    }
+                let at = row * width + s as usize * 6;
+                for channel in 0..3 {
+                    out[at + channel] = main + glow * params.glow_tint[channel];
+                    out[at + 3 + channel] = base * params.extinction[channel] + dust;
                 }
             }
         }
-    }
+    });
 
     VolumeData {
         res,
