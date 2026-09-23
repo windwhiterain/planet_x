@@ -106,7 +106,7 @@ fn the_graph_scripts_do_not_link_operator_libraries() {
     );
     assert!(
         has(&manifest, "dependencies", "px_cook"),
-        "px_graphs 不再依赖 px_cook：图脚本唯一那扇门没了（`begin` / `cook` / 各域算子表）",
+        "px_graphs 不再依赖 px_cook：图脚本唯一那扇门没了（`begin` / `cached` / 各域算子表）",
     );
 }
 

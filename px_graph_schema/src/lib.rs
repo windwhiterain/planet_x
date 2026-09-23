@@ -9,7 +9,7 @@
 //!      ↓
 //! px_*_schema        各领域的数据、参数、以及**算子声明**（`ops.rs`：`px_op!` 那几行）
 //!      ↓
-//! px_cook            `cook` + 图脚本那一侧唯一的门
+//! px_cook            `cached` + 图脚本那一侧唯一的门
 //!      ↓
 //! px_graph           图库本体：驱动（CAS / 参数 / 清单 / cameras / generate）
 //!      ↓
@@ -22,7 +22,7 @@
 //!    驱动在 `px_graph` 里。
 //! 2. **算子之间只通过这一层定义的序列化数据说话**：跨算子边界的是 `PayloadBundle`
 //!    （就是 CAS 里那份字节），不是内存里的 Rust 对象。
-//!    ⇒ 「先 key 后 cook」成立：**算键不需要求值**。
+//!    ⇒ 「先 key 后 cached」成立：**算键不需要求值**。
 //! 3. **图程序不 cargo 依赖实现库**：依赖了就会"改一行实现 ⇒ 重编重链图程序"。
 //!    这条线由 `px_graphs/tests/crate_graph.rs` 看着。
 

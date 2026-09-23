@@ -11,7 +11,7 @@
 //! （那是模块的标记，库住 `art/shaders/lib`），排序后烘 ⇒ 同一棵树两次烘出来的清单逐字节相同。
 
 fn main() {
-    // ⚠ 这张图**一个节点都不 cook**：`begin` 只要它那一行摘要（图名 / 参数目录 / 缓存条数）。
+    // ⚠ 这张图**一个节点都不走缓存**：`begin` 只要它那一行摘要（图名 / 参数目录 / 缓存条数）。
     let _graph = px_cook::begin(px_cook::GraphSpec {
         name: "shaders".to_string(),
         width: 0,

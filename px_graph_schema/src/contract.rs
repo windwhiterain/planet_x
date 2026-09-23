@@ -34,7 +34,7 @@ pub struct Cooked<P> {
 }
 
 impl<P> Cooked<P> {
-    /// 只给 `cook` 用：把刚算出来的（或者刚解出来的）值包成一个"已经拿到手的节点"。
+    /// 只给 `cached` 用：把刚算出来的（或者刚解出来的）值包成一个"已经拿到手的节点"。
     pub fn new(key: Key, value: P, hit: bool, millis: u64, bytes: usize) -> Self {
         Self {
             key,
@@ -48,6 +48,29 @@ impl<P> Cooked<P> {
     /// 类型化的值 —— 算子读上游、图脚本读结果，都走这一条。
     pub fn value(&self) -> &P {
         &self.value
+    }
+}
+
+impl<P: Build> Cooked<P> {
+    /// **把一个裸值包成"可以进图的东西"** —— 它没被缓存过，所以键由**内容**算。
+    ///
+    /// ⚠ 图脚本里"不缓存"那一档（直接调算子那个普通函数）拿到的就是裸值；要把它喂给下游节点
+    ///   （下游的 `Inputs` 字段是 `Cooked<T>`），就在这里包一下 ⇒ **不缓存的值也能进图**，
+    ///   而下游的键跟着**内容**走。
+    ///
+    /// ⚠ 键 = **编出来的那份字节**（`Build::encode` 之后 `to_bytes("", &[])`）—— 与落盘那一份
+    ///   同一个口径，于是"同一个内容 ⇒ 同一个键"，与它是怎么来的无关。空 id / 空相机是**固定的
+    ///   两个常量**：内容键里不许掺节点名与相机（那两样是驱动落盘时补的）。
+    pub fn of(value: P) -> Result<Self, String> {
+        let bundle = P::encode(&value)?;
+        let bytes = bundle.to_bytes("", &[])?;
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"px_cook/cooked/v1");
+        hasher.update(&(bytes.len() as u64).to_le_bytes());
+        hasher.update(&bytes);
+        let mut key = [0_u8; 32];
+        key.copy_from_slice(hasher.finalize().as_bytes());
+        Ok(Self::new(key, value, false, 0, 0))
     }
 }
 
@@ -75,7 +98,7 @@ pub trait PxOp: Sized {
     fn interface() -> u64 {
         // ⚠ **不缓存**：泛型函数里的 `static` 在这里**不按单态化分开**（实测：
         //   `cached_interface::<A>` 与 `::<B>` 拿到同一个值），缓存反而制造 bug。
-        //   代价是每次 `cook` 多哈希三个类型名 —— 可以忽略。
+        //   代价是每次 `cached` 多哈希三个类型名 —— 可以忽略。
         // ⚠ 类型名在字段改名/增删时会变 —— 那正是我们要的信号。
         interface_hash(&[
             ::core::any::type_name::<Self::Params>(),
@@ -117,7 +140,7 @@ pub trait PxOp: Sized {
 
 /// **无上游**那一档的形状：它没有名字问题，留在契约里。
 ///
-/// 于是图脚本写 `cook::<field::Fbm>(&graph, "clusters", ())` —— 那个 `()` 就是它。
+/// 于是图脚本写 `cached(&graph, "clusters", field::Fbm, params, ())` —— 那个 `()` 就是它。
 impl PxInputs for () {
     fn collect(&self, _hasher: &mut blake3::Hasher) {}
 }

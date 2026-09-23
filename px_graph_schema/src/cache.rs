@@ -1,6 +1,6 @@
-//! 驱动与 `cook` 之间**唯一的接缝**。
+//! 驱动与 `cached` 之间**唯一的接缝**。
 //!
-//! `cook`（`px_cook`）只认识这几个方法；驱动（`px_graph`）实现它。
+//! `cached`（`px_cook`）只认识这几个方法；驱动（`px_graph`）实现它。
 //! 两边都不需要知道对方的算子长什么样 —— 所以这一层必须比驱动低。
 
 use px_protocol::art::Camera;
@@ -15,7 +15,7 @@ pub trait Cache {
     /// **画布 = 算子拿到的那个 `Grid`**（尺寸 + 投影）。
     ///
     /// ⚠ 只有一个出口：键里那一份与算子 `render` 手里那一份必须是同一个值。
-    ///   从前它们是两处（`canvas()` + `projection()` 给键、`cook` 的参数给算子）——
+    ///   从前它们是两处（`canvas()` + `projection()` 给键、`cached` 的参数给算子）——
     ///   那种"双份真相"是错的。
     fn grid(&self) -> Grid;
     fn cameras(&self) -> &[Camera];
@@ -37,7 +37,7 @@ pub trait Cache {
     fn store(&self, report: Report<'_>, payload: &PayloadBundle) -> Result<(), String>;
 }
 
-/// 一次 cook 的读数 —— 与 `cook` 打出来的那几行同一档。
+/// 一次 cached 的读数 —— 与 `cached` 打出来的那几行同一档。
 pub struct Report<'a> {
     pub node: &'a str,
     pub op: &'static str,

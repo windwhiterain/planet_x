@@ -1,9 +1,9 @@
 //! 驱动：读参数、算键、查 CAS、落盘、记清单。
 //!
-//! ⚠ 这里是**唯一**知道「一个节点怎么走完一趟」的地方。它与 `cook` 之间只有两样东西：
+//! ⚠ 这里是**唯一**知道「一个节点怎么走完一趟」的地方。它与 `cached` 之间只有两样东西：
 //! `Cache` 那几个方法（`px_graph_schema` 里的接缝）与序列化载荷（`PayloadBundle`）。
 //!
-//! ⚠ **没有全局单例**：`begin` 交回一个 `Graph` 句柄，图脚本拿着它跑 `cook`、最后 `finish`。
+//! ⚠ **没有全局单例**：`begin` 交回一个 `Graph` 句柄，图脚本拿着它跑 `cached`、最后 `finish`。
 //!   从前那份状态住在一个 `OnceLock` 里，于是**第二次 `begin` 被静默忽略** —— 同一个进程里
 //!   第二张图会读到第一张的画布 / 参数 / 相机，而没有任何一行代码看得见这件事。
 
@@ -19,7 +19,7 @@ use px_protocol::stream::{self, Frame};
 
 /// **一张正在跑的图**：画布、参数目录、清单、以及"这一趟是不是全量重算"。
 ///
-/// 它就是 `Cache` 的实现 —— 图脚本拿 `begin` 的返回值直接喂给 `cook`。
+/// 它就是 `Cache` 的实现 —— 图脚本拿 `begin` 的返回值直接喂给 `cached`。
 pub struct Graph {
     spec: GraphSpec,
     /// 画布：尺寸 + 投影。**只在这里折算一次** —— 键里那份与算子手里那份因此必然相同。
@@ -34,8 +34,8 @@ pub struct Graph {
 }
 
 impl Graph {
-    /// 这个节点的参数**原文**（`art/<图>/<节点>.toml`）。类型化的解析在领域 schema 里
-    /// （`px_*_schema::params::parse`）—— 驱动不认识任何算子的参数类型。
+    /// 这个节点的参数**原文**（`art/<图>/<节点>.toml`）。类型化的解析在门那一侧
+    /// （`px_cook::node_params`）—— 驱动不认识任何算子的参数类型。
     pub fn params_text(&self, name: &str) -> Option<String> {
         load_params_text(&self.param_dir, name)
     }
@@ -50,25 +50,26 @@ impl Graph {
         let millis: u64 = manifest.iter().map(|entry| entry.millis).sum();
 
         // 参数索引：每个节点实际生效的参数值 + 字段名。
-        // ⚠ 缺文件是静默用默认值的 ⇒ 这是设计师唯一能看见"我少写了什么/写错了什么字段"的地方。
+        // ⚠ 参数今天有两条来源（`node_params` 从 `art/<图>/<节点>.toml` 读的打底值，
+        //   与图脚本自己算出来的值）⇒ 这一行说清"哪些节点连参数文件都没打底"。
         let used = self.params_used.lock().expect("参数表锁坏了");
         let params_path = self.cache_root.join(&self.spec.name).join("params.json");
-        let defaults: Vec<&String> = used
+        let no_file: Vec<&String> = used
             .iter()
             .filter(|(_, entry)| !entry.from_file)
             .map(|(node, _)| node)
             .collect();
         if !used.is_empty() {
             println!(
-                "参数索引：{} 个节点（{} 个走默认值{}）；字段名与生效值见 {}{}",
+                "参数索引：{} 个节点（{} 个没有参数文件{}）；字段名与生效值见 {}{}",
                 used.len(),
-                defaults.len(),
-                if defaults.is_empty() {
+                no_file.len(),
+                if no_file.is_empty() {
                     String::new()
                 } else {
                     format!(
                         "：{}",
-                        defaults
+                        no_file
                             .iter()
                             .map(|s| s.as_str())
                             .collect::<Vec<_>>()
@@ -76,10 +77,10 @@ impl Graph {
                     )
                 },
                 params_path.display(),
-                if defaults.is_empty() {
+                if no_file.is_empty() {
                     ""
                 } else {
-                    "（⚠ 缺参数文件的都在默认值上）"
+                    "（⚠ 这些节点的参数由图脚本给的值决定，改它们要重编图程序）"
                 },
             );
         }
@@ -150,14 +151,20 @@ impl Cache for Graph {
 
     fn record_params(&self, node: &str, op: &str, params_json: &str, from_file: bool) {
         let value = serde_json::from_str(params_json).unwrap_or(serde_json::Value::Null);
-        self.params_used.lock().expect("参数表锁坏了").insert(
-            node.to_string(),
-            ParamsUsed {
-                op: op.to_string(),
-                from_file,
-                params: value,
-            },
-        );
+        let mut used = self.params_used.lock().expect("参数表锁坏了");
+        // ⚠ **两条记录都指同一个节点，要合并、不是覆盖**：
+        //   `node_params`（参数是从文件打底的）先来、`cached`（生效值 + 算子）后到
+        //   ⇒ `from_file` 只许由 false 变 true，`op` 只许填一次。
+        let entry = used.entry(node.to_string()).or_insert_with(|| ParamsUsed {
+            op: String::new(),
+            from_file: false,
+            params: serde_json::Value::Null,
+        });
+        if !op.is_empty() {
+            entry.op = op.to_string();
+        }
+        entry.from_file |= from_file;
+        entry.params = value;
     }
 
     fn fetch(&self, key: Key) -> Option<PayloadBundle> {

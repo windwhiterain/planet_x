@@ -10,41 +10,61 @@
 ## 0. 图脚本里只看到这些（先把结论摆出来）
 
 ```rust
-use px_cook::{Domain, GraphSpec, begin, cameras, cook, field, mesh, volume};
+use px_cook::{Domain, GraphSpec, begin, cameras, cached, field, mesh, node_params, volume};
 ```
 
-`begin(GraphSpec { … })` 交回一个 `Graph` 句柄；`cook::<算子>(&graph, "节点名", 输入)` 走一趟
-「算键 → 查 → 命中就解载荷；不命中就调实现、编码、落盘」；最后 `graph.finish()` 写参数索引与清单。
-`cook` 的真实签名是
-`cook<O: PxOp>(cache: &dyn Cache, node: &str, inputs: O::Inputs) -> Result<Cooked<O::Payload>, String>`
-（`Graph` 就是那个 `Cache`）：
+`begin(GraphSpec { … })` 交回一个 `Graph` 句柄；**`cached` 是图里唯一那个函数** ——
+它读缓存，缓存脏了/没有才调算子算；最后 `graph.finish()` 写参数索引与清单。
+`cached` 的真实签名是
 
 ```rust
-use px_cook::cook;
+cached<O: PxOp>(cache: &dyn Cache, node: &str, f: O, params: O::Params, inputs: O::Inputs)
+    -> Result<Cooked<O::Payload>, String>
+```
+
+（`Graph` 就是那个 `Cache`；`f` 就是那个算子 —— `field::Fbm` 这种 unit struct 的名字
+本身就是一个值）。参数是**普通 Rust 值**，上游是别的节点的 `Cooked<T>`：
+
+```rust
+use px_cook::{cached, node_params};
 
 // 不吃上游：输入形状是 `()`（无上游那一档住在契约里）
-let clusters  = cook::<field::Fbm>(&graph, "clusters", ())?;
-let mountains = cook::<field::Ridged>(&graph, "mountains", ())?;
-let weight    = cook::<field::Constant>(&graph, "weight", ())?;
+let clusters  = cached(&graph, "clusters",  field::Fbm,      node_params(&graph, "clusters")?,  ())?;
+let mountains = cached(&graph, "mountains", field::Ridged,   node_params(&graph, "mountains")?, ())?;
+let weight    = cached(&graph, "weight",    field::Constant, node_params(&graph, "weight")?,    ())?;
 
 // 两个上游、三个上游：输入形状由算子自己定义（具名字段）
-let carved = cook::<field::Warp>(&graph, "carved",
+let carved = cached(&graph, "carved", field::Warp, node_params(&graph, "carved")?,
                  field::FieldPairInput { field: clusters, offset: mountains })?;
-let mixed  = cook::<field::Mix>(&graph, "mixed",
+let mixed  = cached(&graph, "mixed",  field::Mix,  node_params(&graph, "mixed")?,
                  field::MixInput { a: clusters, b: carved, mask: weight })?;
-let height = cook::<field::Remap>(&graph, "height",
+let height = cached(&graph, "height", field::Remap, node_params(&graph, "height")?,
                  field::FieldInput { field: mixed })?;
 
 // 体积与网格
-let coarse = cook::<volume::CloudCoarse>(&graph, "coarse",
+let coarse = cached(&graph, "coarse", volume::CloudCoarse, node_params(&graph, "coarse")?,
                  volume::CloudCoarseInput { coverage: height.clone() })?;
-let proxy  = cook::<mesh::Proxy>(&graph, "proxy",
+let proxy  = cached(&graph, "proxy",  mesh::Proxy, node_params(&graph, "proxy")?,
                  mesh::ProxyInput { volume: coarse.clone() })?;
 ```
 
-**就这些**。没有 `encode`/`decode`、没有 `cook_field`/`cook_volume`/`cook_mesh`、
+**不缓存**就是直接调那个普通函数（同一个参数、同一个上游）—— 没有第二个缓存入口：
+
+```rust
+let params = node_params(&graph, "clusters")?;
+let preview: px_field_schema::field::Field = field::Fbm.render(&params, &(), graph.grid())?;
+// 裸值要进图（喂给下游）就在脚本里包一下：**键按内容算** —— 包装对象是嵌套的、递归的
+let wrapped: Cooked<Field> = Cooked::of(preview)?;
+```
+
+**就这些**。没有 `encode`/`decode`、没有按域各一个的缓存函数、
 没有 `&[&a, &b]`、没有 `OpLibrary`/`OpTable`、没有描述符表、没有运行期按字符串 id 分派。
 域、相机口径、编解码、身份全从算子类型推。
+
+⚠ **`Cooked<T>` 是"这个参数可以被缓存"的类型标记**：`HashField for Cooked<T>` 写的是**它的键**
+⇒ 包装对象嵌进任何参数结构里都只贡献一个键（`Cooked<Cooked<T>>` 也成立）。
+裸值（不缓存那一档的产物）在脚本里 `Cooked::of(…)` 一下就能进图。
+
 
 **字符串 id 还是有一个**（`px_op!` 那一行的 `"field.fbm"`），但它只做两件事：进键、给人读的读数。
 它**不**用来找函数 —— 「去哪个库、取哪个符号」是编译期常量
@@ -56,7 +76,7 @@ let proxy  = cook::<mesh::Proxy>(&graph, "proxy",
 |---|---|---|
 | 输入个数/形状 | `O::Inputs`（关联类型钉死） | 少给一个上游、给错域 ⇒ `expected MixInput, found …` —— 见 §3.3b |
 | 输出域 | `O::Payload` | 把体积喂给要 `Cooked<Field>` 的字段就编不过 |
-| 参数类型 | `O::Params` | 参数文件字段写错当场报（`deny_unknown_fields`） |
+| 参数类型 | `O::Params`（**值**，不是解 TOML 解出来的） | 给错类型当场编不过；`node_params` 那条路字段写错当场报（`deny_unknown_fields`） |
 
 ---
 
@@ -69,7 +89,7 @@ px_graph_schema    ★契约：Key / PayloadBundle / Grid / 算子身份（OpId�
      ↓
 px_*_schema        各域的数据、参数、**以及算子声明**（src/ops.rs 里那几行 px_op!）
      ↓
-px_cook            图脚本唯一那扇门：cook + 图的生命周期 + 各域算子表（全是 re-export）
+px_cook            图脚本唯一那扇门：cached + node_params + 图的生命周期 + 各域算子表（全是 re-export）
      ↓
 px_graph           驱动（CAS / 参数 / 清单 / cameras / generate / shader）
      ↓
@@ -124,7 +144,7 @@ px_*_op            实现：crate-type = ["dylib"]，运行期按身份装载
 | # | 文件 | 写什么 |
 |---|---|---|
 | 7 | `px_graphs/Cargo.toml` | **不用动**：图程序依赖的是 `px_cook`（唯一那扇门）。⚠ 这里**不许**出现任何 `px_*_op` |
-| 8 | `px_graphs/src/bin/<图>.rs` | `cook::<算子>(…)` 调用链 |
+| 8 | `px_graphs/src/bin/<图>.rs` | `cached(&graph, "节点名", 算子, 参数, 上游)` 调用链 |
 | 9 | `art/<图>/<节点名>.toml` | 这个节点的**超参数** |
 
 ### 2.3 一个算子库的 `src/lib.rs` 全文（`px_field_op/src/lib.rs`）
@@ -261,7 +281,7 @@ pub struct MixInput {
 | | 超参数（`#[derive(PxParams)]`） | 图参数（`#[derive(PxInputs)]`） |
 |---|---|---|
 | 键 | 宏：字段名 + `HashField`（按类型写字节） | 宏：字段名 + `Cooked::key`（上游的键） |
-| 值 | serde：`toml` → 结构 → 规范 JSON（进键） | **普通 Rust 值**：图脚本把 `Cooked<T>` 直接交给 `cook` |
+| 值 | serde：`toml` → 结构 → 规范 JSON（进键） | **普通 Rust 值**：图脚本把 `Cooked<T>` 直接交给 `cached` |
 
 **为什么图参数没有编解码**：图脚本是把**值**（`Cooked<T>` 里那个内存中的值）交过来的，
 从来没有「按位置解上游字节」那条路 ⇒ 字段**顺序**不是接口的一部分，**字段名**才是。
@@ -289,7 +309,7 @@ pub struct MixInput {
 | 输出域改 | 变 | **变** | 重算 |
 | 只改了图脚本 | 不变 | 不变 | 全命中 |
 
-- **接口哈希**管「形状变了」（取代手写的 `version`）：从三个类型名推，`cook` 里算一次，
+- **接口哈希**管「形状变了」（取代手写的 `version`）：从三个类型名推，`cached` 里算一次，
   同时喂给键、读数、清单三处 —— 进键的是完整 64 位，清单里那一格 `ManifestEntry::op_version`
   只是它的低 32 位（给人对账用）。
   ⚠ **不缓存**：泛型函数里的 `static` 不按单态化分开（实测过），缓存反而制造 bug。
@@ -365,14 +385,14 @@ px_graph_schema::px_body! {
 | 网格（`MeshData`） | `true` | `false`（尺寸由参数给） |
 | 体积（`VolumeData`） | `false` | `false`（相机是「怎么看」，体积没人直接看） |
 
-**域决定键里掺不掺评审相机**：`cook` 读 `<O::Payload as Build>::WITH_CAMERAS` 决定要不要
+**域决定键里掺不掺评审相机**：`cached` 读 `<O::Payload as Build>::WITH_CAMERAS` 决定要不要
 `key_with_cameras`；画布同理走 `RESOLUTION_IS_CANVAS`。算子不用管 —— 而且**没有第二个地方要写它**：
 域就是 `Payload` 类型。
 
 ### 3.5 图脚本：`px_graphs/src/bin/<图>.rs`
 
 ```rust
-use px_cook::{Domain, GraphSpec, artifact_path_of, begin, cameras, cook, field, mesh};
+use px_cook::{Domain, GraphSpec, artifact_path_of, begin, cameras, cached, field, mesh, node_params};
 
 let graph = begin(GraphSpec {
     name: "planet".to_string(),
@@ -382,15 +402,18 @@ let graph = begin(GraphSpec {
     cameras: cameras::review(),
 });
 
-let continents = cook::<field::Fbm>(&graph, "continents", ())?;
-let mountains  = cook::<field::Ridged>(&graph, "mountains", ())?;
-let weight     = cook::<field::Constant>(&graph, "weight", ())?;
-let terrain    = cook::<field::Mix>(&graph, "terrain",
-                     field::MixInput { a: continents, b: mountains, mask: weight })?;
-let height     = cook::<field::Remap>(&graph, "height",
-                     field::FieldInput { field: terrain.clone() })?;
-let surface    = cook::<mesh::CubeSphere>(&graph, "surface",
-                     mesh::CubeSphereInput { height: height.clone() })?;
+let continents = cached(&graph, "continents", field::Fbm,
+                            node_params(&graph, "continents")?, ())?;
+let mountains  = cached(&graph, "mountains", field::Ridged,
+                            node_params(&graph, "mountains")?, ())?;
+let weight     = cached(&graph, "weight", field::Constant,
+                            node_params(&graph, "weight")?, ())?;
+let terrain    = cached(&graph, "terrain", field::Mix, node_params(&graph, "terrain")?,
+                            field::MixInput { a: continents, b: mountains, mask: weight })?;
+let height     = cached(&graph, "height", field::Remap, node_params(&graph, "height")?,
+                            field::FieldInput { field: terrain.clone() })?;
+let surface    = cached(&graph, "surface", mesh::CubeSphere, node_params(&graph, "surface")?,
+                            mesh::CubeSphereInput { height: height.clone() })?;
 
 let stats = height.value().stats();
 println!(
@@ -403,17 +426,18 @@ graph.finish();
 ```
 
 - **上游是值，不是引用**：`Cooked<T>` 里是值 ⇒ 同一份被多处用就 `.clone()`。
-- `cook` 的第三个参数收的是 `O::Inputs`，**类型参数不用写全** —— 关联类型会反推。
+- `cached` 的第四个参数收的是 `O::Params`、第五个收 `O::Inputs`，**算子从第三个参数推** —— 
+  不用写 turbofish。
 - 读结果走 `.value()`（`Cooked::value()`）；键与读数在 `.key` / `.hit` / `.millis` / `.bytes`。
-- 参数文件按**节点名**取（`art/<图>/terrain.toml`）。同一个算子在别的图里叫别的名字 ——
-  算子不该知道节点名。
+- 参数文件按**节点名**取（`art/<图>/terrain.toml`）—— 但**取它的动作在脚本里**
+  （`node_params`），`cached` 不碰 `art/`。同一个算子在别的图里叫别的名字，算子不该知道节点名。
 - `begin` 交回**句柄**（不是一个全局单例）：同一个进程里可以同时跑两张图，彼此不串。
 
 ### 3.6 参数文件 `art/<图>/<节点名>.toml`
 
 > 跑完看一眼 `target/pcg/<图>/params.json`：它是**每个节点实际生效的参数值 + 字段名**。
 > `graph.finish()` 还会打一行
-> `参数索引：N 个节点（M 个走默认值：<名字 / 名字>）；字段名与生效值见 <params.json>（⚠ 缺参数文件的都在默认值上）`
+> `参数索引：N 个节点（M 个没有参数文件：<名字 / 名字>）；字段名与生效值见 <params.json>（⚠ 这些节点的参数由图脚本给的值决定，改它们要重编图程序）`
 > —— 照着那份 JSON 补文件即可。
 
 ```toml
@@ -421,7 +445,10 @@ frequency = 1.7
 octaves = 6
 ```
 
-超参数**留在这里**（不在 Rust 里）：改调参只需要重跑图，不重编。
+超参数**留在文件里**（脚本用 `node_params` 读它）：改调参只需要重跑图，不重编。
+⚠ 参数**也可以完全写在 Rust 里**（`Params { frequency: 1.7, ..Default::default() }` 或者
+`Params { zonal: look.stretch, ..node_params(…) }`）—— 那条路的参数改动**要重编图程序**，
+`finish()` 那一行会把这些节点点名（"没有参数文件"的就是它们）。
 
 ---
 
@@ -444,6 +471,13 @@ octaves = 6
 
 ⚠ **节点名不进键**：键由算子身份 + 参数 + 上游算，节点名只在清单与产物里当名字。
 两个节点名不同、其余全同 ⇒ 同一个键（CAS 里就是同一份字节）。
+
+⚠ **上游那个"键"有两种来源，而它们在键这件事上完全同质**：
+* 从 `cached` 来的节点：键 = **它的身份**（算子 id ‖ 接口形状 ‖ 实现源码指纹 ‖ 它的参数 ‖ 它的上游）；
+* 脚本用 `Cooked::of(裸值)` 包出来的：键 = **内容**（`Build::encode` 之后那份字节的哈希）。
+
+⇒ 不缓存那一档（直接调算子的裸值）照样能进图，而下游的键跟着**内容**走；
+「参数是 `Cooked<T>` 就表示它可以被缓存」这条口径在两种来源上说的是同一件事。
 
 ---
 
@@ -486,7 +520,7 @@ pub fn eval_sampled(params: &params::Params, coverage: &Field) -> VolumeData {
 图脚本那一侧只有：
 
 ```rust
-let coarse = cook::<volume::CloudCoarse>(&graph, "coarse",
+let coarse = cached(&graph, "coarse", volume::CloudCoarse, node_params(&graph, "coarse")?,
                  volume::CloudCoarseInput { coverage: mixed.clone() })?;
 ```
 
@@ -529,7 +563,7 @@ px_local_op! { Band, "local.band", BandParams, (), Field,
 | `px_local_op!` | **本图程序** | **本 crate** 的源码指纹（`env!("PX_SOURCE_HASH")`，本 crate 的 `build.rs` 给） | 图程序重编，实现库一位不动 |
 
 * 超参数照样是图侧自己定义的 struct（`#[derive(px_derive::PxParams)]` ⇒ 加字段自动进键）；
-* `cook` 对它一视同仁：算键 → 查 → 命中就解载荷、不命中就调 `render`；
+* `cached` 对它一视同仁：算键 → 查 → 命中就解载荷、不命中就调 `render`；
 * ⚠ 身份是"**整个图程序这一份源码**"（粗是**故意的**）：改任何一个 bin 都会让所有图侧算子换键。
   要跨图复用、要更细的粒度 ⇒ 写成 `px_*_op` 里的正式算子（那时连图程序都不用重编）。
 * ⚠ 唯一的前提：这个 crate 要有 `build.rs`（一行 `px_fingerprint::cargo_fingerprint_for_crate(&[])`，
@@ -825,10 +859,12 @@ cargo build（px_graphs）
 5. **实现库比源码旧时只告警**：跑的是旧实现，键也跟着旧身份走 —— 不会有陈旧命中，
    但读数上那行 `⚠ … 的实现比库新` 不能当噪音看。
 
-6. **参数写错字段名**：靠 `deny_unknown_fields` 当场报。**缺文件仍是静默用默认值**，
-   但 `finish()` 会打一行「`参数索引：N 个节点（M 个走默认值：<名字>）；字段名与生效值见 …`」，
-   并写一份 `<图>/params.json`：每个节点实际生效的参数值 + 字段名。
+6. **参数写错字段名**：`node_params` 那条路靠 `deny_unknown_fields` 当场报。**缺文件仍是静默
+   用默认值**，但 `finish()` 会打一行「`参数索引：N 个节点（M 个没有参数文件：<名字>）；
+   字段名与生效值见 …`」，并写一份 `<图>/params.json`：每个节点实际生效的参数值 + 字段名。
    想补参数文件，照着那份 JSON 抄字段名即可。
+   ⚠ **参数是脚本给的值**（`cached` 收的就是值）⇒ 参数改动照样换键、照着重算，
+   只是"改调参不重编图程序"这条性质**只有参数文件那条路有**：写死在 Rust 里的那份要重编。
 
 7. **别给「域」再加一个并行声明**。`OpKind` 就是这样一个东西，已经删了 ——
    域就是 `Payload` 类型。**下次想加「域标签」时，回来读这一条。**

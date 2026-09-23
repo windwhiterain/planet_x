@@ -1,6 +1,6 @@
 //! 卫星 / 无大气天体：**基础地形 + 三层陨坑** ⇒ 高度场 + 立方球网格。
 //!
-//! 与 `planet.rs` / `desert.rs` 同形（普通 Rust，每一步走 `px_cook` 的缓存辅助函数），
+//! 与 `planet.rs` / `desert.rs` 同形（普通 Rust，每一步走 `px_cook::cached` 的缓存函数），
 //! 差别只在词汇：三层都是 **`field.stamps`**（盖章式打坑）—— 每枚印章有自己的随机半径与
 //! 年龄，按年龄序**挖掘**（年轻坑挖掉老坑的坑缘），密度由上游场当遮罩。
 //! 球面档按 `direction` 取格点（没有接缝、两极不挤）。
@@ -13,7 +13,9 @@
 //!
 //! 渲染：`px run scene orbit-moon`（配方在 `art/scene/orbit-moon.toml`）。
 
-use px_cook::{Domain, GraphSpec, artifact_path_of, begin, cameras, cook, field, mesh};
+use px_cook::{
+    Domain, GraphSpec, artifact_path_of, begin, cached, cameras, field, mesh, node_params,
+};
 
 type Fault = Box<dyn std::error::Error>;
 
@@ -27,40 +29,56 @@ fn main() -> Result<(), Fault> {
     });
 
     // 基础地形：比行星更平（卫星没有板块运动，起伏靠撞击）。
-    let terra = cook::<field::Fbm>(&graph, "terra", ())?;
+    let terra = cached(
+        &graph,
+        "terra",
+        field::Fbm,
+        node_params(&graph, "terra")?,
+        (),
+    )?;
     // 三层印章：`base` 是"被打的那张场"（也当密度遮罩），每一层往上面挖。
-    let basins = cook::<field::Stamps>(
+    let basins = cached(
         &graph,
         "basins",
+        field::Stamps,
+        node_params(&graph, "basins")?,
         field::CratersInput {
             base: terra.clone(),
         },
     )?;
-    let craters = cook::<field::Stamps>(
+    let craters = cached(
         &graph,
         "craters",
+        field::Stamps,
+        node_params(&graph, "craters")?,
         field::CratersInput {
             base: basins.clone(),
         },
     )?;
-    let pits = cook::<field::Stamps>(
+    let pits = cached(
         &graph,
         "pits",
+        field::Stamps,
+        node_params(&graph, "pits")?,
         field::CratersInput {
             base: craters.clone(),
         },
     )?;
     // 收口：把高度压回 [0,1]（`Craters` 不钳制 —— 值域是图的事）。
-    let height = cook::<field::Remap>(
+    let height = cached(
         &graph,
         "height",
+        field::Remap,
+        node_params(&graph, "height")?,
         field::FieldInput {
             field: pits.clone(),
         },
     )?;
-    let surface = cook::<mesh::CubeSphere>(
+    let surface = cached(
         &graph,
         "surface",
+        mesh::CubeSphere,
+        node_params(&graph, "surface")?,
         mesh::CubeSphereInput {
             height: height.clone(),
         },

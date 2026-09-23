@@ -1,8 +1,10 @@
-//! 沙漠：**普通 Rust** —— 同 `planet.rs`，每一步走 `px_cook` 那个缓存辅助函数。
+//! 沙漠：**普通 Rust** —— 同 `planet.rs`，每一步走 `px_cook::cached` 那个缓存函数。
 //!
 //! ⚠ 这里原来是老写法（字符串 id + `&[&Artifact]`）。见 `planet.rs` 顶上那条注释。
 
-use px_cook::{Domain, GraphSpec, artifact_path_of, begin, cameras, cook, field, mesh};
+use px_cook::{
+    Domain, GraphSpec, artifact_path_of, begin, cached, cameras, field, mesh, node_params,
+};
 
 type Fault = Box<dyn std::error::Error>;
 
@@ -15,38 +17,64 @@ fn main() -> Result<(), Fault> {
         cameras: cameras::review(),
     });
 
-    let plateaus = cook::<field::Fbm>(&graph, "plateaus", ())?;
-    let canyons = cook::<field::Ridged>(&graph, "canyons", ())?;
-    let flow = cook::<field::Fbm>(&graph, "flow", ())?;
-    let carved = cook::<field::Warp>(
+    let plateaus = cached(
+        &graph,
+        "plateaus",
+        field::Fbm,
+        node_params(&graph, "plateaus")?,
+        (),
+    )?;
+    let canyons = cached(
+        &graph,
+        "canyons",
+        field::Ridged,
+        node_params(&graph, "canyons")?,
+        (),
+    )?;
+    let flow = cached(&graph, "flow", field::Fbm, node_params(&graph, "flow")?, ())?;
+    let carved = cached(
         &graph,
         "carved",
+        field::Warp,
+        node_params(&graph, "carved")?,
         field::FieldPairInput {
             field: canyons,
             offset: flow,
         },
     )?;
-    let blend = cook::<field::Constant>(&graph, "blend", ())?;
-    let terrain = cook::<field::Mix>(
+    let blend = cached(
+        &graph,
+        "blend",
+        field::Constant,
+        node_params(&graph, "blend")?,
+        (),
+    )?;
+    let terrain = cached(
         &graph,
         "terrain",
+        field::Mix,
+        node_params(&graph, "terrain")?,
         field::MixInput {
             a: plateaus,
             b: carved,
             mask: blend,
         },
     )?;
-    let height = cook::<field::Remap>(
+    let height = cached(
         &graph,
         "height",
+        field::Remap,
+        node_params(&graph, "height")?,
         field::FieldInput {
             field: terrain.clone(),
         },
     )?;
 
-    let surface = cook::<mesh::CubeSphere>(
+    let surface = cached(
         &graph,
         "surface",
+        mesh::CubeSphere,
+        node_params(&graph, "surface")?,
         mesh::CubeSphereInput {
             height: height.clone(),
         },
