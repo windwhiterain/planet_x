@@ -47,7 +47,7 @@ shadow_gain = 40.0
 #
 # ⇒ 幂**低**时底光在薄处也很强（`d¹` 不小），把暗部染蓝；
 #   幂**高**才只剩浓处那一段 ⇒ 核保住蓝白、暗部交回"主发射 + 消光"（玫红）。
-emission_power = 2.5
+emission_power = 4.5
 emission_gain = 0.0
 glow_gain = 0.0
 glow_power = 1.6

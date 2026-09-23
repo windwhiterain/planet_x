@@ -7,7 +7,7 @@
 frequency = 15.0
 octaves = 2
 lacunarity = 2.1
-gain = 0.2
+gain = 0.05
 seed = 20461
 sharpness = 3.2
 zonal = 0.8
