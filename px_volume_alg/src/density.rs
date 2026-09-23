@@ -325,6 +325,7 @@ pub fn bake_density(
     }
 
     Ok(VolumeData {
+        lanes: 1,
         res,
         layers,
         inner: params.inner,

@@ -361,6 +361,8 @@ impl SparseVolume {
             layers: self.layers,
             inner: self.inner,
             outer: self.outer,
+            // ⚠ 这一档是**密度**（每体素一个值，`data[slot] = value`）⇒ 单通道。
+            lanes: 1,
             data,
         }
     }
@@ -411,6 +413,7 @@ mod tests {
             layers,
             inner: 1.0,
             outer: 2.0,
+            lanes: 1,
             data,
         }
     }

@@ -418,6 +418,7 @@ fn canonical() -> String {
         layers: 65,
         inner: 1.01,
         outer: 1.06,
+        lanes: 1,
         data: vec![0.0; 6 * 65 * 65 * 65],
     }
     .blobs()

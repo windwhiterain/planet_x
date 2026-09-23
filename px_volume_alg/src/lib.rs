@@ -166,6 +166,7 @@ pub fn bake<F: FieldFn>(params: &params::Params, cover: &F) -> VolumeData {
         layers,
         inner: params.inner,
         outer: params.outer,
+        lanes: 1,
         data,
     }
 }

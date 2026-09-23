@@ -253,6 +253,7 @@ pub fn bake_emission(
     });
 
     VolumeData {
+        lanes: 6,
         res,
         layers,
         inner: density.inner,
@@ -285,6 +286,7 @@ mod tests {
 
     fn flat_density(res: u32, layers: u32, value: f32) -> VolumeData {
         VolumeData {
+            lanes: 1,
             res,
             layers,
             inner: 1.0,

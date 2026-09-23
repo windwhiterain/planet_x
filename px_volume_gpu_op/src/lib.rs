@@ -288,6 +288,7 @@ mod sampler_tests {
             }
         }
         VolumeData {
+            lanes: 1,
             res,
             layers,
             inner,
@@ -1038,6 +1039,7 @@ mod crosscheck_tests {
             }
         }
         VolumeData {
+            lanes: 1,
             res,
             layers,
             inner,
@@ -1210,6 +1212,7 @@ mod star_tests {
             }
         }
         let volume = VolumeData {
+            lanes: 1,
             res,
             layers,
             inner,
@@ -1620,6 +1623,7 @@ mod sky_tests {
             }
         }
         VolumeData {
+            lanes: 1,
             res,
             layers,
             inner,
@@ -1979,6 +1983,7 @@ mod seam_tests {
             *value = ((index.wrapping_mul(2654435761)) % 1000) as f32 / 1000.0;
         }
         let volume = VolumeData {
+            lanes: 1,
             res,
             layers,
             inner,
@@ -2174,6 +2179,7 @@ mod sampler_seam_tests {
             *value = ((index * 2654435761usize) % 1000) as f32 / 1000.0;
         }
         let volume = VolumeData {
+            lanes: 1,
             res,
             layers,
             inner,
@@ -2241,6 +2247,7 @@ mod march_seam_tests {
             *value = ((index * 2654435761usize) % 1000) as f32 / 1000.0;
         }
         let volume = VolumeData {
+            lanes: 1,
             res,
             layers,
             inner,
@@ -2352,6 +2359,7 @@ mod identity_grade_tests {
             *value = ((index * 2654435761usize) % 1000) as f32 / 1000.0;
         }
         let volume = VolumeData {
+            lanes: 1,
             res,
             layers,
             inner,
@@ -2462,6 +2470,7 @@ mod chain_tests {
             *value = 0.2 + 0.6 * ((index % 97) as f32 / 97.0);
         }
         VolumeData {
+            lanes: 1,
             res: RES,
             layers: LAYERS,
             inner: INNER,
@@ -2745,6 +2754,7 @@ pub fn bake_emission(
         .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap()))
         .collect();
     Ok(px_volume_schema::VolumeData {
+        lanes: 6,
         res,
         layers,
         inner: density.inner,
@@ -2779,6 +2789,7 @@ mod emission_tests {
             *value = ((index.wrapping_mul(2654435761)) % 1000) as f32 / 1000.0;
         }
         let density = VolumeData {
+            lanes: 1,
             res,
             layers,
             inner,
