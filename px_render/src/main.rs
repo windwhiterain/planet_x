@@ -1269,6 +1269,17 @@ fn run_spans(
 ///
 /// ⚠ 在这条修好之前，**质量线的一切全图统计**（亮/暗/四分位/缝比）都带这条台阶，
 ///   不能拿来对参考图。
+/// ---- 续（第 60 轮）----
+///
+/// 全屏 pass 的 uv 生产者**找到了并排除**：`px_pass/src/lib.rs:57` 的 `FULLSCREEN_VERTEX`
+/// （`corner = ((i<<1)&2, i&2)`、`uv = (corner.x, 1 - corner.y)`、`position = corner*2 - 1`）
+/// —— 可见区正好拿到 `uv ∈ [0,1]`，写法正确。
+///
+/// ⇒ **新的最强线索**：影子走的是**屏幕空间的页**（`px-scene/src/vshadow.rs`；片元里
+///   `sun_light(point, in.position.xy)`）。页是屏幕空间网格 ⇒ **页边界天然屏幕锁定**；
+///   而"左半亮 / 右半暗、差 3.3x"正是"有影子 / 无影子"的量级 —— 与实测四条
+///   （屏幕锁定、与相机无关、与图宽成比例、纯色清屏图干净）全对得上。
+///   下一步查页的排布与"取哪一页"那几句（半幅/页宽算错、或页索引用了 `width/2`）。
 fn views_of(options: &Options) -> render::Views {
     if options.sheet {
         render::Views::Sheet {
