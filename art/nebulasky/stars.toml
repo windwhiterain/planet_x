@@ -10,7 +10,7 @@
 #   ⇒ 现在星只是**世界坐标里的点**：位置按**体积**均匀撒在壳里，索引交给 R3 稀疏格。
 
 # 星数（撒在下面那层壳的**体积**里）。
-count = 1200000
+count = 2500000
 seed = 60613
 
 # 星所在的那层壳（世界单位）。⚠ 与 `art/nebula/density_volume.toml` 的 `inner`/`outer`
@@ -66,8 +66,8 @@ sky_contrast = 2.0
 #   ⇒ 必须吃**真密度场**。接受概率 = (密度/平均密度)^gas_contrast，上限 1。
 # ⚠ 拒绝采样只能变稀 ⇒ `count` 要按存活率抬上去。
 gas_biased = true
-gas_contrast = 2.0
+gas_contrast = 3.0
 
 # 分色诊断：星光走蓝（散射走红在 art/nebula/emission.toml 的 glow_tint）。
 star_tint = [0.12, 0.30, 1.0]
-gas_floor = 0.5
+gas_floor = 0.75
