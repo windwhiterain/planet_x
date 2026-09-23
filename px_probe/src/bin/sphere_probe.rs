@@ -266,6 +266,7 @@ fn soft_sphere() -> VolumeData {
         data.iter().copied().fold(0.0_f32, f32::max)
     );
     VolumeData {
+        lanes: 1,
         res: RES,
         layers: LAYERS,
         inner: INNER,
@@ -335,6 +336,7 @@ fn dump() -> Result<(), String> {
         }
     }
     let sphere = VolumeData {
+        lanes: 1,
         res: SIDE,
         layers: LAYERS,
         inner: INNER,

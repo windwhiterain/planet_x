@@ -94,6 +94,7 @@ fn density_by_octant(field: &StarField) -> Vec<usize> {
 /// 一份**真空**发射体积（只剩星与背景）：直射项才能单独量。
 fn vacuum(res: u32, layers: u32, inner: f32, outer: f32) -> VolumeData {
     VolumeData {
+        lanes: 1,
         res,
         layers,
         inner,
