@@ -6,7 +6,7 @@
 # 一格多大（单位：纹素宽）。⚠ 与 `fill` **一起**决定星空的密度：
 #   一格一纹素时每格都可能有星 ⇒ 加上光晕就成了"一层纱"。
 cells_per_texel = 0.125
-fill = 0.075
+fill = 0.055
 # 亮度的幂律指数：暗的多、亮的少（取 `(1/draw)^power`，不是 `draw^power`）。
 brightness_power = 1.1
 seed = 60613
