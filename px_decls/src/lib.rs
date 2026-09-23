@@ -78,6 +78,15 @@ pub const TABLE: &[(&str, fn() -> DeclFacts)] = &[
     }),
     ("CubeSphere", || facts::<px_mesh_schema::ops::CubeSphere>()),
     ("Proxy", || facts::<px_mesh_schema::ops::Proxy>()),
+    // ⚠ 2026-09-25 补：这一晚新增/漏登记的 7 处声明。`inst_gate` 那道门要求
+    //   "`px_op!` 的处数 == 表里条数"，它就是这么发现少了 7 条的（20 vs 13）。
+    ("Fbm3", || facts::<px_field_schema::ops::Fbm3>()),
+    ("Ridged3", || facts::<px_field_schema::ops::Ridged3>()),
+    ("Warp3", || facts::<px_field_schema::ops::Warp3>()),
+    ("Density", || facts::<px_volume_schema::ops::Density>()),
+    ("Emission", || facts::<px_volume_schema::ops::Emission>()),
+    ("SkyNebula", || facts::<px_volume_schema::ops::SkyNebula>()),
+    ("Stars", || facts::<px_volume_schema::ops::Stars>()),
 ];
 
 /// **声明名 → 事实**。查不到回 `None`（生成器据此报错并点名是 recipe 第几条）。
