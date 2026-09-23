@@ -268,6 +268,40 @@ fn main() -> Result<(), Fault> {
     )?;
     report("shaped", shaped.value());
 
+    // ── **大尺度包络**（构图那一层）────────────────────────────────────────
+    //
+    // ⚠ 用户原话："每一面的 pattern 都是一样的，只是亮度不同"。量下来六面**不是**同一张图
+    //   （各自归一去均值后方差后相关 0.23~0.56），但**性格一样** —— 因为 `extent` 与密度
+    //   **同频**：掩码跟着同一批斑块走 ⇒ 换哪个方向都是"同一类云换个亮度"（统计均匀）。
+    //   这一层用**低频**场（0.35 对 blobs 的 1.4）当权重：`mix(真空, shaped, 权重)`
+    //   = `shaped × 权重` ⇒ 星云收进一片，并给出核心到边缘的落差。
+    let envelope = cached(
+        &shape_graph,
+        "envelope",
+        field::Fbm3,
+        node_params(&shape_graph, "envelope")?,
+        (),
+    )?;
+    let envelope_mask = cached(
+        &shape_graph,
+        "envelope_mask",
+        field::Remap,
+        node_params(&shape_graph, "envelope_mask")?,
+        field::FieldInput { field: envelope },
+    )?;
+    let shaped2 = cached(
+        &shape_graph,
+        "shaped2",
+        field::Mix,
+        node_params(&shape_graph, "shaped2")?,
+        field::MixInput {
+            a: vacuum.clone(),
+            b: shaped,
+            mask: envelope_mask,
+        },
+    )?;
+    report("shaped2", shaped2.value());
+
     // ── **暗尘带**：沿脊线雕细缝（参考图的"暗尘埃柱与暗带"）──────────────────
     //
     // ⚠⚠ 与上一轮失败那版（独立的 `filaments` 高频场）的差别就是这一刀的全部要点：
@@ -300,7 +334,7 @@ fn main() -> Result<(), Fault> {
         field::Mix,
         node_params(&shape_graph, "textured")?,
         field::MixInput {
-            a: shaped,
+            a: shaped2,
             b: vacuum,
             mask: carved,
         },
