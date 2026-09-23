@@ -171,6 +171,7 @@ pub fn view_dimension(dimension: TextureDimension) -> wgpu::TextureViewDimension
     match dimension {
         TextureDimension::D2 => wgpu::TextureViewDimension::D2,
         TextureDimension::Cube => wgpu::TextureViewDimension::Cube,
+        TextureDimension::D2Array => wgpu::TextureViewDimension::D2Array,
     }
 }
 
@@ -293,6 +294,9 @@ impl Fallbacks {
         match dimension {
             TextureDimension::D2 => &self.view_2d,
             TextureDimension::Cube => &self.view_cube,
+            // ⚠ 兜底那张是 1×1 的 2D，D2Array 那一格也拿它顶（降采样绑的是**真** atlas，
+            //    兜底只在"这一格没人给图"时才用得上）。
+            TextureDimension::D2Array => &self.view_2d,
         }
     }
 
@@ -300,6 +304,7 @@ impl Fallbacks {
         match dimension {
             TextureDimension::D2 => &self.texture_2d,
             TextureDimension::Cube => &self.texture_cube,
+            TextureDimension::D2Array => &self.texture_2d,
         }
     }
 }

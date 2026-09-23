@@ -50,6 +50,7 @@ pub fn layout() -> Layout {
                 dimension: match dimension {
                     px_protocol::material::TextureDimension::D2 => Dimension::D2,
                     px_protocol::material::TextureDimension::Cube => Dimension::Cube,
+                    px_protocol::material::TextureDimension::D2Array => Dimension::D2Array,
                 },
                 // 材质那一套贴图是**颜色**的（色板/条带/云图）⇒ 不是深度。
                 depth: false,
@@ -107,6 +108,11 @@ struct Fullscreen {
     entry: String,
     params: Vec<u8>,
     slots: Vec<u32>,
+    /// **这份 shader 反射出来的贴图槽形状**（`px_shader::reflect`）→ `PassPlan::slots`。
+    ///
+    /// ⚠ 全屏 pass 没有材质 ⇒ 它的绑定组布局不能沿用全局约定表那份（颜色贴图）。
+    ///    金字塔降采样声明的正是 `texture_depth_2d_array`（`D2Array` + 深度槽）。
+    texture_slots: Vec<Slot>,
 }
 
 /// 文档 → 计划。**五条 pass 全部**翻译并 `check()`，一条都不跳：
@@ -166,6 +172,10 @@ pub fn build(spec: &SceneSpec, pcg_root: &Path) -> Result<Plan, String> {
                 .unwrap_or_default(),
             reads: pass.reads.clone(),
             writes: pass.writes.clone(),
+            texture_slots: fullscreen
+                .as_ref()
+                .map(|screen| screen.texture_slots.clone())
+                .filter(|slots| !slots.is_empty()),
             params: match (&fullscreen, kind) {
                 (Some(screen), _) => screen.params.clone(),
                 // ⚠ **几何 pass 的参数**（§本轮）：`view_proj` 那 64 字节由**宿主**在出图时
@@ -295,11 +305,30 @@ fn fullscreen_of(
                 .join(" / ")
         ));
     }
+    // ⚠⚠ **这份 shader 反射出来的贴图槽形状** → `PassPlan::slots`：全屏 pass 没有材质 ⇒
+    //    绑定组布局不能沿用全局约定表那份（颜色贴图、非深度）。金字塔降采样声明的正是
+    //    `texture_depth_2d_array`（`D2Array` + 深度槽），形状对不上就只会在
+    //    **建管线/建组时**才炸（「布局与绑定的类型对不上」，离病因很远）。
+    let texture_slots = px_shader::reflect::reflect_assembled(&loaded.assembled, label)
+        .map_err(|err| format!("pass '{label}'：{err}"))?
+        .textures
+        .into_iter()
+        .map(|slot| Slot {
+            binding: slot.binding,
+            dimension: match slot.dimension {
+                px_protocol::material::TextureDimension::D2 => Dimension::D2,
+                px_protocol::material::TextureDimension::Cube => Dimension::Cube,
+                px_protocol::material::TextureDimension::D2Array => Dimension::D2Array,
+            },
+            depth: slot.depth,
+        })
+        .collect();
     Ok(Fullscreen {
         source: loaded.assembled,
         entry: pass.entry.clone(),
         params,
         slots: declared,
+        texture_slots,
     })
 }
 
@@ -321,6 +350,7 @@ mod tests {
             let expected = match dimension {
                 px_protocol::material::TextureDimension::D2 => Dimension::D2,
                 px_protocol::material::TextureDimension::Cube => Dimension::Cube,
+                px_protocol::material::TextureDimension::D2Array => Dimension::D2Array,
             };
             assert_eq!(slot.dimension, expected);
         }

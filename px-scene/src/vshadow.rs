@@ -566,7 +566,15 @@ pub fn allocate(lights: &[Vec<Caster>]) -> Result<Allocation, Overflow> {
                                     }
                                 }
                                 None => {
-                                    wanted.push((level, face, py, px, caster.id.clone()));
+                                    // ⚠⚠ **几何只画到自己的那一级**（用户裁决的 (ii)）：粗级的页照旧分配
+                                    //    （金字塔要铺满 ⇒ 粗级处处命中），但上面的几何由降采样从细级取
+                                    //    **max 深度**补上。所以 `level > own` 这几条只占页、不带 caster。
+                                    let id = if level == own {
+                                        caster.id.clone()
+                                    } else {
+                                        String::new()
+                                    };
+                                    wanted.push((level, face, py, px, id));
                                 }
                             }
                         }
@@ -693,7 +701,11 @@ pub fn allocate(lights: &[Vec<Caster>]) -> Result<Allocation, Overflow> {
                 words = vec![0_u32; words_per_row as usize];
             }
             words[(page_x / 32) as usize] |= 1_u32 << (page_x % 32);
-            let mut casters_here: Vec<String> = ids.split('|').map(str::to_string).collect();
+            let mut casters_here: Vec<String> = ids
+                .split('|')
+                .filter(|id| !id.is_empty())
+                .map(str::to_string)
+                .collect();
             casters_here.sort();
             casters_here.dedup();
             let slot = slots[*level as usize][*face as usize];
@@ -845,7 +857,12 @@ mod tests {
         let ratio = far.patches.len() as f64 / near.patches.len() as f64;
         assert!(
             ratio < 4.0,
-            "灯远十倍而分出去的页数涨了 {ratio} 倍 —— 稀疏那一半丢了"
+            "灯远十倍而分出去的页数涨了 {ratio} 倍（近 {} 页 / 远 {} 页，近侧 levels={} pps={} own 该是 {}）—— 稀疏那一半丢了",
+            near.patches.len(),
+            far.patches.len(),
+            near.lights[0].levels,
+            near.lights[0].pages_per_side,
+            0
         );
     }
 

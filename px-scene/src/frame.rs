@@ -752,13 +752,103 @@ pub fn build(
                 //    只挂一份材质（一套组 1），而"每页只有少数几个物体落进去"是常态 ——
                 //    按 caster 拆开之后，每一笔的实例下标是唯一的一个，
                 //    而"这一页的 view"由这一笔自己的 `viewport` 说。
-                let mut cleared = false;
+                let mut cleared = [false; crate::vshadow::MAX_LEVELS as usize];
                 for patch in allocation
                     .patches
                     .iter()
                     .filter(|patch| patch.light == light && patch.face == face)
                 {
                     let window = patch.window;
+                    // ---- 降采样（`fragment_shader` 那一档）：**一页一条全屏 pass**，不带 draw ----
+                    //
+                    // ⚠⚠ 这是 (ii) 的正身（用户裁决）：级 k 的这一页 = 级 k-1 那四个孩子取
+                    //    **max 深度**（最近遮挡物 ⇒ 影偏大不漏光，单通道装不下 min/max，
+                    //    这条偏置写在 `art/shaders/shadow_downsample.wgsl` 的文件头）。
+                    //    它画的是执行器自备的全屏三角 ⇒ 与"哪几个物体落在这一页"无关，
+                    //    `draws` 空、`patch.casters` 一个都不看。
+                    // ⚠ "是这一档"的判据看 `fragment_shader` 那一栏（**配方里显式写的**），
+                    //    不从 shader 反射猜 —— 猜错的症状是"pass 静默什么都不写"。
+                    if entry.fragment_shader.is_some() {
+                        // 输出是哪一级的 atlas ⇒ 就是参数块里的"级"。按名字认（与
+                        // 资源尺寸那一处同一条约定：认不出当场拒，因为认错了只是"影是错的"）。
+                        let level = crate::vshadow::SHADOW_ATLAS_RESOURCES
+                            .iter()
+                            .position(|name| entry.depth_target.as_deref() == Some(*name))
+                            .ok_or_else(|| {
+                                format!(
+                                    "{at} 的降采样 pass '{}' 的 depth_target 是 '{}'：\
+                                     那不是某一级的影子 atlas（{}）",
+                                    entry.label,
+                                    entry.depth_target.as_deref().unwrap_or("(没写)"),
+                                    crate::vshadow::SHADOW_ATLAS_RESOURCES.join(" / ")
+                                )
+                            })? as u32;
+                        if level == 0 {
+                            return Err(format!(
+                                "{at} 的降采样 pass '{}' 往级 0 画：级 0 是最细的那一级，\
+                                 没有更细的一级可降（降采样只能 k ≥ 1）",
+                                entry.label
+                            ));
+                        }
+                        // ⚠⚠ **这一条只展开"该级"的页**：上面那个 `patches` 是按 (灯, 面)
+                        //    滤的、里面混着**每一级**的页。不滤级 ⇒ 级 0 那些页也会被展开成
+                        //    一条「写 `atlas_l0`、读 `atlas_l0`」的 pass —— 深度附件与**资源**
+                        //    撞车（wgpu：`DEPTH_STENCIL_WRITE` 是独占用法，不许与任何别的用法
+                        //    同处一条 pass），而报错里只看得见资源名、看不见是哪一条 pass。
+                        if patch.level != level {
+                            continue;
+                        }
+                        // 参数块**按名字**给（执行器按 shader 声明的结构体打包，
+                        // 与材质同一条路）：`level/light/face/page_size/origin_x/origin_y`。
+                        let page_size = crate::vshadow::PAGE_SIZE;
+                        let mut down = std::collections::BTreeMap::new();
+                        for (key, value) in [
+                            ("level", level),
+                            ("light", light),
+                            ("face", face),
+                            ("page_size", page_size),
+                            ("origin_x", patch.page_x * page_size),
+                            ("origin_y", patch.page_y * page_size),
+                        ] {
+                            down.insert(key.to_string(), Value::Num(f64::from(value)));
+                        }
+                        let mut page = PassSpec {
+                            kind: entry.kind.clone(),
+                            shader: shader.clone(),
+                            label: format!(
+                                "{}_down_c{}",
+                                page_label(&face_label, patch.level, patch.page_y, patch.page_x),
+                                passes.len()
+                            ),
+                            entry: entry.entry.clone(),
+                            reads: entry.reads.clone(),
+                            writes: entry.writes.clone(),
+                            params: down,
+                            draws: Vec::new(),
+                            vertex_shader: vertex_shader.clone(),
+                            vertex_entry: vertex_entry.clone(),
+                            render: entry.render.clone(),
+                            depth_target: entry
+                                .depth_target
+                                .as_ref()
+                                .map(|_| crate::vshadow::shadow_atlas_resource(patch.level)),
+                            cube_face: Some(PassCubeFace { light, face, layer }),
+                            viewport: Some([
+                                patch.atlas_x as f32,
+                                patch.atlas_y as f32,
+                                page_size as f32,
+                                page_size as f32,
+                            ]),
+                        };
+                        if cleared[patch.level as usize] {
+                            // 这一级的 atlas 已经清过了：接着前面写下的深度，不清
+                            // （`LoadOp::Clear` 清的是**整份附件**，见上面那段最贵的一课）。
+                            page.render = load_state(&page.render);
+                        }
+                        cleared[patch.level as usize] = true;
+                        passes.push(page);
+                        continue;
+                    }
                     // 这一页的几何：只画 `patch.casters` 里点名的那些物体。
                     for caster in patch.casters.iter() {
                         // 这一页的那一笔：材质名照**这一面**那一份实例（它带着"哪一面"），
@@ -839,11 +929,11 @@ pub fn build(
                                 ),
                             )),
                         )]);
-                        if cleared {
+                        if cleared[patch.level as usize] {
                             // 这一层已经清过了：接着前面几页写下的深度，不清。
                             page.render = load_state(&page.render);
                         }
-                        cleared = true;
+                        cleared[patch.level as usize] = true;
                         passes.push(page);
                     }
                 }
@@ -1047,12 +1137,19 @@ fn swap_depth(render: &str, want: &str) -> String {
         .join("|")
 }
 
-/// 烘帧材质时组装 WGSL 用的桩表：**宿主那一张**（`bevy_stub` + 宿主自己的 `view`）。
+/// 烘帧材质时组装 WGSL 用的桩表：**宿主那一张**（`wgpu_host_stub`，视图那一格照旧换掉）。
 ///
-/// ⚠ 为什么不能只用 `bevy_stub`：帧材质是**宿主自有**的 WGSL，它的运行期兑现者就是裸 wgpu
-/// 宿主 —— `art/frame/skybox.wgsl` 引的 `view.view_from_clip` 在 Bevy 那张**近似**表里
-/// 没有（Bevy 真正的 `View` 有七十多个字段，那张表只有五格）。所以这一格必须换成宿主那一份，
-/// 而它的文本**只有一处**（`px_shader::assemble::HOST_VIEW_STUB`，宿主与这里共用）。
+/// ⚠⚠ 落回的那张是 **`wgpu_host_stub`**，不是 `bevy_stub`（用户裁决「全屏 pass 也要支持
+///    import」）：帧自有材质**只由 wgpu 宿主兑现**（见这段末尾），所以它的桩表就该是宿主
+///    那一张完整表 —— 影子那一格（`px_shadow_page_slot` / `PX_PAGE_SIZE` /
+///    `POINT_SHADOW_STUB`）也因此进得来，金字塔降采样（`art/shaders/shadow_downsample.wgsl`）
+///    正是要它。从前落回 `bevy_stub` ⇒ 影子桩表不注入 ⇒ 「unknown identifier」当场拒，
+///    而报错里只看得见符号名、看不见**桩表选错了**（离病因很远）。
+///    两张表的差别由 `px_render::stubs` 里那条钉住判据管着。
+///
+/// ⚠ 为什么 `view` 那一格仍然要换：`art/frame/skybox.wgsl` 引的 `view.view_from_clip` 在
+///    Bevy 那张**近似**表里没有（Bevy 真正的 `View` 有七十多个字段，那张表只有五格），
+///    而它的文本**只有一处**（`px_shader::assemble::HOST_VIEW_STUB`，宿主与这里共用）。
 ///
 /// ⚠ 内容 shader 的烘图侧走的是 Bevy 那张（`px_graph::shader_schema` 那段注释写了为什么）——
 /// 两张表的区别正是"这份 WGSL 是谁的"：内容是 Bevy 宿主与 wgpu 宿主**都要**兑现的，
@@ -1060,7 +1157,7 @@ fn swap_depth(render: &str, want: &str) -> String {
 fn frame_stubs(symbol: &str) -> Option<&'static str> {
     match symbol {
         "bevy_pbr::mesh_view_bindings::view" => Some(px_shader::assemble::HOST_VIEW_STUB),
-        other => px_shader::assemble::bevy_stub(other),
+        other => px_shader::host_stubs::wgpu_host_stub(other),
     }
 }
 

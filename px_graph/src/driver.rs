@@ -486,7 +486,7 @@ fn shader_schema(id: &str, text: &str, modules: &px_shader::ModuleTable) -> Resu
     let assembled = px_shader::assemble::render_source(
         text,
         modules,
-        px_shader::assemble::bevy_stub,
+        px_shader::host_stubs::wgpu_host_stub,
         &mut seen,
     );
     px_shader::reflect::reflect_assembled(&assembled, id)?.to_json()

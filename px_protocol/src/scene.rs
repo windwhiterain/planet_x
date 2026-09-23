@@ -1102,6 +1102,12 @@ impl SceneSpec {
                 //（它连"画"都不是，没有"没人看得见"这回事，是**没搬**）。
                 match pass.kind.as_str() {
                     "geometry" => {}
+                    // ⚠⚠ **fullscreen 也允许空**（用户裁决「全屏 pass 也要支持 import」的后续）：
+                    //    金字塔降采样那条全屏 pass 写的是 `@builtin(frag_depth)`
+                    //    （`render` 里 `frag_depth=true`），没有颜色目标 ⇒ `writes` 天然空。
+                    //    它成不成立仍由执行器判 ——「挂了颜色却没写目标」那条判据住在
+                    //    `px_pass`（只有它会去解析那串 `render` 文本）。
+                    "fullscreen" => {}
                     "copy" => {
                         return Err(format!(
                             "{at} 是 copy，却没有 writes：一次搬运必须说清**搬到哪张图**\

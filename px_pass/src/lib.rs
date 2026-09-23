@@ -888,6 +888,18 @@ pub struct PassPlan {
     pub entry: String,
     pub reads: Vec<String>,
     pub writes: Vec<String>,
+    /// 这一条 pass 的**贴图槽位形状**：宿主按**这份 shader 的反射**填的
+    /// （`px_shader::reflect::reflect_assembled` 的 `textures`）。
+    ///
+    /// ⚠⚠ 为什么要这一栏（`None` = 沿用 `plan.layout.slots`，向后兼容）：
+    ///    `plan.layout` 是**一份**共享布局，槽位形状来自全局约定表 `TEXTURE_SLOTS`
+    ///    （颜色贴图：`texture_2d` / `texture_cube`，非深度）。而**全屏 pass 没有材质**、
+    ///    片元是宿主自己那支 —— 金字塔降采样声明的正是 `texture_depth_2d_array`
+    ///    （`D2Array` + 深度槽）。一份布局**装不下两种形状**：
+    ///    "布局与绑定的类型对不上"在 wgpu 里是**建管线/建组时**才炸，而且离病因很远。
+    /// ⚠ 执行器只吃形状、不反射（`px_pass` 只依赖 `wgpu`，这是有意的：它不许懂 WGSL）⇒
+    ///    反射的那一份由**烘图侧**填好送进来。
+    pub texture_slots: Option<Vec<Slot>>,
     /// 参数块的字节：宿主按**这份 shader 自己声明的结构体**打好了（与材质同一条路）。
     ///
     /// ⚠ **几何 pass 与全屏 pass 都走这一栏**（§本节修正）：几何那一支的绑定组由宿主解析，
@@ -1647,6 +1659,27 @@ pub struct Frame<'a> {
     /// 代价是组 0 有了**两个来源**，也就是 §66.1 那颗"同一件事两处说"的雷 ——
     /// 而静默的优先级正是我们两次裁定不可接受的那一类（`Role::Depth` 退役、`seed` 顶替）。
     pub materials: &'a [ResolvedMaterial<'a>],
+    /// **组 0 的"哑图"那一档**（视图 / 灯 / **四张影子 atlas 全挂 1×1 兜底** / 页表 …）
+    /// 的布局与绑定组。
+    ///
+    /// ⚠⚠ 两条，都是这一格存在的理由：
+    ///
+    /// 1. **几何 pass 的组 0 从材质那条路来**（`ResolvedMaterial::groups`），而**全屏 pass
+    ///    没有材质**（片元是宿主自己那支 shader，绑定组是执行器现建的）⇒ 从前全屏那条的
+    ///    管线布局里**根本没有组 0**，片元一碰宿主桩表里那几个 `@group(0)` 符号就被 wgpu 拒
+    ///    （「group 0 binding 4 is not available in the pipeline layout」）。
+    ///    金字塔降采样正要用组 0 的**页表**（`px_shadow_page_slot`）。
+    /// 2. **必须是"哑图"那一档，不是 `cell.zero`**：`cell.zero` 把**四张真 atlas 全绑上**
+    ///    （binding 2 / 22 / 23 / 24），而降采样**正在写**其中一张 —— wgpu 的
+    ///    `DEPTH_STENCIL_WRITE` 是独占用法，附件同时被绑就是硬错（实测：级 k 的降采样
+    ///    写 `atlas_l{k}`，`cell.zero` 第 `k` 格正好也绑着它）。它读输入走的是**自己的**
+    ///    第 1 格（"写谁就不绑谁"），组 0 那四格只要**页表**是真的就够 —— 哑图那一档
+    ///    除那四格之外全是真的（视图 / 灯 / 页表 / 偏移都在）。
+    /// 3. ⚠ 页 pass（几何那一条）也用同一档，理由一模一样：它写 `atlas` 的某一层。
+    ///
+    /// ⚠ `None` = 不绑组 0（纯全屏 blit 那种，片元不引宿主符号）。给了就**必绑**：
+    ///    "布局里有这一组、绑定时漏了"是 wgpu 的硬错，比静默错像素好。
+    pub zero_dummy: Option<(&'a BindGroupLayout, &'a BindGroup)>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1942,6 +1975,12 @@ pub struct Executor {
     pipelines: HashMap<String, RenderPipeline>,
     layouts: HashMap<Layout, BindGroupLayout>,
     sampler: Option<Sampler>,
+    /// **深度槽**那一格用的采样器（`SamplerBindingType::Comparison`）。
+    ///
+    /// ⚠ 它必须与 `fn layout` 里那一格是**同一种**：布局说 `Comparison`、绑定给 `Filtering`
+    /// 在 `create_bind_group` 时当场拒（「Sampler binding 2 expects comparison = true」）。
+    /// 金字塔降采样绑的是影子 atlas（每级一张 `texture_depth_2d_array`），正是那一档。
+    comparison_sampler: Option<Sampler>,
     pool: HashMap<String, Pooled>,
     /// 没被 reads 占到的格一律绑它：布局是固定超集，shader 里声明了就一定绑得上。
     fallback: HashMap<Dimension, TextureView>,
@@ -2059,6 +2098,21 @@ impl Executor {
                     ..Default::default()
                 });
                 self.sampler = Some(sampler.clone());
+                sampler
+            }
+        }
+    }
+
+    fn comparison_sampler(&mut self, device: &Device) -> Sampler {
+        match &self.comparison_sampler {
+            Some(sampler) => sampler.clone(),
+            None => {
+                let sampler = device.create_sampler(&SamplerDescriptor {
+                    label: Some("px_pass_comparison_sampler"),
+                    compare: Some(wgpu::CompareFunction::GreaterEqual),
+                    ..Default::default()
+                });
+                self.comparison_sampler = Some(sampler.clone());
                 sampler
             }
         }
@@ -2394,6 +2448,16 @@ impl Executor {
                 .unwrap_or_else(|| self.fallback(device, encoder, slot.dimension));
             views.push(view);
         }
+        // ⚠ 深度槽要**比较采样器**（布局那一格就是这么建的）⇒ 逐槽挑一份，同样先收进表里
+        //    （`entries` 借的是它们，必须活到 `create_bind_group` 之后）。
+        let mut samplers: Vec<Sampler> = Vec::with_capacity(layout.slots.len());
+        for slot in &layout.slots {
+            samplers.push(if slot.depth {
+                self.comparison_sampler(device)
+            } else {
+                sampler.clone()
+            });
+        }
         let mut entries: Vec<BindGroupEntry> = vec![BindGroupEntry {
             binding: layout.params_binding,
             resource: BindingResource::Buffer(BufferBinding {
@@ -2402,14 +2466,16 @@ impl Executor {
                 size: None,
             }),
         }];
-        for (slot, view) in layout.slots.iter().zip(views.iter()) {
+        for ((slot, view), slot_sampler) in
+            layout.slots.iter().zip(views.iter()).zip(samplers.iter())
+        {
             entries.push(BindGroupEntry {
                 binding: slot.binding,
                 resource: BindingResource::TextureView(view),
             });
             entries.push(BindGroupEntry {
                 binding: slot.binding + 1,
-                resource: BindingResource::Sampler(sampler),
+                resource: BindingResource::Sampler(slot_sampler),
             });
         }
         device.create_bind_group(&BindGroupDescriptor {
@@ -2462,7 +2528,8 @@ impl Executor {
         device: &Device,
         layout: &Layout,
         pass: &PassPlan,
-        format: TextureFormat,
+        format: Option<TextureFormat>,
+        zero_layout: Option<&BindGroupLayout>,
     ) -> RenderPipeline {
         let key = format!(
             "fullscreen|{:016x}|{format:?}|{}|{}|{}|{}",
@@ -2478,8 +2545,18 @@ impl Executor {
         let label = format!("px_pass {}", pass.label);
         let vertex = module_of_wgsl(device, "px_pass_fullscreen_vertex", FULLSCREEN_VERTEX);
         let fragment = module_of_wgsl(device, label.as_str(), pass.shader.as_str());
+        // ⚠ 调用方（`execute_inner`）递进来的 `layout` **已经是这一条 pass 的有效形状**
+        //    （全屏 pass 那份按反射来的 `texture_slots` 在那里替了进来）—— 这里不再自己算
+        //    一遍：同一件事两处说，迟早漂开（症状是「管线说 Depth、绑定组给 Float」）。
         let group_layout = self.layout(device, layout);
         let mut groups: Vec<Option<&BindGroupLayout>> = vec![None; layout.group as usize + 1];
+        // ⚠⚠ **组 0**（`Frame::zero`）：全屏 pass 没有材质 ⇒ 组 0 只能从这里来。
+        //    少了它，片元一碰宿主桩表里那几个 `@group(0)` 符号就被 wgpu 拒
+        //    （金字塔降采样要的页表正是 `@group(0) @binding(4)`）。
+        if let Some(zero) = zero_layout {
+            groups.resize(groups.len().max(1), None);
+            groups[0] = Some(zero);
+        }
         groups[layout.group as usize] = Some(&group_layout);
         let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
             label: Some("px_pass_pipeline_layout"),
@@ -2488,7 +2565,7 @@ impl Executor {
         });
         // ⚠ `targets` 要先落到一个 let 上：`&[Some(...)]` 直接写进 `if/else` 是**临时值**，
         //    借用活不过这条语句（E0716）。`frag_depth` 那一档取空目标，也走同一个 let。
-        let color_targets = [Some(ColorTargetState {
+        let color_targets = [format.map(|format| ColorTargetState {
             format,
             blend: None,
             write_mask: ColorWrites::ALL,
@@ -3056,17 +3133,35 @@ impl Executor {
                 ));
             }
             if fullscreen {
+                // ⚠⚠ **这一条 pass 自己的槽位形状**（`PassPlan::texture_slots`）：全屏 pass
+                //    没有材质 ⇒ 管线布局**与绑定组**都必须用这一份。两处各用一份的症状正是
+                //    「管线说 Depth、绑定组给 Float」—— 建组时当场拒，且离病因很远
+                //    （金字塔降采样声明的就是 `texture_depth_2d_array`）。
+                //    `None` = 照旧（纯全屏 blit 那种，全局约定表那份就对）。
+                let pass_layout = match &pass.texture_slots {
+                    Some(slots) => Layout {
+                        slots: slots.clone(),
+                        ..layout.clone()
+                    },
+                    None => layout.clone(),
+                };
                 let pipeline = self.pipeline_fullscreen(
                     device,
-                    &layout,
+                    &pass_layout,
                     pass,
-                    color
-                        .as_ref()
-                        .map(|(_, format, _)| *format)
-                        .expect("全屏 pass 的颜色附件由 check 保证"),
+                    // ⚠ `frag_depth` 那一档**没有颜色附件**（金字塔降采样：`color=none`，
+                    //    深度值由片元写 `@builtin(frag_depth)`）⇒ 这里是 `None`。
+                    color.as_ref().map(|(_, format, _)| *format),
+                    frame.zero_dummy.map(|(zero_layout, _)| zero_layout),
                 );
-                let bind_group =
-                    self.bind_group(device, encoder, &layout, &sampler, &pass.params, &bound);
+                let bind_group = self.bind_group(
+                    device,
+                    encoder,
+                    &pass_layout,
+                    &sampler,
+                    &pass.params,
+                    &bound,
+                );
                 fullscreen_draw = Some((pipeline, bind_group));
             }
 
@@ -3163,6 +3258,12 @@ impl Executor {
             }
             if let Some((pipeline, bind_group)) = &fullscreen_draw {
                 render_pass.set_pipeline(pipeline);
+                // ⚠⚠ 组 0 **先绑**（与几何那条同一条口径）：全屏 pass 的片元里那几个宿主符号
+                //    （页表 `@group(0) @binding(4)`）要它。给了布局就必绑 ——
+                //    "布局里有这一组、绑定时漏了"是 wgpu 的硬错。
+                if let Some((_, zero)) = &frame.zero_dummy {
+                    render_pass.set_bind_group(0, *zero, &[]);
+                }
                 render_pass.set_bind_group(layout.group, bind_group, &[]);
                 render_pass.draw(0..3, 0..1);
             } else {
@@ -4256,6 +4357,7 @@ fn vs_main(@location(0) position: vec3<f32>) -> Out {
 
         // 一帧、一条 pass、**带格子**；读回三个像素。
         let frame = Frame {
+            zero_dummy: None,
             width: side,
             height: side,
             viewport: Some([4.0, 0.0, 4.0, 8.0]),
@@ -4368,6 +4470,7 @@ fn vs_main(@location(0) position: vec3<f32>) -> Out {
         let materials = [resolved_material("white", &white, &tint_layout, Cull::None)];
 
         let frame = Frame {
+            zero_dummy: None,
             width: side,
             height: side,
             // ⚠ 整幅：这一条判的**只**是 `pass.viewport`。
@@ -4563,6 +4666,7 @@ fn vs_main(@location(0) position: vec3<f32>) -> Out {
         let white = test_material(&device, &tint_layout, [1.0, 1.0, 1.0, 1.0]);
         let materials = [resolved_material("white", &white, &tint_layout, Cull::None)];
         let frame = Frame {
+            zero_dummy: None,
             width: side,
             height: side,
             viewport: None,
@@ -4951,6 +5055,7 @@ fn vs_main(@location(0) position: vec3<f32>) -> Out {
             }],
         };
         let frame = Frame {
+            zero_dummy: None,
             width: SIDE,
             height: SIDE,
             viewport: None,
@@ -5639,6 +5744,7 @@ fn fs_main(@location(0) tint: vec4<f32>) -> @location(0) vec4<f32> {
         sets: &[Vec<External<'_>>],
     ) -> ([u8; 4], [u8; 4]) {
         let frame = Frame {
+            zero_dummy: None,
             width: SIDE,
             height: SIDE,
             viewport: None,
@@ -5913,6 +6019,7 @@ fn fs_main(@location(0) tint: vec4<f32>) -> @location(0) vec4<f32> {
             format: TextureFormat::Rgba8UnormSrgb,
         }]];
         let frame = Frame {
+            zero_dummy: None,
             width: SIDE,
             height: SIDE,
             viewport: None,
@@ -5939,6 +6046,7 @@ fn fs_main(@location(0) tint: vec4<f32>) -> @location(0) vec4<f32> {
             format: TextureFormat::Rgba8UnormSrgb,
         }]];
         let frame = Frame {
+            zero_dummy: None,
             width: SIDE,
             height: SIDE,
             viewport: None,

@@ -66,6 +66,10 @@ pub const PARAMS_ALIGN: u32 = 16;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TextureDimension {
+    // `texture_depth_2d_array`（每面一层）—— 每级一张影子 atlas（金字塔降采样）。
+    // ⚠ 与 `px_pass::Dimension::D2Array` 是一对：那边是执行器的槽位形状，这边是
+    //    反射出来的形状。两边不一致的症状是「材质槽位对不上」。
+    D2Array,
     D2,
     Cube,
 }
@@ -75,6 +79,7 @@ impl TextureDimension {
         match self {
             Self::D2 => "texture_2d",
             Self::Cube => "texture_cube",
+            Self::D2Array => "texture_depth_2d_array",
         }
     }
 
@@ -83,6 +88,8 @@ impl TextureDimension {
         match self {
             Self::D2 => 1,
             Self::Cube => crate::art::CUBE_FACES,
+            // 每级一张影子 atlas：每面一层 ⇒ 六层（层号 = 灯×6 + 面）。
+            Self::D2Array => crate::art::CUBE_FACES,
         }
     }
 }
@@ -130,6 +137,13 @@ pub struct ParamSlot {
 pub struct TextureSlot {
     pub binding: u32,
     pub dimension: TextureDimension,
+    /// **深度**贴图（`texture_depth_2d_array` / `texture_depth_2d`）⇒ 绑定组那一格要
+    /// `TextureSampleType::Depth` + `Comparison` 采样器（`px_pass::Slot::depth`）。
+    ///
+    /// ⚠ 它从反射来（naga 的 `ImageClass::Depth`），不是从名字猜 —— 猜错的症状是
+    ///    「布局与绑定的类型对不上」在**建管线/建组时**才炸，离病因很远。
+    #[serde(default)]
+    pub depth: bool,
 }
 
 /// 一份 shader 反射出来的材质契约：参数块的布局 + 贴图格的维度。
@@ -347,6 +361,7 @@ mod tests {
             textures: vec![TextureSlot {
                 binding: 5,
                 dimension: TextureDimension::Cube,
+                depth: false,
             }],
         }
     }

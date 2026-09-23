@@ -2557,6 +2557,9 @@ impl Session {
                 sets: &sets,
                 geometries: &resolved_geometry,
                 materials: &table,
+                // ⚠⚠ **组 0**：全屏 pass（金字塔降采样）没有材质，组 0 只能从这里进
+                //    （几何那条从材质那条路进）。见 `px_pass::Frame::zero` 那段。
+                zero_dummy: Some((&cell.zero_dummy.layout, &cell.zero_dummy.bind_group)),
             };
             let audit_text = match stamps {
                 Some(stamps) => {
@@ -4082,6 +4085,8 @@ mod tests {
             entry: String::new(),
             reads: Vec::new(),
             writes: writes.iter().map(|name| name.to_string()).collect(),
+            // ⚠ 全屏 pass 的槽位形状（按反射来）—— 这条判据不看它。
+            texture_slots: None,
             params: Vec::new(),
             slots: Vec::new(),
             render: px_pass::RenderState::parse(render).expect("状态那几栏"),

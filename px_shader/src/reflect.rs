@@ -114,10 +114,18 @@ pub fn reflect_assembled(assembled: &str, name: &str) -> Result<MaterialLayout, 
             continue;
         }
         match inner {
-            naga::TypeInner::Image { dim, arrayed, .. } => {
+            naga::TypeInner::Image {
+                dim,
+                arrayed,
+                class,
+            } => {
                 let dimension = match (dim, arrayed) {
                     (naga::ImageDimension::D2, false) => TextureDimension::D2,
                     (naga::ImageDimension::Cube, false) => TextureDimension::Cube,
+                    // 每级一张影子 atlas（金字塔降采样）：`texture_depth_2d_array`（每面一层）。
+                    // ⚠ `px_pass::Dimension::D2Array` 早就有（`Slot::depth` 那一刀），
+                    //    反射这层校验当时没跟上 ⇒ 它把降采样挡在门外。
+                    (naga::ImageDimension::D2, true) => TextureDimension::D2Array,
                     _ => {
                         return Err(format!(
                             "{name} 第 {} 格是 {dim:?}（arrayed = {arrayed}）的贴图：\
@@ -129,6 +137,8 @@ pub fn reflect_assembled(assembled: &str, name: &str) -> Result<MaterialLayout, 
                 textures.push(TextureSlot {
                     binding: binding.binding,
                     dimension,
+                    // ⚠ 从反射的 `ImageClass` 来，不从名字猜（见 `TextureSlot::depth`）。
+                    depth: matches!(class, naga::ImageClass::Depth { .. }),
                 });
             }
             naga::TypeInner::Sampler { .. } => samplers.push(binding.binding),
@@ -156,7 +166,13 @@ pub fn reflect_assembled(assembled: &str, name: &str) -> Result<MaterialLayout, 
                 texture_bindings()
             ));
         };
-        if dimension != texture.dimension {
+        // ⚠ 放宽一格（用户裁决「全屏 pass 也要支持 import」的后续）：`texture_2d` 那几格
+        //    **也接受 `texture_depth_2d_array`**（金字塔降采样要把上一级的影子 atlas 绑在
+        //    贴图格上）。反向不放宽：数组纹理的格子不许塞 2D。
+        if dimension != texture.dimension
+            && !(dimension == TextureDimension::D2
+                && texture.dimension == TextureDimension::D2Array)
+        {
             return Err(format!(
                 "{name} 第 {} 格声明的是 {}，约定里这一格是 {}",
                 texture.binding,
@@ -240,7 +256,7 @@ mod tests {
         let assembled = crate::assemble::render_source(
             &source,
             &modules,
-            crate::assemble::bevy_stub,
+            crate::host_stubs::wgpu_host_stub,
             &mut seen,
         );
         reflect_assembled(&assembled, name).unwrap_or_else(|err| panic!("{err}"))
@@ -254,7 +270,12 @@ mod tests {
         )
         .expect("模块表");
         let mut seen = Vec::new();
-        crate::assemble::render_source(source, &modules, crate::assemble::bevy_stub, &mut seen)
+        crate::assemble::render_source(
+            source,
+            &modules,
+            crate::host_stubs::wgpu_host_stub,
+            &mut seen,
+        )
     }
 
     /// 契约的**形状**由 shader 自己的结构体说了算（不是 Rust 侧那张老表）。

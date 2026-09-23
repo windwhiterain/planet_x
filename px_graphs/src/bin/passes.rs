@@ -238,13 +238,19 @@ fn main() {
             let (shader_source, _) = shader_parts_of(&member, &px_cook::cache_root())
                 .unwrap_or_else(|err| panic!("pass '{label}'：{err}"));
             // 组装一遍再问入口：替掉 `#{MATERIAL_BIND_GROUP}`、展开 `#import`（如果这份 shader
-            // 有的话 —— 执行器会因为 `#import` 拒它，但那是**另一条**理由，不能在这里报成
-            // "解析不过"，那会让人以为是 WGSL 写坏了）。
+            // 有的话）。
+            //
+            // ⚠⚠ 桩表是 **`wgpu_host_stub`**（不是 `bevy_stub`）：用户裁决「全屏 pass 也要
+            //    支持 import」之后，全屏 shader 可以拿宿主桩表里那些符号
+            //    （`px_shadow_page_slot` / `PX_PAGE_SIZE` …）。从前传 `bevy_stub` ⇒ 影子桩表
+            //    不注入 ⇒ 「unknown identifier」当场拒，而报错里只看得见符号名、看不出
+            //    **桩表选错了**（离病因很远）。两份桩表的差别由
+            //    `px_render::stubs` 里那条钉住判据管着。
             let mut seen = Vec::new();
             let assembled = px_shader::assemble::render_source(
                 &shader_source,
                 &modules,
-                px_shader::assemble::bevy_stub,
+                px_shader::host_stubs::wgpu_host_stub,
                 &mut seen,
             );
             let entries = px_shader::reflect::entry_points(&assembled, &format!("pass '{label}'"))

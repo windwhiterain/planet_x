@@ -147,6 +147,61 @@ depth_target = "point_shadow_atlas"
 shadow_faces = 6
 render = "color=none|depth=clear(0)|depth_write=true|compare=greater_equal|winding=ccw"
 
+# ---- 金字塔降采样（用户裁决的 (ii) 的正身）：级 k 的一页 = 级 k-1 的四个孩子取 **max** ----
+#
+# ⚠⚠ **粗级只由降采样生成**（用户裁决）：几何只画到自己的那一级（`caster_level`），
+#    粗级靠这条链铺满 ⇒ 「要的那一级没页时退到父级」那条回退基本不再走到。
+# ⚠ **顺序要紧**：`shadow_down_l2` 读的 `atlas_l1` 必须**已经**含 l1 的降采样结果
+#    （否则粗级会漏掉"细级里才看得见的薄几何"）。所以这三条按 l1 → l2 → l3 排，
+#    且都排在 `point_shadow`（几何那一步）之后。
+# ⚠ 读 `point_shadow_atlas_l{k-1}`、写 `point_shadow_atlas_l{k}` —— **两张不同的纹理**，
+#    因为 wgpu 不许同一条 pass 里把一张图既当（写的）深度附件、又当被绑的资源
+#    （与上面那段 `copy_shadow_atlas` 被删掉是同一颗雷的两面）。
+#    「写谁就不绑谁」：它自己的第 1 格只绑上一级，组 0 那四格挂哑图。
+# ⚠ `frag_depth=true`：深度值由片元写 `@builtin(frag_depth)`（`px_pass` 那一档开关）。
+#    而「取 max」有两级：片元里对四个孩子取一次，硬件的
+#    `compare=greater_equal + depth_write` 再与这一页上已有的内容取一次。
+# ⚠ 每一条又按 (灯 × 六面 × **每一页**) 展开 —— 页在这里是 **pass** 的展开维
+#    （几何那条里页是 **draw** 的展开维）：全屏三角与"哪几个物体落在这一页"无关。
+[[before]]
+label = "shadow_down_l1"
+kind = "fullscreen"
+select = "none"
+fragment_shader = "shadow_downsample"
+entry = "fs_main"
+shadow_faces = 6
+reads = ["point_shadow_atlas"]
+writes = []
+depth_target = "point_shadow_atlas_l1"
+params = { level = 1, light = 0, face = 0, page_size = 128, origin_x = 0, origin_y = 0 }
+render = "color=none|depth=clear(0)|frag_depth=true|depth_write=true|compare=greater_equal|winding=ccw"
+
+[[before]]
+label = "shadow_down_l2"
+kind = "fullscreen"
+select = "none"
+fragment_shader = "shadow_downsample"
+entry = "fs_main"
+shadow_faces = 6
+reads = ["point_shadow_atlas_l1"]
+writes = []
+depth_target = "point_shadow_atlas_l2"
+params = { level = 2, light = 0, face = 0, page_size = 128, origin_x = 0, origin_y = 0 }
+render = "color=none|depth=clear(0)|frag_depth=true|depth_write=true|compare=greater_equal|winding=ccw"
+
+[[before]]
+label = "shadow_down_l3"
+kind = "fullscreen"
+select = "none"
+fragment_shader = "shadow_downsample"
+entry = "fs_main"
+shadow_faces = 6
+reads = ["point_shadow_atlas_l2"]
+writes = []
+depth_target = "point_shadow_atlas_l3"
+params = { level = 3, light = 0, face = 0, page_size = 128, origin_x = 0, origin_y = 0 }
+render = "color=none|depth=clear(0)|frag_depth=true|depth_write=true|compare=greater_equal|winding=ccw"
+
 
 # ---- 拷贝：把预通道的深度**搬**一份快照出来（§131）----
 #
