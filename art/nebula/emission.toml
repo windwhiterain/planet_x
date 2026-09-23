@@ -13,7 +13,7 @@ light_radius = 0.28
 # 朝光源步进多少步算遮挡：步数越多边缘越锐（代价线性）。
 shadow_steps = 24
 # 遮挡的浓度：`exp(-τ × 这个)`。给大了只剩最靠近光源的一薄层亮。
-shadow_gain = 2.4
+shadow_gain = 2.0
 
 # 发射 = `density^power × gain`：power > 1 ⇒ 只有浓的地方才亮（薄雾几乎不发光）。
 #
@@ -48,7 +48,7 @@ shadow_gain = 2.4
 # ⇒ 幂**低**时底光在薄处也很强（`d¹` 不小），把暗部染蓝；
 #   幂**高**才只剩浓处那一段 ⇒ 核保住蓝白、暗部交回"主发射 + 消光"（玫红）。
 emission_power = 6.5
-emission_gain = 0.6
+emission_gain = 0.85
 glow_gain = 5.5
 glow_power = 1.6
 glow_threshold = 0.48
@@ -75,7 +75,7 @@ dust_threshold = 0.45
 
 # 中心星团：内缘朝心那一圈亮起来、背面暗下去（目标里的"朝光亮缘/背光暗面"）。
 cluster_count = 4
-cluster_gain = 2.2
+cluster_gain = 1.2
 cluster_tint = [0.72, 0.86, 1.0]
 cluster_steps = 12
 cluster_spread = 0.35
