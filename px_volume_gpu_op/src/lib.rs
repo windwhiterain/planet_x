@@ -12,6 +12,55 @@
 //!   这里把它压成一条判据：GPU 按 WGSL 的公式重排一遍数组，Rust 按本文件的公式算期望，
 //!   逐元素必须相等。**先钉死下标，再谈光线步进。**
 
+//! # 移植规格：CPU 的 sample_at → WGSL（逐字对齐，别自由发挥）
+//!
+//! 这一段是把 px_volume_alg::raymarch::sample_at 的**语义**原样记下来（真源在那边，
+//! 改那边必须改这里）。WGSL 侧必须**逐步照做**，否则会重现那道竖缝或引入新边。
+//!
+//! `	ext
+//! 输入：世界点 p；体积 (res, layers, inner, outer)
+//!  1. r = |p|；span = outer - inner
+//!     容差 tolerance = |span|.max(1) * 1e-5
+//!     若 r < inner - tol 或 r > outer + tol 或 |span| <= eps ⇒ 壳外（读出 0）
+//!  2. dir = p / r  ⇒  (face, s, t) = cube_face_of(dir)          // 见下
+//!  3. altitude = clamp((r - inner) / span, 0, 1)
+//!     sz = altitude * (layers - 1)
+//!     layer0 = (|sz - round(sz)| < 1e-3) ? round(sz) : floor(sz)   // ⚠ 1e-3 的贴齐
+//!     tz = snap(sz - layer0)
+//!     la = clamp(layer0, 0, layers-1)；lb = clamp(layer0 + 1, 0, layers-1)
+//!  4. sx = s * res - 0.5；sy = t * res - 0.5
+//!     x0 = floor(sx)；y0 = floor(sy)；tx = snap(sx - x0)；ty = snap(sy - y0)
+//!     snap(f) = f < 1e-4 ? 0 : (f > 1-1e-4 ? 1 : f)
+//!  5. ⚠⚠ **八个角逐个跨面反查**（不能在本面里 wrap/clamp）：
+//!       corner_slot(cs, ct, layer):
+//!         s = (cs + 0.5) / res；t = (ct + 0.5) / res
+//!         (nf, ns, nt) = cube_face_of(cube_direction(face, s, t))
+//!         cs' = min(u32(ns * res), res-1)；ct' = min(u32(nt * res), res-1)
+//!         slot = (((nf * layers + min(layer, layers-1)) * res + ct') * res + cs') * 6
+//!       八个角 = {(x0|y0|la), (x0+1|y0|la), (x0|y0+1|la), (x0+1|y0+1|la),
+//!                 (x0|y0|lb), (x0+1|y0|lb), (x0|y0+1|lb), (x0+1|y0+1|lb)}
+//!  6. 三线性权重：(wx, wy) = (1 - tx, 1 - ty)；wz、以及 8 个权重按 x/y/z 组合
+//!     gather(lane) = Σ w[i] * data[corners[i] + lane]
+//! `
+//!
+//! 两个几何核（px_protocol::art，真源在那边）：
+//!
+//! `	ext
+//! cube_direction(face, s, t): a = 2s-1, b = 2t-1
+//!   face 0 => ( 1, -b, -a) | 1 => (-1, -b,  a) | 2 => (a,  1,  b)
+//!   face 3 => ( a, -1, -b) | 4 => ( a, -b,  1) | 5 => (-a, -b, -1)
+//!   再归一化（长度为 0 时返回 (0,1,0)）
+//!
+//! cube_face_of(d): (ax, ay, az) = (|x|, |y|, |z|)
+//!   face = (ax >= ay && ax >= az) ? (x > 0 ? 0 : 1)
+//!        : (ay >= az)            ? (y > 0 ? 2 : 3)
+//!        :                         (z > 0 ? 4 : 5)
+//!   major = (face in {0,1}) ? ax : (face in {2,3}) ? ay : az；再 max(eps)
+//!   (a, b) = face 0 => (-z,-y) | 1 => (z,-y) | 2 => (x, z)
+//!          | face 3 => ( x,-z) | 4 => (x,-y) | 5 => (-x,-y)
+//!   s = (a/major)*0.5 + 0.5；t = (b/major)*0.5 + 0.5；两者 clamp 到 [0,1]
+//! `
+
 use px_gpu::{Binding, connect, dispatch};
 
 /// 每个体素几条通道：`[发射 R, G, B, σ_R, σ_G, σ_B]`。
