@@ -16,6 +16,9 @@ px_graph_schema = { path = "../px_graph_schema" }
 px_volume_schema = { path = "../px_volume_schema" }
 # 算子的输入就是一张场（`px_body!` 展开出来的签名里就是它）。
 px_field_schema = { path = "../px_field_schema" }
+# 星场的载荷类型（`px_sparse::StarField`）：`cloud.emission` 与 `sky.nebula` 两个壳的
+# 签名里都有它（星是 R3 里的点光源，不再是协议层的一张立方图）。
+px_sparse = { path = "../px_sparse" }
 # ⚠ **算法在这里**（rlib）：这一份壳只把它接到声明上。搬出去的理由见 `src/lib.rs` 顶上那条。
 px_volume_alg = { path = "../px_volume_alg" }
 

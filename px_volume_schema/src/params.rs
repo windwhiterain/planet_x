@@ -103,20 +103,38 @@ pub mod emission {
     #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, px_derive::PxParams)]
     #[serde(default, deny_unknown_fields)]
     pub struct EmissionParams {
-        /// **中心星团**：壳心附近的几颗电离源（逐星 `1/r²` + 色温）。`0` = 关。
+        /// **星光**在气体上的增益：逐体素把"附近星点的辐照"折进发射（`0` = 关）。
         ///
-        /// ⚠ 与 `light`（单方向光）**并联**，不是替换：方向光给"整体一侧亮"，星团给
-        ///   **内缘朝心那一圈亮起来、背面暗下去** —— 目标里那四样（朝光亮缘、背光暗面、
-        ///   参差剪影、前景挡后景）主要靠它。
-        pub cluster_count: u32,
-        /// 星团的总权重（与 `emission_gain` 同一量纲，便于对照）。
-        pub cluster_gain: f32,
-        /// 星团的**色温色调**（逐通道）：热的星团偏蓝白。
-        pub cluster_tint: [f32; 3],
-        /// 逐星的阴影步数。星团有 N 颗 ⇒ 代价 ≈ `N × 这个`（与 `shadow_steps` 同量纲）。
-        pub cluster_steps: u32,
-        /// 星团在壳内的**散布半径比例**（相对当地半径）：`0` = 全部挤在壳心。
-        pub cluster_spread: f32,
+        /// ⚠⚠ 这一档是用户 2026-09-25 定的口径：**星不是贴在天穹上的像素，是 R3 里的点光源，
+        ///   它照亮周围的气**。光晕（参考图里那圈粉晕）因此**长在气上** ——
+        ///   星在浓气里晕小而亮、在空处几乎没有晕，而且天然是世界坐标、天然抗锯齿。
+        ///
+        /// ⚠ 与旧 `cluster_*`（4 颗程序化的、只知道方向的假光源）的关系是**替换**：
+        ///   星簇现在就是星表里真实的一组星（`params::stars::StarsParams::cluster_*`），
+        ///   既直射进画面、也照亮气体 ⇒ 两套光照不会打架。
+        pub starlight_gain: f32,
+        /// 星光辐照的**软化半径**（世界单位）：辐照取 `亮度 / (d² + soft²)`。
+        ///
+        /// ⚠ 它是"这一颗星的光在气里铺多开"，与 `starlight_radius`（**查哪几颗**）是两件事：
+        ///   前者是物理衰减的形状，后者是搜索的截断。给 `0` = 只吃 `1/d²`（近处会炸）。
+        ///
+        /// ⚠⚠ 分母里那个 `soft²` 是**有量纲的常数** ⇒ `starlight_gain` 的量级被它决定
+        ///   （`soft = 0.05` 时是 `1e-3` 那一档，不是 1 那一档）。给增益之前先算一遍：
+        ///   典型星亮度 ~10、距离 ~0.1 ⇒ 单颗 ~10/(0.01+0.0025) = 800，
+        ///   八颗之和量级 `1e3` ⇒ 增益取 `1e-3` 上下才与自发光（`d^power × 0.85`）同量级。
+        pub starlight_soft: f32,
+        /// **查多远**：逐体素只在以自己为心、半径 `starlight_radius` 的球里找星（世界单位）。
+        ///
+        /// ⚠ 它是**物理**旋钮（星光能照到多远的气），与 `stars.cell`（**存储**分辨率：
+        ///   一个细格装几颗星）分开 —— 用户 2026-09-25 定的两个旋钮，别绑死。
+        pub starlight_radius: f32,
+        /// 逐星的阴影步数（与 `shadow_steps` 同量纲）：`N 颗候选 ⇒ 代价 ≈ N × 这个`。
+        pub starlight_steps: u32,
+        /// 每个体素最多吃几颗星（按"亮度 / 距离²"取前几名）。
+        ///
+        /// ⚠ 它是**截断**而不是物理：亮度是幂律的（少数亮星 + 大量暗星），
+        ///   而辐照按 `1/d²` 掉 ⇒ 前几名之外的和本来就可以忽略。
+        pub starlight_max: u32,
         /// **光源方向**（世界空间，单位向量）：星云内部那颗电离源的方位。
         ///
         /// ⚠ 参考图里"亮脊 + 暗柱"的来源就是它：朝着光源的那一侧被照亮，背光那一侧与
@@ -201,11 +219,11 @@ pub mod emission {
             Self {
                 light: [0.3, 0.5, 0.8],
                 light_radius: 0.25,
-                cluster_count: 0,
-                cluster_gain: 0.0,
-                cluster_tint: [1.0, 1.0, 1.0],
-                cluster_steps: 0,
-                cluster_spread: 0.35,
+                starlight_gain: 0.0,
+                starlight_soft: 0.05,
+                starlight_radius: 0.20,
+                starlight_steps: 12,
+                starlight_max: 8,
                 shadow_steps: 24,
                 shadow_gain: 1.6,
                 emission_power: 2.2,
@@ -245,10 +263,22 @@ pub mod sky {
         pub jitter: f32,
         /// 星点的亮度倍率（星点**乘**透射率 ⇒ 被前面的气遮住、被尘埃染红）。
         pub star_gain: f32,
+        /// 星点的**核半径**（弧度，世界空间的角半径）—— 就是"这颗星多大"。
+        ///
+        /// ⚠⚠ 它是**弧度**而不是"几个纹素"（2026-09-25 改）：按纹素给等于让**存储网格的
+        ///   斜度**决定世界空间里一个点的大小 —— 而立方图的纹素角跨一个面差 3 倍
+        ///   （实测：面心的星核 σ≈1.0 纹素、面角 1.6 纹素，即"圆被存成椭圆"）。
+        ///   给弧度之后，横向形状与位置无关；采样要多细是**输出面**自己的事。
+        pub star_core: f32,
+        /// 星点的**外晕半径**（弧度）与它的权重（参考图里那圈粉晕）。
+        ///
+        /// ⚠ 这一档只是"星自己的晕"；**被星照亮的气**那份晕住在 `cloud.emission`
+        ///   （`starlight_*`），两者是两件事：前者是点光源本身的光学弥散，
+        ///   后者是气被照亮 —— 后者天然有形状（气浓处亮），前者是各向同性的。
+        pub star_halo: f32,
+        pub star_halo_gain: f32,
         /// 背景天空的底色（通常是近黑）。
         pub background: [f32; 3],
-        /// 星图的哪一档算数（星图里亮纹素的比例很小，门限决定"有几颗星"）。
-        pub star_floor: f32,
     }
 
     impl Default for SkyParams {
@@ -258,8 +288,82 @@ pub mod sky {
                 steps: 96,
                 jitter: 1.0,
                 star_gain: 1.0,
+                // 面 1024 的面心纹素角是 2/1024 ⇒ 核给 1.5 纹素 ≈ 2.9e-3 rad：
+                // 面角处纹素角只小 3 倍 ⇒ 到处都是"至少一个纹素宽"，不会漏采样。
+                star_core: 0.0029,
+                star_halo: 0.010,
+                star_halo_gain: 0.035,
                 background: [0.0, 0.0, 0.0],
-                star_floor: 0.4,
+            }
+        }
+    }
+}
+
+/// **`sky.stars` 的参数**：世界坐标里的一批点光源（R3 星场）。
+///
+/// ⚠⚠ 它**不是一张场**（输出是 `StarField` 载荷）：星是**点**，既没有"近精远粗"，
+///   也没有"方向参数化"这回事 ⇒ 世界坐标里按体积撒点 + 一个均匀三维格当搜索结构。
+///   它出的东西有两个消费者，各取一半：
+///     * `cloud.emission`：拿"哪几颗星在附近 + 多亮"去**照亮气体**（在散射那一条）；
+///     * `sky.nebula`：沿视线查格，把星自己按**角半径**（弧度）画成一个点。
+pub mod stars {
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, px_derive::PxParams)]
+    #[serde(default, deny_unknown_fields)]
+    pub struct StarsParams {
+        /// 星数（撒在壳内的**体积**里）。
+        pub count: u32,
+        pub seed: u32,
+        /// 星所在的那一层壳（世界单位）。
+        ///
+        /// ⚠ 与 `cloud.density` 的 `inner` / `outer` **刻意一致**：星不是贴在天穹上的像素，
+        ///   是**混在气里的点光源** —— 近处的星不被整层气遮住、远处的被前面的气吃掉，
+        ///   这就是"星嵌在星云里"的那件事。两处不一致的症状只是"星看起来飘在雾外面"。
+        pub inner: f32,
+        pub outer: f32,
+        /// **存储分辨率**：统一稀疏格的细格边长（世界单位）。
+        ///
+        /// ⚠⚠ 它与 `light_radius`（物理查询半径）是**两个旋钮**（用户 2026-09-25 定的）：
+        ///   这个决定"一个细格装几颗星"（越小越省逐格的下探、块也越多），
+        ///   那个决定"星光能照多远"。绑死会在"想细一点"和"想照远一点"之间二选一。
+        pub cell: f32,
+        /// 亮度幂律：`(1 / draw)^power`（暗的多、亮的少）。
+        pub brightness_power: f32,
+        /// 亮度的上限（幂律的尾巴很长，钳住免得一颗星打爆整幅图）。
+        pub max_brightness: f32,
+        /// **星簇**：嵌在气里的那几颗亮星（参考图里明显的那一簇）。
+        ///
+        /// ⚠ 它们与"场的星"是同一种东西（同一张表、同一个格）⇒ 既直射、也照亮气体。
+        ///   旧的 `cloud.emission::cluster_*`（4 颗只知道方向的程序化假光源）由此**退役**。
+        pub cluster_count: u32,
+        /// 簇心（**世界坐标的点**，不是方向）。
+        pub cluster: [f32; 3],
+        /// 星簇的散布半径（世界单位）。
+        pub cluster_radius: f32,
+        /// 星簇的亮度倍率。
+        pub cluster_gain: f32,
+        /// 星簇的色温色调（线性 RGB）。
+        pub cluster_tint: [f32; 3],
+    }
+
+    impl Default for StarsParams {
+        fn default() -> Self {
+            Self {
+                count: 180_000,
+                seed: 60613,
+                inner: 1.0,
+                outer: 3.0,
+                cell: 0.05,
+                brightness_power: 1.1,
+                max_brightness: 64.0,
+                cluster_count: 4,
+                // 与旧版 `emission.toml` 的 `cluster = [0.25, 0.35, 0.90]`（方向）
+                // 同一个方位，落在半径 2.0 处 ⇒ 世界点 ≈ 方向 × 2.0。
+                cluster: [0.50, 0.70, 1.80],
+                cluster_radius: 0.35,
+                cluster_gain: 1.2,
+                cluster_tint: [0.72, 0.86, 1.0],
             }
         }
     }

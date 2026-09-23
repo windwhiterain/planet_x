@@ -10,6 +10,7 @@
 use px_field_schema::field::Field;
 use px_graph_schema::{Cooked, px_op};
 use px_protocol::art::TextureData;
+use px_sparse::StarField;
 
 use crate::VolumeData;
 use crate::params;
@@ -29,26 +30,48 @@ pub struct DensityInput {
     pub density: Cooked<Field>,
 }
 
-/// 算光照要吃的东西：**一份密度体积**（`cloud.density` 的产物）。
+/// 算光照要吃的东西：**一份密度体积**（`cloud.density` 的产物）+ **一份星场**。
+///
+/// ⚠ 星场是 2026-09-25 加进来的（用户口径："星是 R3 里的点光源，它照亮气体"）：
+///   星光照的是**这一点周围的气**，与看它的视线无关 ⇒ 与方向光、阴影同一条口径，
+///   逐体素算一遍就够，不该塞进天空那一步进里。
 #[derive(px_derive::PxInputs)]
 pub struct EmissionInput {
     pub volume: Cooked<VolumeData>,
+    pub stars: Cooked<StarField>,
 }
 
-/// 沿视线积分要吃的东西：**一份发射体积** + **一张星图**（`CubeMap`）。
+/// 沿视线积分要吃的东西：**一份发射体积** + **一份 R3 星场**。
 ///
-/// ⚠ 星图是**图输入**（不是参数）：星点要参与积分（被气遮住、被尘埃染红），所以它必须
-///   与发射体积在同一趟里被读到。给成参数的话那张图就没法由别的节点造出来。
+/// ⚠ 星场是**图输入**（不是参数）：星点要参与积分（被气遮住、被尘埃染红），所以它必须
+///   与发射体积在同一趟里被读到。给成参数的话那份星场就没法由别的节点造出来。
 #[derive(px_derive::PxInputs)]
 pub struct SkyInput {
     pub volume: Cooked<VolumeData>,
-    pub stars: Cooked<Field>,
+    pub stars: Cooked<StarField>,
 }
 
 /// 产物形状：`cached(&graph, 节点, CloudCoarse, …)` 返回的就是它。
 ///
 /// ⚠ 图脚本那一侧读体积的判据仪器都拿这个别名当签名（它只说明"拿到手的是一份体积"）。
 pub type VolumeOut = Cooked<VolumeData>;
+
+/// 产物形状：星场那一档（`StarField` 载荷，渲染器不读它）。
+pub type StarOut = Cooked<StarField>;
+
+px_op! {
+    /// **世界坐标里撒一批星点 → 一个 R3 星场**（`StarField` 载荷）。
+    ///
+    /// ⚠⚠ 它**不是 `field.*`**（尽管它的前身是 `field.stars`）：它出的不是一张场。
+    ///   旧那一档把星**画进一张立方贴图**（方向参数化）⇒ 一个面上纹素角差 3 倍
+    ///   （圆被存成椭圆）、星图与天空面必须分辨率一致、面棱两侧各有一份采样形状
+    ///   —— 三条都是"用方向网格存点"带来的，与星本身无关。星是**世界坐标里的点**。
+    ///   （用户 2026-09-25：*一切物质都应该在世界坐标生成，球体坐标只应当用于储存/采样*。）
+    ///
+    /// ⚠ 位置按**体积**均匀（不是按球面均匀）：星撒在气里，密度该按体积算。
+    ///   亮度取幂律（暗的多、亮的少），星簇是一组真实的亮星（既直射也照亮气体）。
+    Stars, "sky.stars", "px_volume_op", params::stars::StarsParams, (), StarField
+}
 
 px_op! {
     /// 烘一份体积（立方球参数空间）。

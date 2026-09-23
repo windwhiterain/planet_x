@@ -1554,11 +1554,14 @@ dependencies = [
  "bytemuck",
  "pollster",
  "px_gpu",
+ "px_graph",
  "px_protocol",
  "px_shader",
+ "px_sparse",
  "px_verify",
  "px_volume_alg",
  "px_volume_schema",
+ "toml",
  "wgpu",
 ]
 
@@ -1599,6 +1602,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "px_sparse"
+version = "0.1.0"
+dependencies = [
+ "px_protocol",
+]
+
+[[package]]
 name = "px_verify"
 version = "0.1.0"
 dependencies = [
@@ -1614,6 +1624,8 @@ dependencies = [
  "px_field_schema",
  "px_fingerprint",
  "px_graph_schema",
+ "px_protocol",
+ "px_sparse",
  "px_verify",
  "px_volume_schema",
 ]
@@ -1624,6 +1636,7 @@ version = "0.0.0"
 dependencies = [
  "px_field_schema",
  "px_gpu",
+ "px_sparse",
  "px_volume_alg",
  "px_volume_schema",
 ]
@@ -1635,6 +1648,7 @@ dependencies = [
  "px_field_schema",
  "px_fingerprint",
  "px_graph_schema",
+ "px_sparse",
  "px_volume_alg",
  "px_volume_gpu_op",
  "px_volume_schema",
@@ -1650,6 +1664,7 @@ dependencies = [
  "px_fingerprint",
  "px_graph_schema",
  "px_protocol",
+ "px_sparse",
  "serde",
  "serde_json",
  "toml",

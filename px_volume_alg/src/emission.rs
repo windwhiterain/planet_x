@@ -23,11 +23,13 @@
 //!   烘图时算得完，是因为体素数（几十万）比"射线数 × 步数"（上亿）小三个数量级。
 
 use px_field_schema::field::{CUBE_FACES, cube_direction};
+use px_sparse::StarField;
 use px_volume_schema::VolumeData;
 use px_volume_schema::params::density::DensityParams;
 use px_volume_schema::params::emission::EmissionParams;
 
 use crate::density::{bake_density, sample_world};
+use crate::stars::brightest_near;
 
 fn normalize(v: [f32; 3]) -> [f32; 3] {
     let length = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
@@ -46,9 +48,25 @@ fn normalize(v: [f32; 3]) -> [f32; 3] {
 /// 4. 发射 = `d^emission_power × emission_gain × lit`；
 /// 5. 消光 = `d^extinction_power × extinction`，再按"尘埃档"加一笔（`dust_bias`）。
 ///
-/// ⚠ 光深要用**同一个采样函数**（三线性）算，不能拿体素格点凑：格点上的 τ 会有台阶，
+/// 光深要用**同一个采样函数**（三线性）算，不能拿体素格点凑：格点上的 τ 会有台阶，
 ///   而台阶在画面上就是一圈圈等值线。
-pub fn bake_emission(density: &VolumeData, params: &EmissionParams) -> VolumeData {
+///
+/// ⚠⚠ **星光照气体**（`starlight_*`，2026-09-25）：逐体素查 R3 星场里附近的星，
+///   算 `亮度 / (d² + soft²) × 朝它走的遮挡`，再乘 `density^power` 折进发射。
+///   这就是"气被星照亮"那一条 —— 参考图里星周围那圈晕**长在气上**：
+///   星在浓气里晕小而实、在空处几乎没有晕，而且它是世界坐标里的量（没有贴图分辨率、
+///   没有面棱、没有椭圆）。
+///
+/// ⚠ 它与旧的 `cluster_*`（4 颗只知道方向的程序化假光源）是**替换关系**：星簇现在是
+///   星表里真实的一组星，既直射进画面、也照亮周围的气 ⇒ 两套光照不会打架。
+///
+/// ⚠ 逐星遮挡是**逐体素**的量（与视线无关），与方向光那一条同一条理由：算一遍是
+///   `体素数 × 候选星数 × 星影步数`，塞进天空那一步进就是乘上"步数"。
+pub fn bake_emission(
+    density: &VolumeData,
+    stars: &StarField,
+    params: &EmissionParams,
+) -> VolumeData {
     let res = density.res.max(2);
     let layers = density.layers.max(2);
     let span = density.outer - density.inner;
@@ -59,6 +77,13 @@ pub fn bake_emission(density: &VolumeData, params: &EmissionParams) -> VolumeDat
     let steps = params.shadow_steps.max(1);
     let total = (density.outer - light_radius).max(1e-4);
     let step = total / steps as f32;
+
+    // 星光那一档的常数：查多远（`starlight_radius`，**物理**旋钮）、多软、逐星走几步、
+    // 最多吃几颗。⚠ 它与 `stars.cell`（**存储**细格）是两个旋钮，这里只读前者。
+    let star_reach = params.starlight_radius.max(1e-4);
+    let star_soft2 = (params.starlight_soft.max(1e-4)).powi(2);
+    let star_steps = params.starlight_steps.max(1);
+    let star_keep = params.starlight_max as usize;
 
     // ⚠ **四通道**（RGB 发射 + A 消光）⇒ 分配要乘 4。少乘就是"写到下一格"的越界。
     // ⚠ **六通道**：`[发射 R, G, B, σ_R, σ_G, σ_B]` ⇒ 分配要乘 6。
@@ -86,6 +111,8 @@ pub fn bake_emission(density: &VolumeData, params: &EmissionParams) -> VolumeDat
             let altitude = layer as f32 / (layers - 1) as f32;
             let radius = density.inner + span * altitude;
             let s_t = (t as f32 + 0.5) / res as f32;
+            // ⚠ 候选表**一行一份**（复用，不逐体素分配）：`brightest_near` 只清空它。
+            let mut candidates: Vec<px_sparse::Star> = Vec::new();
             for s in 0..res {
                 let s_s = (s as f32 + 0.5) / res as f32;
                 let direction = cube_direction(face, s_s, s_t);
@@ -110,46 +137,34 @@ pub fn bake_emission(density: &VolumeData, params: &EmissionParams) -> VolumeDat
                 }
                 let lit = (-optical_depth * params.shadow_gain).exp();
 
-                // ---- 中心星团：逐星阴影行进 + 1/r² + 色温 ----
+                // ---- 星光照气体：附近最亮的几颗 + 逐星遮挡 ----
                 //
-                // ⚠ 与方向光**并联**（不是替换）：方向光给"整体一侧亮"，星团给
+                // ⚠ 与方向光**并联**（不是替换）：方向光给"整体一侧亮"，星给
                 //   "内缘朝心那一圈亮、背面暗" —— 后者才是目标点名的四样（朝光亮缘、
                 //   背光暗面、参差剪影、前景挡后景）的主要来源。
-                // ⚠ 星位走 **Fibonacci 球**（确定性的）：烘图必须可复现，
-                //   随机星位会让同一份配方每次烘出不同的字节。
-                let mut cluster_lit = 0.0_f32;
-                if params.cluster_count > 0 {
-                    let stars = params.cluster_count.min(8);
-                    let golden = 2.399_963_2_f32;
-                    for star in 0..stars {
-                        let z = 1.0 - 2.0 * (star as f32 + 0.5) / stars as f32;
-                        let ring = (1.0 - z * z).max(0.0).sqrt();
-                        let phi = golden * star as f32;
-                        let spread = params.cluster_spread * radius;
-                        let star_position = [
-                            ring * phi.cos() * spread,
-                            ring * phi.sin() * spread,
-                            z * spread,
-                        ];
+                // ⚠ 辐照取 `亮度 / (d² + soft²)`：`soft` 是软化半径（`d → 0` 时不发散）。
+                //   星是**幂律**亮的（少数亮星 + 大量暗星）⇒ 只吃前 `starlight_max` 颗。
+                let mut star_lit = [0.0_f32; 3];
+                if params.starlight_gain > 0.0 {
+                    brightest_near(stars, position, star_reach, star_keep, &mut candidates);
+                    for star in &candidates {
                         let to_star = [
-                            star_position[0] - position[0],
-                            star_position[1] - position[1],
-                            star_position[2] - position[2],
+                            star.position[0] - position[0],
+                            star.position[1] - position[1],
+                            star.position[2] - position[2],
                         ];
-                        let distance = (to_star[0] * to_star[0]
+                        let distance2 = to_star[0] * to_star[0]
                             + to_star[1] * to_star[1]
-                            + to_star[2] * to_star[2])
-                            .sqrt()
-                            .max(1e-4);
+                            + to_star[2] * to_star[2];
+                        let distance = distance2.sqrt().max(1e-4);
                         let away = [
                             to_star[0] / distance,
                             to_star[1] / distance,
                             to_star[2] / distance,
                         ];
-                        let count = params.cluster_steps.max(1);
-                        let through = distance / count as f32;
+                        let through = distance / star_steps as f32;
                         let mut tau = 0.0_f32;
-                        for step_index in 1..=count {
+                        for step_index in 1..=star_steps {
                             let far = step_index as f32 * through;
                             let probe = [
                                 position[0] + away[0] * far,
@@ -158,11 +173,12 @@ pub fn bake_emission(density: &VolumeData, params: &EmissionParams) -> VolumeDat
                             ];
                             tau += sample_world(density, probe) * through;
                         }
-                        // `1/r²` 以壳内半径为单位归一化（否则换 inner 就换亮度）。
-                        let falloff = (density.inner * density.inner) / (distance * distance);
-                        cluster_lit += (-tau * params.shadow_gain).exp() * falloff;
+                        let falloff = star.brightness / (distance2 + star_soft2);
+                        let visible = (-tau * params.shadow_gain).exp() * falloff;
+                        for channel in 0..3 {
+                            star_lit[channel] += visible * star.tint[channel];
+                        }
                     }
-                    cluster_lit /= stars as f32;
                 }
 
                 // ---- 两份发射，逐通道 ----
@@ -178,14 +194,14 @@ pub fn bake_emission(density: &VolumeData, params: &EmissionParams) -> VolumeDat
                 let base = d.powf(params.extinction_power);
                 let dust = ((d - params.dust_threshold).max(0.0)) * params.dust_bias;
 
-                // 星团那一笔：与主发射同形状（只在有气的地方亮），颜色走色温。
-                let cluster = d.powf(params.emission_power) * params.cluster_gain * cluster_lit;
+                // 星光那一笔：与主发射同形状（只在有气的地方亮），颜色走**星自己的色温**
+                // （星簇偏蓝白 ⇒ 参考图里核心那一圈也是蓝白的）。
+                let star_emit = d.powf(params.emission_power) * params.starlight_gain;
 
                 let at = row * width + s as usize * 6;
                 for channel in 0..3 {
-                    out[at + channel] = main
-                        + glow * params.glow_tint[channel]
-                        + cluster * params.cluster_tint[channel];
+                    out[at + channel] =
+                        main + glow * params.glow_tint[channel] + star_emit * star_lit[channel];
                     out[at + 3 + channel] = base * params.extinction[channel] + dust;
                 }
             }
@@ -209,11 +225,12 @@ pub fn bake_emission(density: &VolumeData, params: &EmissionParams) -> VolumeDat
 pub fn emit_from_field(
     density_params: &DensityParams,
     emission_params: &EmissionParams,
+    stars: &StarField,
     canvas_width: u32,
     density_field: &px_field_schema::field::Field,
 ) -> Result<VolumeData, String> {
     let density = bake_density(density_params, canvas_width, density_field)?;
-    Ok(bake_emission(&density, emission_params))
+    Ok(bake_emission(&density, stars, emission_params))
 }
 
 #[cfg(test)]
@@ -229,6 +246,33 @@ mod tests {
             inner: 1.0,
             outer: 2.0,
             data: vec![value; (CUBE_FACES * layers * res * res) as usize],
+        }
+    }
+
+    /// 一份**空**星场（`starlight_gain > 0` 时它必须不产生任何光）。
+    fn no_stars() -> StarField {
+        StarField::build(empty_meta(), &[], &[], &[]).expect("造空星场")
+    }
+
+    /// 一颗亮星（放在 +X 轴上半径 1.5 处）。
+    fn one_star(brightness: f32) -> StarField {
+        StarField::build(
+            empty_meta(),
+            &[[1.5, 0.0, 0.0]],
+            &[brightness],
+            &[[1.0, 1.0, 1.0]],
+        )
+        .expect("造一颗星")
+    }
+
+    /// 一份"只有一颗星那么大的盒"的格参数（够装下 +X 上半径 1.5 那颗）。
+    fn empty_meta() -> px_sparse::GridMeta {
+        let block = px_sparse::grid::CHUNK_CELLS;
+        let dims = 3 * block;
+        px_sparse::GridMeta {
+            cell: 0.5,
+            origin: [-3.0; 3],
+            dims: [dims, dims, dims],
         }
     }
 
@@ -289,7 +333,7 @@ mod tests {
             shadow_gain: 3.0,
             ..Default::default()
         };
-        let emission = bake_emission(&density, &params);
+        let emission = bake_emission(&density, &no_stars(), &params);
         let emit_of = |face: u32| -> f32 {
             let layer = density.layers - 1;
             let mid = density.res / 2;
@@ -312,6 +356,7 @@ mod tests {
     fn extinction_grows_with_density() {
         let thin = bake_emission(
             &flat_density(8, 6, 0.15),
+            &no_stars(),
             &EmissionParams {
                 shadow_gain: 0.0,
                 ..Default::default()
@@ -319,6 +364,7 @@ mod tests {
         );
         let thick = bake_emission(
             &flat_density(8, 6, 0.85),
+            &no_stars(),
             &EmissionParams {
                 shadow_gain: 0.0,
                 ..Default::default()
@@ -347,7 +393,7 @@ mod tests {
             ..Default::default()
         };
         let density = flat_density(8, 4, 0.5);
-        let emission = bake_emission(&density, &params);
+        let emission = bake_emission(&density, &no_stars(), &params);
         // 先确认密度真的读到了（阳性对照）：读不到的话下面那条测的是"0 的平均"。
         assert!(
             emission.data[3] > 1e-6,
@@ -379,11 +425,70 @@ mod tests {
             emit_from_field(
                 &DensityParams::default(),
                 &EmissionParams::default(),
+                &no_stars(),
                 shape.res,
                 &field
             )
             .is_err(),
             "形状对不上的场必须被拒"
         );
+    }
+
+    /// **星光照的是气**：同一颗星、同一份参数，只有"把气放进去"才出光 ——
+    /// 而且**空星场**必须与"没有星"逐字相同（关掉星光那一档的等价性）。
+    ///
+    /// ⚠ 这一条钉两件事：`starlight_gain` 真的接到了输出上；以及"没有星 ⇒ 没有这一笔"
+    ///   （空星场读出 0 颗 ⇒ 逐字不变，这正是 `starlight_gain = 0` 与其他档共存的理由）。
+    #[test]
+    fn starlight_needs_both_a_star_and_gas() {
+        let params = EmissionParams {
+            starlight_gain: 4.0,
+            starlight_radius: 0.5,
+            starlight_steps: 4,
+            shadow_gain: 0.0,
+            ..Default::default()
+        };
+        let emission_of = |brightness: f32| -> [f64; 3] {
+            let volume = bake_emission(&flat_density(8, 4, 0.6), &one_star(brightness), &params);
+            let sum = |lane: usize| -> f64 {
+                volume
+                    .data
+                    .chunks(6)
+                    .map(|chunk| chunk[lane] as f64)
+                    .sum::<f64>()
+            };
+            [sum(0), sum(1), sum(2)]
+        };
+        let off = emission_of(0.0);
+        let on = emission_of(8.0);
+        assert!(
+            on[0] > off[0] * 1.5,
+            "点亮一颗星应当让气体明显更亮：{:.3} vs {:.3}",
+            on[0],
+            off[0]
+        );
+        // 亮度是线性进光照的（`亮度 / (d² + soft²)`）。
+        let brighter = emission_of(16.0);
+        assert!(
+            (brighter[0] - off[0]) > 1.8 * (on[0] - off[0]),
+            "星光那一笔必须跟着星的亮度线性涨"
+        );
+    }
+
+    /// **没有气就没有星光照**：把密度放到 0，星光那一笔必然消失
+    /// （散射发生在气上，不是空间里发光）。
+    #[test]
+    fn starlight_vanishes_without_gas() {
+        let params = EmissionParams {
+            starlight_gain: 4.0,
+            starlight_radius: 0.5,
+            starlight_steps: 4,
+            shadow_gain: 0.0,
+            ..Default::default()
+        };
+        let vacuum = bake_emission(&flat_density(8, 4, 0.0), &one_star(32.0), &params);
+        for value in &vacuum.data {
+            assert_eq!(*value, 0.0, "真空里不该有星光照出来的光");
+        }
     }
 }

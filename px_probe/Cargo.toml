@@ -26,3 +26,8 @@ pollster = "0.4"
 #   重建那一份**不复制**（复制出来的就是"量自己的抄本"）。
 px_volume_schema = { path = "../px_volume_schema" }
 px_volume_alg = { path = "../px_volume_alg" }
+# ⚠ `star_probe` 用：统一稀疏格那一份（星场载荷 + 索引）+ **按 `art/*.toml` 读参数**
+#   （探针不许在源码里抄一份星场参数 —— 抄一份就是"量的是另一份星场"）。
+px_sparse = { path = "../px_sparse" }
+px_graph = { path = "../px_graph" }
+toml = "0.8"

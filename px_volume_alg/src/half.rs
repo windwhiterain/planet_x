@@ -51,6 +51,35 @@ pub fn half_from_f32(value: f32) -> u16 {
     sign | result
 }
 
+/// 半精度位模式 → f32（[`half_from_f32`] 的逆）。
+///
+/// ⚠ 读**烘好的天空产物**（`rgba16f`）要用它：渲染器在 GPU 上采样，而探针/工具只能从
+///   `.pxart` 的字节里把它解回来。
+///
+/// ⚠ 本模块的判据**故意不调它**（测试里另写了一份独立的解码）：两个方向共用一份实现，
+///   "一起错"会看起来像通过。
+pub fn f32_from_half(half: u16) -> f32 {
+    let sign = if half & 0x8000 != 0 { -1.0_f32 } else { 1.0 };
+    let exponent = (half >> 10) & 0x1f;
+    let mantissa = (half & 0x03ff) as f32;
+    let magnitude = match exponent {
+        // 非规格化：`2^-24 × m/1024`。
+        0 => f32::from_bits(0x3380_0000) * mantissa / 1024.0,
+        0x1f => {
+            if mantissa == 0.0 {
+                f32::INFINITY
+            } else {
+                f32::NAN
+            }
+        }
+        _ => {
+            let scale = f32::from_bits(((exponent as u32) + 112) << 23);
+            scale * (1.0 + mantissa / 1024.0)
+        }
+    };
+    sign * magnitude
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

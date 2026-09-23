@@ -3,12 +3,12 @@
 //! ```text
 //! 图 nebula（画布 = 体网格）            图 nebulasky（画布 = 立方贴图）
 //! ─────────────────────────            ──────────────────────────────
-//! field.fbm3 / ridged3 / warp3           field.stars
+//! field.fbm3 / ridged3 / warp3           sky.stars
 //!         │                                     │
 //!         ▼  cloud.density                      │
 //!     VolumeData                                │
 //!         │                                     │
-//!         ▼  cloud.emission                     │
+//!         ▼  cloud.emission ◀── sky.stars       │
 //!     VolumeData（RGB 发射 + A 消光）            │
 //!         └──────────────┬──────────────────────┘
 //!                        ▼  sky.nebula ×3      沿视线积分，一条通道一张 CubeMap 场
@@ -18,11 +18,19 @@
 //! ```
 //!
 //! ⚠ **必须是两张图**：体积那一条链要**体网格**画布（`res × res²·layers·6`），
-//!   而星点与天空要**球面**画布（`res × res·6`）。两种画布的"行数"含义不同，
+//!   而天空要**立方贴图**画布（`res × res·6`）。两种画布的"行数"含义不同，
 //!   `VolumeShape::of` 会把 `32×192` 解成 `layers = 1/6` 那样的非整数而拒掉
 //!   （实测：`field.fbm3 要一张体网格画布…拿到的是 CubeMap 32×192`）。
 //!   ⚠ 两张图**不能同名** —— 名字决定 `art/<名字>/*.toml` 与清单落点，同名会撞键。
-//!   顺带的好处：星图只烘一次、三条通道共用（放在一张图里会被积三遍）。
+//!
+//! ⚠⚠ **星场在两张图里各挂一次，而且必须是同一个节点名、同一份参数**
+//!   （2026-09-25）：星不再只是一张天空上的图，它同时是**照亮气体的光源**
+//!   ⇒ `cloud.emission`（体积图）与 `sky.nebula`（天空图）都要它。
+//!   两份参数的来源**只有一处**（`art/nebulasky/stars.toml`，下面手工读一次再喂给两个
+//!   节点）：`sky.stars` 的产物与画布无关（`RESOLUTION_IS_CANVAS = false`）
+//!   ⇒ 同参同上游 ⇒ **同一个键**，CAS 里只存一份、只烘一次。
+//!   ⚠ 两处各抄一份 toml 是这一档最容易出的错（两边差一个数就变成两份星场，
+//!     而症状只是"气体被照亮的那些星与天上的星对不上"）。
 //!
 //! ⚠ `--face` 是**两个**面分辨率：体积那边是 `cloud.density` 的画布宽度，
 //!   天空那边是 `sky.*.toml` 的 `face`（两边不一致会在形状检查那里当场报）。
@@ -36,6 +44,7 @@ use std::time::Instant;
 
 use px_cook::{Domain, GraphSpec, begin, cached, field, node_params, volume};
 use px_field_schema::field::Field;
+use px_volume_schema::params::stars::StarsParams;
 
 /// 图侧对错误的统一态度：**当场失败**，不静默跳过。
 type Fault = Box<dyn std::error::Error>;
@@ -118,6 +127,22 @@ fn volume_layers() -> Result<u32, Fault> {
     let params: px_volume_schema::params::density::DensityParams =
         toml::from_str(&text).map_err(|err| format!("{} 解不开：{err}", path.display()))?;
     Ok(params.layers)
+}
+
+/// `art/nebulasky/stars.toml` 里那一份星场参数（读不到/解不开就 `Err`，不猜）。
+///
+/// ⚠ **两张图只有这一处星场参数来源**：体积图要给 `cloud.emission` 喂星（照亮气体），
+///   天空图要给 `sky.nebula` 喂星（画星点）。两处各抄一份 toml 的后果不是"报错"，
+///   而是**两份不同的星场** —— 天上的星与被气照亮的那批星对不上，而画面看起来
+///   "只是有点怪"。同一个节点名 + 同一份参数 ⇒ 同一个键 ⇒ 只烘一次。
+fn star_params() -> Result<StarsParams, Fault> {
+    let path = px_graph::workspace_root()
+        .join("art")
+        .join("nebulasky")
+        .join("stars.toml");
+    let text = std::fs::read_to_string(&path)
+        .map_err(|err| format!("读不到 {}：{err}", path.display()))?;
+    Ok(toml::from_str(&text).map_err(|err| format!("{} 解不开：{err}", path.display()))?)
 }
 
 /// 打印一张场的读数（形状对不对、值域有没有塌掉，一眼就能看出来）。
@@ -348,6 +373,9 @@ fn main() -> Result<(), Fault> {
         node_params(&shape_graph, "density_volume")?,
         volume::DensityInput { density: textured },
     )?;
+    // ⚠ 星场在**体积图**里也要挂一次：`cloud.emission` 要它来照亮气体（在散射那一条）。
+    //   参数与天空图那一份**逐字相同**（同一个 `star_params()`）⇒ 同一个键。
+    let shape_stars = cached(&shape_graph, "stars", volume::Stars, star_params()?, ())?;
     let emission = cached(
         &shape_graph,
         "emission",
@@ -355,6 +383,7 @@ fn main() -> Result<(), Fault> {
         node_params(&shape_graph, "emission")?,
         volume::EmissionInput {
             volume: density_volume,
+            stars: shape_stars,
         },
     )?;
 
@@ -366,13 +395,7 @@ fn main() -> Result<(), Fault> {
         projection: Domain::CubeMap,
         cameras: Vec::new(),
     });
-    let stars = cached(
-        &sky_graph,
-        "stars",
-        field::Stars,
-        node_params(&sky_graph, "stars")?,
-        (),
-    )?;
+    let stars = cached(&sky_graph, "stars", volume::Stars, star_params()?, ())?;
     // ⚠ **一个节点交出一整张天空贴图**（三条通道在算子内部各积一遍）。
     //   `sky` 就是场景文档要引用的那个节点名（`nebulasky::sky`），而它是一条
     //   **正常的图成员** —— 驱动照常进键、落盘、登记清单，这里不必手工拼贴图。
