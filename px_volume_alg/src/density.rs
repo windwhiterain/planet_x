@@ -25,6 +25,24 @@ use px_field_schema::volume::VolumeShape;
 use px_volume_schema::VolumeData;
 use px_volume_schema::params::density::DensityParams;
 
+/// **壳壁渐隐的宽度**（占径向的比例）：`altitude` 的两端各按这么宽的一条窗归零。
+///
+/// ⚠ `0.10` = 每端 10% 的径向 —— 够宽到看不出"边界"，又窄到不动中段的主体结构。
+///   实测 0.18 太宽：亮的面积 46.9% → 32.0%、暗的 7.2% → 18.7%（参考 45.2% / 9.4%）。
+const SHELL_WALL_FADE: f32 = 0.10;
+
+/// **壳壁上那一条归零窗**：`altitude ∈ [0,1]`（0 = 内壁、1 = 外壁）→ 密度上的系数。
+///
+/// ⚠ 公式只在**这一处**（烘焙与判据共用）：壁窗是密度体积语义的一部分，
+///   判据要按它算期望值 —— 抄一份到测试里就成了第二个会漂开的真相。
+fn shell_wall(altitude: f32) -> f32 {
+    let ramp = |x: f32| {
+        let t = (x / SHELL_WALL_FADE).clamp(0.0, 1.0);
+        t * t * (3.0 - 2.0 * t)
+    };
+    ramp(altitude) * ramp(1.0 - altitude)
+}
+
 /// 一行一列上的**径向保守化**半径（`reach` 格）。
 ///
 /// ⚠ 只沿**径向**取最大值（不是三维邻域）：视线在参数空间里主要沿径向推进，面内那一维
@@ -272,8 +290,17 @@ pub fn bake_density(
                     column[layer as usize] = density;
                 }
                 let column = dilate_layers(&column, layers, params.reach);
+                // ⚠⚠ **壳壁自然渐隐**（不是几何硬切）：`altitude` 从 0 到 1 就是壳的径向。
+                //   原来两头是**硬边界** —— 内壁正对观察者，视线一进来就是满密度 ⇒ 画面上
+                //   "处处有底噪、黑不存在"，而那圈边界在体上是一条等值面（归因不到布局）。
+                //   两端各乘一条归零窗 ⇒ 气在壳的两壁自然变薄（参考图的星云边界正是渐隐的）。
+                //   ⚠ 必须放在 `dilate_layers` **之后**：保守化会把邻格的密度顶上来，
+                //     先渐隐再保守化等于把墙又填回去。
+                let wall_at = |altitude: f32| shell_wall(altitude);
                 for layer in 0..layers {
-                    data[field_to_volume_slot(&shape, face, layer, t, s)] = column[layer as usize];
+                    let altitude = layer as f32 / (layers - 1).max(1) as f32;
+                    data[field_to_volume_slot(&shape, face, layer, t, s)] =
+                        column[layer as usize] * wall_at(altitude);
                 }
             }
         }
@@ -334,11 +361,12 @@ mod tests {
             for layer in 0..shape.layers {
                 for t in 0..shape.res {
                     for s in 0..shape.res {
-                        let want = field.at(s, field_row(&shape, face, layer, t));
+                        let want = field.at(s, field_row(&shape, face, layer, t))
+                            * shell_wall(layer as f32 / (shape.layers - 1).max(1) as f32);
                         let got = volume.at(face, layer, t, s);
                         assert!(
                             (got - want).abs() < 1e-6,
-                            "面 {face} 层 {layer} t {t} s {s}：搬到 {got}，应当是 {want}"
+                            "面 {face} 层 {layer} t {t} s {s}：搬到 {got}，应当是 {want}（搬运值 × 壁窗）"
                         );
                         checked += 1;
                     }
@@ -348,7 +376,7 @@ mod tests {
         assert_eq!(checked, volume.samples(), "必须逐格都对过");
     }
 
-    /// **壳外与壳内都是零，壳里是那个常数**（按世界点采样）。
+    /// **壳外与壳内都是零；壳里是那个常数（再乘两壁的渐隐窗）**（按世界点采样）。
     ///
     /// ⚠ 这条钉的是 `sample_world` 的边界与几何：它是光照与积分唯一读密度的入口，
     ///   它错了整个画面就是黑的（而"黑"在调参时最容易被误读成"曝光不对"）。
@@ -437,12 +465,20 @@ mod tests {
         assert_eq!(volume.inner, 2.0);
         assert_eq!(volume.outer, 5.0);
         assert_eq!(volume.data.len(), volume.samples());
-        let worst = volume
-            .data
-            .iter()
-            .map(|value| (value - 0.37).abs())
-            .fold(0.0_f32, f32::max);
-        assert!(worst < 1e-6, "常数场搬过去之后最大偏差 {worst}");
+        // ⚠ 期望值 = 常数 × **壁窗**：常数场搬过去之后，两壁按 `shell_wall` 渐隐到 0
+        //   （这不是"搬运错了"，而是密度体积语义的一部分）。
+        let mut worst = 0.0_f32;
+        for face in 0..CUBE_FACES {
+            for layer in 0..shape.layers {
+                let want = 0.37 * shell_wall(layer as f32 / (shape.layers - 1).max(1) as f32);
+                for t in 0..shape.res {
+                    for s in 0..shape.res {
+                        worst = worst.max((volume.at(face, layer, t, s) - want).abs());
+                    }
+                }
+            }
+        }
+        assert!(worst < 1e-6, "常数场搬过去（再乘壁窗）之后最大偏差 {worst}");
     }
 
     /// **坐标不重排**：值只跟 `(面, 层, t, s)` 有关，与摊平顺序无关。
@@ -466,11 +502,12 @@ mod tests {
                 for t in 0..shape.res {
                     for s in 0..shape.res {
                         let y = shape.row_of(face, layer) + t;
-                        let expected = field.at(s, y);
+                        let expected = field.at(s, y)
+                            * shell_wall(layer as f32 / (shape.layers - 1).max(1) as f32);
                         let got = volume.at(face, layer, t, s);
                         assert!(
                             (got - expected).abs() < 1e-6,
-                            "面 {face} 层 {layer} t {t} s {s}：搬到 {} 应当是 {expected}",
+                            "面 {face} 层 {layer} t {t} s {s}：搬到 {} 应当是 {expected}（搬运值 × 壁窗）",
                             got
                         );
                         checked += 1;
