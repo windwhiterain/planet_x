@@ -29,4 +29,4 @@ star_halo = 0.012
 star_halo_gain = 0.035
 
 # 背景天空的底色（深黑太空）。
-background = [0.0006, 0.0004, 0.0005]
+background = [0.0, 0.0, 0.0]
