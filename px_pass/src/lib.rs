@@ -639,6 +639,18 @@ pub struct RenderState {
     /// （prepass 就是它）；缺省成"不写"的话，那条 pass 会静默地什么都不留下。
     /// 透明档要的是"测但不写"，那种 pass 自己写 `depth_write = false`。
     pub depth_write: bool,
+    /// 片元阶段**写了 `@builtin(frag_depth)`**（降采样那条 pass 就是它）。
+    ///
+    /// ⚠⚠ 它存在的理由与「`color=none` ⇒ 不建片元阶段」那条判据**不冲突，是例外条款**：
+    ///    那条判据管的是"材质的片元 shader 在没有颜色附件时没有输出可写"（影子页 pass
+    ///    正是它）；而这一条说的是"**这条 pass 的深度值来自一张纹理**，只能在片元里算完
+    ///    写出来"（金字塔降采样：读 `atlas[k-1]` 的四个孩子取 max，写 `atlas[k]`）。
+    ///    **必须显式声明**，不许从 shader 里反射猜 —— 猜错的症状是"pass 静默什么都不写"。
+    ///
+    /// ⚠ 开了它就**关掉 early-Z**（`frag_depth` 的语义），且深度比较照旧生效 ⇒
+    ///    「取 max」其实有**两级**：片元里对四个孩子取一次 max，硬件的
+    ///    `compare=greater_equal + depth_write` 再把它与已有内容取一次 max。
+    pub frag_depth: bool,
     /// 深度比较函数。缺省 `greater_equal`（reverse-Z）。
     pub compare: Compare,
     /// 正面朝向。⚠ 它**留在 pass 上**（不是漏搬）：这个项目只有**一套**绕向约定
@@ -653,6 +665,7 @@ impl Default for RenderState {
             color: Attachment::Clear(Color::TRANSPARENT),
             depth: Attachment::None,
             depth_write: true,
+            frag_depth: false,
             compare: Compare::GreaterEqual,
             winding: Winding::Ccw,
         }
@@ -664,16 +677,27 @@ impl Default for RenderState {
 ///
 /// ⚠ 这里**没有 `cull`**：剔除属于材质（见 [`ResolvedMaterial::cull`]），
 /// 所以它既不在 pass 的状态里、也不在这串文本里。
+// ⚠ **必填**的那一档（下面 `for key in STATE_KEYS` 会要求它们一个不少）。
+//    `frag_depth` 不在这里 —— 它是**可选**的（缺省 false，而 false 时 `to_text`
+//    一个字都不写）：把它算成必填，就等于要求每条 pass 的 `render` 都多写一格，
+//    而那条"缺一格就是没说"的判据要的正是"少写 = 明确的缺省"。
 const STATE_KEYS: [&str; 5] = ["color", "depth", "depth_write", "compare", "winding"];
+/// 可选的那一档：缺省有明确含义，所以不写就是那个缺省。
+const OPTIONAL_KEYS: [&str; 1] = ["frag_depth"];
 
 impl RenderState {
     /// 写回文本：`color=clear(0,0,0,0)|depth=none|depth_write=true|compare=greater_equal|winding=ccw`。
     pub fn name(&self) -> String {
         format!(
-            "color={}|depth={}|depth_write={}|compare={}|winding={}",
+            "color={}|depth={}|depth_write={}|{}compare={}|winding={}",
             self.color.name(),
             self.depth.name(),
             self.depth_write,
+            if self.frag_depth {
+                "frag_depth=true|"
+            } else {
+                ""
+            },
             self.compare.name(),
             self.winding.name()
         )
@@ -688,7 +712,7 @@ impl RenderState {
             })?;
             let key = key.trim();
             let value = value.trim();
-            if !STATE_KEYS.contains(&key) {
+            if !STATE_KEYS.contains(&key) && !OPTIONAL_KEYS.contains(&key) {
                 return Err(format!(
                     "认不出的状态键 '{key}'：这一版认 {}（整串 '{text}'）",
                     STATE_KEYS.join(" / ")
@@ -701,6 +725,17 @@ impl RenderState {
             match key {
                 "color" => state.color = Attachment::<Color>::parse(value)?,
                 "depth" => state.depth = Attachment::<f32>::parse(value)?,
+                "frag_depth" => {
+                    state.frag_depth = match value {
+                        "true" => true,
+                        "false" => false,
+                        other => {
+                            return Err(format!(
+                                "frag_depth 只认 'true' 与 'false'，实际是 '{other}'"
+                            ));
+                        }
+                    };
+                }
                 "depth_write" => {
                     state.depth_write = match value {
                         "true" => true,
@@ -1176,7 +1211,10 @@ impl Plan {
                     "{at} 既不挂颜色也不挂深度：它画到哪儿去？一条 pass 至少要有一个附件"
                 ));
             }
-            if pass.kind == PassKind::Fullscreen && pass.render.color == Attachment::None {
+            if pass.kind == PassKind::Fullscreen
+                && pass.render.color == Attachment::None
+                && !pass.render.frag_depth
+            {
                 return Err(format!(
                     "{at} 的 kind 是 fullscreen，却没挂颜色附件：全屏三角只会写颜色，\
                      不挂颜色就等于什么都没做（要只写深度就该是一条 geometry pass）"
@@ -2448,6 +2486,18 @@ impl Executor {
             bind_group_layouts: &groups,
             immediate_size: 0,
         });
+        // ⚠ `targets` 要先落到一个 let 上：`&[Some(...)]` 直接写进 `if/else` 是**临时值**，
+        //    借用活不过这条语句（E0716）。`frag_depth` 那一档取空目标，也走同一个 let。
+        let color_targets = [Some(ColorTargetState {
+            format,
+            blend: None,
+            write_mask: ColorWrites::ALL,
+        })];
+        let targets: &[Option<ColorTargetState>] = if pass.render.frag_depth {
+            &[]
+        } else {
+            &color_targets
+        };
         let pipeline = device.create_render_pipeline(&RenderPipelineDescriptor {
             label: Some(label.as_str()),
             layout: Some(&pipeline_layout),
@@ -2464,17 +2514,23 @@ impl Executor {
                 front_face: pass.render.winding.to_wgpu(),
                 ..Default::default()
             },
-            depth_stencil: None,
+            // ⚠⚠ `frag_depth` 那一档（金字塔降采样）：**深度附件 + 空颜色目标**，
+            //    深度值由片元写 `@builtin(frag_depth)`。其余照旧（纯全屏三角写颜色）。
+            //    「取 max」有两级：片元里对四个孩子取一次，硬件的
+            //    `compare=greater_equal + depth_write` 再与已有内容取一次。
+            depth_stencil: pass.render.frag_depth.then(|| wgpu::DepthStencilState {
+                format: TextureFormat::Depth32Float,
+                depth_write_enabled: Some(pass.render.depth_write),
+                depth_compare: Some(pass.render.compare.to_wgpu()),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
             multisample: MultisampleState::default(),
             fragment: Some(FragmentState {
                 module: &fragment,
                 entry_point: Some(pass.entry.as_str()),
                 compilation_options: PipelineCompilationOptions::default(),
-                targets: &[Some(ColorTargetState {
-                    format,
-                    blend: None,
-                    write_mask: ColorWrites::ALL,
-                })],
+                targets: &targets,
             }),
             multiview_mask: None,
             cache: None,
@@ -3561,6 +3617,7 @@ fn vs_main(@location(0) position: vec3<f32>) -> Out {
                     for compare in compares {
                         for winding in windings {
                             let state = RenderState {
+                                frag_depth: false,
                                 color,
                                 depth,
                                 depth_write,
