@@ -1152,9 +1152,6 @@ pub fn anchors_from_radiance(
             anchors[index] = floor;
         }
     }
-    if std::env::var("PX_DEBUG_TONE").is_ok() {
-        eprintln!("[tone] 量出的输入分位 = {anchors:?}");
-    }
     Ok(anchors)
 }
 
@@ -1424,17 +1421,6 @@ pub fn raymarch_sky(
             texels * 3
         ));
     }
-    // ⚠ 受控诊断口（`PX_DUMP_SKY=<路径>`）：把**分级后的六面**按 f32 原样落盘。
-    //   用途只有一个 —— 在成图上看到面棱异常时，能直接**看贴图本身**，把"烘焙侧内容"
-    //   与"渲染侧采样"一刀分开（不再靠任何代理指标推断）。默认不写。
-    if let Ok(path) = std::env::var("PX_DUMP_SKY") {
-        let mut raw = Vec::with_capacity(graded.len() * 4);
-        for value in &graded {
-            raw.extend_from_slice(&value.to_le_bytes());
-        }
-        std::fs::write(&path, &raw).map_err(|error| format!("dump 失败：{error}"))?;
-    }
-
     // 打包成 Rgba16Float：alpha = 1（与 CPU 那一侧逐字一致）。
     let mut packed = Vec::with_capacity(texels * 8);
     for index in 0..texels {
