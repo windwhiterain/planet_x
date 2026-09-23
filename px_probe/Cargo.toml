@@ -6,6 +6,7 @@ edition = "2024"
 # 探针不是测试：它有 GPU、要几分钟、退出码才是判据（§47）。
 # 所以它不进 workspace 的 default-members，`cargo test` 不会碰它。
 [dependencies]
+px_gpu = { path = "../px_gpu" }
 # ⚠ **不依赖任何宿主 crate**（S8-a 之前它只为了 `px_render::shaders::assemble` 而依赖 bevy 宿主）。
 # 现在它要的两样都在共享叶子 crate `px_shader` 里：路径约定（`workspace_roots` /
 # `workspace_source_of`）与**裸 wgpu 宿主那张桩表**（`host_stubs::wgpu_host_stub`，

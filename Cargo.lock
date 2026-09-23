@@ -1553,6 +1553,7 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "pollster",
+ "px_gpu",
  "px_protocol",
  "px_shader",
  "px_verify",
