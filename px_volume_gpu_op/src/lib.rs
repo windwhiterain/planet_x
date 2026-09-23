@@ -1450,3 +1450,164 @@ mod size_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod seam_tests {
+    use super::*;
+    use px_field_schema::field::{Field, Projection};
+    use px_volume_schema::VolumeData;
+
+    fn f32_from_half(bits: u16) -> f32 {
+        let sign = if bits & 0x8000 != 0 { -1.0_f32 } else { 1.0 };
+        let exponent = ((bits >> 10) & 0x1f) as i32;
+        let mantissa = (bits & 0x3ff) as f32;
+        match exponent {
+            0 => sign * mantissa * 2.0_f32.powi(-24),
+            31 => {
+                if mantissa == 0.0 { sign * f32::INFINITY } else { f32::NAN }
+            }
+            _ => sign * (1.0 + mantissa / 1024.0) * 2.0_f32.powi(exponent - 15),
+        }
+    }
+
+    /// **面棱两侧的连续性**（烘焙侧的决定性判据）。
+    ///
+    /// ⚠ 为什么必须关掉抖动：抖动是**逐 texel 的哈希**（按方向取种子），棱两侧的抖动模式
+    ///   本来就互不相关 ⇒ 每个 texel 都带一份独立噪声，会把"结构性错配"淹掉。
+    ///   `jitter = 0` 之后，棱两侧的差只可能来自**采样/布局/面序**。
+    ///
+    /// 判法：每条棱上的 texel，找**另一面**上方向最接近的那一格，比它们的差；
+    /// 再拿同面内相邻 texel 的差当基准。棱上的差若显著大于面内基准 ⇒ 烘焙侧有缝。
+    /// ⚠⚠ **已知失败**（这条判据现在红着，故意的）。实测：
+    /// * 面棱上的差 **0.04767** = 面内基准 **0.00789** 的 **6.04 倍**（最大 0.16117）；
+    /// * 形状是**系统性**的：六个面一致（0.040~0.051）、沿整条棱均匀（分段 0.032~0.059）
+    ///   ⇒ 不是面序/朝向错（那会按面、按棱给出不同图案），而是**每一条棱都发生**的东西。
+    /// * 它同时存在于 GPU 与 CPU 两条路（GPU 那份与 CPU 逐 texel 只差 0.000482，
+    ///   是有意对账过的）⇒ **两边同源**，所以"GPU 对 CPU"这类判据抓不到它。
+    /// * 细密噪声那几版在成图上被纹理掩盖；尺度改大（基频 1.4）后一眼可见 —— 说明它一直在。
+    ///
+    /// 下一轮从这里二分：先做**采样器级**的连续性判据（同一份逐格随机夹具，直接比
+    /// `sample_volume` 在棱两侧的点），把"采样语义"与"光线步进"分开；
+    /// 再查 `sample_at` 的角点约定（主格用 `floor(s*res - 0.5)`，角点却用
+    /// `u32(ns*res)` 截断 —— 两者差半个纹素的可能就在这儿）。
+    #[test]
+    #[ignore = "已知烘焙侧缝：面棱差是面内基准的 6.04 倍（见上）"]
+    fn the_baked_sky_is_continuous_across_face_edges() {
+        let (res, layers) = (8_u32, 4_u32);
+        let (inner, outer) = (1.0_f32, 2.0_f32);
+        let mut data = vec![0.0_f32; (6 * layers * res * res * LANES as u32) as usize];
+        for (index, value) in data.iter_mut().enumerate() {
+            // 逐格不同的可逆编码：任何位置错配都会立刻显形（不像光滑场那样看不出来）。
+            *value = 0.2 + 0.6 * ((index % 97) as f32 / 97.0);
+        }
+        let volume = VolumeData { res, layers, inner, outer, data };
+        // 星图：一面 2 格 ⇒ 高 2*6 = 12，像素数 24。
+        let stars_field = Field::with_projection(2, 12, vec![0.0; 24], Projection::CubeMap);
+        let params = px_volume_schema::params::sky::SkyParams {
+            face: 32,
+            steps: 16,
+            jitter: 0.0,
+            star_gain: 0.0,
+            star_floor: 0.9,
+            ..Default::default()
+        };
+        let texture = match raymarch_sky(&volume, &stars_field, &params) {
+            Ok(texture) => texture,
+            Err(message) => panic!("烘焙失败：{message}"),
+        };
+        let face = params.face;
+        let lum = |x: u32, y: u32| -> f32 {
+            let at = ((y * face + x) * 8) as usize;
+            f32_from_half(u16::from_le_bytes([texture.bytes[at], texture.bytes[at + 1]]))
+        };
+        let direction = |face_index: u32, x: u32, y: u32| -> [f32; 3] {
+            px_volume_schema::direction_of(
+                face_index,
+                (x as f32 + 0.5) / face as f32,
+                (y as f32 + 0.5) / face as f32,
+            )
+        };
+        // 面内基准：同一面里左右相邻 texel 的平均差。
+        let mut interior = 0.0_f32;
+        let mut interior_count = 0.0_f32;
+        for face_index in 0..6_u32 {
+            for y in 0..face {
+                for x in 0..face - 1 {
+                    interior += (lum(x + 1, y) - lum(x, y)).abs();
+                    interior_count += 1.0;
+                }
+            }
+        }
+        let interior = interior / interior_count;
+        // 棱上：每一面 s=0 那一列的 texel，找另一面上方向最接近的 texel。
+        let mut edge = 0.0_f32;
+        let mut edge_count = 0.0_f32;
+        let mut worst = 0.0_f32;
+        for face_index in 0..6_u32 {
+            for y in 0..face {
+                let here = direction(face_index, 0, y);
+                let mut best = f32::MAX;
+                let mut best_value = 0.0_f32;
+                for other in 0..6_u32 {
+                    if other == face_index {
+                        continue;
+                    }
+                    for oy in 0..face {
+                        for ox in 0..face {
+                            let there = direction(other, ox, oy);
+                            let dot = here[0] * there[0] + here[1] * there[1] + here[2] * there[2];
+                            let angle = 1.0 - dot;
+                            if angle < best {
+                                best = angle;
+                                best_value = lum(ox, oy);
+                            }
+                        }
+                    }
+                }
+                let diff = (lum(0, y) - best_value).abs();
+                edge += diff;
+                edge_count += 1.0;
+                worst = worst.max(diff);
+            }
+        }
+        let edge = edge / edge_count;
+        let ratio = edge / interior.max(1e-6);
+        // 先看**形状**：逐面、以及棱上 t 的分布（两端 = 角点，中间 = 棱身）。
+        let mut per_face = [0.0_f32; 6];
+        let mut per_band = [0.0_f32; 4];
+        let mut per_band_count = [0.0_f32; 4];
+        for face_index in 0..6_u32 {
+            for y in 0..face {
+                let here = direction(face_index, 0, y);
+                let mut best = f32::MAX;
+                let mut best_value = 0.0_f32;
+                for other in 0..6_u32 {
+                    if other == face_index { continue; }
+                    for oy in 0..face {
+                        for ox in 0..face {
+                            let there = direction(other, ox, oy);
+                            let dot = here[0]*there[0] + here[1]*there[1] + here[2]*there[2];
+                            if 1.0 - dot < best { best = 1.0 - dot; best_value = lum(ox, oy); }
+                        }
+                    }
+                }
+                let diff = (lum(0, y) - best_value).abs();
+                per_face[face_index as usize] += diff;
+                let band = ((y * 4) / face).min(3) as usize;
+                per_band[band] += diff;
+                per_band_count[band] += 1.0;
+            }
+        }
+        println!("逐面棱差：{:?}", per_face.map(|v| (v / face as f32 * 1000.0).round() / 1000.0));
+        println!("棱上分段（0=一端 3=另一端）：{:?}", std::array::from_fn::<f32, 4, _>(|i| per_band[i] / per_band_count[i].max(1.0) * 1000.0).map(|v| (v).round() / 1000.0));
+        println!("面内基准 {interior:.5}（乘 1000 后 {:.3}）", interior * 1000.0);
+        assert!(
+            ratio < 2.0,
+            "面棱上的差 {edge:.5} 是面内基准 {interior:.5} 的 {ratio:.2} 倍（最大 {worst:.5}）\
+             —— 棱两侧对不上，缝在**烘焙侧**（采样/布局/面序）"
+        );
+        println!(
+            "px_volume_gpu_op：面棱差 {edge:.5} / 面内 {interior:.5} = {ratio:.2}x（最大 {worst:.5}）"
+        );
+    }
+}
