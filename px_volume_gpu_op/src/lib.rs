@@ -1143,6 +1143,18 @@ pub fn anchors_from_radiance(
             *value = 1e-4;
         }
     }
+    // ⚠⚠ 分位**撞进同一个箱**时锚点会相等 ⇒ 响应曲线里 `log(hi/lo) = 0` ⇒ 斜率除零 ⇒
+    //   那一段的输出变成 NaN/∞（症状是画面上一块突然错开，而不是"暗一点"）。
+    //   这里强制**严格递增**并留最小间隔。
+    for index in 1..4 {
+        let floor = anchors[index - 1] * 1.06;
+        if anchors[index] < floor {
+            anchors[index] = floor;
+        }
+    }
+    if std::env::var("PX_DEBUG_TONE").is_ok() {
+        eprintln!("[tone] 量出的输入分位 = {anchors:?}");
+    }
     Ok(anchors)
 }
 
@@ -1598,6 +1610,38 @@ mod seam_tests {
                 per_band_count[band] += 1.0;
             }
         }
+        // ⚠ 先量**角度距离**：跨棱找到的"最近格"若比面内相邻格更远，那 6 倍就只是
+        //   色相过渡段把更大的角度差放大出来的，不是不连续。
+        let mut edge_angle = 0.0_f32;
+        let mut edge_angle_count = 0.0_f32;
+        for face_index in 0..6_u32 {
+            for row in 0..face {
+                let here = direction(face_index, 0, row);
+                let mut best = f32::MAX;
+                for other in 0..6_u32 {
+                    if other == face_index { continue; }
+                    for oy in 0..face {
+                        for ox in 0..face {
+                            let there = direction(other, ox, oy);
+                            let dot = here[0]*there[0] + here[1]*there[1] + here[2]*there[2];
+                            if 1.0 - dot < best { best = 1.0 - dot; }
+                        }
+                    }
+                }
+                edge_angle += best;
+                edge_angle_count += 1.0;
+            }
+        }
+        // 面内相邻格的角度距离（同一面里左右相邻）。
+        let a0 = direction(0, 0, 5);
+        let a1 = direction(0, 1, 5);
+        let interior_angle = 1.0 - (a0[0]*a1[0] + a0[1]*a1[1] + a0[2]*a1[2]);
+        println!(
+            "角度距离：跨棱最近格 {:.6} / 面内相邻格 {:.6} = {:.2}x",
+            edge_angle / edge_angle_count,
+            interior_angle,
+            (edge_angle / edge_angle_count) / interior_angle.max(1e-9)
+        );
         println!("逐面棱差：{:?}", per_face.map(|v| (v / face as f32 * 1000.0).round() / 1000.0));
         println!("棱上分段（0=一端 3=另一端）：{:?}", std::array::from_fn::<f32, 4, _>(|i| per_band[i] / per_band_count[i].max(1.0) * 1000.0).map(|v| (v).round() / 1000.0));
         println!("面内基准 {interior:.5}（乘 1000 后 {:.3}）", interior * 1000.0);
@@ -1608,6 +1652,264 @@ mod seam_tests {
         );
         println!(
             "px_volume_gpu_op：面棱差 {edge:.5} / 面内 {interior:.5} = {ratio:.2}x（最大 {worst:.5}）"
+        );
+    }
+}
+
+#[cfg(test)]
+mod sampler_seam_tests {
+    use super::*;
+    use px_volume_schema::VolumeData;
+
+    /// **采样器级连续性**：把"采样语义"与"光线步进"分开。
+    ///
+    /// 法：同一半径上取两组点，组内两点都相差**一个纹素**的角度 ——
+    /// * 跨棱组：`s = +0.5/res` 与 `s = -0.5/res`（后者落到相邻面上去，
+    ///   因为 `cube_direction` 是线性映射，`s` 越界就是越过棱）；
+    /// * 面内组：`s = +0.5/res` 与 `s = +1.5/res`。
+    /// 采样是连续的话，两组的差应当**同量级**；跨棱那组显著更大 ⇒ 缝在采样语义里。
+    ///
+    /// ⚠ 这条只跑 CPU 的 `sample_volume`（GPU 那份已被证明与它逐点一致到 1e-6 ⇒
+    ///   同源问题两边都有，跑一边就够，也快得多）。
+    #[test]
+    fn the_sampler_is_continuous_across_a_face_edge() {
+        let (res, layers) = (8_u32, 4_u32);
+        let (inner, outer) = (1.0_f32, 2.0_f32);
+        // 逐格随机（不是光滑场）：任何"取错格"都会立刻显形。
+        let mut data = vec![0.0_f32; (6 * layers * res * res * LANES as u32) as usize];
+        for (index, value) in data.iter_mut().enumerate() {
+            *value = ((index * 2654435761usize) % 1000) as f32 / 1000.0;
+        }
+        let volume = VolumeData { res, layers, inner, outer, data };
+        // 多半径扫描：缝若只在某些半径上出现，就能直接指到"层/高度"那一层的约定。
+        let mut worst = (0.0_f32, 0.0_f32, 0.0_f32);
+        for step_index in 0..16 {
+            let radius = inner + (outer - inner) * (step_index as f32 + 0.5) / 16.0;
+            let mut edge = 0.0_f32;
+            let mut inside = 0.0_f32;
+            let mut count = 0.0_f32;
+            for face in 0..6_u32 {
+                for t_index in 1..res - 1 {
+                    let t = (t_index as f32 + 0.5) / res as f32;
+                    let at = |s: f32| -> f32 {
+                        let d = px_volume_schema::direction_of(face, s, t);
+                        let point = [d[0] * radius, d[1] * radius, d[2] * radius];
+                        px_volume_alg::sample_volume(&volume, point, 0)
+                    };
+                    let step = 0.5 / res as f32;
+                    edge += (at(step) - at(-step)).abs();
+                    inside += (at(1.0 + step) - at(step)).abs();
+                    count += 1.0;
+                }
+            }
+            let edge = edge / count;
+            let inside = inside / count;
+            let ratio = edge / inside.max(1e-6);
+            println!("  半径 {radius:.3}（高度 {:.3}）：跨棱 {edge:.5} / 面内 {inside:.5} = {ratio:.2}x",
+                (radius - inner) / (outer - inner));
+            if ratio > worst.2 {
+                worst = (radius, edge, ratio);
+            }
+        }
+        println!("采样器：最差在半径 {:.3} —— {:.2}x", worst.0, worst.2);
+        assert!(worst.2 < 2.0, "半径 {:.3} 上跨棱的采样差是面内的 {:.2} 倍 —— 采样语义在该处不连续", worst.0, worst.2);
+    }
+}
+
+#[cfg(test)]
+mod march_seam_tests {
+    use super::*;
+    use px_volume_schema::VolumeData;
+
+    /// **步进级连续性**（不含分级）：CPU 的 `raymarch_channel` 出的就是辐射，没有响应曲线
+    /// 也没有色相斜坡 ⇒ 拿它一比，就能把"步进"与"分级"分开。
+    ///
+    /// 测法：同一张天空纹理上，取每面 `x = 0`（棱）那一列的 texel，与**另一面**上方向最接近的
+    /// texel 比；面内相邻 texel 的差当基准。`jitter = 0`（抖动是逐 texel 哈希，会把结构性错配淹掉）。
+    #[test]
+    fn the_march_is_continuous_across_a_face_edge() {
+        let (res, layers) = (8_u32, 4_u32);
+        let (inner, outer) = (1.0_f32, 2.0_f32);
+        let mut data = vec![0.0_f32; (6 * layers * res * res * LANES as u32) as usize];
+        for (index, value) in data.iter_mut().enumerate() {
+            *value = ((index * 2654435761usize) % 1000) as f32 / 1000.0;
+        }
+        let volume = VolumeData { res, layers, inner, outer, data };
+        let face = 32_u32;
+        let params = px_volume_schema::params::sky::SkyParams {
+            face,
+            steps: 16,
+            jitter: 0.0,
+            star_gain: 0.0,
+            star_floor: 0.9,
+            ..Default::default()
+        };
+        let field = px_volume_alg::raymarch_channel(&volume, None, &params, 0);
+        let lum = |x: u32, y: u32| -> f32 { field.at(x, y) };
+        let direction = |face_index: u32, x: u32, y: u32| -> [f32; 3] {
+            px_volume_schema::direction_of(
+                face_index,
+                (x as f32 + 0.5) / face as f32,
+                (y as f32 + 0.5) / face as f32,
+            )
+        };
+        let mut interior = 0.0_f32;
+        let mut interior_count = 0.0_f32;
+        for face_index in 0..6_u32 {
+            for row in 0..face {
+                for x in 0..face - 1 {
+                    interior += (lum(x + 1, row) - lum(x, row)).abs();
+                    interior_count += 1.0;
+                }
+            }
+        }
+        let interior = interior / interior_count;
+        let mut edge = 0.0_f32;
+        let mut count = 0.0_f32;
+        let mut worst = 0.0_f32;
+        for face_index in 0..6_u32 {
+            for row in 0..face {
+                let here = direction(face_index, 0, row);
+                let mut best = f32::MAX;
+                let mut best_value = 0.0_f32;
+                for other in 0..6_u32 {
+                    if other == face_index { continue; }
+                    for oy in 0..face {
+                        for ox in 0..face {
+                            let there = direction(other, ox, oy);
+                            let dot = here[0]*there[0] + here[1]*there[1] + here[2]*there[2];
+                            if 1.0 - dot < best {
+                                best = 1.0 - dot;
+                                best_value = lum(ox, other * face + oy);
+                            }
+                        }
+                    }
+                }
+                let diff = (lum(0, face_index * face + row) - best_value).abs();
+                edge += diff;
+                count += 1.0;
+                worst = worst.max(diff);
+            }
+        }
+        let edge = edge / count;
+        println!(
+            "步进：棱上差 {edge:.5} / 面内 {interior:.5} = {:.2}x（最大 {worst:.5}）",
+            edge / interior.max(1e-6)
+        );
+        assert!(
+            edge / interior.max(1e-6) < 2.0,
+            "步进侧在棱上不连续：{:.2} 倍",
+            edge / interior.max(1e-6)
+        );
+    }
+}
+
+#[cfg(test)]
+mod identity_grade_tests {
+    use super::*;
+    use px_field_schema::field::{Field, Projection};
+    use px_volume_schema::VolumeData;
+
+    fn f32_from_half(bits: u16) -> f32 {
+        let sign = if bits & 0x8000 != 0 { -1.0_f32 } else { 1.0 };
+        let exponent = ((bits >> 10) & 0x1f) as i32;
+        let mantissa = (bits & 0x3ff) as f32;
+        match exponent {
+            0 => sign * mantissa * 2.0_f32.powi(-24),
+            31 => {
+                if mantissa == 0.0 { sign * f32::INFINITY } else { f32::NAN }
+            }
+            _ => sign * (1.0 + mantissa / 1024.0) * 2.0_f32.powi(exponent - 15),
+        }
+    }
+
+    /// **恒等分级下，辐射本身在棱上连不连续？**
+    ///
+    /// 把响应设成恒等（`tone_in == tone_out`、肩推到无穷）且色相强度 0 ⇒ 出来的就是**原始辐射**。
+    /// 缝若消失 ⇒ 病在**分级**；若仍在 ⇒ 病在**步进**（GPU 那一侧，CPU 步进已证连续）。
+    #[test]
+    fn the_radiance_is_continuous_under_an_identity_grade() {
+        let (res, layers) = (8_u32, 4_u32);
+        let (inner, outer) = (1.0_f32, 2.0_f32);
+        let mut data = vec![0.0_f32; (6 * layers * res * res * LANES as u32) as usize];
+        for (index, value) in data.iter_mut().enumerate() {
+            *value = ((index * 2654435761usize) % 1000) as f32 / 1000.0;
+        }
+        let volume = VolumeData { res, layers, inner, outer, data };
+        let face = 32_u32;
+        let stars_field = Field::with_projection(2, 12, vec![0.0; 24], Projection::CubeMap);
+        let params = px_volume_schema::params::sky::SkyParams {
+            face,
+            steps: 16,
+            jitter: 0.0,
+            star_gain: 0.0,
+            star_floor: 0.9,
+            ..Default::default()
+        };
+        let identity = [0.01_f32, 0.1, 1.0, 10.0];
+        let texture = sky(
+            face,
+            params.steps,
+            inner,
+            res,
+            layers,
+            inner,
+            outer,
+            &volume.data,
+            &MarchExtras { stars: Some(&[0.0; 24]), star_face: 2, star_gain: 0.0, star_floor: 0.9, background: [0.0; 3] },
+            (identity, identity, [1.0e9, 1.0e9]),
+            (px_volume_alg::raymarch::RAMP_LUMA, [[1.0, 1.0, 1.0, 0.0]; 4]),
+            0.0,
+        )
+        .expect("恒等分级下出图");
+        // `sky()` 回来的是 f32 的分级结果（每 texel 三个）⇒ 直接取 R 通道。
+        let lum = |x: u32, y: u32| -> f32 { texture[((y * face + x) * 3) as usize] };
+        let direction = |face_index: u32, x: u32, y: u32| -> [f32; 3] {
+            px_volume_schema::direction_of(
+                face_index,
+                (x as f32 + 0.5) / face as f32,
+                (y as f32 + 0.5) / face as f32,
+            )
+        };
+        let mut interior = 0.0_f32;
+        let mut interior_count = 0.0_f32;
+        for face_index in 0..6_u32 {
+            for row in 0..face {
+                for x in 0..face - 1 {
+                    interior += (lum(x + 1, row) - lum(x, row)).abs();
+                    interior_count += 1.0;
+                }
+            }
+        }
+        let interior = interior / interior_count;
+        let mut edge = 0.0_f32;
+        let mut count = 0.0_f32;
+        for face_index in 0..6_u32 {
+            for row in 0..face {
+                let here = direction(face_index, 0, row);
+                let mut best = f32::MAX;
+                let mut best_value = 0.0_f32;
+                for other in 0..6_u32 {
+                    if other == face_index { continue; }
+                    for oy in 0..face {
+                        for ox in 0..face {
+                            let there = direction(other, ox, oy);
+                            let dot = here[0]*there[0] + here[1]*there[1] + here[2]*there[2];
+                            if 1.0 - dot < best {
+                                best = 1.0 - dot;
+                                best_value = lum(ox, other * face + oy);
+                            }
+                        }
+                    }
+                }
+                edge += (lum(0, face_index * face + row) - best_value).abs();
+                count += 1.0;
+            }
+        }
+        let edge = edge / count;
+        println!(
+            "恒等分级：棱上差 {edge:.5} / 面内 {interior:.5} = {:.2}x",
+            edge / interior.max(1e-6)
         );
     }
 }
