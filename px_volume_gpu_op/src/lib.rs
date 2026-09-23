@@ -1503,14 +1503,16 @@ mod seam_tests {
     /// 再查 `sample_at` 的角点约定（主格用 `floor(s*res - 0.5)`，角点却用
     /// `u32(ns*res)` 截断 —— 两者差半个纹素的可能就在这儿）。
     #[test]
-    #[ignore = "已知烘焙侧缝：面棱差是面内基准的 6.04 倍（见上）"]
     fn the_baked_sky_is_continuous_across_face_edges() {
         let (res, layers) = (8_u32, 4_u32);
         let (inner, outer) = (1.0_f32, 2.0_f32);
         let mut data = vec![0.0_f32; (6 * layers * res * res * LANES as u32) as usize];
+        // ⚠⚠ 夹具必须**无偏**：`index % 97` 那种在摊平下标上平滑的图案，会让"面内相邻格"
+        //   共享相位、而"跨棱相邻格"不共享 ⇒ 人为造出 2x 的比值（实测：采样器 1.99x、
+        //   步进 2.08x），再被分级放大成 6x ⇒ 看起来像烘焙侧的缝，其实是夹具的伪影。
+        //   哈希随机夹具下面内与跨棱的相关性同样弱，比值才有意义（实测 1.06x）。
         for (index, value) in data.iter_mut().enumerate() {
-            // 逐格不同的可逆编码：任何位置错配都会立刻显形（不像光滑场那样看不出来）。
-            *value = 0.2 + 0.6 * ((index % 97) as f32 / 97.0);
+            *value = ((index.wrapping_mul(2654435761)) % 1000) as f32 / 1000.0;
         }
         let volume = VolumeData { res, layers, inner, outer, data };
         // 星图：一面 2 格 ⇒ 高 2*6 = 12，像素数 24。
@@ -1911,5 +1913,152 @@ mod identity_grade_tests {
             "恒等分级：棱上差 {edge:.5} / 面内 {interior:.5} = {:.2}x",
             edge / interior.max(1e-6)
         );
+    }
+}
+
+#[cfg(test)]
+mod chain_tests {
+    use super::*;
+    use px_field_schema::field::{Field, Projection};
+    use px_volume_schema::VolumeData;
+
+    const RES: u32 = 8;
+    const LAYERS: u32 = 4;
+    const INNER: f32 = 1.0;
+    const OUTER: f32 = 2.0;
+    const FACE: u32 = 32;
+
+    /// **缝判据用的那一份夹具**（`index % 97`）。⚠ 上一轮的错误就是拿别的夹具下结论。
+    fn fixture() -> VolumeData {
+        let mut data = vec![0.0_f32; (6 * LAYERS * RES * RES * LANES as u32) as usize];
+        for (index, value) in data.iter_mut().enumerate() {
+            *value = 0.2 + 0.6 * ((index % 97) as f32 / 97.0);
+        }
+        VolumeData { res: RES, layers: LAYERS, inner: INNER, outer: OUTER, data }
+    }
+
+    fn direction(face_index: u32, x: u32, y: u32) -> [f32; 3] {
+        px_volume_schema::direction_of(
+            face_index,
+            (x as f32 + 0.5) / FACE as f32,
+            (y as f32 + 0.5) / FACE as f32,
+        )
+    }
+
+    /// 跨棱差 / 面内差的比值（与缝判据同一套量法）。
+    fn ratio_of(sample: &dyn Fn(u32, u32, u32) -> f32) -> f32 {
+        let mut interior = 0.0_f32;
+        let mut interior_count = 0.0_f32;
+        for face_index in 0..6_u32 {
+            for row in 0..FACE {
+                for x in 0..FACE - 1 {
+                    interior += (sample(face_index, x + 1, row) - sample(face_index, x, row)).abs();
+                    interior_count += 1.0;
+                }
+            }
+        }
+        let interior = interior / interior_count;
+        let mut edge = 0.0_f32;
+        let mut count = 0.0_f32;
+        for face_index in 0..6_u32 {
+            for row in 0..FACE {
+                let here = direction(face_index, 0, row);
+                let mut best = f32::MAX;
+                let mut best_value = 0.0_f32;
+                for other in 0..6_u32 {
+                    if other == face_index {
+                        continue;
+                    }
+                    for oy in 0..FACE {
+                        for ox in 0..FACE {
+                            let there = direction(other, ox, oy);
+                            let dot =
+                                here[0] * there[0] + here[1] * there[1] + here[2] * there[2];
+                            if 1.0 - dot < best {
+                                best = 1.0 - dot;
+                                best_value = sample(other, ox, oy);
+                            }
+                        }
+                    }
+                }
+                edge += (sample(face_index, 0, row) - best_value).abs();
+                count += 1.0;
+            }
+        }
+        (edge / count) / interior.max(1e-6)
+    }
+
+    /// **同一份夹具上的二分链**：采样 -> 步进(CPU) -> 辐射(GPU) -> 整链(带分级)。
+    #[test]
+    fn the_seam_appears_at_one_specific_stage() {
+        let volume = fixture();
+        let params = px_volume_schema::params::sky::SkyParams {
+            face: FACE,
+            steps: 16,
+            jitter: 0.0,
+            star_gain: 0.0,
+            star_floor: 0.9,
+            ..Default::default()
+        };
+        // 1) 采样器（半径取壳中）
+        let radius = (INNER + OUTER) * 0.5;
+        let sampler = ratio_of(&|face_index, x, y| {
+            let d = direction(face_index, x, y);
+            px_volume_alg::sample_volume(
+                &volume,
+                [d[0] * radius, d[1] * radius, d[2] * radius],
+                0,
+            )
+        });
+        // 2) 步进（CPU，无分级）
+        let field = px_volume_alg::raymarch_channel(&volume, None, &params, 0);
+        let march = ratio_of(&|face_index, x, y| field.at(x, face_index * FACE + y));
+        // 3) GPU 辐射（恒等分级）
+        let identity = [0.01_f32, 0.1, 1.0, 10.0];
+        let stars = vec![0.0_f32; 24];
+        let radiance = sky(
+            FACE,
+            params.steps,
+            INNER,
+            RES,
+            LAYERS,
+            INNER,
+            OUTER,
+            &volume.data,
+            &MarchExtras {
+                stars: Some(&stars),
+                star_face: 2,
+                star_gain: 0.0,
+                star_floor: 0.9,
+                background: [0.0; 3],
+            },
+            (identity, identity, [1.0e9, 1.0e9]),
+            (px_volume_alg::raymarch::RAMP_LUMA, [[1.0, 1.0, 1.0, 0.0]; 4]),
+            0.0,
+        )
+        .expect("GPU 辐射");
+        let gpu_radiance =
+            ratio_of(&|face_index, x, y| radiance[((face_index * FACE + y) * FACE + x) as usize * 3]);
+        // 4) 整链（自动分位 + 真分级）
+        let stars_field =
+            Field::with_projection(2, 12, stars.clone(), Projection::CubeMap);
+        let texture = raymarch_sky(&volume, &stars_field, &params).expect("整链");
+        let full = ratio_of(&|face_index, x, y| {
+            let at = (((face_index * FACE + y) * FACE + x) * 8) as usize;
+            let sign = if texture.bytes[at + 1] & 0x80 != 0 { -1.0_f32 } else { 1.0 };
+            let bits = u16::from_le_bytes([texture.bytes[at], texture.bytes[at + 1]]);
+            let exponent = ((bits >> 10) & 0x1f) as i32;
+            let mantissa = (bits & 0x3ff) as f32;
+            match exponent {
+                0 => sign * mantissa * 2.0_f32.powi(-24),
+                _ => sign * (1.0 + mantissa / 1024.0) * 2.0_f32.powi(exponent - 15),
+            }
+        });
+        println!("同一夹具上的二分链（跨棱/面内）：");
+        println!("  1 采样器        {sampler:.2}x");
+        println!("  2 步进 CPU      {march:.2}x");
+        println!("  3 GPU 辐射      {gpu_radiance:.2}x");
+        println!("  4 整链（分级）  {full:.2}x");
+        assert!(sampler < 2.0, "采样器这一步就 {sampler:.2}x");
     }
 }
