@@ -140,25 +140,33 @@ fn sample_at(volume: &VolumeData, point: [f32; 3]) -> Sample {
     let y0 = sy.floor();
     let tx = snap(sx - x0);
     let ty = snap(sy - y0);
-    let clamp_cell = |value: f32| value.clamp(0.0, (res - 1) as f32) as u32;
-    let wrap_cell = |value: f32| (value.rem_euclid(res as f32)) as u32;
-    let (xa, xb) = (wrap_cell(x0), wrap_cell(x0 + 1.0));
-    let (ya, yb) = (clamp_cell(y0), clamp_cell(y0 + 1.0));
     let layer_at = |step: f32| (layer0 + step).clamp(0.0, last_layer as f32) as u32;
     let (la, lb) = (layer_at(0.0), layer_at(1.0));
 
-    let slot = |cell_s: u32, cell_t: u32, layer: u32| -> usize {
-        ((((face * layers + layer) * res + cell_t) * res + cell_s) * 6) as usize
+    // ⚠⚠ **八个角要跨面取**（round 30 修 —— 那道竖缝的真凶）：`s` / `t` 走出本面时，落点是
+    //   **相邻面**的格子。从前是 `wrap_cell(s)` + `clamp_cell(t)`、而 `slot` 的面号**写死**
+    //   ⇒ 八个角全在本面里 ⇒ 视线跨过面棱时采样值跳一下 ⇒ 贴图上那道通高的竖缝。
+    //   实测（`PX_DEBUG_SEAM`）：面 0 的 `s=0` 棱与面 4 的 `s=1` 棱**本该是棱上的同一点**
+    //   （`cube_direction` 两面同值、只差一个纹素），亮度却是 0.0015 对 0.0295（20 倍）；
+    //   画面正中那一对（面 1 `s=0` / 面 5 `s=1`）差 12 倍。
+    //   ⚠ 这与 `density::sample_world` 是**同一类 bug 的第二份实现** —— 两处都得按方向反查。
+    let corner_slot = |cell_s: f32, cell_t: f32, layer: u32| -> usize {
+        let s = (cell_s + 0.5) / res as f32;
+        let t = (cell_t + 0.5) / res as f32;
+        let (nf, ns, nt) = cube_face_of(px_field_schema::field::cube_direction(face, s, t));
+        let cs = ((ns * res as f32) as u32).min(res - 1);
+        let ct = ((nt * res as f32) as u32).min(res - 1);
+        ((((nf * layers + layer.min(last_layer)) * res + ct) * res + cs) * 6) as usize
     };
     let corners = [
-        slot(xa, ya, la),
-        slot(xb, ya, la),
-        slot(xa, yb, la),
-        slot(xb, yb, la),
-        slot(xa, ya, lb),
-        slot(xb, ya, lb),
-        slot(xa, yb, lb),
-        slot(xb, yb, lb),
+        corner_slot(x0, y0, la),
+        corner_slot(x0 + 1.0, y0, la),
+        corner_slot(x0, y0 + 1.0, la),
+        corner_slot(x0 + 1.0, y0 + 1.0, la),
+        corner_slot(x0, y0, lb),
+        corner_slot(x0 + 1.0, y0, lb),
+        corner_slot(x0, y0 + 1.0, lb),
+        corner_slot(x0 + 1.0, y0 + 1.0, lb),
     ];
     let (wx, wy) = (1.0 - tx, 1.0 - ty);
     let weights = [
@@ -353,7 +361,7 @@ pub const GRADE_STRENGTH: f32 = 0.95;
 /// ⚠ p99 之上走**软肩**（C¹ 连续、渐近 [`TONE_CEIL`]）：星核该白但**不许撞顶**
 ///   （参考图削顶 0.000%、线性最高 0.9868）。
 /// ⚠ `tone(0) = 0`：纯黑原样（"深黑太空"靠它）。
-pub const TONE_IN: [f32; 4] = [0.0060, 0.0292, 0.0621, 0.1326];
+pub const TONE_IN: [f32; 4] = [0.004660, 0.026200, 0.064400, 0.131100];
 pub const TONE_OUT: [f32; 4] = [0.0051, 0.0171, 0.0746, 0.2489];
 const TONE_SHOULDER: f32 = 0.72;
 const TONE_CEIL: f32 = 0.95;
@@ -542,6 +550,72 @@ mod tests {
             outer: 2.0,
             data,
         }
+    }
+
+    /// ⚠⚠ **接缝的判据**：跨过立方体面棱采样时，读到的必须是**连续**的值。
+    ///
+    /// 面 0（`+x`）的 `s = 0` 棱与面 4（`+z`）的 `s = 1` 棱是**同一条线**
+    /// （`cube_direction(0, 0, t)` 与 `cube_direction(4, 1, t)` 给同一个方向）⇒
+    /// 棱两侧各半个纹素处的两个点，采样值应当几乎相同。
+    ///
+    /// ⚠ 从前 `sample_at` 的八个角**全在本面里**（`wrap_cell` + `clamp_cell`、`slot` 的
+    ///   面号写死）⇒ 棱两侧差到 **12~20 倍**，天空贴图上就是那道通高的竖缝。
+    ///   这条判据钉住它（`density::sample_world` 是同类的第二份实现，两边都已修）。
+    #[test]
+    fn sampling_stays_continuous_across_a_face_edge() {
+        let (res, layers) = (16_u32, 8_u32);
+        // 逐格按**方向**填一个光滑但非平凡的值：光滑 ⇒ 本来就该连续；非平凡 ⇒ 不平庸地过。
+        let mut data = vec![0.0_f32; (CUBE_FACES * layers * res * res * 6) as usize];
+        let mut slot = 0_usize;
+        for face in 0..CUBE_FACES {
+            for layer in 0..layers {
+                for t in 0..res {
+                    for s in 0..res {
+                        let direction = px_volume_schema::direction_of(
+                            face,
+                            s as f32 / (res - 1) as f32,
+                            t as f32 / (res - 1) as f32,
+                        );
+                        let value = 0.2
+                            + 0.15
+                                * (7.0 * direction[0]).sin()
+                                * (7.0 * direction[1]).sin()
+                                * (7.0 * direction[2]).sin();
+                        for lane in 0..6 {
+                            data[slot + lane] = value;
+                        }
+                        slot += 6;
+                    }
+                }
+            }
+        }
+        let volume = VolumeData {
+            res,
+            layers,
+            inner: 1.0,
+            outer: 2.0,
+            data,
+        };
+        // 棱两侧各离棱半个纹素，取同一个 `t`、同一个半径。
+        let t = 0.5_f32;
+        let half = 0.5 / res as f32;
+        let radius = 1.5_f32;
+        let point = |direction: [f32; 3]| {
+            [
+                direction[0] * radius,
+                direction[1] * radius,
+                direction[2] * radius,
+            ]
+        };
+        let left = point(px_field_schema::field::cube_direction(0, half, t));
+        let right = point(px_field_schema::field::cube_direction(4, 1.0 - half, t));
+        let a = sample_at(&volume, left).gather(&volume.data, 0);
+        let b = sample_at(&volume, right).gather(&volume.data, 0);
+        assert!(
+            (a - b).abs() < 0.05,
+            "棱两侧的采样值差了 {:.4}（{a:.4} 对 {b:.4}）—— 场在棱上是断的",
+            (a - b).abs()
+        );
     }
 
     fn params() -> SkyParams {
