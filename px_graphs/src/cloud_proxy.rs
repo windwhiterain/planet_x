@@ -72,6 +72,8 @@ pub fn coarse_roots(
         return Vec::new();
     }
     let samples = samples.max(2);
+    // ⚠ 等值面的根落在**世界半径**上 ⇒ 参数高度要过 `Shell`（参数空间线性、世界等比）。
+    let shell = px_volume_schema::volume::Shell::new(params.inner, params.outer);
     let value_at =
         |altitude: f32| proxy::field_at(cloud, params, cover, direction, altitude) - params.tau;
     let mut roots = Vec::new();
@@ -81,7 +83,7 @@ pub fn coarse_roots(
         let altitude = step as f32 / samples as f32;
         let value = value_at(altitude);
         if previous == 0.0 {
-            roots.push(params.inner + previous_altitude * params.span());
+            roots.push(shell.radius_of(previous_altitude));
         }
         if previous * value < 0.0 {
             let (mut low, mut high) = (previous_altitude, altitude);
@@ -96,7 +98,7 @@ pub fn coarse_roots(
                     low_value = middle_value;
                 }
             }
-            roots.push(params.inner + 0.5 * (low + high) * params.span());
+            roots.push(shell.radius_of(0.5 * (low + high)));
         }
         previous_altitude = altitude;
         previous = value;
@@ -152,7 +154,8 @@ pub fn cell_diagonal(params: &Params, direction: [f32; 3], radius: f32) -> f32 {
     let res = params.res.max(2);
     let layers = params.layers.max(2);
     let (face, u, v) = px_protocol::art::cube_face_of(direction);
-    let altitude = ((radius - params.inner) / params.span()).clamp(0.0, 1.0);
+    let altitude =
+        px_volume_schema::volume::Shell::new(params.inner, params.outer).altitude_of(radius);
     let point = point_of(face, [u, v, altitude], params.inner, params.outer);
     let step_s = point_of(
         face,
@@ -166,7 +169,10 @@ pub fn cell_diagonal(params: &Params, direction: [f32; 3], radius: f32) -> f32 {
         params.inner,
         params.outer,
     );
-    let step_r = params.span() / (layers - 1) as f32;
+    // ⚠ 径向步长在**世界**里是等比的（Shell），所以在 ltitude 处取那一点的 dr/du。
+    let step_r = px_volume_schema::volume::Shell::new(params.inner, params.outer)
+        .stretch_of(altitude)
+        / (layers - 1) as f32;
     let one = length(sub(step_s, point));
     let two = length(sub(step_t, point));
     (one * one + two * two + step_r * step_r).sqrt()

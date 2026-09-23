@@ -2532,7 +2532,10 @@ mod chain_tests {
             ..Default::default()
         };
         // 1) 采样器（半径取壳中）
-        let radius = (INNER + OUTER) * 0.5;
+        // ⚠ "壳中"是**参数空间中点**（`u = 0.5`）⇒ 世界半径是几何平均 `√(inner·outer)`，
+        //   不是算术平均：径向律改了之后算术平均落在 `u = 0.585` 上，这一条量的
+        //   "跨棱噪声 / 面内噪声"会跟着换一层（阈值 2.0 就在边上）。
+        let radius = (INNER * OUTER).sqrt();
         let sampler = ratio_of(&|face_index, x, y| {
             let d = direction(face_index, x, y);
             px_volume_alg::sample_volume(&volume, [d[0] * radius, d[1] * radius, d[2] * radius], 0)

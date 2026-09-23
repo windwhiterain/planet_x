@@ -300,7 +300,8 @@ fn sample_at(volume: &VolumeData, point: [f32; 3]) -> Sample {
     let res = volume.res.max(2);
     let layers = volume.layers.max(2);
     let last_layer = layers - 1;
-    let altitude = ((radius - volume.inner) / span).clamp(0.0, 1.0);
+    let altitude =
+        px_volume_schema::volume::Shell::new(volume.inner, volume.outer).altitude_of(radius);
     let sz = altitude * last_layer as f32;
     let nearest = sz.round();
     let layer0 = if (sz - nearest).abs() < 1e-3 {
@@ -376,7 +377,12 @@ fn march_channel(
     let enter = emission.inner;
     let exit = emission.outer;
     let steps = params.steps.max(1);
-    let step = (exit - enter) / steps as f32;
+    // ⚠⚠ **步长在参数空间里取固定**（用户 2026-09-25 的口径）：`u` 均匀 ⇒ 落到世界里是
+    //   等比步长（∝ r），与角向格子 `r·Δθ` 配成各向同性。世界长度仍然要算出来
+    //   （光学深度是世界的量）：第 `i` 步的世界长度 = 那一格 `[i·Δu, (i+1)·Δu]` 的
+    //   `R` 之差 —— 它与抖动无关，所以期望值不变。
+    let shell = px_volume_schema::volume::Shell::new(enter, exit);
+    let du = 1.0 / steps as f32;
     let seed = 0x51ed_270b_u32.wrapping_add(channel as u32);
     // ⚠ 这一通道自己的消光（`1 + channel`）⇒ 蓝被吃得比红多 ⇒ 尘埃染红。
     let sigma_lane = 3 + channel.min(2);
@@ -406,7 +412,9 @@ fn march_channel(
         } else {
             0.5
         };
-        let distance = enter + (index as f32 + offset) * step;
+        let distance = shell.radius_of((index as f32 + offset) * du);
+        // 这一格的世界长度（`u` 均匀、世界等比 ⇒ 每步都不一样）。
+        let step = shell.radius_of((index + 1) as f32 * du) - shell.radius_of(index as f32 * du);
         let point = [
             direction[0] * distance,
             direction[1] * distance,

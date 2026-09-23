@@ -194,8 +194,10 @@ pub fn sample_world(volume: &VolumeData, point: [f32; 3]) -> f32 {
     let res = volume.res.max(2);
     let last_layer = volume.layers.max(2) - 1;
 
-    // 径向：层心在整数上（`altitude = layer / (layers-1)`）。
-    let altitude = ((radius - volume.inner) / span).clamp(0.0, 1.0);
+    // 径向：层心在整数上（`altitude = layer / (layers-1)`），而 `altitude` 是
+    // **参数空间**的高度（世界半径 → 它是 [`Shell::altitude_of`]，等比、不是线性）。
+    let altitude =
+        px_volume_schema::volume::Shell::new(volume.inner, volume.outer).altitude_of(radius);
     let sz = altitude * last_layer as f32;
     let nearest = sz.round();
     let layer0 = if (sz - nearest).abs() < 1e-3 {

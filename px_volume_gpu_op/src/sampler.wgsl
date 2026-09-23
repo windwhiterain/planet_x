@@ -113,6 +113,38 @@ fn gather_at(corners: array<u32, 8>, weights: array<f32, 8>, lane: u32) -> f32 {
     return total;
 }
 
+// ⚠⚠ **径向律：参数空间里线性、世界空间里等比**（2026-09-25 用户口径，与 CPU 的
+//   `px_volume_schema::volume::Shell` 是**同一条**）：`r = inner·(outer/inner)^u`。
+//   角向格子的世界尺寸是 `r·Δθ`（∝ r），径向也 ∝ r ⇒ 格子在每个半径上是同一个形状
+//   （线性径向在 r = 3 处给出 3:1 的"饼"）。
+//   ⚠ 采样 O(1)：层号 = `floor(u·layers)`，非线性只活在下面这一对函数里。
+//   改这里必须同时改 CPU 那一份 —— 两侧不一致的症状是"层错位"（画面上一圈圈台阶）。
+fn shell_radius(u: f32) -> f32 {
+    let inner = volume.extent.x;
+    let outer = volume.extent.y;
+    if (inner <= 0.0) {
+        return inner + (outer - inner) * clamp(u, 0.0, 1.0);
+    }
+    return inner * pow(outer / inner, clamp(u, 0.0, 1.0));
+}
+
+fn shell_altitude(radius: f32) -> f32 {
+    let inner = volume.extent.x;
+    let outer = volume.extent.y;
+    if (inner <= 0.0) {
+        let span = outer - inner;
+        if (abs(span) <= 1e-30) {
+            return 0.0;
+        }
+        return clamp((radius - inner) / span, 0.0, 1.0);
+    }
+    let ratio = log(outer / inner);
+    if (abs(ratio) <= 1e-30) {
+        return 0.0;
+    }
+    return clamp(log(max(radius, 1e-30) / inner) / ratio, 0.0, 1.0);
+}
+
 fn sample_volume(point: vec3<f32>, lane: u32) -> f32 {
     let res = volume.shape.x;
     let layers = volume.shape.y;
@@ -133,7 +165,7 @@ fn sample_volume(point: vec3<f32>, lane: u32) -> f32 {
     let t = mapped.z;
 
     let last_layer = layers - 1u;
-    let altitude = clamp((radius - inner) / span, 0.0, 1.0);
+    let altitude = shell_altitude(radius);
     let sz = altitude * f32(last_layer);
     let nearest = round(sz);
     var layer0 = floor(sz);
@@ -475,7 +507,7 @@ fn star_slab_collect(direction: vec3<f32>, t0: f32, t1: f32, support: f32) {
 //   * `T < 1e-4` 时 CPU 把游标推到末尾 ⇒ 剩下的星**整批丢掉**（不是用 `T` 兜底）；
 //   * 走完全程时，剩下的星（半径超出最后一个采样点的、**以及还没收到的那几层**）
 //     才用最后的透过率兜底。
-fn march_radiance(direction: vec3<f32>, lane: u32, steps: u32, h: f32, enter: f32, background: f32) -> f32 {
+fn march_radiance(direction: vec3<f32>, lane: u32, steps: u32, enter: f32, background: f32) -> f32 {
     let outer = volume.extent.y;
     let cell = star_meta.space.x;
     let gain = star_meta.light.z;
@@ -486,8 +518,15 @@ fn march_radiance(direction: vec3<f32>, lane: u32, steps: u32, h: f32, enter: f3
     var transmittance = 1.0;
     var radiance = 0.0;
     var stopped = false;
+    // ⚠⚠ **步长在参数空间里固定**（`u` 均匀 ⇒ 世界等比，与 CPU 同一口径）。
+    //   世界长度每步都要算（光学深度是世界的量），而它与抖动无关 ⇒ 期望值不变。
+    let du = 1.0 / f32(steps);
     for (var i = 0u; i < steps; i = i + 1u) {
-        let distance = enter + (f32(i) + 0.5) * h;
+        // ⚠ 采样点取格子中点（`offset = 0.5`）：与 CPU 的 `jitter = 0` 那一档逐字一致
+        //   （抖动是 CPU 那一侧的另一档，这里不掺 —— 掺了就不是同一条视线了）。
+        let here = (f32(i) + 0.5) * du;
+        let distance = shell_radius(here);
+        let step = shell_radius(f32(i + 1u) * du) - shell_radius(f32(i) * du);
         if (star_on) {
             // 半径不超过这一步的层全部收下来（多收无害：消费那一条按半径判）。
             while (slab <= outer && slab <= distance) {
@@ -498,8 +537,8 @@ fn march_radiance(direction: vec3<f32>, lane: u32, steps: u32, h: f32, enter: f3
         let point = direction * distance;
         let emit = sample_volume(point, lane);
         let sigma = sample_volume(point, lane + 3u);
-        radiance = radiance + transmittance * emit * h;
-        transmittance = transmittance * exp(-sigma * h);
+        radiance = radiance + transmittance * emit * step;
+        transmittance = transmittance * exp(-sigma * step);
         if (star_on) {
             // ⚠ 每颗星用它**自己那一步**的透过率：近处的星不被整层气遮住、远处的被前面的气吃掉。
             var taken = 0u;
@@ -559,9 +598,7 @@ fn march(@builtin(global_invocation_id) id: vec3<u32>) {
     let steps = sky.counts.x;
     let lane = sky.counts.z;
     let enter = sky.scalars.w;
-    let outer = volume.extent.y;
-    let h = (outer - enter) / f32(steps);
-    image[index] = march_radiance(direction, lane, steps, h, enter, pick3(sky.background.xyz, lane));
+    image[index] = march_radiance(direction, lane, steps, enter, pick3(sky.background.xyz, lane));
 }
 
 // 取 vec4 的第 i 个分量（显式分支：动态 vec 下标在语言间有差异，不碰它）。
@@ -704,12 +741,10 @@ fn sky_radiance(@builtin(global_invocation_id) id: vec3<u32>) {
     let direction = cube_direction(face, s, t);
     let steps = sky.counts.x;
     let enter = sky.scalars.w;
-    let outer = volume.extent.y;
-    let h = (outer - enter) / f32(steps);
 
     var rgb = vec3<f32>(0.0, 0.0, 0.0);
     for (var c = 0u; c < 3u; c = c + 1u) {
-        let radiance = march_radiance(direction, c, steps, h, enter, pick3(sky.background.xyz, c));
+        let radiance = march_radiance(direction, c, steps, enter, pick3(sky.background.xyz, c));
         if (c == 0u) { rgb.x = max(radiance, 0.0); }
         if (c == 1u) { rgb.y = max(radiance, 0.0); }
         if (c == 2u) { rgb.z = max(radiance, 0.0); }
@@ -891,14 +926,14 @@ fn bake_emission(@builtin(global_invocation_id) id: vec3<u32>) {
     let outer = volume.extent.y;
     let span = outer - inner;
     let altitude = f32(layer) / f32(max(layers, 2u) - 1u);
-    let radius = inner + span * altitude;
+    let radius = shell_radius(altitude);
     let direction = cube_direction(face, (f32(s) + 0.5) / f32(res), (f32(t) + 0.5) / f32(res));
     let position = direction * radius;
     let d = emission_world(position);
 
     // ---- 单方向光的遮挡 ----
     let light_direction = normalize(emission.light.xyz);
-    let light_radius = inner + span * clamp(emission.params.x, 0.0, 1.0);
+    let light_radius = shell_radius(clamp(emission.params.x, 0.0, 1.0));
     let steps = emission.counts.z;
     let total = max(outer - light_radius, 1e-4);
     let step = total / f32(steps);

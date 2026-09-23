@@ -69,9 +69,11 @@ pub fn bake_emission(
 ) -> VolumeData {
     let res = density.res.max(2);
     let layers = density.layers.max(2);
-    let span = density.outer - density.inner;
+    // ⚠ 径向律是**参数空间线性、世界等比**（与 `px_volume_schema::volume::Shell` 同一条）：
+    //   层心的高度就是参数 `u`，世界半径要过 `Shell`；方向光的半径同理（那个参数也是一个高度）。
+    let shell = px_volume_schema::volume::Shell::new(density.inner, density.outer);
     let light_direction = normalize(params.light);
-    let light_radius = density.inner + span * params.light_radius.clamp(0.0, 1.0);
+    let light_radius = shell.radius_of(params.light_radius.clamp(0.0, 1.0));
 
     // 朝光源的步长：整段壳分成 `shadow_steps` 段，逐段累加光深。
     let steps = params.shadow_steps.max(1);
@@ -109,7 +111,7 @@ pub fn bake_emission(
             let layer = (row_index % (layers * res)) / res;
             let t = row_index % res;
             let altitude = layer as f32 / (layers - 1) as f32;
-            let radius = density.inner + span * altitude;
+            let radius = shell.radius_of(altitude);
             let s_t = (t as f32 + 0.5) / res as f32;
             // ⚠ 候选表**一行一份**（复用，不逐体素分配）：`brightest_near` 只清空它。
             let mut candidates: Vec<px_sparse::Star> = Vec::new();
@@ -284,12 +286,12 @@ mod tests {
     #[test]
     fn every_voxel_centre_lands_inside_the_shell() {
         let density = flat_density(8, 4, 0.5);
-        let span = density.outer - density.inner;
+        let shell = px_volume_schema::volume::Shell::new(density.inner, density.outer);
         let mut worst = 0.0_f32;
         for face in 0..CUBE_FACES {
             for layer in 0..density.layers {
                 let altitude = layer as f32 / (density.layers - 1) as f32;
-                let radius = density.inner + span * altitude;
+                let radius = shell.radius_of(altitude);
                 assert!(
                     (density.inner..=density.outer).contains(&radius),
                     "层 {layer} 的半径 {radius} 跑到壳外了（壳是 {}..{}）",
