@@ -631,6 +631,68 @@ fn main() -> Result<(), String> {
         "    第 {slab} 层（t1 = {t1:.2}、半宽 {half:.3}）：AABB 外接球里有 {inside} 颗星（这是「测过」的上界）"
     );
 
+    // ⚠ **按表观亮度剔除**的账（用户 2026-09-25）：`1/r²` 之后远处的暗星读不出来 ⇒ 剔掉。
+    //   三栏一起看才够：①剔多少颗 ②每条视线的候选降多少（省下来的那件事）
+    //   ③**照亮气体**那一档的辐照降多少（被剔的星本来就最暗，但剔多了气会跟着暗）。
+    //   ⚠ ③ 用未封顶的和（`starlight_max` 截断是 emission 那一档的事）—— 这里要的是相对变化。
+    let (light_radius, light_soft) = (0.2_f32, 0.05_f32);
+    let lit_at = |field: &StarField| -> f64 {
+        let probes = 256;
+        let mut total = 0.0_f64;
+        for index in 0..probes {
+            let z = 1.0 - 2.0 * (index as f32 + 0.5) / probes as f32;
+            let ring = (1.0 - z * z).max(0.0).sqrt();
+            let phi = 2.399_963_2_f32 * index as f32;
+            let point = [ring * phi.cos() * 2.0, ring * phi.sin() * 2.0, z * 2.0];
+            for star in px_volume_alg::stars_near(field, point, light_radius) {
+                let delta = [
+                    star.position[0] - point[0],
+                    star.position[1] - point[1],
+                    star.position[2] - point[2],
+                ];
+                let distance2 = delta[0] * delta[0] + delta[1] * delta[1] + delta[2] * delta[2];
+                total += (star.brightness / (distance2 + light_soft * light_soft)) as f64;
+            }
+        }
+        total / probes as f64
+    };
+    let baseline_lit = lit_at(&field);
+    println!("按表观亮度剔除（阈值 → 存活 / 每条视线候选 / 气体受照）：");
+    for threshold in [0.0_f32, 0.05, 0.125, 0.25, 0.5, 1.0, 2.0, 4.0] {
+        let mut tuned = params.clone();
+        tuned.min_apparent = threshold;
+        let Ok(tuned_field) = px_volume_alg::bake_stars(&tuned) else {
+            continue;
+        };
+        let support = px_volume_alg::raymarch::star_support(&params_sky);
+        let mut total = 0_usize;
+        let probes = 512;
+        for index in 0..probes {
+            let z = 1.0 - 2.0 * (index as f32 + 0.5) / probes as f32;
+            let ring = (1.0 - z * z).max(0.0).sqrt();
+            let phi = 2.399_963_2_f32 * index as f32;
+            let direction = [ring * phi.cos(), ring * phi.sin(), z];
+            total += px_volume_alg::raymarch::slab_candidate_counts(
+                &tuned_field,
+                direction,
+                params.inner,
+                params.outer,
+                support,
+            )
+            .iter()
+            .sum::<usize>();
+        }
+        let lit = lit_at(&tuned_field);
+        println!(
+            "  {threshold:>5.3} → {:>7} 颗（{:>5.1}%）／候选 {:>5.1}／气体受照 {:.1}%（该星核峰值 {:.4}）",
+            tuned_field.count(),
+            100.0 * tuned_field.count() as f64 / params.count.max(1) as f64,
+            total as f64 / probes as f64,
+            100.0 * lit / baseline_lit.max(1e-9),
+            threshold * params_sky.star_gain,
+        );
+    }
+
     if let Some(path) = artifact {
         // ⚠ 两个阈值都要看：**0.05 那一档量的是"整幅亮不亮"**（气也过线 ⇒ 它反映气的分布
         //   与分级曲线），而 **0.5 那一档只有星核过线**（气很少那么亮）⇒ 后者才是

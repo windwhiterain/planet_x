@@ -11,9 +11,9 @@ light = [0.25, 0.35, 0.90]
 #   而参考图的结构特征是"**一个亮核 + 大片暗**" ⇒ 收到 0.12 让亮区聚成一个核。
 light_radius = 0.28
 # 朝光源步进多少步算遮挡：步数越多边缘越锐（代价线性）。
-shadow_steps = 24
+shadow_steps = 48
 # 遮挡的浓度：`exp(-τ × 这个)`。给大了只剩最靠近光源的一薄层亮。
-shadow_gain = 2.0
+shadow_gain = 3.0
 
 # 发射 = `density^power × gain`：power > 1 ⇒ 只有浓的地方才亮（薄雾几乎不发光）。
 #
@@ -48,8 +48,8 @@ shadow_gain = 2.0
 # ⇒ 幂**低**时底光在薄处也很强（`d¹` 不小），把暗部染蓝；
 #   幂**高**才只剩浓处那一段 ⇒ 核保住蓝白、暗部交回"主发射 + 消光"（玫红）。
 emission_power = 6.5
-emission_gain = 0.85
-glow_gain = 5.5
+emission_gain = 20.0
+glow_gain = 0.0
 glow_power = 1.6
 glow_threshold = 0.48
 glow_tint = [0.35, 0.85, 1.15]
@@ -106,11 +106,11 @@ starlight_gain = 0.003
 # **查多远**：逐体素只在半径 0.2 的球里找星（世界单位）。
 # ⚠ 与 `sky.stars` 的 `cell`（**存储**细格）是两个旋钮：这个决定"光铺多开"。
 #   0.2 时一颗星大约照到 `0.2³ × 4000/单位³ ≈ 32` 颗邻居星里最近的那几颗。
-starlight_radius = 0.2
+starlight_radius = 0.4
 # 辐照的软化半径：`亮度 / (d² + soft²)`（`d → 0` 时不发散）。
 starlight_soft = 0.05
 # 逐星阴影步数（与 `shadow_steps` 同量纲）。
 starlight_steps = 12
 # 每个体素最多吃几颗星（按亮度取前几名；星的亮度是幂律的 ⇒ 前几名之外可忽略）。
-starlight_max = 8
+starlight_max = 16
 

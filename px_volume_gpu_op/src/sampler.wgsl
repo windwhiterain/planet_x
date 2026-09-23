@@ -545,7 +545,9 @@ fn march_radiance(direction: vec3<f32>, lane: u32, steps: u32, enter: f32, backg
             while (taken < star_pending_count && star_pending_radius[taken] <= distance) {
                 let star = star_pending_star[taken];
                 let power = star_brightness(star) * pick3(star_tint(star), lane);
-                radiance = radiance + ((transmittance * power) * star_power(star_pending_sine[taken])) * gain;
+                // 点源的辐照律：像素值 ∝ 1/r²，增益锚在内壁上（与 CPU 的 star_falloff 同一条）。
+                let falloff = (enter / max(star_pending_radius[taken], 1e-4));
+                radiance = radiance + ((transmittance * power) * star_power(star_pending_sine[taken])) * gain * (falloff * falloff);
                 taken = taken + 1u;
             }
             if (taken > 0u) {
@@ -572,7 +574,8 @@ fn march_radiance(direction: vec3<f32>, lane: u32, steps: u32, enter: f32, backg
         for (var i = 0u; i < star_pending_count; i = i + 1u) {
             let star = star_pending_star[i];
             let power = star_brightness(star) * pick3(star_tint(star), lane);
-            radiance = radiance + ((transmittance * power) * star_power(star_pending_sine[i])) * gain;
+            let falloff = (enter / max(star_pending_radius[i], 1e-4));
+            radiance = radiance + ((transmittance * power) * star_power(star_pending_sine[i])) * gain * (falloff * falloff);
         }
     }
     return radiance + transmittance * background;

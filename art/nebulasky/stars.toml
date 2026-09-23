@@ -28,6 +28,12 @@ cell = 0.05
 brightness_power = 1.1
 # 幂律的尾巴很长（`draw → 0` 时能到几千），钳住免得一颗星打爆整幅图。
 max_brightness = 64.0
+min_apparent = 2.0
+
+# 成团：变化由星给、背景由气给（用户 2026-09-25）。
+clump_count = 64
+clump_radius = 0.25
+clump_share = 0.6
 
 # 嵌在气里的那一簇亮星（参考图里那几颗明显的星）。
 # ⚠ 它们与"场的星"是**同一种东西**（同一张表、同一个格）⇒ 既直射进画面、
@@ -36,5 +42,5 @@ cluster_count = 4
 # 簇心是**世界坐标的点**（旧版是方向）—— 取旧方向的同一方位、落在半径 2.0 处。
 cluster = [0.50, 0.70, 1.80]
 cluster_radius = 0.35
-cluster_gain = 1.2
+cluster_gain = 6.0
 cluster_tint = [0.72, 0.86, 1.0]

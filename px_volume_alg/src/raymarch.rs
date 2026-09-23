@@ -362,6 +362,24 @@ fn sample_at(volume: &VolumeData, point: [f32; 3]) -> Sample {
     }
 }
 
+/// **点源的辐照律**：相机（在壳心）看一颗距离 `r` 的星，像素值 ∝ `1/r²`。
+///
+/// ⚠⚠ 2026-09-25 用户定的：`1/r²` 是辐照度、必须成立。此前直接看见那一档**漏了它**
+///   （`B·PSF` 与距离无关），而"照亮气体"那一档早就是 `B/(d²+soft²)` ——
+///   **同一个 `B` 在两档里含义不同**，那才是真正的不一致。
+///
+/// ⚠ 增益**锚在内壁上**（`(inner/r)²`）：`star_gain` 的含义因此是"内壁上一颗星的
+///   表观亮度"⇒ 近处的星亮度与从前一样、远处的按 `1/r²` 变暗（`r = outer` 处是 1/9）。
+///   不锚的话整套增益要重标一遍，而那会把"哪一档变了"搅在一起。
+///
+/// ⚠ 这里**不含任何介质**（用户："先不管介质"）：均匀稀薄介质要么进 RTE、要么进
+///   假想的星等，两样都不是这一档该干的事。气自己的消光仍然照旧（那是星云本身）。
+pub fn star_falloff(radius: f32, inner: f32) -> f32 {
+    let reference = inner.max(1e-4);
+    let distance = radius.max(1e-4);
+    (reference / distance) * (reference / distance)
+}
+
 /// 一条视线的积分（出一条通道）。
 ///
 /// ⚠ 步长是**弦长除以步数**：弧长参数化下每步的 `ds` 相同 ⇒ 透过率可以逐步累乘，
@@ -436,8 +454,11 @@ fn march_channel(
         //   ⚠ 摆在透过率**更新之后**：星在这一步里，它前面那些气也该算上。
         while next_hit < hits.len() && hits[next_hit].radius <= distance {
             let hit = &hits[next_hit];
-            radiance +=
-                transmittance * hit.power[lane] * star_power(hit.sine, params) * params.star_gain;
+            radiance += transmittance
+                * hit.power[lane]
+                * star_power(hit.sine, params)
+                * params.star_gain
+                * star_falloff(hit.radius, enter);
             next_hit += 1;
         }
         if transmittance < 1e-4 {
@@ -452,8 +473,11 @@ fn march_channel(
     // 它们的贡献是 `T_end × …`，与"星在天穹上"那一档逐字一致。
     while next_hit < hits.len() {
         let hit = &hits[next_hit];
-        radiance +=
-            transmittance * hit.power[lane] * star_power(hit.sine, params) * params.star_gain;
+        radiance += transmittance
+            * hit.power[lane]
+            * star_power(hit.sine, params)
+            * params.star_gain
+            * star_falloff(hit.radius, enter);
         next_hit += 1;
     }
 

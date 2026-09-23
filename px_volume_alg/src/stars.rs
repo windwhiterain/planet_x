@@ -20,6 +20,8 @@
 
 use px_sparse::grid::{CHUNK_CELLS, GridMeta};
 use px_sparse::{Star, StarField};
+
+use crate::raymarch::star_falloff;
 use px_volume_schema::params::stars::StarsParams;
 
 /// 一颗星的确定性随机源：**纯函数**（同一个种子 + 同一个序号永远同一颗星）。
@@ -115,16 +117,63 @@ pub fn bake_stars(params: &StarsParams) -> Result<StarField, String> {
     let mut values: Vec<f32> = Vec::with_capacity(count + cluster_count);
     let mut tints: Vec<[f32; 3]> = Vec::with_capacity(count + cluster_count);
 
+    // ⚠ **簇心**先撒好（体积均匀撒在壳里）：成团那一部分星以它们为心落在 `clump_radius` 内。
+    //   簇心用**自己的种子**（`0x1b87_3f21`）⇒ 与星的哈希流无关，改簇数不会挪动别的星。
+    let clump_count = params.clump_count as usize;
+    let mut clumps: Vec<[f32; 3]> = Vec::with_capacity(clump_count);
+    for index in 0..clump_count {
+        let h0 = hash(seed ^ 0x1b87_3f21, index as u32);
+        let h1 = hash(seed ^ 0x2f6a_1d43, index as u32);
+        let h2 = hash(seed ^ 0x3c9e_5b17, index as u32);
+        let r = radius_of(unit24(h0), params);
+        let direction = direction_of(unit24(h1), unit24(h2));
+        clumps.push([direction[0] * r, direction[1] * r, direction[2] * r]);
+    }
+
     for index in 0..count {
         // ⚠ 三个通道各取**一颗独立的哈希**（24 位小数）：位置与亮度共用一个种子的相邻字节
         //   会让"亮的星总长在格的同一角"，而半径与方向的低位共用会让两个通道相关。
         let h0 = hash(seed, index as u32);
         let h1 = hash(seed ^ 0x9e37_79b9, index as u32);
         let h2 = hash(seed ^ 0x85eb_ca6b, index as u32);
-        let r = radius_of(unit24(h0), params);
-        let direction = direction_of(unit24(h1), unit24(h2));
-        positions.push([direction[0] * r, direction[1] * r, direction[2] * r]);
-        values.push(brightness(hash(seed ^ 0x51ed_270b, index as u32), params));
+        let value = brightness(hash(seed ^ 0x51ed_270b, index as u32), params);
+        // 成团还是均匀：**同一颗星自己决定**（与位置/亮度的哈希独立）⇒ 换个比例只挪走
+        // 该挪的那些星，其余星位逐位不变。
+        let clumped = clump_count > 0
+            && params.clump_share > 0.0
+            && unit24(hash(seed ^ 0x6d2b_79f5, index as u32)) < params.clump_share;
+        let position = if clumped {
+            let pick = unit24(hash(seed ^ 0x4a1c_9e37, index as u32));
+            let centre = clumps[((pick * clump_count as f32) as usize).min(clump_count - 1)];
+            // 簇内**按体积均匀**（球里均匀，不是壳上均匀）⇒ `u^(1/3)`，方向按球面度均匀。
+            let spread = params.clump_radius.max(0.0)
+                * unit24(hash(seed ^ 0x7f4a_2c61, index as u32)).cbrt();
+            let direction = direction_of(
+                unit24(hash(seed ^ 0x58d3_1b9f, index as u32)),
+                unit24(hash(seed ^ 0x93e6_4d27, index as u32)),
+            );
+            [
+                centre[0] + direction[0] * spread,
+                centre[1] + direction[1] * spread,
+                centre[2] + direction[2] * spread,
+            ]
+        } else {
+            let r = radius_of(unit24(h0), params);
+            let direction = direction_of(unit24(h1), unit24(h2));
+            [direction[0] * r, direction[1] * r, direction[2] * r]
+        };
+        let r = (position[0] * position[0] + position[1] * position[1] + position[2] * position[2])
+            .sqrt();
+        // ⚠⚠ **按表观亮度剔除**（用户 2026-09-25）：直接看见那一档像素值 ∝ `B/r²`
+        //   （辐照律，见 `raymarch::star_falloff`）⇒ 远处的暗星根本读不出来。
+        //   剔掉它们等于**星等截断**（真实星表就是这么干的），而它的副产品正是
+        //   "近密远疏"：`1/r²` 让远处的暗星先掉出去（`r = 3` 处阈值收到 1/9）。
+        //   ⚠ 阈值只看**几何 + 亮度**，不看气（用户："先不管介质"）⇒ 星场不必吃密度。
+        if value * star_falloff(r, params.inner) < params.min_apparent {
+            continue;
+        }
+        positions.push(position);
+        values.push(value);
         tints.push([1.0, 1.0, 1.0]);
     }
 
