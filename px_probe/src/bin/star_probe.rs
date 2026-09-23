@@ -132,15 +132,100 @@ fn lit_by_ring(field: &StarField, params: &SkyParams, face: u32) -> Vec<(f64, f6
                     2
                 };
                 let value = plane.at(x, face_index * face + y);
-                area[band] += 1.0;
+                // ⚠⚠ 按**球面度**加权，不是数 texel：立方图一个 texel 的立体角是
+                //   `4/(1+a²+b²)^{3/2}/face²` —— 面角比面心小 **5.2 倍**（a=b=1 时
+                //   `3^{3/2} = 5.196`）⇒ 数 texel 会把面角的亮面积凭空抬高（同一个角半径的
+                //   星在面角盖住 5 倍多的 texel）。旧版那个 1.58x 量的是**球面度**，
+                //   所以这里也必须按球面度，否则两件事不可比。
+                let weight =
+                    1.0 / ((1.0 + (a * a + b * b) as f64) * (1.0 + (a * a + b * b) as f64).sqrt());
+                area[band] += weight;
                 if value > 0.05 {
-                    lit[band] += 1.0;
+                    lit[band] += weight;
                 }
             }
         }
     }
     (0..3)
         .map(|band| (lit[band] / area[band], lit[band], area[band]))
+        .collect()
+}
+
+/// **解析版的位置均匀性**：把每颗星的"亮于阈值的那块角面积"按它所在的环带累加，
+/// 再除以**带内的球面度**。
+///
+/// ⚠⚠ 为什么要有这一条（而不是只看烘出来的贴图）：产物那一侧混着**气**（亮的带本来就多
+///   过线的）、**分级曲线**（非线性）与**立方图 texel 的立体角差 5.2 倍**（面角一个 texel
+///   的立体角只有面心的 1/5.2 ⇒ 同一个角半径的星在面角盖住 5 倍多的 texel）。
+///   这一条把星这一层**单独**拿出来量：真空（透过率 1）、不给分级、按球面度加权。
+///
+/// 面积取高斯的解析式 `π σ² ln(P / 阈值)`（`P = 亮度 × 增益`；`P ≤ 阈值` 时为 0）——
+/// ⚠ 它是**每颗星各自**的，与采样分辨率无关。
+fn analytic_core_area(field: &StarField, params: &SkyParams, threshold: f64) -> Vec<(f64, f64)> {
+    // 三个带的球面度（把立方图表面按 `1/(1+a²+b²)^{3/2}` 积一遍）。
+    let grid = 2048_usize;
+    let mut solid = [0.0_f64; 3];
+    for face in 0..6 {
+        for y in 0..grid {
+            for x in 0..grid {
+                let a = (x as f64 + 0.5) / grid as f64 * 2.0 - 1.0;
+                let b = (y as f64 + 0.5) / grid as f64 * 2.0 - 1.0;
+                let _ = face;
+                let r = (a * a + b * b).sqrt();
+                let band = if r < 0.5 {
+                    0
+                } else if r < 0.9 {
+                    1
+                } else {
+                    2
+                };
+                let weight = 1.0 / ((1.0 + a * a + b * b) * (1.0 + a * a + b * b).sqrt());
+                solid[band] += weight;
+            }
+        }
+    }
+    let mut lit = [0.0_f64; 3];
+    let sigma = params.star_core.max(1e-6) as f64;
+    for index in 0..field.count() {
+        let star = field.star(index);
+        let p = star.position;
+        let length = ((p[0] as f64).powi(2) + (p[1] as f64).powi(2) + (p[2] as f64).powi(2)).sqrt();
+        if length <= 0.0 {
+            continue;
+        }
+        // 方向 → 立方图的面 + (a, b)（取主轴那一面，与 `cube_direction` 同一套参数）。
+        let d = [
+            p[0] as f64 / length,
+            p[1] as f64 / length,
+            p[2] as f64 / length,
+        ];
+        let axis = (0..3)
+            .max_by(|x, y| d[*x].abs().partial_cmp(&d[*y].abs()).expect("没有 NaN"))
+            .unwrap_or(0);
+        let major = d[axis].abs().max(1e-9);
+        let (u, v) = match axis {
+            0 => (d[1], d[2]),
+            1 => (d[0], d[2]),
+            _ => (d[0], d[1]),
+        };
+        let a = u / major;
+        let b = v / major;
+        let r = (a * a + b * b).sqrt();
+        let band = if r < 0.5 {
+            0
+        } else if r < 0.9 {
+            1
+        } else {
+            2
+        };
+        let peak = star.brightness as f64 * params.star_gain as f64;
+        if peak <= threshold {
+            continue;
+        }
+        lit[band] += std::f64::consts::PI * sigma * sigma * (peak / threshold).ln();
+    }
+    (0..3)
+        .map(|band| (lit[band] / solid[band], solid[band]))
         .collect()
 }
 
@@ -218,9 +303,12 @@ fn lit_rings_of_artifact(
                 // 布局与 `VolumeData` 同一个口径：行 = 面 × 面 + y，每行 `面 × 4` 个通道。
                 let texel = ((face_index * face + y) * face + x) as usize;
                 let value = half(texel * 4);
-                area[band] += 1.0;
+                // ⚠ 与 `lit_by_ring` 同一个口径：**按球面度加权**（面角的 texel 小 5.2 倍）。
+                let radius2 = (a * a + b * b) as f64;
+                let weight = 1.0 / ((1.0 + radius2) * (1.0 + radius2).sqrt());
+                area[band] += weight;
                 if value > threshold {
-                    lit[band] += 1.0;
+                    lit[band] += weight;
                 }
             }
         }
@@ -329,6 +417,21 @@ fn main() -> Result<(), String> {
         lit[2] * 100.0,
         if lit[0] > 0.0 {
             lit[2] / lit[0]
+        } else {
+            f64::INFINITY
+        }
+    );
+
+    // ⚠ 这一条才是**星层单独**的判据（真空、不分级、按球面度加权）：上面那条现算与下面
+    //   那条产物都被气/分级/texel 面积混着，只有这一条能指认"星自己偏没偏"。
+    let analytic = analytic_core_area(&field, &params_sky, 0.05);
+    println!(
+        "星核亮面积（解析、真空、按球面度）：面心 {:.3e} / 中 {:.3e} / 面角 {:.3e}｜面角/面心 **{:.3}x**",
+        analytic[0].0,
+        analytic[1].0,
+        analytic[2].0,
+        if analytic[0].0 > 0.0 {
+            analytic[2].0 / analytic[0].0
         } else {
             f64::INFINITY
         }
@@ -529,20 +632,25 @@ fn main() -> Result<(), String> {
     );
 
     if let Some(path) = artifact {
-        // 产物上量一遍：**同一个阈值**（0.05）与同一套环带，才好与上一行对照。
-        let (rings, face) = lit_rings_of_artifact(&path, 0.05)?;
-        let lit: Vec<f64> = rings.iter().map(|(value, _, _)| *value).collect();
-        println!(
-            "产物 {path}（面 {face}）：亮面积占比 {:.4}% / {:.4}% / {:.4}%｜面角/面心 **{:.3}x**",
-            lit[0] * 100.0,
-            lit[1] * 100.0,
-            lit[2] * 100.0,
-            if lit[0] > 0.0 {
-                lit[2] / lit[0]
-            } else {
-                f64::INFINITY
-            }
-        );
+        // ⚠ 两个阈值都要看：**0.05 那一档量的是"整幅亮不亮"**（气也过线 ⇒ 它反映气的分布
+        //   与分级曲线），而 **0.5 那一档只有星核过线**（气很少那么亮）⇒ 后者才是
+        //   "星在立方图上的位置偏不偏"。旧版那个 1.58x 是量在星这一档上的，两个都印出来，
+        //   免得拿混淆的那一档去比。
+        for threshold in [0.05_f32, 0.5] {
+            let (rings, face) = lit_rings_of_artifact(&path, threshold)?;
+            let lit: Vec<f64> = rings.iter().map(|(value, _, _)| *value).collect();
+            println!(
+                "产物 {path}（面 {face}，阈值 {threshold:.2}）：亮面积占比 {:.4}% / {:.4}% / {:.4}%｜面角/面心 **{:.3}x**",
+                lit[0] * 100.0,
+                lit[1] * 100.0,
+                lit[2] * 100.0,
+                if lit[0] > 0.0 {
+                    lit[2] / lit[0]
+                } else {
+                    f64::INFINITY
+                }
+            );
+        }
     }
     Ok(())
 }
