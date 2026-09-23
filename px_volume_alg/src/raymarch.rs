@@ -311,6 +311,61 @@ pub const RAMP_HUE: [[f32; 3]; 4] = [
 /// 朝目标色相走多满（`1` = 完全替换；`< 1` 保留一点原色变化）。
 pub const GRADE_STRENGTH: f32 = 0.95;
 
+/// **亮度响应**（S 形对比曲线）—— 分级里的第二件事（第一件是色相斜坡）。
+///
+/// ⚠⚠ 全部从**参考图的分位实测**拟合：把我当前的 p10/p50/p85/p99 映到参考的 ——
+///
+///   | 锚点（输入 luma → 输出 luma） | 段的 log-log 斜率 |
+///   |---|---|
+///   | 0.0061 → 0.0051（p10） | —— |
+///   | 0.0299 → 0.0171（p50） | **0.76**（暗部几乎不动） |
+///   | 0.0636 → 0.0746（p85） | **1.96**（中调大压） |
+///   | 0.1357 → 0.2489（p99） | **1.59**（亮端大拉） |
+///
+///   ⇒ 是**S 形对比**，不是幂律：纯 gamma 1.7 能映中后三点，但 p10 被压掉 5 倍
+///   （推演排除）。⚠ 锚点**跟着实测走**：输入分布变了（改密度/发射）要重拟 ——
+///   像白平衡一样，是"对参考的响应"，不是普适常数。
+/// ⚠ p99 之上走**软肩**（C¹ 连续、渐近 [`TONE_CEIL`]）：星核该白但**不许撞顶**
+///   （参考图削顶 0.000%、线性最高 0.9868）。
+/// ⚠ `tone(0) = 0`：纯黑原样（"深黑太空"靠它）。
+pub const TONE_IN: [f32; 4] = [0.0061, 0.0299, 0.0636, 0.1357];
+pub const TONE_OUT: [f32; 4] = [0.0051, 0.0171, 0.0746, 0.2489];
+const TONE_SHOULDER: f32 = 0.72;
+const TONE_CEIL: f32 = 0.95;
+
+fn tone(l: f32) -> f32 {
+    if l <= 0.0 {
+        return 0.0;
+    }
+    // log-log 分段线性（锚点间插值；两端按最外一段的实测斜率幂外推）。
+    let x = l.ln();
+    let y = if l <= TONE_IN[0] {
+        let slope = (TONE_OUT[1] / TONE_OUT[0]).ln() / (TONE_IN[1] / TONE_IN[0]).ln();
+        (TONE_OUT[0].ln() + (x - TONE_IN[0].ln()) * slope).exp()
+    } else if l >= TONE_IN[3] {
+        let slope = (TONE_OUT[3] / TONE_OUT[2]).ln() / (TONE_IN[3] / TONE_IN[2]).ln();
+        (TONE_OUT[3].ln() + (x - TONE_IN[3].ln()) * slope).exp()
+    } else {
+        let mut value = TONE_OUT[0];
+        for stop in 0..3 {
+            if l < TONE_IN[stop + 1] {
+                let w = (x - TONE_IN[stop].ln()) / (TONE_IN[stop + 1].ln() - TONE_IN[stop].ln());
+                value =
+                    (TONE_OUT[stop].ln() + w * (TONE_OUT[stop + 1] / TONE_OUT[stop]).ln()).exp();
+                break;
+            }
+        }
+        value
+    };
+    // 软肩：指数收敛到 `TONE_CEIL`（起点处斜率恰为 1 ⇒ C¹ 连续）。
+    if y <= TONE_SHOULDER {
+        y
+    } else {
+        let span = TONE_CEIL - TONE_SHOULDER;
+        TONE_SHOULDER + span * (1.0 - (-(y - TONE_SHOULDER) / span).exp())
+    }
+}
+
 /// 斜坡上的目标色相（按**档位键**的亮度取段）。
 fn ramp_hue(key: f32) -> [f32; 3] {
     if key >= RAMP_LUMA[3] {
@@ -463,7 +518,12 @@ pub fn raymarch_sky(
             planes[1][index].max(0.0),
             planes[2][index].max(0.0),
         ];
-        let out = grade_pixel(rgb, region[index]);
+        // ⚠ **先亮度响应、后色相斜坡**：色相的档位常数（`RAMP_LUMA`）是**输出域**
+        //   量出来的（参考图的分位）⇒ 必须对齐到响应**之后**的亮度，顺序不能反。
+        let l = luma_of[index];
+        let response = if l > 1e-9 { tone(l) / l } else { 0.0 };
+        let rgb = [rgb[0] * response, rgb[1] * response, rgb[2] * response];
+        let out = grade_pixel(rgb, tone(region[index].max(0.0)));
         graded[index * 3] = line(out[0]);
         graded[index * 3 + 1] = line(out[1]);
         graded[index * 3 + 2] = line(out[2]);
@@ -766,5 +826,19 @@ mod tests {
             "暗尘带没逃出区域档（G/R {:.2}）",
             lane[1] / lane[0]
         );
+
+        // ⚠ **亮度响应**（`tone`）的三条硬性质：单调、纯黑原样、**永不撞顶**
+        //   （削顶必须是 0 —— 参考图削顶 0.000%，白核靠软肩不靠钳位）。
+        assert_eq!(tone(0.0), 0.0);
+        let mut previous = 0.0_f32;
+        for step in 0..200_usize {
+            let l = step as f32 * 0.01;
+            let y = tone(l);
+            assert!(y >= previous, "tone 不单调（{l} 处 {y} < {previous}）");
+            // ⚠ `<=` 而不是 `<`：f32 里软肩会**等于**渐近值（`e^(−84)` 直接下溢为 0），
+            //   而 0.95 线性 = sRGB 250 —— 本就不算削顶，判据要的是"不许**超过**"。
+            assert!(y <= TONE_CEIL, "tone 撞顶（{l} 处 {y}）");
+            previous = y;
+        }
     }
 }
