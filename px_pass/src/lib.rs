@@ -1983,7 +1983,12 @@ pub struct Executor {
     comparison_sampler: Option<Sampler>,
     pool: HashMap<String, Pooled>,
     /// 没被 reads 占到的格一律绑它：布局是固定超集，shader 里声明了就一定绑得上。
-    fallback: HashMap<Dimension, TextureView>,
+    ///
+    /// ⚠ 键是 **`(维度, 是不是深度)`**：深度那一档要的是 `Depth32Float` 的纹理
+    /// （布局声明的是 `TextureSampleType::Depth` + `Comparison` 采样器），
+    /// 拿颜色那张去顶会在建组时当场拒 —— 而"这个槽没人给图"本来是个**正当**情形
+    /// （固定超集的代价），不该以硬报错收场。
+    fallback: HashMap<(Dimension, bool), TextureView>,
     /// 宿主 `seed` 过的名字（见 [`Executor::seed`]）。
     ///
     /// ⚠ 它留在这里是为了 `execute` 能判"seed 了却没人用"：名字对不上（例如
@@ -2268,10 +2273,19 @@ impl Executor {
         device: &Device,
         encoder: &mut CommandEncoder,
         dimension: Dimension,
+        depth: bool,
     ) -> TextureView {
-        if let Some(view) = self.fallback.get(&dimension) {
+        if let Some(view) = self.fallback.get(&(dimension, depth)) {
             return view.clone();
         }
+        // ⚠ 深度槽必须是深度**格式**：布局那一格声明的是 `TextureSampleType::Depth`
+        //    （+ `Comparison` 采样器），拿 `Rgba8UnormSrgb` 去顶在建组时当场拒 ——
+        //    而"这个槽没人给图"是**正当**情形（固定超集的代价），不该以硬报错收场。
+        let format = if depth {
+            TextureFormat::Depth32Float
+        } else {
+            TextureFormat::Rgba8UnormSrgb
+        };
         let texture = device.create_texture(&TextureDescriptor {
             label: Some("px_pass_fallback"),
             size: Extent3d {
@@ -2282,7 +2296,7 @@ impl Executor {
             mip_level_count: 1,
             sample_count: 1,
             dimension: GpuDimension::D2,
-            format: TextureFormat::Rgba8UnormSrgb,
+            format,
             usage: TextureUsages::TEXTURE_BINDING | TextureUsages::RENDER_ATTACHMENT,
             view_formats: &[],
         });
@@ -2299,25 +2313,48 @@ impl Executor {
                 array_layer_count: Some(1),
                 ..Default::default()
             });
-            let descriptor = RenderPassDescriptor {
-                label: Some("px_pass_fallback_clear"),
-                color_attachments: &[Some(RenderPassColorAttachment {
-                    view: &layer_view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: Operations {
-                        load: LoadOp::Clear(wgpu::Color::WHITE),
-                        store: StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
+            // ⚠ 深度那一档只能当**深度附件**清（`Depth32Float` 不能挂颜色附件），
+            //    而颜色那一档照旧全白（"没有这张图"读到白）。
+            let descriptor = if depth {
+                RenderPassDescriptor {
+                    label: Some("px_pass_fallback_clear"),
+                    color_attachments: &[],
+                    depth_stencil_attachment: Some(RenderPassDepthStencilAttachment {
+                        view: &layer_view,
+                        // ⚠ **0.0 = 远**（无限 reverse-Z）⇒ 这个槽读出来是"没有遮挡物"，
+                        //    正是"没人给图"该有的语义（清成 1.0 会变成"处处被挡" ——
+                        //    那才是静默错像素）。
+                        depth_ops: Some(Operations {
+                            load: LoadOp::Clear(0.0),
+                            store: StoreOp::Store,
+                        }),
+                        stencil_ops: None,
+                    }),
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                }
+            } else {
+                RenderPassDescriptor {
+                    label: Some("px_pass_fallback_clear"),
+                    color_attachments: &[Some(RenderPassColorAttachment {
+                        view: &layer_view,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: Operations {
+                            load: LoadOp::Clear(wgpu::Color::WHITE),
+                            store: StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                }
             };
             let _ = encoder.begin_render_pass(&descriptor);
         }
-        self.fallback.insert(dimension, view.clone());
+        self.fallback.insert((dimension, depth), view.clone());
         view
     }
 
@@ -2445,7 +2482,7 @@ impl Executor {
                 .iter()
                 .find(|(binding, _)| *binding == slot.binding)
                 .map(|(_, view)| view.clone())
-                .unwrap_or_else(|| self.fallback(device, encoder, slot.dimension));
+                .unwrap_or_else(|| self.fallback(device, encoder, slot.dimension, slot.depth));
             views.push(view);
         }
         // ⚠ 深度槽要**比较采样器**（布局那一格就是这么建的）⇒ 逐槽挑一份，同样先收进表里

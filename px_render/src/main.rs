@@ -630,6 +630,25 @@ fn check_content_shaders() -> i32 {
 ///
 /// ⚠ 落盘的尺寸用 `rendered.width/height`，不是命令行的 `--width/--height`：
 /// 对照图那一档命令行给的是**一格**的尺寸（960×640），而落盘那张是 3840×1920。
+/// "执行了" 那一栏怎么打：**默认只列前几条 + 总数**。
+///
+/// ⚠⚠ 这一栏列的是**展开后**的每一条 pass —— 而虚拟影图之后，一条帧配方会展开成
+/// **几千条**（影子每页一条：`probe-ringsun1` 实测 4369 条），逐条打出来会刷掉
+/// **十几万字节**（实测 122 KB），把同一段里真正有用的那几行读数淹掉。
+/// 日志里有用的是"跑了哪些、共多少条"；要看全表就 `PX_PASS_LIST=1`（诊断闸门照旧，
+/// 与本仓库其它几处同一条口径：**默认给人看的短，要细节的显式开口**）。
+fn executed_summary(executed: &[String]) -> String {
+    const HEAD: usize = 8;
+    let total = executed.len();
+    if std::env::var_os("PX_PASS_LIST").is_some() || total <= HEAD {
+        return executed.join(" → ");
+    }
+    format!(
+        "{} → …（共 {total} 条；要看全表设 PX_PASS_LIST=1）",
+        executed[..HEAD].join(" → ")
+    )
+}
+
 fn run_scene(
     scene: &Path,
     out: &Path,
@@ -693,7 +712,7 @@ fn run_scene(
     if let Some(text) = stats_text {
         println!("{text}");
     }
-    println!("执行了：{}", rendered.executed.join(" → "));
+    println!("执行了：{}", executed_summary(&rendered.executed));
     for (label, why) in &rendered.skipped {
         println!("⚠ 没有执行 '{label}'：{why}");
     }

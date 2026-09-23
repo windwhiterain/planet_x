@@ -271,7 +271,7 @@ impl Server {
                 &sha256[..sha256.len().min(16)],
             );
             println!("  可用性：{verdict}");
-            println!("  执行了：{}", rendered.executed.join(" → "));
+            println!("  执行了：{}", crate::executed_summary(&rendered.executed));
             for (skipped, why) in &rendered.skipped {
                 println!("⚠ 没有执行 '{skipped}'：{why}");
             }
