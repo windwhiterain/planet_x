@@ -34,10 +34,12 @@ const OUTER: f32 = 3.0;
 const CENTRE: [f32; 3] = [0.0, 0.0, 1.8];
 const RADIUS: f32 = 0.55;
 const SOFT: f32 = 0.18;
+/// 球**内部**的密度（单一变量：只改它）。
+const DENSITY: f32 = 1.0;
 
 fn main() -> Result<(), String> {
     let stars_params = StarsParams {
-        count: 4_000_000,
+        count: 150_000,
         // ⚠ 星落在球里：其余参数照 art 的语义给（见 `art/nebulasky/stars.toml`）。
         gas_biased: true,
         gas_contrast: 1.5,
@@ -162,7 +164,8 @@ fn soft_sphere() -> VolumeData {
                     ];
                     let distance =
                         (offset[0] * offset[0] + offset[1] * offset[1] + offset[2] * offset[2]).sqrt();
-                    let value = ((RADIUS + SOFT - distance) / SOFT).clamp(0.0, 1.0);
+                    let profile = ((RADIUS + SOFT - distance) / SOFT).clamp(0.0, 1.0);
+                    let value = profile * DENSITY;
                     data.push(value);
                 }
             }
