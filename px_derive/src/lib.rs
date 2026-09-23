@@ -96,7 +96,7 @@ fn compile_error(message: &str) -> TokenStream {
 /// ```
 ///
 /// ⚠ **字段名进键**（与 `PxParams` 同一条口径）：加一个字段又删一个，不会因为"值恰好一样"而撞。
-/// ⚠ 只有这一半：图脚本是把**值**交给 `cook` 的（`MixInput { a, b, mask }`），
+/// ⚠ 只有这一半：图脚本是把**值**交给 `cached` 的（`MixInput { a, b, mask }`），
 ///   从来没有"按位置解上游字节"那条路 ⇒ 字段顺序不是接口的一部分，字段名才是。
 #[proc_macro_derive(PxInputs)]
 pub fn derive_px_inputs(input: TokenStream) -> TokenStream {

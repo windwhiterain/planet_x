@@ -1,12 +1,12 @@
-//! 云：**普通 Rust** —— 一张场接一张场地算下去，每一步走 `px_cook` 那个缓存辅助函数。
+//! 云：**普通 Rust** —— 一张场接一张场地算下去，每一步走 `px_cook::cached` 那个缓存函数。
 //!
 //! 与老写法（`node("field.fbm", "clusters", &[])`，字符串 id + 字节边界）的差别：
 //! * 参数类型、**输入个数**、输出域全是**编译期**的事（接错一个输入编不过）；
-//! * 参数文件的**位置**（`art/clouds/<名>.toml`）留在图脚本这一侧 —— 同一个
-//!   `field.fbm` 在别的图里叫别的名字，算子不该知道；
+//! * 参数是**普通 rust 值**：`node_params` 从 `art/clouds/<名>.toml` 读一份打底
+//!   （同一个 `field.fbm` 在别的图里叫别的名字，算子不该知道），想改哪个字段在 Rust 里改；
 //! * 键里多了算子的源码哈希 ⇒ 改算子体必然重算，不靠人记得升版本。
 
-use px_cook::{Domain, Graph, GraphSpec, begin, cameras, cook, field, mesh, volume};
+use px_cook::{Domain, Graph, GraphSpec, begin, cached, cameras, field, mesh, node_params, volume};
 use px_field_schema::field::cube_map_extent;
 use px_volume_schema::PATCHES;
 
@@ -29,21 +29,43 @@ fn main() -> Result<(), Fault> {
     // ── 场：七步，每一步都是「普通函数调用 + 隐式缓存」 ───────────────────────
     // ⚠ 上游是**具名字段的普通 Rust 值**（`Unary1/2/3`），漏一个、接错域都是编译错。
     // ⚠ 共享的上游（`mixed` 被 6 处用）克隆一次就好 —— `Cooked` 里是值，不是引用。
-    let clusters = cook::<field::Fbm>(&graph, "clusters", ())?;
-    let billows = cook::<field::Fbm>(&graph, "billows", ())?;
-    let flow = cook::<field::Fbm>(&graph, "flow", ())?;
-    let carved = cook::<field::Warp>(
+    let clusters = cached(
+        &graph,
+        "clusters",
+        field::Fbm,
+        node_params(&graph, "clusters")?,
+        (),
+    )?;
+    let billows = cached(
+        &graph,
+        "billows",
+        field::Fbm,
+        node_params(&graph, "billows")?,
+        (),
+    )?;
+    let flow = cached(&graph, "flow", field::Fbm, node_params(&graph, "flow")?, ())?;
+    let carved = cached(
         &graph,
         "carved",
+        field::Warp,
+        node_params(&graph, "carved")?,
         field::FieldPairInput {
             field: billows,
             offset: flow,
         },
     )?;
-    let weight = cook::<field::Constant>(&graph, "weight", ())?;
-    let mixed = cook::<field::Mix>(
+    let weight = cached(
+        &graph,
+        "weight",
+        field::Constant,
+        node_params(&graph, "weight")?,
+        (),
+    )?;
+    let mixed = cached(
         &graph,
         "mixed",
+        field::Mix,
+        node_params(&graph, "mixed")?,
         field::MixInput {
             a: clusters,
             b: carved,
@@ -51,60 +73,76 @@ fn main() -> Result<(), Fault> {
         },
     )?;
 
-    let coverage = cook::<field::Remap>(
+    let coverage = cached(
         &graph,
         "coverage",
+        field::Remap,
+        node_params(&graph, "coverage")?,
         field::FieldInput {
             field: mixed.clone(),
         },
     )?;
-    let slope_x = cook::<field::Gradient>(
+    let slope_x = cached(
         &graph,
         "slope_x",
+        field::Gradient,
+        node_params(&graph, "slope_x")?,
         field::FieldInput {
             field: mixed.clone(),
         },
     )?;
-    let slope_y = cook::<field::Gradient>(
+    let slope_y = cached(
         &graph,
         "slope_y",
+        field::Gradient,
+        node_params(&graph, "slope_y")?,
         field::FieldInput {
             field: mixed.clone(),
         },
     )?;
-    let slope_z = cook::<field::Gradient>(
+    let slope_z = cached(
         &graph,
         "slope_z",
+        field::Gradient,
+        node_params(&graph, "slope_z")?,
         field::FieldInput {
             field: mixed.clone(),
         },
     )?;
 
     // ── 体积：粗场（包住真场）与含细节的真场，参数文件不同、算子同一个 ─────────
-    let coarse = cook::<volume::CloudCoarse>(
+    let coarse = cached(
         &graph,
         "coarse",
+        volume::CloudCoarse,
+        node_params(&graph, "coarse")?,
         volume::CloudCoarseInput {
             coverage: mixed.clone(),
         },
     )?;
-    let proxy = cook::<mesh::Proxy>(
+    let proxy = cached(
         &graph,
         "proxy",
+        mesh::Proxy,
+        node_params(&graph, "proxy")?,
         mesh::ProxyInput {
             volume: coarse.clone(),
         },
     )?;
-    let fine = cook::<volume::CloudCoarse>(
+    let fine = cached(
         &graph,
         "coarse_fine",
+        volume::CloudCoarse,
+        node_params(&graph, "coarse_fine")?,
         volume::CloudCoarseInput {
             coverage: mixed.clone(),
         },
     )?;
-    let proxy_fine = cook::<mesh::Proxy>(
+    let proxy_fine = cached(
         &graph,
         "proxy_fine",
+        mesh::Proxy,
+        node_params(&graph, "proxy_fine")?,
         mesh::ProxyInput {
             volume: fine.clone(),
         },
@@ -188,10 +226,9 @@ fn check(
     volume: &volume::VolumeOut,
     proxy: &px_cook::Cooked<px_mesh_schema::MeshData>,
 ) {
-    // ⚠ 参数走 schema 的类型化解析（驱动只给原文）：判据读的是**同一份 TOML**，
+    // ⚠ 参数走**同一条**读参数的路（`node_params`）：判据读的是**同一份 TOML**，
     //   不是自己再抄一遍的数。
-    let params = px_volume_schema::params::parse(graph.params_text(name).as_deref())
-        .unwrap_or_else(|err| panic!("读参数 {name} 失败：{err}"));
+    let params = node_params(graph, name).unwrap_or_else(|err| panic!("读参数 {name} 失败：{err}"));
     let cloud = px_verify::proxy::from_volume(&params);
     let coverage = mixed.value();
     let mesh = proxy.value();

@@ -24,7 +24,7 @@ use px_scene::recipe;
 const DEFAULT_SCENE: &str = "orbit";
 
 fn main() {
-    // ⚠ 这张图**一个节点都不 cook**：`begin` 只要它那一行摘要（图名 / 参数目录 / 缓存条数）。
+    // ⚠ 这张图**一个节点都不走缓存**：`begin` 只要它那一行摘要（图名 / 参数目录 / 缓存条数）。
     let _graph = px_cook::begin(px_cook::GraphSpec {
         name: "scene".to_string(),
         width: 0,

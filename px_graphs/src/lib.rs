@@ -6,7 +6,7 @@
 //!
 //! ```text
 //! let graph = begin(GraphSpec { … });                        ← 一棵图的句柄
-//! let continents = cook::<field::Fbm>(&graph, "continents", ())?;   ← 类型在编译期，实现不在
+//! let continents = cached(&graph, "continents", field::Fbm, params, ())?;  ← 类型在编译期，实现不在
 //! graph.finish();
 //! ```
 //!

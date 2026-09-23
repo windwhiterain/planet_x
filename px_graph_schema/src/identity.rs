@@ -80,6 +80,21 @@ impl HashField for String {
     }
 }
 
+/// **包装对象也能进键**：写的是它的**键**，不是把里面的值再哈希一遍。
+///
+/// ⚠ 这一条就是「**包装对象是嵌套的、递归的**」那半：`Cooked<T>` 嵌进任何参数结构里都只贡献
+///   一个键（`PxKeyed` 按字段名 + 这个键写），而 `Cooked<Cooked<T>>` 照样成立
+///   —— 外面那层写的是里面那层的键。⇒ 一个参数是 `Cooked<T>`，意思就是「**它可以被缓存**」。
+///
+/// ⚠ 裸值要进图就在脚本里包一下（[`crate::Cooked::of`]）：那种包装对象的键是**内容**
+///   算出来的，于是它与"从缓存里解出来的那一份"在键这件事上完全同质。
+impl<T> HashField for crate::contract::Cooked<T> {
+    fn hash_field(&self, hasher: &mut blake3::Hasher) {
+        hasher.update(b"px_cook/cooked-field/v1");
+        hasher.update(&self.key);
+    }
+}
+
 /// **超参数**：一个 struct 自己说明它贡献给键的是什么。
 ///
 /// ⚠ 由 `#[derive(PxParams)]`（住 `px_derive`）按字段列表生成。手写的话，

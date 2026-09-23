@@ -4,7 +4,7 @@
 //! `Cache` 那几个方法；键与清单只认「算子身份 + 规范参数 + 上游的键」，不看内存里是什么类型。
 //!
 //! 图脚本（`px_graphs/src/bin/*.rs`）拿到的 API 就三样：
-//! `begin(GraphSpec)` → `cook::<O>(&cache, "节点名", 输入)` → `finish()`。
+//! `begin(GraphSpec)` → `cached(&graph, "节点名", 算子, 参数, 上游)` → `finish()`。
 
 pub mod cameras;
 pub mod driver;

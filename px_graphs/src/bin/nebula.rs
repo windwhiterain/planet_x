@@ -34,7 +34,7 @@
 
 use std::time::Instant;
 
-use px_cook::{Domain, GraphSpec, begin, cook, field, volume};
+use px_cook::{Domain, GraphSpec, begin, cached, field, node_params, volume};
 use px_field_schema::field::Field;
 
 /// 图侧对错误的统一态度：**当场失败**，不静默跳过。
@@ -152,16 +152,48 @@ fn main() -> Result<(), Fault> {
         cameras: Vec::new(),
     });
 
-    let blobs = cook::<field::Fbm3>(&shape_graph, "blobs", ())?;
-    let wisps = cook::<field::Ridged3>(&shape_graph, "wisps", ())?;
-    let flow = cook::<field::Fbm3>(&shape_graph, "flow", ())?;
-    let flow_second = cook::<field::Fbm3>(&shape_graph, "flow_second", ())?;
-    let flow_third = cook::<field::Fbm3>(&shape_graph, "flow_third", ())?;
+    let blobs = cached(
+        &shape_graph,
+        "blobs",
+        field::Fbm3,
+        node_params(&shape_graph, "blobs")?,
+        (),
+    )?;
+    let wisps = cached(
+        &shape_graph,
+        "wisps",
+        field::Ridged3,
+        node_params(&shape_graph, "wisps")?,
+        (),
+    )?;
+    let flow = cached(
+        &shape_graph,
+        "flow",
+        field::Fbm3,
+        node_params(&shape_graph, "flow")?,
+        (),
+    )?;
+    let flow_second = cached(
+        &shape_graph,
+        "flow_second",
+        field::Fbm3,
+        node_params(&shape_graph, "flow_second")?,
+        (),
+    )?;
+    let flow_third = cached(
+        &shape_graph,
+        "flow_third",
+        field::Fbm3,
+        node_params(&shape_graph, "flow_third")?,
+        (),
+    )?;
 
     // 三轴扭曲：三个上游各管一个轴。⚠ 顺序上**先叠结构、最后扭曲**：反过来会把脊搅散。
-    let warped = cook::<field::Warp3>(
+    let warped = cached(
         &shape_graph,
         "warped",
+        field::Warp3,
+        node_params(&shape_graph, "warped")?,
         field::Warp3Input {
             field: blobs,
             offset_a: flow,
@@ -184,23 +216,29 @@ fn main() -> Result<(), Fault> {
     // 气只聚在**一片**里（参考图正是"一团云 + 大片黑"）。
     //
     // 这一档把低频的团块场**二值化**成"有气 / 没气"，再乘进密度里。
-    let extent = cook::<field::Remap>(
+    let extent = cached(
         &shape_graph,
         "extent",
+        field::Remap,
+        node_params(&shape_graph, "extent")?,
         field::FieldInput {
             field: warped.clone(),
         },
     )?;
-    let weight = cook::<field::Remap>(
+    let weight = cached(
         &shape_graph,
         "weight",
+        field::Remap,
+        node_params(&shape_graph, "weight")?,
         field::FieldInput {
             field: warped.clone(),
         },
     )?;
-    let density = cook::<field::Mix>(
+    let density = cached(
         &shape_graph,
         "density",
+        field::Mix,
+        node_params(&shape_graph, "density")?,
         field::MixInput {
             a: warped,
             b: wisps.clone(),
@@ -210,10 +248,18 @@ fn main() -> Result<(), Fault> {
     // ⚠ 密度 × 包络 ⇒ 包络为 0 的地方**连消光都是 0**（那才是真空），
     //   不只是"暗一点" —— 这一条决定了暗部能不能真的压到 0 附近。
     //   常数 0 走 `vacuum.toml`（`field.constant` 的参数只有 `value`）。
-    let vacuum = cook::<field::Constant>(&shape_graph, "vacuum", ())?;
-    let shaped = cook::<field::Mix>(
+    let vacuum = cached(
+        &shape_graph,
+        "vacuum",
+        field::Constant,
+        node_params(&shape_graph, "vacuum")?,
+        (),
+    )?;
+    let shaped = cached(
         &shape_graph,
         "shaped",
+        field::Mix,
+        node_params(&shape_graph, "shaped")?,
         field::MixInput {
             a: vacuum.clone(),
             b: density,
@@ -238,13 +284,21 @@ fn main() -> Result<(), Fault> {
     //   2. 上一版 `frequency = 18` 超出 64³ 网格的奈奎斯特（≈32），
     //      **那层细节根本产生不出来** —— 这是它的第二个败因。
     //   `wisps` 频率 11 ⇒ 脊宽约 1 格、间距约 6 格，正是"尘带"的尺度。
-    let carved = cook::<field::Remap>(&shape_graph, "carved", field::FieldInput { field: wisps })?;
+    let carved = cached(
+        &shape_graph,
+        "carved",
+        field::Remap,
+        node_params(&shape_graph, "carved")?,
+        field::FieldInput { field: wisps },
+    )?;
     // ⚠ `mix(a, b, mask) = a×(1−mask) + b×mask` ⇒ `mix(shaped, 真空, 脊)`
     //   就是"沿脊线把密度雕低"。`carved.toml` 的 `out_max = 0.8` ⇒ 缝里留 20% 的气
     //   —— 留一点消光，挡住缝后面的星点（雕到 0 会像"破洞"，星会透出来）。
-    let textured = cook::<field::Mix>(
+    let textured = cached(
         &shape_graph,
         "textured",
+        field::Mix,
+        node_params(&shape_graph, "textured")?,
         field::MixInput {
             a: shaped,
             b: vacuum,
@@ -253,14 +307,18 @@ fn main() -> Result<(), Fault> {
     )?;
     report("textured", textured.value());
 
-    let density_volume = cook::<volume::Density>(
+    let density_volume = cached(
         &shape_graph,
         "density_volume",
+        volume::Density,
+        node_params(&shape_graph, "density_volume")?,
         volume::DensityInput { density: textured },
     )?;
-    let emission = cook::<volume::Emission>(
+    let emission = cached(
         &shape_graph,
         "emission",
+        volume::Emission,
+        node_params(&shape_graph, "emission")?,
         volume::EmissionInput {
             volume: density_volume,
         },
@@ -274,13 +332,21 @@ fn main() -> Result<(), Fault> {
         projection: Domain::CubeMap,
         cameras: Vec::new(),
     });
-    let stars = cook::<field::Stars>(&sky_graph, "stars", ())?;
+    let stars = cached(
+        &sky_graph,
+        "stars",
+        field::Stars,
+        node_params(&sky_graph, "stars")?,
+        (),
+    )?;
     // ⚠ **一个节点交出一整张天空贴图**（三条通道在算子内部各积一遍）。
     //   `sky` 就是场景文档要引用的那个节点名（`nebulasky::sky`），而它是一条
     //   **正常的图成员** —— 驱动照常进键、落盘、登记清单，这里不必手工拼贴图。
-    let sky = cook::<volume::SkyNebula>(
+    let sky = cached(
         &sky_graph,
         "sky",
+        volume::SkyNebula,
+        node_params(&sky_graph, "sky")?,
         volume::SkyInput {
             volume: emission,
             stars,

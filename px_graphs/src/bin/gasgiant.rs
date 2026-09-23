@@ -19,7 +19,7 @@
 //!
 //! 渲染：`px run scene orbit-gasgiant`（配方在 `art/scene/orbit-gasgiant.toml`）。
 
-use px_cook::{Domain, GraphSpec, begin, cameras, cook, field};
+use px_cook::{Domain, GraphSpec, begin, cached, cameras, field, node_params};
 use px_field_schema::field::cube_map_extent;
 
 use px_graphs::insts::LatBands;
@@ -39,34 +39,58 @@ fn main() -> Result<(), Fault> {
     });
 
     // 湍流：给条带边界"挪相位"的那一张场（球面 fbm）。
-    let turbulence = cook::<field::Fbm>(&graph, "turbulence", ())?;
+    let turbulence = cached(
+        &graph,
+        "turbulence",
+        field::Fbm,
+        node_params(&graph, "turbulence")?,
+        (),
+    )?;
     // 主角：纬向条带（**实例库**）。`bands` 参数就是"几圈条带"。
-    let bands = cook::<LatBands>(
+    let bands = cached(
         &graph,
         "bands",
+        LatBands,
+        node_params(&graph, "bands")?,
         field::FieldRemapInput {
             input: turbulence.clone(),
         },
     )?;
     // 中尺度湍流：**扭曲源**（不是条带的相位，那张是 `turbulence`）。
-    let swirl = cook::<field::Fbm>(&graph, "swirl", ())?;
+    let swirl = cached(
+        &graph,
+        "swirl",
+        field::Fbm,
+        node_params(&graph, "swirl")?,
+        (),
+    )?;
     // ⚠ 主角那一步：**把条带推歪**（域扭曲）。
     //   没有它，条带就是"纯纬度的函数" ⇒ 画面上是一颗**西瓜**（用户原话）。真实的气态行星
     //   条带被湍流拉成流线、会分叉、会打卷，带的宽窄沿经度差得很远 —— 这些都不是"加噪声"
     //   能给的，是**几何被扭曲**。`field.warp` 正是词汇里那一条（推采样方向再重新取样）。
-    let warped = cook::<field::Warp>(
+    let warped = cached(
         &graph,
         "warped",
+        field::Warp,
+        node_params(&graph, "warped")?,
         field::FieldPairInput {
             field: bands,
             offset: swirl.clone(),
         },
     )?;
     // 第二级（更细的一档）：等值线是闭合团块的湍流 ⇒ 把条带在那些团块附近搅成**闭环**。
-    let spots = cook::<field::Fbm>(&graph, "spots", ())?;
-    let eddied = cook::<field::Warp>(
+    let spots = cached(
+        &graph,
+        "spots",
+        field::Fbm,
+        node_params(&graph, "spots")?,
+        (),
+    )?;
+    let eddied = cached(
         &graph,
         "eddied",
+        field::Warp,
+        node_params(&graph, "eddied")?,
         field::FieldPairInput {
             field: warped,
             offset: spots,
@@ -74,10 +98,18 @@ fn main() -> Result<(), Fault> {
     )?;
     // 第三层次：**另一张独立的场**（不是"同一张图缩放"）——细丝。它也被同一个 `swirl` 推歪，
     // 这样细丝跟着条带走，而不是铺一层无关的噪点。
-    let filaments_raw = cook::<field::Fbm>(&graph, "filaments_raw", ())?;
-    let filaments = cook::<field::Warp>(
+    let filaments_raw = cached(
+        &graph,
+        "filaments_raw",
+        field::Fbm,
+        node_params(&graph, "filaments_raw")?,
+        (),
+    )?;
+    let filaments = cached(
         &graph,
         "filaments",
+        field::Warp,
+        node_params(&graph, "filaments")?,
         field::FieldPairInput {
             field: filaments_raw,
             offset: swirl,
@@ -90,9 +122,11 @@ fn main() -> Result<(), Fault> {
     //   细而硬的环（陨坑缘那一条半正弦），在球面上看着像**海岸线**而不是涡旋 —— 实测图
     //   `target/shot-gasgiant-craters.png`。气态巨行星的涡旋不是"撞出来的坑"，
     //   它的边界由湍流相位（`bands` 实例里那一项）**加上域扭曲**给，这里就不叠异物了。
-    let mixed = cook::<field::Remap>(
+    let mixed = cached(
         &graph,
         "mixed",
+        field::Remap,
+        node_params(&graph, "mixed")?,
         field::FieldInput {
             field: eddied.clone(),
         },

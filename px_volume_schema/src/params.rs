@@ -83,15 +83,6 @@ impl Params {
     }
 }
 
-/// TOML 原文 → **类型化**的参数（图脚本拿它去跑判据仪器时用这条；`cook` 走的是
-/// `O::Params` 那一份，两者同一条 `Default` 口径）。
-pub fn parse(toml_text: Option<&str>) -> Result<Params, String> {
-    match toml_text {
-        Some(text) => toml::from_str(text).map_err(|err| err.to_string()),
-        None => Ok(Params::default()),
-    }
-}
-
 /// `FieldKind` 是**纯局部开关**（决定粗场还是真场），但产物确实不同 ⇒ 进键。
 impl px_graph_schema::HashField for FieldKind {
     fn hash_field(&self, hasher: &mut blake3::Hasher) {

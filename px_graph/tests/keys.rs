@@ -1,7 +1,7 @@
 //! 键的门：**一个节点的键 = 产出这个节点的那些东西**。
 //!
 //! ⚠ 这里调的是**唯一那个算键的函数**（`px_graph_schema::node_key`）—— 生产路径
-//! （`px_cook::cook`）调的是同一个。从前有两份（`node_key` 只在测试里活着、`cook` 自己
+//! （`px_cook::cached`）调的是同一个。从前有两份（`node_key` 只在测试里活着、`cached` 自己
 //! 内联算），于是"文档里的键定义"与"真正的键"可以悄悄漂开；现在漂不开。
 
 use px_field_schema::field::Field;

@@ -15,7 +15,7 @@
 //!   而 `bands` 走的是**实例库**（`target/pcg/inst/<key>.dll`）—— 一张图里两条装载路并存，
 //!   这正是"声明住 schema、实现住 dylib、泛型参数住 art/inst"三样同时成立时该有的样子。
 
-use px_cook::{Domain, GraphSpec, begin, cook, field};
+use px_cook::{Domain, GraphSpec, begin, cached, field, node_params};
 use px_graph_schema::PxOp;
 
 use px_graphs::insts::Waves;
@@ -33,11 +33,19 @@ fn main() -> Result<(), Fault> {
     });
 
     // 上游：预置的分形噪声（`px_field_op`，运行时按身份装载）。
-    let source = cook::<field::Fbm>(&graph, "source", ())?;
+    let source = cached(
+        &graph,
+        "source",
+        field::Fbm,
+        node_params(&graph, "source")?,
+        (),
+    )?;
     // 本图的主角：**图侧现写的泛型参数**（`art/inst/waves.rs`）经实例库算出来的那一张场。
-    let bands = cook::<Waves>(
+    let bands = cached(
         &graph,
         "bands",
+        Waves,
+        node_params(&graph, "bands")?,
         field::FieldRemapInput {
             input: source.clone(),
         },

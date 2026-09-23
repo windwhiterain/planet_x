@@ -2,7 +2,7 @@
 //!
 //! 这一篇守的是目标里那句「agent 在图侧现写泛型算子」，量三件事：
 //!
-//! 1. 现写的算子**能算**、能落盘、再跑一次能命中（`cook` 那条路对它一视同仁）；
+//! 1. 现写的算子**能算**、能落盘、再跑一次能命中（`cached` 那条路对它一视同仁）；
 //! 2. 它的**身份是本图程序**这一份源码（不是某个 dylib 的）；
 //! 3. 同一个图程序里两个现写的算子**互不相同**（id 进键）。
 //!
@@ -12,7 +12,7 @@
 //!   而这一篇不该往 `art/` 写文件。那条性质由 `px_graph/tests/keys.rs`（规范 JSON 进键）
 //!   与三张真图的产物判据看着。
 
-use px_cook::{Domain, Graph, GraphSpec, begin, cook, px_local_op};
+use px_cook::{Domain, Graph, GraphSpec, begin, cached, node_params, px_local_op};
 use px_field_schema::field::{Field, GridField};
 use px_graph_schema::{Grid, PxOp};
 use serde::{Deserialize, Serialize};
@@ -109,7 +109,15 @@ fn a_graph_local_operator_is_a_first_class_operator() {
     let graph = graph();
 
     // 1) 能算、能落盘、值不是常数。
-    let band = cook::<Band>(&graph, "band", ()).expect("现写的算子应当能算");
+    let band = cached(
+        &graph,
+        "band",
+        Band,
+        node_params(&graph, "band")
+            .expect("参数（这张图没有 art/local-op/band.toml ⇒ 走 Default）"),
+        (),
+    )
+    .expect("现写的算子应当能算");
     let value = band.value();
     assert_eq!((value.width, value.height), (8, 4));
     let stats = value.stats();
@@ -133,9 +141,23 @@ fn a_graph_local_operator_is_a_first_class_operator() {
     assert_eq!(hash.len(), 64);
 
     // 3) 键稳定（第二次必命中）、两个现写算子互不相同（id 进键）。
-    let rings = cook::<Rings>(&graph, "rings", ()).expect("第二个现写算子");
+    let rings = cached(
+        &graph,
+        "rings",
+        Rings,
+        node_params(&graph, "rings").expect("参数"),
+        (),
+    )
+    .expect("第二个现写算子");
     assert_ne!(band.key, rings.key, "两个现写算子算出同一个键 ⇒ id 没进键");
-    let again = cook::<Band>(&graph, "band", ()).expect("第二次");
+    let again = cached(
+        &graph,
+        "band",
+        Band,
+        node_params(&graph, "band").expect("参数"),
+        (),
+    )
+    .expect("第二次");
     assert!(
         again.hit,
         "同一个节点再算一次没命中 ⇒ 键不稳定（现写算子的身份没钉住）"

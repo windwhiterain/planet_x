@@ -45,7 +45,7 @@ pub struct SkyInput {
     pub stars: Cooked<Field>,
 }
 
-/// 产物形状：`cook::<CloudCoarse>` 返回的就是它。
+/// 产物形状：`cached(&graph, 节点, CloudCoarse, …)` 返回的就是它。
 ///
 /// ⚠ 图脚本那一侧读体积的判据仪器都拿这个别名当签名（它只说明"拿到手的是一份体积"）。
 pub type VolumeOut = Cooked<VolumeData>;

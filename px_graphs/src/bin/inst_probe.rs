@@ -10,13 +10,13 @@
 //!   一条永远可能什么都不查的判据，比没有这条判据更坏（它给人一种查过了的错觉）。
 //!   ⇒ 判据分成两件**各自都硬**的事：
 //!     * `tests/inst_gate.rs`：**计划那一半**（recipe ↔ 生成物 ↔ 图，纯事实，不需要任何产物）；
-//!     * 这一支：**运行那一半**（装载 + cook + 命中 + 键稳定），缺库就**当场报错并给出命令**。
+//!     * 这一支：**运行那一半**（装载 + cached + 命中 + 键稳定），缺库就**当场报错并给出命令**。
 //!
 //! ⚠ 这条探针也是"实例库真能装载"这件事**唯一**的判据：`PxOp::LIB` 是空串、
 //!   库按 key 在运行期 `dlopen`、符号按声明名拼 —— 三件事里任何一件错，图跑起来才炸。
 
 use px_cook::inst::BuildGraph;
-use px_cook::{Cooked, Domain, GraphSpec, begin, cook, volume};
+use px_cook::{Cooked, Domain, GraphSpec, begin, cached, node_params, volume};
 use px_field_schema::field::Field;
 use px_graph_schema::PxOp;
 use px_graphs::insts::Band;
@@ -77,8 +77,22 @@ fn main() {
     let inputs = || volume::CloudCoarseInput {
         coverage: coverage.clone(),
     };
-    let first = cook::<Band>(&graph, "band", inputs()).expect("实例算子应当能算");
-    let again = cook::<Band>(&graph, "band", inputs()).expect("第二次");
+    let first = cached(
+        &graph,
+        "band",
+        Band,
+        node_params(&graph, "band").expect("参数（这个图没有 art/inst-op/band.toml ⇒ 走 Default）"),
+        inputs(),
+    )
+    .expect("实例算子应当能算");
+    let again = cached(
+        &graph,
+        "band",
+        Band,
+        node_params(&graph, "band").expect("参数"),
+        inputs(),
+    )
+    .expect("第二次");
     println!(
         "实例算子：{}×{}×{}｜命中={} → {}｜key {}",
         first.value().res,

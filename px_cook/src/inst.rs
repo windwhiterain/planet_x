@@ -747,7 +747,7 @@ pub fn inst_env(name: &str) -> &'static str {
 ///   主构建一旦带 `RUSTFLAGS`，实例库与图程序就**必然对不上**，装载层会（正确地）把每条实例
 ///   都拒掉 —— 拒绝没错，但得让人有办法改对，所以这里把 profile / target / RUSTFLAGS 一起传下去。
 ///
-/// ⚠ **它只在 stage 1 被调**（`20-build-graph.md` §182）：stage 2（`cook` 那条路）**只读装载**，
+/// ⚠ **它只在 stage 1 被调**（`20-build-graph.md` §182）：stage 2（`cached` 那条路）**只读装载**，
 ///   永远走不到这里 ⇒ 图程序里这一段是**死代码**（它随 `px_cook` 链进图 exe，但一个字节都不会跑）。
 ///   把"会跑 rustc"这件事放进一个 stage 2 也链着的 crate，代价就是这一份死代码 —— 换来的是
 ///   "执行住在 `BuildGraph` 上"（B2 后半那一条），而 R1（改 art/inst ⇒ 七个 exe 一位不动）

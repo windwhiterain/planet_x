@@ -198,7 +198,13 @@ pub fn remap_sampled(scale: &Scale, gamma: f32, input: &Field, grid: Grid) -> Fi
 
 /// **实例库入口**：用一个**图侧给的**场函数重映射上游那张场
 /// （实例的体模板里这样用：
-/// `px_field_alg::remap_with(&px_field_alg::identity(), p, i.input.value(), g, $arg)`）。
+/// `px_field_alg::remap_with(&px_field_alg::identity(), p, 1.0, i.input.value(), g, $arg)`）。
+///
+/// ⚠ 第三栏 `gamma` 实例那一档固定给 `1.0`（= 不弯，见 [`px_field_schema::params::bend`]）
+///   —— 实例的参数结构（`RemapParams`：`gain` / `bias` / `bands`）里**没有**非线性那一栏，
+///   而弯曲是**预置 `Remap`** 那一档的参数（`params::remap::Params::gamma`）。
+///   要实例也弯，就在 `RemapParams` 里加一栏、并把这个 `1.0` 换成 `p.gamma`
+///   —— 两处必须一起改（否则键变了而算法没变，或反过来）。
 ///
 /// ⚠ 它必须与 [`remap_sampled`] 走**同一条**路径（都是 [`map_grid`]），否则同一份参数会算出
 ///   两种结果 —— 预设实现那一档与泛型实例那一档就再也对不上，而两者共用的缓存键分不出这个
