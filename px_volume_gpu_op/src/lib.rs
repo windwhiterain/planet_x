@@ -1060,3 +1060,148 @@ pub fn sky(
         .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap()))
         .collect())
 }
+
+#[cfg(test)]
+mod sky_tests {
+    use super::*;
+    use px_field_schema::field::{Field, Projection};
+    use px_volume_schema::VolumeData;
+
+    /// 标准 IEEE-754 binary16 -> f32（**判据侧自带**：`px_volume_alg::half` 只有编码口，
+    /// 而这里要读回它产出的 `Rgba16Float`。格式是公开标准，与被测逻辑无关）。
+    fn f32_from_half(bits: u16) -> f32 {
+        let sign = if bits & 0x8000 != 0 { -1.0_f32 } else { 1.0 };
+        let exponent = ((bits >> 10) & 0x1f) as i32;
+        let mantissa = (bits & 0x3ff) as f32;
+        match exponent {
+            0 => sign * mantissa * 2.0_f32.powi(-24),
+            31 => {
+                if mantissa == 0.0 { sign * f32::INFINITY } else { f32::NAN }
+            }
+            _ => sign * (1.0 + mantissa / 1024.0) * 2.0_f32.powi(exponent - 15),
+        }
+    }
+
+    fn fixture(res: u32, layers: u32, inner: f32, outer: f32) -> VolumeData {
+        let mut data = vec![0.0_f32; (6 * layers * res * res * LANES as u32) as usize];
+        for face in 0..6_u32 {
+            for layer in 0..layers {
+                let altitude = layer as f32 / (layers - 1).max(1) as f32;
+                let radius = inner + (outer - inner) * altitude;
+                for t in 0..res {
+                    for s in 0..res {
+                        let d = px_volume_schema::direction_of(
+                            face,
+                            (s as f32 + 0.5) / res as f32,
+                            (t as f32 + 0.5) / res as f32,
+                        );
+                        let wave = (3.0 * d[0]).sin() * (4.0 * d[1]).cos() * (5.0 * d[2]).sin();
+                        let at = flat_index(res, layers, face, layer, t, s, 0);
+                        for lane in 0..LANES {
+                            data[at + lane] = match lane {
+                                0..=2 => (0.45 + 0.3 * wave).max(0.0) * (1.0 + 0.12 * lane as f32),
+                                _ => (0.25 + 0.5 * (wave * 0.5 + 0.5)).max(0.0),
+                            };
+                        }
+                    }
+                }
+            }
+        }
+        VolumeData { res, layers, inner, outer, data }
+    }
+
+    /// **整条天空逐 texel 对账**：三条通道的步进 + 星点/底色 + 亮度响应 + 色相分级，
+    /// 合起来必须与 CPU 的 `raymarch_sky` 一致（容差取半精度的量级：参考图那一侧是
+    /// `Rgba16Float`，有效位就那么多）。
+    #[test]
+    fn the_gpu_sky_matches_the_cpu_end_to_end() {
+        let (res, layers) = (8_u32, 4_u32);
+        let (inner, outer) = (1.0_f32, 2.0_f32);
+        let volume = fixture(res, layers, inner, outer);
+        let star_face = 4_u32;
+        let stars: Vec<f32> = (0..(star_face * star_face * 6) as usize)
+            .map(|index| if index % 7 == 0 { 0.1 } else { 0.2 + (index % 5) as f32 * 0.15 })
+            .collect();
+        let stars_field =
+            Field::with_projection(star_face, star_face * 6, stars.clone(), Projection::CubeMap);
+        let params = px_volume_schema::params::sky::SkyParams {
+            face: 8,
+            steps: 32,
+            jitter: 0.0,
+            star_gain: 0.07,
+            star_floor: 0.25,
+            background: [0.0011, 0.0007, 0.0009],
+            ..Default::default()
+        };
+        let reference =
+            px_volume_alg::raymarch_sky(&volume, &stars_field, &params).expect("CPU 出图");
+        let table = px_volume_alg::raymarch::RAMP_HUE;
+        let ramp_hue_table = [
+            [table[0][0], table[0][1], table[0][2], 0.0],
+            [table[1][0], table[1][1], table[1][2], 0.0],
+            [table[2][0], table[2][1], table[2][2], 0.0],
+            [table[3][0], table[3][1], table[3][2], 0.0],
+        ];
+        let extras = MarchExtras {
+            stars: Some(&stars),
+            star_face,
+            star_gain: params.star_gain,
+            star_floor: params.star_floor,
+            background: params.background,
+        };
+        let Ok(gpu_side) = sky(
+            params.face,
+            params.steps,
+            inner,
+            res,
+            layers,
+            inner,
+            outer,
+            &volume.data,
+            &extras,
+            (
+                px_volume_alg::raymarch::TONE_IN,
+                px_volume_alg::raymarch::TONE_OUT,
+                px_volume_alg::TONE_LIMITS,
+            ),
+            (px_volume_alg::raymarch::RAMP_LUMA, ramp_hue_table),
+            px_volume_alg::GRADE_STRENGTH,
+        ) else {
+            println!("px_volume_gpu_op：没有可用 GPU，跳过");
+            return;
+        };
+        // 参考是 Rgba16Float：每 texel 8 字节（前三个 half 是 RGB，第四个是 1.0）。
+        let texels = reference.bytes.len() / 8;
+        assert_eq!(gpu_side.len(), texels * 3, "texel 数");
+        let mut worst = 0.0_f32;
+        let mut worst_at = 0usize;
+        for index in 0..texels {
+            for channel in 0..3 {
+                let at = index * 8 + channel * 2;
+                let want = f32_from_half(u16::from_le_bytes([
+                    reference.bytes[at],
+                    reference.bytes[at + 1],
+                ]));
+                let got = gpu_side[index * 3 + channel];
+                let diff = (got - want).abs() / want.abs().max(1e-2);
+                if diff > worst {
+                    worst = diff;
+                    worst_at = index * 3 + channel;
+                }
+            }
+        }
+        assert!(
+            worst < 5e-3,
+            "整链最大相对偏差 {worst:.6} 在第 {worst_at} 个分量（GPU {} 对 CPU {})",
+            gpu_side[worst_at],
+            f32_from_half(u16::from_le_bytes([
+                reference.bytes[(worst_at / 3) * 8 + (worst_at % 3) * 2],
+                reference.bytes[(worst_at / 3) * 8 + (worst_at % 3) * 2 + 1],
+            ]))
+        );
+        println!(
+            "px_volume_gpu_op：整链 {} texel 最大相对偏差 {worst:.6}",
+            texels
+        );
+    }
+}

@@ -25,7 +25,7 @@ pub mod raymarch;
 
 pub use density::{bake_density, sample_world};
 pub use emission::{bake_emission, emit_from_field};
-pub use raymarch::{
+pub use raymarch::{GRADE_STRENGTH, 
     TONE_LIMITS, ramp_hue_at, raymarch_channel, raymarch_sky, sample_volume, tone_at,
 };
 
