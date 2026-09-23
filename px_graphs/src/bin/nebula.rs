@@ -373,8 +373,22 @@ fn main() -> Result<(), Fault> {
         node_params(&shape_graph, "density_volume")?,
         volume::DensityInput { density: textured },
     )?;
-    // ⚠ 星光照亮气体那一笔**已删**（用户 2026-09-25："想当然的非物理元素，散射已经包含"）
-    //   ⇒ 发射只吃密度、不再吃星 ⇒ 依赖方向变成 `density → emission → stars → sky`。
+    // ⚠⚠ **顺序在这里是有约束的**（2026-09-25 晚恢复"星光照亮气体"之后）：
+    //   依赖方向是 `density → stars → emission → sky` —— 星先烘（吃**密度**），
+    //   发射后烘（吃密度 + 星场，见 `EmissionInput::stars`）。
+    //   ⚠ 反过来（发射吃星、星又吃发射）就成环，图侧当场拒。
+    //   ⚠ 星场吃的是**密度**（不是发射）：发射是六通道交错，而星那一侧的 `sample_world`
+    //     按单通道索引 ⇒ 喂发射会读到错位数据（踩过的坑：星团落到没有红光的暗处 ✗）。
+    //   ⚠ 星场只在**体积图**里解析；天空图直接用这里的句柄（与 `volume` 同一条路）。
+    let shape_stars = cached(
+        &shape_graph,
+        "stars",
+        volume::Stars,
+        star_params()?,
+        volume::StarsInput {
+            volume: density_volume.clone(),
+        },
+    )?;
     let emission = cached(
         &shape_graph,
         "emission",
@@ -382,23 +396,7 @@ fn main() -> Result<(), Fault> {
         node_params(&shape_graph, "emission")?,
         volume::EmissionInput {
             volume: density_volume.clone(),
-        },
-    )?;
-    // ⚠⚠ 星场吃的是**发射**（不是密度）：用户指出"星与气的大尺度分布仍然没 align"——
-    //   因为密度 ≠ 看得见的东西（发射 = 密度 × 点光源的 1/d² × 遮挡）。
-    //   星场只在**体积图**里解析；天空图直接用这里的句柄（与 `volume` 同一条路）。
-    let shape_stars = cached(
-        &shape_graph,
-        "stars",
-        volume::Stars,
-        star_params()?,
-        volume::StarsInput {
-            // ⚠⚠ 只能喂**单通道**体积（密度 ✓）：`sample_world` 是按"每体素一条"索引的，
-            //   而发射是**六通道交错**（`at = row*width + s*6`）⇒ 喂发射会让拒绝采样读到
-            //   错位数据（实测：星团落到没有红光的暗处 ✗）。
-            //   要改成"跟**看得见的**星云对齐"，得先给星场一侧加一条**按通道步长**取数的
-            //   读法（下一刀）；那才是"密度 align"与"看得见的 align"之间的差别。
-            volume: density_volume.clone(),
+            stars: shape_stars.clone(),
         },
     )?;
 

@@ -66,7 +66,8 @@ sky_contrast = 2.0
 #   ⇒ 必须吃**真密度场**。接受概率 = (密度/平均密度)^gas_contrast，上限 1。
 # ⚠ 拒绝采样只能变稀 ⇒ `count` 要按存活率抬上去。
 gas_biased = true
-gas_contrast = 1.5
+gas_contrast = 2.0
 
 # 分色诊断：星光走蓝（散射走红在 art/nebula/emission.toml 的 glow_tint）。
 star_tint = [0.12, 0.30, 1.0]
+gas_floor = 0.5

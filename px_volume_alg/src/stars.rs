@@ -230,7 +230,11 @@ pub fn bake_stars(
         if params.gas_biased {
             if let (Some(volume), Some(mean)) = (density, gas_mean) {
                 let here = crate::density::sample_world(volume, position).max(0.0);
-                let chance = (here / mean).powf(params.gas_contrast).min(1.0);
+                // ⚠ 地板以下**一颗都不留**（空洞必须真的空 —— 用户 2026-09-25）。
+                let ratio = here / mean;
+                let floor = params.gas_floor.clamp(0.0, 0.999);
+                let over = ((ratio - floor) / (1.0 - floor)).clamp(0.0, 1.0);
+                let chance = over.powf(params.gas_contrast);
                 if unit24(hash(seed ^ 0x77c1_5a3d, index as u32)) >= chance {
                     continue;
                 }

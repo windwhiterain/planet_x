@@ -826,7 +826,8 @@ struct EmissionUniform {
     params: vec4<f32>,      // (light_radius_ratio, shadow_gain, emission_power, emission_gain)
     light: vec4<f32>,       // (方向 xyz, 未用)
     glow: vec4<f32>,        // (glow_gain, glow_power, glow_threshold, 未用)
-    glow_tint: vec4<f32>,
+    glow_tint: vec4<f32>,   // 散射的通道配比（用户 2026-09-25：散射走红）
+    scatter_tint: vec4<f32>,// 分色诊断的配比（`[1,1,1]` = 不染色）
     extinction: vec4<f32>,  // (r, g, b, extinction_power)
     dust: vec4<f32>,        // (dust_bias, dust_threshold, 未用, 未用)
     counts: vec4<u32>,      // (res, layers, shadow_steps, 未用)
@@ -839,10 +840,14 @@ fn emission_world(point: vec3<f32>) -> f32 {
     return max(sample_volume(point, 0u), 0.0);
 }
 
-// 一颗星落在这一点上的**辐照 × 它自己的色**：朝星走 `steps` 步算光深，再
+// 一颗星落在这一点上的**辐照**（**无色**）：朝星走 `steps` 步算光深，再
 // `exp(-τ × shadow_gain) × 亮度 / (d² + soft²)`。常数与 CPU 那一趟同一个来路
 // （`soft2` 在宿主上按 `starlight_soft.max(1e-4)²` 夹好）。
-fn star_visible(position: vec3<f32>, star: u32, soft2: f32, steps: u32) -> vec3<f32> {
+//
+// ⚠⚠ **不乘 `star_tint(star)`**（2026-09-25，用户口径：星云不许自发光，亮度只能来自星光
+//   的散射）：这一笔是"星光被气散射出来的光"，通道配比由 `emission.glow_tint`（红）给；
+//   星自己的色温只走**直射**那一档（`march_radiance` 里 `亮度 × star_tint`，蓝）。
+fn star_visible(position: vec3<f32>, star: u32, soft2: f32, steps: u32) -> f32 {
     let to_star = star_position(star) - position;
     let distance2 = dot(to_star, to_star);
     let distance = max(sqrt(distance2), 1e-4);
@@ -853,11 +858,12 @@ fn star_visible(position: vec3<f32>, star: u32, soft2: f32, steps: u32) -> vec3<
         tau = tau + emission_world(position + away * (f32(i) * through)) * through;
     }
     let falloff = star_brightness(star) / (distance2 + soft2);
-    let visible = exp(-tau * emission.params.y) * falloff;
-    return visible * star_tint(star);
+    return exp(-tau * emission.params.y) * falloff;
 }
 
-// **星光照气体**：球查询（半径 `starlight_radius`）里亮度前 `starlight_max` 颗 + 逐星遮挡。
+// **星光照气体**（= 星光被气散射）：球查询（半径 `starlight_radius`）里亮度前
+// `starlight_max` 颗 + 逐星遮挡。
+// ⚠ 累加的是**无色的辐照**（`vec3` 三格同一个数）：星的颜色不进这一笔。
 // ⚠⚠ 与 CPU 的 `brightest_near` 逐条对齐，包括那条最容易漏的次序规则：CPU **只在候选多于
 //   `keep` 时**才排序 ⇒ 候选不多时用的是**遍历次序**；而逐通道的求和是浮点加法
 //   ⇒ 次序不同就不是逐位相同。所以这里两套表并存（见上面的注释）。
@@ -895,7 +901,7 @@ fn star_light(position: vec3<f32>) -> vec3<f32> {
                     }
                     if (keep == 0u) {
                         // `keep = 0` = CPU 那一侧的"不封顶"：不排序 ⇒ 直接按遍历次序累加。
-                        lit = lit + star_visible(position, star, soft2, steps);
+                        lit = lit + vec3<f32>(star_visible(position, star, soft2, steps));
                     } else {
                         if (star_cand_count <= keep) {
                             star_cand[star_cand_count] = star;
@@ -912,11 +918,11 @@ fn star_light(position: vec3<f32>) -> vec3<f32> {
     }
     if (star_cand_count <= keep) {
         for (var i = 0u; i < star_cand_count; i = i + 1u) {
-            lit = lit + star_visible(position, star_cand[i], soft2, steps);
+            lit = lit + vec3<f32>(star_visible(position, star_cand[i], soft2, steps));
         }
     } else {
         for (var i = 0u; i < star_kept_count; i = i + 1u) {
-            lit = lit + star_visible(position, star_kept[i], soft2, steps);
+            lit = lit + vec3<f32>(star_visible(position, star_kept[i], soft2, steps));
         }
     }
     return lit;
@@ -962,22 +968,28 @@ fn bake_emission(@builtin(global_invocation_id) id: vec3<u32>) {
     let reach = clamp(light_radius / light_distance, 0.0, 1.0);
     let lit = exp(-optical_depth * emission.params.y) * (reach * reach);
 
-    // ⚠ 用户 2026-09-25：星光照气体那一档**删掉**（"想当然的非物理元素，散射已经包含"）。
+    // ---- 星光照气体（= 星光被气散射）：R3 星场里附近最亮的几颗 + 逐星遮挡 ----
+    // ⚠ 与 CPU 的 `bake_emission` 逐条对齐：**无色**（`star_lit` 三格同一个数）。
+    let star_lit = star_light(position);
 
     let main = pow(d, emission.params.z) * emission.params.w * lit;
     let above = max(d - emission.glow.z, 0.0);
     let glow = pow(above, emission.glow.y) * emission.glow.x * lit;
-    // 星光那一笔与主发射**同形状**（只在有气的地方亮），颜色走星自己的色温。
+    // 星光被气**散射**那一笔：与主发射**同形状**（只在有气的地方亮），而 `star_lit` 只是
+    // 一份**无色的形状** ⇒ 它的颜色完全由 `glow_tint` 给（用户 2026-09-25：散射走红）。
+    let star_emit = pow(d, emission.params.z) * star_meta.light.z;
     let base = pow(d, emission.extinction.w);
     let dust = max(d - emission.dust.y, 0.0) * emission.dust.x;
 
     let at = index * 6u;
+    // ⚠⚠ `glow_tint` **也乘 `main`**（它的含义是"星云散射出来的光的通道配比"），而且
+    //   **散射项也吃它**：星云不许自发光 ⇒ 画面上亮的那一片就是星光被气散射出来的，
+    //   而它必须是**红色**。`scatter_tint` 是分色诊断（`[1,1,1]` = 不染色）。
     let tint = emission.glow_tint.xyz;
-    // ⚠⚠ `tint`（= `glow_tint`）现在**也乘 `main`**：它的含义是"星云散射出来的光的通道配比"
-    //   （用户 2026-09-25："散射定为红色"）。与 CPU 的 `bake_emission` 逐条对齐。
-    emitted[at + 0u] = (main + glow) * tint.x;
-    emitted[at + 1u] = (main + glow) * tint.y;
-    emitted[at + 2u] = (main + glow) * tint.z;
+    let scatter = emission.scatter_tint.xyz;
+    emitted[at + 0u] = (main + glow + star_emit * star_lit.x) * tint.x * scatter.x;
+    emitted[at + 1u] = (main + glow + star_emit * star_lit.y) * tint.y * scatter.y;
+    emitted[at + 2u] = (main + glow + star_emit * star_lit.z) * tint.z * scatter.z;
     emitted[at + 3u] = base * emission.extinction.x + dust;
     emitted[at + 4u] = base * emission.extinction.y + dust;
     emitted[at + 5u] = base * emission.extinction.z + dust;

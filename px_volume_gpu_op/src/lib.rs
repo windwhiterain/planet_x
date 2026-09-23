@@ -2609,6 +2609,7 @@ mod chain_tests {
 #[allow(clippy::too_many_arguments)]
 pub fn bake_emission(
     density: &px_volume_schema::VolumeData,
+    stars: &px_sparse::StarField,
     params: &px_volume_schema::params::emission::EmissionParams,
 ) -> Result<px_volume_schema::VolumeData, String> {
     if params.starlight_gain > 0.0 && params.starlight_max > STAR_KEEP_MAX {
@@ -2647,8 +2648,10 @@ pub fn bake_emission(
         0.0_f32.to_le_bytes(),
     ]
     .concat();
-    // ⚠ 六个 vec4 + 一个 `vec4<u32>`：`cluster_*` 那一对**已经删掉**（星团现在是星表里
-    //   真实的星，走 `star_meta`）—— uniform 布局变了就必须两边一起改。
+    // ⚠ 七个 `vec4<f32>` + 一个 `vec4<u32>`：`scatter_tint` 是**后加**的一格（分色诊断），
+    //   它必须与 WGSL 那一边的 `struct EmissionUniform` **逐字段同序** —— 差一格就是
+    //   "消光跑进颜色里"那一类静默错位。`cluster_*` 那一对**已经删掉**（星团现在是星表里
+    //   真实的星，走 `star_meta`）。
     let uniform = [
         params.light_radius,
         params.shadow_gain,
@@ -2665,6 +2668,10 @@ pub fn bake_emission(
         params.glow_tint[0],
         params.glow_tint[1],
         params.glow_tint[2],
+        0.0,
+        params.scatter_tint[0],
+        params.scatter_tint[1],
+        params.scatter_tint[2],
         0.0,
         params.extinction[0],
         params.extinction[1],
@@ -2686,31 +2693,14 @@ pub fn bake_emission(
     let voxels = (6 * layers * res * res) as usize;
     let bytes =
         |values: &[f32]| -> Vec<u8> { values.iter().flat_map(|v| v.to_le_bytes()).collect() };
-    // ⚠⚠ 星光照气体那一笔已删（用户 2026-09-25："想当然的非物理元素，散射已经包含"）
-    //   ⇒ 这张星表只剩**占位**：绑定还留着（着色器那一侧还没拆），但喂的是**空**星场
-    //   ⇒ 常量时间、也不影响结果。真正的清理（拆掉 bindings 6/10/11/12 与 `star_*`
-    //   那一整套、以及 `EmissionParams::starlight_*`）是下一刀。
-    let empty_stars = px_sparse::StarField {
-        grid: px_sparse::grid::Grid {
-            meta: px_sparse::grid::GridMeta {
-                cell: 1.0,
-                origin: [0.0; 3],
-                dims: [px_sparse::grid::CHUNK_CELLS; 3],
-            },
-            chunk_start: Vec::new(),
-            brick_slot: Vec::new(),
-            brick_mask: Vec::new(),
-            brick_sub: Vec::new(),
-            sub_start: Vec::new(),
-            items: 0,
-        },
-        stars: Vec::new(),
-    };
-    let star_grid = StarGrid::of(&empty_stars);
+    // ⚠⚠ 星光照气体那一档**恢复了**（2026-09-25 晚：星云不许自发光，亮度只能来自星光的散射）
+    //   ⇒ 这里喂**真星场**（不再是那一份占位空表）。星表/索引/参数块三个绑定与 `sky_radiance`
+    //   那一档共用同一套 WGSL（星的球查询只有一处实现）。
+    let star_grid = StarGrid::of(stars);
     let star_meta = StarMeta::emission(&star_grid, params);
     let star_slots = StarSlots::of(&MarchExtras {
         star_grid: Some(&star_grid),
-        star_table: &empty_stars.stars,
+        star_table: &stars.stars,
         star_meta,
         background: [0.0; 3],
     });
@@ -2808,10 +2798,14 @@ mod emission_tests {
                 starlight_radius: 0.2,
                 starlight_steps: 4,
                 starlight_max: keep,
+                // ⚠ 两份配比都给**非平凡**的值：`glow_tint` 与 `scatter_tint` 是后加的 uniform
+                //   格子，给 `[1,1,1]` 的话"消光跑进颜色里"那类错位测不出来。
+                glow_tint: [0.85, 0.30, 0.55],
+                scatter_tint: [1.0, 0.6, 0.25],
                 ..Default::default()
             };
-            let reference = px_volume_alg::bake_emission(&density, &params);
-            let gpu_side = match bake_emission(&density, &params) {
+            let reference = px_volume_alg::bake_emission(&density, &stars, &params);
+            let gpu_side = match bake_emission(&density, &stars, &params) {
                 Ok(volume) => volume,
                 Err(message) => panic!("GPU 发射烘焙失败：{message}"),
             };
