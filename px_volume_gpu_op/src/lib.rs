@@ -121,9 +121,18 @@ fn repack(@builtin(global_invocation_id) id: vec3<u32>) {
 }
 "#;
 
-/// 一维网格要几个工作组（每块 64 个线程，与 WGSL 的 `workgroup_size` 一致）。
+/// 派发尺寸：每块 64 个线程，与 WGSL 的 `workgroup_size` 一致。
+///
+/// ⚠⚠ x 方向**必须切在 65535 以内**（`max_compute_workgroups_per_dimension`，WebGPU 规范常数）：
+///   天穹 face 1024 要 98304 个工作组，一维派发会越界 —— 症状是烘图报 wgpu 校验错、
+///   panic 穿过算子的 dylib 边界、整个烘焙进程 abort，且**没有任何可读信息**（实测踩过）。
+///   WGSL 侧用同一把尺子（`flat_index_of` 里的 `WG_X`）把 (x, y) 摊平。
 pub fn workgroups(threads: usize) -> (u32, u32, u32) {
-    ((threads.div_ceil(64).max(1)) as u32, 1, 1)
+    const WG_X: usize = 65535;
+    let blocks = threads.div_ceil(64).max(1);
+    let x = blocks.min(WG_X);
+    let y = blocks.div_ceil(WG_X);
+    (x as u32, y as u32, 1)
 }
 
 /// 跑一遍重排核；返回 GPU 写出的数组。
@@ -1271,4 +1280,38 @@ pub fn raymarch_sky(
         px_volume_schema::TextureFormat::Rgba16Float,
         bytes,
     ))
+}
+
+#[cfg(test)]
+mod size_tests {
+    use super::*;
+
+    /// **真实尺寸**（shape 128 的体积 = 6 面 x 128^2 x 128 层 x 6 通道 x 4 B = 302 MB）
+    /// 必须能派发。烘焙里那一档就是这个尺寸 —— 小尺寸的判据全绿也说明不了它。
+    /// 失败时把 wgpu 的原文打出来（而不是让进程消失）。
+    #[test]
+    fn a_real_size_volume_goes_through() {
+        let (res, layers, face) = (128_u32, 128_u32, 1024_u32);
+        let (inner, outer) = (1.0_f32, 2.0_f32);
+        let data = vec![0.5_f32; (6 * layers * res * res * LANES as u32) as usize];
+        let result = march(
+            face,
+            4,
+            0,
+            inner,
+            res,
+            layers,
+            inner,
+            outer,
+            &data,
+            &MarchExtras::default(),
+        );
+        match result {
+            Ok(values) => {
+                assert_eq!(values.len(), (face * face * 6) as usize, "texel 数");
+                println!("px_volume_gpu_op：真实尺寸（302 MB 体积 + face 1024）派发通过");
+            }
+            Err(message) => panic!("真实尺寸派发失败：{message}"),
+        }
+    }
 }

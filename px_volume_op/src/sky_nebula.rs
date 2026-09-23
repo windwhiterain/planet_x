@@ -25,7 +25,5 @@ fn px_volume_op_gpu(
 
 px_graph_schema::px_body! {
     SkyNebula,
-    // ⚠ 待切：GPU 档在**真实体积尺寸**下会触发 wgpu 校验错并 abort（见提交信息）。
-    //   切回来只要把这行换成 `px_volume_op_gpu(...)?`；语义已由 9 条判据对过。
-    |p, i, _g| px_volume_alg::raymarch_sky(i.volume.value(), i.stars.value(), p)?
+    |p, i, _g| px_volume_op_gpu(i.volume.value(), i.stars.value(), p)?
 }

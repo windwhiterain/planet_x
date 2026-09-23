@@ -12,6 +12,18 @@ struct Volume {
     extent: vec4<f32>,
 };
 
+
+// ⚠⚠ 一维派发有个**硬顶**：`max_compute_workgroups_per_dimension = 65535`（WebGPU 规范常数）。
+//   天穹 face 1024 要 6 * 1024^2 / 64 = 98304 个工作组 ⇒ 一维派发必然越界（实测：烘图报
+//   wgpu 校验错，panic 穿过算子的 dylib 边界 ⇒ 整个烘焙进程 abort，且没有任何可读信息）。
+//   ⇒ x 方向切在 65535，余数走 y 维；这里按同一把尺子把 (x, y) 摊平。
+const WG_X: u32 = 65535u;
+const WG_SIZE: u32 = 64u;
+
+fn flat_index_of(id: vec3<u32>) -> u32 {
+    return id.x + id.y * WG_X * WG_SIZE;
+}
+
 @group(0) @binding(0) var<uniform> volume: Volume;
 @group(0) @binding(1) var<storage, read> data: array<f32>;
 @group(0) @binding(2) var<storage, read> points: array<f32>;
@@ -166,12 +178,13 @@ fn sample_volume(point: vec3<f32>, lane: u32) -> f32 {
 
 @compute @workgroup_size(64)
 fn sample_points(@builtin(global_invocation_id) id: vec3<u32>) {
+    let index = flat_index_of(id);
     let count = arrayLength(&out);
-    if (id.x >= count) {
+    if (index >= count) {
         return;
     }
-    let point = vec3<f32>(points[id.x * 3u], points[id.x * 3u + 1u], points[id.x * 3u + 2u]);
-    out[id.x] = sample_volume(point, volume.shape.w);
+    let point = vec3<f32>(points[index * 3u], points[index * 3u + 1u], points[index * 3u + 2u]);
+    out[index] = sample_volume(point, volume.shape.w);
 }
 
 // ------------------------------- 步进入口 -------------------------------
@@ -199,13 +212,14 @@ struct Sky {
 // 布局与星点查表同一套：row = 面 * face_size + y。
 @compute @workgroup_size(64)
 fn march(@builtin(global_invocation_id) id: vec3<u32>) {
+    let index = flat_index_of(id);
     let count = arrayLength(&image);
-    if (id.x >= count) {
+    if (index >= count) {
         return;
     }
     let face_size = sky.counts.y;
-    let row = id.x / face_size;
-    let x = id.x % face_size;
+    let row = index / face_size;
+    let x = index % face_size;
     let face = row / face_size;
     let y = row % face_size;
     let s = (f32(x) + 0.5) / f32(face_size);
@@ -229,7 +243,7 @@ fn march(@builtin(global_invocation_id) id: vec3<u32>) {
     // 星点与背景：乘透射率 —— 被前面的气遮住、被尘埃染红（与 CPU 同一口径）。
     radiance = radiance + transmittance * star_level(direction) * sky.scalars.y;
     radiance = radiance + transmittance * channel_of(sky.background, lane);
-    image[id.x] = radiance;
+    image[index] = radiance;
 }
 
 // 星点：方向 -> 立方贴图格 -> 扣地板并归一化。face_size = 0 表示没有星图。
@@ -305,11 +319,12 @@ fn tone(l: f32, tone_in: vec4<f32>, tone_out: vec4<f32>) -> f32 {
 
 @compute @workgroup_size(64)
 fn tone_of(@builtin(global_invocation_id) id: vec3<u32>) {
+    let index = flat_index_of(id);
     let count = arrayLength(&image);
-    if (id.x >= count) {
+    if (index >= count) {
         return;
     }
-    image[id.x] = tone(image[id.x], sky.tone_in, sky.tone_out);
+    image[index] = tone(image[index], sky.tone_in, sky.tone_out);
 }
 
 // 档位色相：按档位键的亮度取段；段间过渡**收窄到段间的 20%**（线性混色会让大量像素停在
@@ -345,14 +360,15 @@ fn ramp_hue(key: f32) -> vec3<f32> {
 // 每格一次：键就是这一格自己的亮度（没有邻域平均 —— 烘焙离线，判据直接来自采样本身）。
 @compute @workgroup_size(64)
 fn hue_of_keys(@builtin(global_invocation_id) id: vec3<u32>) {
+    let index = flat_index_of(id);
     let count = arrayLength(&image) / 3u;
-    if (id.x >= count) {
+    if (index >= count) {
         return;
     }
-    let hue = ramp_hue(image[id.x * 3u]);
-    image[id.x * 3u] = hue.x;
-    image[id.x * 3u + 1u] = hue.y;
-    image[id.x * 3u + 2u] = hue.z;
+    let hue = ramp_hue(image[index * 3u]);
+    image[index * 3u] = hue.x;
+    image[index * 3u + 1u] = hue.y;
+    image[index * 3u + 2u] = hue.z;
 }
 
 // 每格一次分级：先亮度响应、后色相斜坡，逐格亮度守恒；纯黑原样出去。
@@ -382,13 +398,14 @@ fn grade_pixel(rgb: vec3<f32>) -> vec3<f32> {
 // image 每格 3 个 f32（分级就地覆盖）。
 @compute @workgroup_size(64)
 fn sky_grade(@builtin(global_invocation_id) id: vec3<u32>) {
+    let index = flat_index_of(id);
     let count = arrayLength(&image) / 3u;
-    if (id.x >= count) {
+    if (index >= count) {
         return;
     }
     let face_size = sky.counts.y;
-    let row = id.x / face_size;
-    let x = id.x % face_size;
+    let row = index / face_size;
+    let x = index % face_size;
     let face = row / face_size;
     let y = row % face_size;
     let s = (f32(x) + 0.5) / f32(face_size);
@@ -426,7 +443,7 @@ fn sky_grade(@builtin(global_invocation_id) id: vec3<u32>) {
         response = tone(l, sky.tone_in, sky.tone_out) / l;
     }
     let graded = grade_pixel(rgb * response);
-    image[id.x * 3u] = graded.x;
-    image[id.x * 3u + 1u] = graded.y;
-    image[id.x * 3u + 2u] = graded.z;
+    image[index * 3u] = graded.x;
+    image[index * 3u + 1u] = graded.y;
+    image[index * 3u + 2u] = graded.z;
 }

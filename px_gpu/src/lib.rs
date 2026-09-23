@@ -24,6 +24,18 @@ pub struct Gpu {
 
 static GPU: OnceLock<Option<Gpu>> = OnceLock::new();
 
+/// 最近一次**未被错误域捕获**的 wgpu 错误。
+///
+/// ⚠⚠ 为什么必须装这个处理器：wgpu 默认的错误处理是 **panic**，而算子是 dylib ——
+///   panic 穿过 dylib 边界会变成 `Rust cannot catch foreign exceptions`，
+///   **整个烘焙进程直接 abort**（实测踩过，而且没有任何可读信息）。装了之后错误落在这里，
+///   由调用方决定怎么报（算子契约本来就是 `Result`）。
+static LAST_ERROR: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+pub fn take_last_error() -> Option<String> {
+    LAST_ERROR.lock().ok().and_then(|mut slot| slot.take())
+}
+
 fn backends() -> wgpu::Backends {
     match std::env::var("WGPU_BACKEND").as_deref() {
         Ok("vulkan") => wgpu::Backends::VULKAN,
@@ -57,6 +69,13 @@ fn build() -> Option<Gpu> {
         trace: wgpu::Trace::Off,
     }))
     .ok()?;
+    device.on_uncaptured_error(std::sync::Arc::new(|error| {
+        let text = format!("{error}");
+        eprintln!("px_gpu 未捕获错误：{text}");
+        if let Ok(mut slot) = LAST_ERROR.lock() {
+            *slot = Some(text);
+        }
+    }));
     Some(Gpu {
         instance,
         adapter,
@@ -252,6 +271,8 @@ pub fn dispatch_slots(
     // ⚠ 待办：这里该压一层校验错误域（出错返回 Err 而不是 panic —— panic 穿过算子的
     //   dylib 边界会 abort 整个烘焙进程，实测踩过）。wgpu 29 的这个位置没有
     //   `pop_error_scope`，留到搞清 API 之后再补。
+    // ⚠ 压一层校验错误域 ⇒ 出错**返回 Err**（算子契约本来就是 Result），不 panic、不 abort。
+    let scope = gpu.device.push_error_scope(wgpu::ErrorFilter::Validation);
     let mut encoder = gpu
         .device
         .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -270,6 +291,10 @@ pub fn dispatch_slots(
         encoder.copy_buffer_to_buffer(&buffers[*index], 0, &staging[slot], 0, *size as u64);
     }
     gpu.queue.submit(Some(encoder.finish()));
+
+    if let Some(error) = pollster::block_on(scope.pop()) {
+        return Err(format!("px_gpu 校验出错：{error}"));
+    }
 
     for buffer in &staging {
         let slice = buffer.slice(..);
