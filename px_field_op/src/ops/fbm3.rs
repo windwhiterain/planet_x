@@ -33,17 +33,24 @@ pub fn eval(params: &params::Fbm3Params, _inputs: &[&Field], grid: Grid) -> Fiel
         gain: params.gain,
         seed: params.seed,
     };
-    let mut field = Field::filled_with(shape.res, shape.height(), 0.0, grid.projection);
-    for y in 0..field.height {
-        let (face, _) = shape.slot_of(y).expect("行号在形状之内");
-        for x in 0..field.width {
-            let mut voxel = voxel_of(&shape, face, x, y);
-            // `zonal` 只动**径向**那一维：结构沿径向被拉长／压扁（`1.0` = 各向同性）。
-            voxel[2] *= params.zonal;
-            field.set(x, y, noise::fbm_3(voxel, &settings));
+    // ⚠ **按行带并行**（见 [`crate::parallel`]）：逐格结果与串行逐位相同。
+    //   这一档是图里最贵的几处之一（体网格上 6~7 个八度的三维噪声）。
+    let width = shape.res as usize;
+    let height = shape.height() as usize;
+    let data = crate::parallel::rows(width, height, |first, count, out| {
+        for row in 0..count {
+            let y = (first + row) as u32;
+            let (face, _) = shape.slot_of(y).expect("行号在形状之内");
+            let base = row * width;
+            for x in 0..shape.res {
+                let mut voxel = voxel_of(&shape, face, x, y);
+                // `zonal` 只动**径向**那一维：结构沿径向被拉长／压扁（`1.0` = 各向同性）。
+                voxel[2] *= params.zonal;
+                out[base + x as usize] = noise::fbm_3(voxel, &settings);
+            }
         }
-    }
-    field
+    });
+    Field::with_projection(shape.res, shape.height(), data, grid.projection)
 }
 
 #[cfg(test)]

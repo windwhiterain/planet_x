@@ -253,19 +253,27 @@ pub fn raymarch_channel(
     channel: usize,
 ) -> Field {
     let face = params.face.max(1);
-    let mut field = Field::filled_with(face, face * CUBE_FACES, 0.0, Projection::CubeMap);
-    for y in 0..field.height {
-        let face_index = (y / face).min(CUBE_FACES - 1);
-        for x in 0..field.width {
-            let direction = art_direction_at(Projection::CubeMap, face, face * CUBE_FACES, x, y);
-            // ⚠ 逐格唯一：`y * face + x` **必须**带上 x（行号 y 一样的格会拿到同一个抖动
-            //   ⇒ 横向条纹）。`face_index << 20` 只是把六个面分开。
-            let texel = (y * face + x) ^ (face_index << 20);
-            let value = march_channel(emission, stars, params, channel, direction, texel);
-            field.set(x, y, value);
-        }
-    }
-    field
+    let height = face * CUBE_FACES;
+    // ⚠ **按行带并行**（`px_field_schema::parallel`）：逐格结果与串行逐位相同。
+    //   这一档是天空烘焙里最贵的一处：六个面 × face² 格 × 每格一次 256 步的步进，
+    //   而 `raymarch_sky` 还要把三条通道各走一遍。
+    let data =
+        px_field_schema::parallel::rows(face as usize, height as usize, |first, count, out| {
+            for row in 0..count {
+                let y = (first + row) as u32;
+                let face_index = (y / face).min(CUBE_FACES - 1);
+                let base = row * face as usize;
+                for x in 0..face {
+                    let direction = art_direction_at(Projection::CubeMap, face, height, x, y);
+                    // ⚠ 逐格唯一：`y * face + x` **必须**带上 x（行号 y 一样的格会拿到同一个抖动
+                    //   ⇒ 横向条纹）。`face_index << 20` 只是把六个面分开。
+                    let texel = (y * face + x) ^ (face_index << 20);
+                    out[base + x as usize] =
+                        march_channel(emission, stars, params, channel, direction, texel);
+                }
+            }
+        });
+    Field::with_projection(face, height, data, Projection::CubeMap)
 }
 
 /// 图侧最顺手的入口：**发射体积 + 星图 → 一张天空立方贴图**。
@@ -403,60 +411,16 @@ fn ramp_hue(key: f32) -> [f32; 3] {
     RAMP_HUE[3]
 }
 
-/// **区域亮度**（低频）：单面内两趟盒式模糊（行 + 列，前缀和）。
+/// **分级**（一格）：色相按**这一格自己的亮度**取档，亮度逐格守恒。
 ///
-/// ⚠⚠ 治的是**粉彩糊**（第三版分级的全部要点）：
-///   档位若按**逐像素**亮度取，每朵云内部从亮到暗就走完红→沙→蓝全程
-///   ⇒ 每朵云都是红蓝渐变 ⇒ 整图粉彩。参考图的色相是**区域性**的 ——
-///   整条气河是饱和蓝青、整片尘埃是深绯红（HII 区 vs 尘埃带是**空间**分的，
-///   不是明暗分的）。⇒ 档位按**区域亮度**取：同区域共享色相家族，跨区域才换色。
-///
-/// ⚠ 半径取 `face/8`（1024 面上 128 纹素）——**"区域"必须是河/尘埃的分界尺度**：
-///   取 `face/32`（32 纹素）实测**只平均到云内** ⇒ 蓝河的亮部被拖到区域均值的暖档
-///   （亮档 G/R 掉到 0.61）。再小退化成逐像素（粉彩糊），再大则两类区域和成一锅。
-///   嵌在蓝河里的**暗尘球**与星由 `grade_pixel` 的**两头逃逸**兜住，不靠半径。
-/// ⚠ 模糊**限制在单面内**（接缝不做立方体邻接的跨界平均）：跨界要按面邻接走、
-///   代价大，而接缝处只影响模糊半径宽的边缘（1024 面上 12%）。
-/// ⚠ 前缀和按 f64、固定顺序累加 ⇒ 逐位确定（键要能命中缓存）。
-fn region_luma(luma: &[f32], face: usize) -> Vec<f32> {
-    let radius = (face / 8).max(4);
-    let mut out = vec![0.0_f32; luma.len()];
-    let mut rows = vec![0.0_f32; face * face];
-    let mut prefix = vec![0.0_f64; face + 1];
-    for f in 0..6_usize {
-        let base = f * face * face;
-        // 第一趟：沿行（t 固定，s 走）。
-        for t in 0..face {
-            let row_in = &luma[base + t * face..base + (t + 1) * face];
-            prefix[0] = 0.0;
-            for s in 0..face {
-                prefix[s + 1] = prefix[s] + row_in[s] as f64;
-            }
-            let row_out = &mut rows[t * face..(t + 1) * face];
-            for s in 0..face {
-                let lo = s.saturating_sub(radius);
-                let hi = (s + radius + 1).min(face);
-                row_out[s] = ((prefix[hi] - prefix[lo]) / (hi - lo) as f64) as f32;
-            }
-        }
-        // 第二趟：沿列（s 固定，t 走）。
-        for s in 0..face {
-            prefix[0] = 0.0;
-            for t in 0..face {
-                prefix[t + 1] = prefix[t] + rows[t * face + s] as f64;
-            }
-            for t in 0..face {
-                let lo = t.saturating_sub(radius);
-                let hi = (t + radius + 1).min(face);
-                out[base + t * face + s] = ((prefix[hi] - prefix[lo]) / (hi - lo) as f64) as f32;
-            }
-        }
-    }
-    out
-}
-
-/// **分级**（一格）：色相按**区域亮度**取档（`region`），亮度逐格守恒。
-fn grade_pixel(rgb: [f32; 3], region: f32) -> [f32; 3] {
+/// ⚠⚠ 这里曾经有一层"区域亮度"（单面盒式模糊后再取档）—— 那是**实时渲染的取巧**：
+///   烘焙是离线的，判据应当**直接来自采样纹理本身**，采样不够就**去提采样**
+///   （`--shape` / `--layers`），而不是对成品图做邻域平均。那层模糊还有两个后患：
+///   * 面内模糊在立方体面的接缝两侧各用半窗、平均的是**不同内容** ⇒ 区域值在接缝处
+///     阶跃 ⇒ **接缝可见**（cam 135° 那台画面正中恰好在一条面棱上）；
+///   * 它把"区域"这件事**建立在别人的亮度上**，掩盖了采样不足。
+///   删掉之后，色相由每格自己的亮度决定 —— 采样够细时画面自然成区。
+fn grade_pixel(rgb: [f32; 3]) -> [f32; 3] {
     let luma = |color: &[f32; 3]| color[0] * 0.2126 + color[1] * 0.7152 + color[2] * 0.0722;
     let measured = luma(&rgb);
     // ⚠ 纯黑**原样出去**：目标色会把零格染上一点暗档色相 —— 数值虽小，
@@ -464,30 +428,7 @@ fn grade_pixel(rgb: [f32; 3], region: f32) -> [f32; 3] {
     if measured <= 1e-6 {
         return rgb;
     }
-    // ⚠ **两头逃逸**（否则区域档会伤到两类东西）：
-    //   * 上逃：**星核/亮点**远亮于所在区域 ⇒ 按自身亮度取档
-    //   （否则暗区里的星会变红 —— 参考图的星是白的）；
-    //   * 下逃：**暗尘带/空洞**远暗于所在区域 ⇒ 也按自身
-    //   （否则嵌在蓝河里的暗尘球会被区域染蓝 —— 参考图的暗尘球是暗红的）。
-    //   中间的普通云纹（0.5× ~ 2× 区域）⇒ `t = 0` ⇒ 同区域同族。
-    // ⚠⚠ 档位键 = **区域亮度**，孤立亮点的越档**封顶 20%**（`min(自身, 区域×1.2)`）：
-    //   * **星晕**（ratio ~3 的孤立亮点）只许越档 20% ⇒ 在尘埃里仍是粉红
-    //     （round 24 的 `max` 无封顶 ⇒ 星晕进亮档 ⇒ 薰衣草、暗档 G/R 0.41）；
-    //   * **湖心**（ratio ~1.3 的区域成员）本来就贴着区域 ⇒ 封顶不影响 ⇒ 蓝；
-    //   * **星核**（ratio 数十倍）与**暗尘带**（ratio < 0.2）两头逃逸按自身取；
-    //   * 纯区域键（无封顶、无逃逸）也试过：区域均值把湖拖暖（亮档 G/R 0.48）——
-    //     封顶 20% 是"区域管族、亮部有限越档"的正解。
-    let ratio = measured / region.max(1e-6);
-    let smooth = |x: f32| {
-        let x = x.clamp(0.0, 1.0);
-        x * x * (3.0 - 2.0 * x)
-    };
-    let up = smooth((ratio - 8.0) / 12.0);
-    let down = smooth((0.2 - ratio) / 0.15);
-    let t = up.max(down);
-    let base = region.max(measured.min(region * 1.2));
-    let key = base.powf(1.0 - t) * measured.powf(t);
-    let target = ramp_hue(key);
+    let target = ramp_hue(measured);
     // ⚠ 目标先缩到**这一格的 luma** 再插值 ⇒ 输出 luma 与输入逐格相同
     //   （判据 `grading_keeps_the_luma_and_heads_for_the_band_hue` 钉着）。
     let scale = measured / luma(&target);
@@ -510,23 +451,13 @@ pub fn raymarch_sky(
         planes.push(field.data);
     }
 
-    // ⚠ **按区域分档的色相分级**（bake 期，最后一步）—— 动机与常数见文件头，
-    //   逐格的那点事在 [`grade_pixel`]（判据 `grading_keeps_the_luma` 钉着它的亮度守恒）。
-    //
-    //   ⚠⚠ 分级走到第三版才对：一版按通道补丁（各推一把、两档都差）、
-    //   二版按**逐像素亮度**分档（两档对了、但整图粉彩糊 —— 每朵云内部都在走色相斜坡）、
-    //   三版按**区域亮度**分档（这一版）：同区域同族、跨区域换色。
+    // ⚠ **逐格色相分级**（bake 期，最后一步）—— 档位键就是这一格自己的亮度。
+    //   动机与常数见文件头，逐格那点事在 [`grade_pixel`]
+    //   （判据 `grading_keeps_the_luma` 钉着它的亮度守恒）。
+    //   ⚠⚠ 这里**不再有"区域亮度"那一层模糊**（理由见 [`grade_pixel`]）：
+    //   采样不足要靠**提高采样**解决，不是拿邻域平均去盖。
     let line = |value: f32| -> f32 { value.max(0.0) };
     let texels = planes[0].len();
-    let face_size = sky_params.face.max(1) as usize;
-    // 区域亮度 = 色相的档位键（见 [`region_luma`] —— 治粉彩糊的那一步）。
-    let mut luma_of = vec![0.0_f32; texels];
-    for index in 0..texels {
-        luma_of[index] = planes[0][index].max(0.0) * 0.2126
-            + planes[1][index].max(0.0) * 0.7152
-            + planes[2][index].max(0.0) * 0.0722;
-    }
-    let region = region_luma(&luma_of, face_size);
     let mut graded = vec![0.0_f32; texels * 3];
     for index in 0..texels {
         let rgb = [
@@ -536,10 +467,10 @@ pub fn raymarch_sky(
         ];
         // ⚠ **先亮度响应、后色相斜坡**：色相的档位常数（`RAMP_LUMA`）是**输出域**
         //   量出来的（参考图的分位）⇒ 必须对齐到响应**之后**的亮度，顺序不能反。
-        let l = luma_of[index];
+        let l = rgb[0] * 0.2126 + rgb[1] * 0.7152 + rgb[2] * 0.0722;
         let response = if l > 1e-9 { tone(l) / l } else { 0.0 };
         let rgb = [rgb[0] * response, rgb[1] * response, rgb[2] * response];
-        let out = grade_pixel(rgb, tone(region[index].max(0.0)));
+        let out = grade_pixel(rgb);
         graded[index * 3] = line(out[0]);
         graded[index * 3 + 1] = line(out[1]);
         graded[index * 3 + 2] = line(out[2]);
@@ -762,7 +693,7 @@ mod tests {
         assert!(saw_dimmer, "外层有消光 ⇒ 必须有一部分被吃掉");
     }
 
-    /// **分级：亮度守恒、同区域同族、星与暗带两头逃逸、纯黑原样**。
+    /// **分级：亮度守恒、逐格色相分档、纯黑原样**。
     ///
     /// ⚠ 亮度守恒是那条硬性质（色相与亮度互不干扰 ⇒ 亮度那一维仍只由体渲染的参数管）。
     ///   浮点求和顺序变了 ⇒ 不是逐位恒等，用紧容差。
@@ -770,7 +701,7 @@ mod tests {
     fn grading_keeps_the_luma_and_heads_for_the_band_hue() {
         let luma = |color: &[f32; 3]| color[0] * 0.2126 + color[1] * 0.7152 + color[2] * 0.0722;
         // ⚠ 纯黑必须**正好**是纯黑（判据用逐位：这里恒等成立）。
-        assert_eq!(grade_pixel([0.0, 0.0, 0.0], 0.01), [0.0, 0.0, 0.0]);
+        assert_eq!(grade_pixel([0.0, 0.0, 0.0]), [0.0, 0.0, 0.0]);
         for rgb in [
             [0.004, 0.002, 0.003],
             [0.01, 0.01, 0.01],
@@ -778,8 +709,7 @@ mod tests {
             [0.2, 0.16, 0.22],
             [1.5, 0.9, 1.2],
         ] {
-            // 均匀区域（`region` = 自身）⇒ 走的就是"逐像素档"那条老路径。
-            let out = grade_pixel(rgb, luma(&rgb));
+            let out = grade_pixel(rgb);
             let drift = (luma(&out) - luma(&rgb)).abs();
             assert!(
                 drift <= 1e-6 + luma(&rgb) * 1e-4,
@@ -787,7 +717,7 @@ mod tests {
             );
         }
         // 暗的往暗档色相走（目标 G/R = 0.24、B/R = 0.61；起点是中性的 1/1）。
-        let dark = grade_pixel([0.006, 0.006, 0.006], 0.006);
+        let dark = grade_pixel([0.006, 0.006, 0.006]);
         assert!(
             dark[1] / dark[0] < 0.4,
             "暗档的绿没压下去（{:.3}）",
@@ -799,7 +729,7 @@ mod tests {
             dark[2] / dark[0]
         );
         // 亮的往亮档色相走（目标 G/R = 0.81、B/R = 1.10）。
-        let bright = grade_pixel([0.2, 0.2, 0.2], 0.2);
+        let bright = grade_pixel([0.2, 0.2, 0.2]);
         assert!(
             bright[2] / bright[0] > 1.0,
             "亮档的蓝没高过红（{:.3}）",
@@ -810,44 +740,23 @@ mod tests {
             "亮档的绿没抬起来（{:.3}）",
             bright[1] / bright[0]
         );
-
-        // ⚠⚠ **区域是唯一的档位键**（星核/暗尘带两头逃逸除外）：
-        //   * **星晕**（亮于区域的孤立亮点）跟**区域**走 ⇒ 在尘埃里是粉红
-        //     （round 24 让它逃进亮档 ⇒ 薰衣草、暗档 G/R 抬到 0.41）；
-        //   * **湖缘**（暗于湖心的区域成员）也跟区域走 ⇒ 湖内同族不掉档。
-        let region = 0.02;
-        let dim_in = grade_pixel([0.01, 0.01, 0.01], region);
+        // ⚠ **键就是这一格自己的亮度**（区域那一层已删，见 `grade_pixel` 的说明）：
+        //   两格**等亮度**时档位相同 ⇒ 目标色同向（差别只来自那 5% 的原色残留）。
+        //   ⚠ 第二格要按亮度**配平**（`0.0796/0.0318/0.1432` 的亮度也是 0.05）——
+        //   随手取一组通道值并不等亮度，那测的就是"键漂了"，不是这条性质。
+        let a = grade_pixel([0.05, 0.05, 0.05]);
+        let b = grade_pixel([0.0796, 0.0318, 0.1432]);
         assert!(
-            dim_in[1] / dim_in[0] < 0.5,
-            "暗部该跟区域档走（G/R {:.2}）",
-            dim_in[1] / dim_in[0]
+            (luma(&a) - luma(&b)).abs() < 1e-4,
+            "配平写错了：两格亮度不同（{:.5} vs {:.5}）",
+            luma(&a),
+            luma(&b)
         );
-        let halo = grade_pixel([0.08, 0.08, 0.08], region);
         assert!(
-            halo[1] / halo[0] < 0.5,
-            "星晕逃进了亮档（G/R {:.2}）—— 薰衣草回来了",
-            halo[1] / halo[0]
-        );
-        let lake_edge = grade_pixel([0.05, 0.05, 0.05], 0.15);
-        assert!(
-            lake_edge[2] / lake_edge[0] > 1.2,
-            "湖缘掉了档（B/R {:.2}）—— 湖内要同族",
-            lake_edge[2] / lake_edge[0]
-        );
-        // 星要**逃出**区域档：远亮于区域的格子按自身取 ⇒ 白（参考图的星是白的）。
-        let star = grade_pixel([0.5, 0.5, 0.5], region);
-        assert!(
-            star[2] / star[0] > 0.95,
-            "星没逃出区域档（B/R {:.2}）",
-            star[2] / star[0]
-        );
-        // 暗尘带也要**逃出**：远暗于区域的格子按自身取 ⇒ 暗红
-        // （否则嵌在蓝河里的暗尘球会被区域染蓝 —— 参考图的暗尘球是暗红的）。
-        let lane = grade_pixel([0.003, 0.003, 0.003], 0.08);
-        assert!(
-            lane[1] / lane[0] < 0.45,
-            "暗尘带没逃出区域档（G/R {:.2}）",
-            lane[1] / lane[0]
+            (a[2] / a[0] - b[2] / b[0]).abs() < 0.1,
+            "等亮度的两格档位不一致（{:.2} vs {:.2}）—— 键漂了",
+            a[2] / a[0],
+            b[2] / b[0]
         );
 
         // ⚠ **亮度响应**（`tone`）的三条硬性质：单调、纯黑原样、**永不撞顶**

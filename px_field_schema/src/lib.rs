@@ -12,6 +12,7 @@ pub const SOURCE_HASH: &str = env!("PX_SOURCE_HASH");
 pub mod field;
 pub mod noise;
 pub mod ops;
+pub mod parallel;
 pub mod params;
 pub mod payload;
 pub mod volume;

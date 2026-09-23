@@ -18,6 +18,7 @@
 
 pub mod noise;
 pub mod ops;
+pub mod parallel;
 
 // 这个库的身份：`…__source_hash`（进键的"实现是哪一份"）与 `…__contract_hash`
 // （装载时与图程序对账"我们是不是同一份契约编出来的"）。
