@@ -373,9 +373,22 @@ fn main() -> Result<(), Fault> {
         node_params(&shape_graph, "density_volume")?,
         volume::DensityInput { density: textured },
     )?;
-    // ⚠ 星场在**体积图**里也要挂一次：`cloud.emission` 要它来照亮气体（在散射那一条）。
-    //   参数与天空图那一份**逐字相同**（同一个 `star_params()`）⇒ 同一个键。
-    let shape_stars = cached(&shape_graph, "stars", volume::Stars, star_params()?, ())?;
+    // ⚠⚠ 星场**吃密度**（用户 2026-09-25："让星星和星云在大尺度上分布近似"）：
+    //   只对低频噪声时实测相关 +0.022 ⇒ 必须按**真密度场**拒绝采样。密度在体积图里，
+    //   所以星场**只在体积图**解析；天空图那一份多余的节点删掉了，直接把这里的句柄
+    //   喂进天空节点（与 `volume` 完全同一条路）—— 顺带保证两边是同一份星场。
+    let shape_stars = cached(
+        &shape_graph,
+        "stars",
+        volume::Stars,
+        star_params()?,
+        volume::StarsInput {
+            // ⚠ 星场与发射**都要**这份密度 ⇒ 只能克隆一次句柄（`Cooked` 是 `Clone`，
+            //   而它内含的是整份体积：shape 256 时 604 MB ⇒ 克隆一次要 ~0.5 秒）。
+            //   稀疏砖那一档落地后这份内存就不再是问题了。
+            volume: density_volume.clone(),
+        },
+    )?;
     let emission = cached(
         &shape_graph,
         "emission",
@@ -383,11 +396,13 @@ fn main() -> Result<(), Fault> {
         node_params(&shape_graph, "emission")?,
         volume::EmissionInput {
             volume: density_volume,
-            stars: shape_stars,
+            // ⚠ 星场句柄在发射与天空两处都要 ⇒ 克隆一次（`StarField` 只有几 MB，
+            //   与密度那份 604 MB 不是一回事）。
+            stars: shape_stars.clone(),
         },
     )?;
 
-    // ── 图二：星点 + 整张天空（画布是立方贴图）────────────────────────────
+    // ── 图二：整张天空（画布是立方贴图）──────────────────────────────────
     let sky_graph = begin(GraphSpec {
         name: "nebulasky".to_string(),
         width: face,
@@ -395,7 +410,6 @@ fn main() -> Result<(), Fault> {
         projection: Domain::CubeMap,
         cameras: Vec::new(),
     });
-    let stars = cached(&sky_graph, "stars", volume::Stars, star_params()?, ())?;
     // ⚠ **一个节点交出一整张天空贴图**（三条通道在算子内部各积一遍）。
     //   `sky` 就是场景文档要引用的那个节点名（`nebulasky::sky`），而它是一条
     //   **正常的图成员** —— 驱动照常进键、落盘、登记清单，这里不必手工拼贴图。
@@ -406,7 +420,7 @@ fn main() -> Result<(), Fault> {
         node_params(&sky_graph, "sky")?,
         volume::SkyInput {
             volume: emission,
-            stars,
+            stars: shape_stars,
         },
     )?;
     println!(

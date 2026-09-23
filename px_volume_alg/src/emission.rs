@@ -227,8 +227,11 @@ pub fn bake_emission(
 
                 let at = row * width + s as usize * 6;
                 for channel in 0..3 {
+                    // ⚠ `scatter_tint` 只乘**发射**通道（消光通道不动）：尘埃染色是物理，
+                    //   而分色是诊断（用户 2026-09-25：散射走红、星光走蓝）。
                     out[at + channel] =
-                        main + glow * params.glow_tint[channel] + star_emit * star_lit[channel];
+                        (main + glow * params.glow_tint[channel] + star_emit * star_lit[channel])
+                            * params.scatter_tint[channel];
                     out[at + 3 + channel] = base * params.extinction[channel] + dust;
                 }
             }

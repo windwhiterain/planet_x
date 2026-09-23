@@ -345,7 +345,7 @@ fn main() -> Result<(), String> {
     );
 
     let started = std::time::Instant::now();
-    let field = bake_stars(&params).map_err(|err| err.to_string())?;
+    let field = bake_stars(&params, None).map_err(|err| err.to_string())?;
     println!(
         "撒点 + 建格：{:.2} 秒｜{} 颗｜{} 个 brick｜{} 个占用细格｜每 brick {:.2} 颗、每细格 {:.2} 颗",
         started.elapsed().as_secs_f64(),
@@ -663,7 +663,7 @@ fn main() -> Result<(), String> {
     for threshold in [0.0_f32, 0.05, 0.125, 0.25, 0.5, 1.0, 2.0, 4.0] {
         let mut tuned = params.clone();
         tuned.min_apparent = threshold;
-        let Ok(tuned_field) = px_volume_alg::bake_stars(&tuned) else {
+        let Ok(tuned_field) = px_volume_alg::bake_stars(&tuned, None) else {
             continue;
         };
         let support = px_volume_alg::raymarch::star_support(&params_sky);

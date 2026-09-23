@@ -476,6 +476,7 @@ fn march_channel(
                 * hit.power[lane]
                 * star_power(hit.sine, hit.radius, params)
                 * params.star_gain
+                * params.star_tint[lane]
                 * star_falloff(hit.radius, enter);
             next_hit += 1;
         }
@@ -495,6 +496,7 @@ fn march_channel(
             * hit.power[lane]
             * star_power(hit.sine, hit.radius, params)
             * params.star_gain
+            * params.star_tint[lane]
             * star_falloff(hit.radius, enter);
         next_hit += 1;
     }

@@ -10,7 +10,7 @@
 #   ⇒ 现在星只是**世界坐标里的点**：位置按**体积**均匀撒在壳里，索引交给 R3 稀疏格。
 
 # 星数（撒在下面那层壳的**体积**里）。
-count = 700000
+count = 1200000
 seed = 60613
 
 # 星所在的那层壳（世界单位）。⚠ 与 `art/nebula/density_volume.toml` 的 `inner`/`outer`
@@ -59,3 +59,11 @@ sky_gain = 0.5
 sky_seed = 9173
 sky_zonal = 0.9
 sky_contrast = 2.0
+
+# ── 精确相关：星按**真实密度场**拒绝采样（体积图的 `stars` 吃 `cloud.density`）────
+# ⚠ 用户 2026-09-25："让星星和星云在大尺度上分布近似"。
+#   实测只抄 envelope 那一层噪声时相关只有 +0.022（气的分布是整条链的阈值/mix 定的）
+#   ⇒ 必须吃**真密度场**。接受概率 = (密度/平均密度)^gas_contrast，上限 1。
+# ⚠ 拒绝采样只能变稀 ⇒ `count` 要按存活率抬上去。
+gas_biased = true
+gas_contrast = 1.5

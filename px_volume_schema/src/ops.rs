@@ -41,6 +41,15 @@ pub struct EmissionInput {
     pub stars: Cooked<StarField>,
 }
 
+/// 星场的输入：**密度体积**（星按它拒绝采样 ⇒ 与气的大尺度分布精确相关）。
+///
+/// ⚠ 为什么是输入而不是参数：密度得由别的节点造出来（它是 `cloud.density` 的产物），
+///   给成参数那份密度就没法进键了。给成输入，上游的键自然进星场的键。
+#[derive(px_derive::PxInputs)]
+pub struct StarsInput {
+    pub volume: Cooked<VolumeData>,
+}
+
 /// 沿视线积分要吃的东西：**一份发射体积** + **一份 R3 星场**。
 ///
 /// ⚠ 星场是**图输入**（不是参数）：星点要参与积分（被气遮住、被尘埃染红），所以它必须
@@ -70,7 +79,12 @@ px_op! {
     ///
     /// ⚠ 位置按**体积**均匀（不是按球面均匀）：星撒在气里，密度该按体积算。
     ///   亮度取幂律（暗的多、亮的少），星簇是一组真实的亮星（既直射也照亮气体）。
-    Stars, "sky.stars", "px_volume_op", params::stars::StarsParams, (), StarField
+    ///
+    /// ⚠⚠ 它**吃一个输入**：`cloud.density`。用户 2026-09-25："让星星和星云在大尺度上
+    ///   分布近似" —— 实测只对上低频噪声时相关只有 +0.022（气的分布是整条链的阈值/mix
+    ///   定的）⇒ 星必须按**真密度场**拒绝采样。因为密度在体积图里，这一档**只在体积图**
+    ///   解析：天空图直接拿体积图的星场句柄（与 `volume` 同一条路），那份多余的节点删掉。
+    Stars, "sky.stars", "px_volume_op", params::stars::StarsParams, StarsInput, StarField
 }
 
 px_op! {

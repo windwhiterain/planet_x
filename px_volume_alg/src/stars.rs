@@ -155,8 +155,19 @@ fn grid_meta(params: &StarsParams, reach: f32) -> GridMeta {
 /// ⚠ 细格边长（`cell`）与光照半径（`light_radius`）是**两个旋钮**（用户 2026-09-25 定的）：
 ///   前者是**存储分辨率**（一个格装几颗星），后者是**物理查询半径**（星光能照多远）。
 ///   把它们绑死会在"想细一点"和"想照远一点"之间二选一。
-pub fn bake_stars(params: &StarsParams) -> Result<StarField, String> {
+pub fn bake_stars(
+    params: &StarsParams,
+    density: Option<&px_volume_schema::VolumeData>,
+) -> Result<StarField, String> {
     let seed = params.seed;
+    // ⚠⚠ **精确相关**用的参照密度（拒绝采样只能变稀 ⇒ 拿平均密度当 1.0 的基准，
+    //   气的峰上保持原样、别处按幂律稀下去）。一遍累加，量级是几十毫秒。
+    let gas_mean = density
+        .map(|volume| {
+            let sum: f64 = volume.data.iter().map(|value| *value as f64).sum();
+            (sum / volume.data.len().max(1) as f64) as f32
+        })
+        .filter(|mean| *mean > 1e-9);
     let count = params.count as usize;
     let cluster_count = params.cluster_count as usize;
 
@@ -212,6 +223,19 @@ pub fn bake_stars(params: &StarsParams) -> Result<StarField, String> {
         let r = (position[0] * position[0] + position[1] * position[1] + position[2] * position[2])
             .sqrt()
             .max(1e-6);
+        // ⚠⚠ **精确相关**（用户 2026-09-25 定的一档）：按**真实密度场**拒绝采样 ⇒
+        //   星云在哪、星就在哪（大尺度上同分布）。实测只抄 `envelope` 那一层噪声时
+        //   相关只有 +0.022 —— 气的分布是整条链的阈值/mix 定的，光对上低频层对不出来。
+        //   ⚠ 抽签的哈希与位置/亮度/其他偏置的哈希各自独立（改对比度不会挪动位置）。
+        if params.gas_biased {
+            if let (Some(volume), Some(mean)) = (density, gas_mean) {
+                let here = crate::density::sample_world(volume, position).max(0.0);
+                let chance = (here / mean).powf(params.gas_contrast).min(1.0);
+                if unit24(hash(seed ^ 0x77c1_5a3d, index as u32)) >= chance {
+                    continue;
+                }
+            }
+        }
         // ⚠⚠ **大尺度偏置**（用户 2026-09-25："让星星和星云在大尺度上分布近似"）：
         //   按"气那一族噪声"做一次**拒绝采样**（抽签也用哈希 ⇒ 确定性）⇒
         //   留下来的星在大尺度上跟气同分布。
@@ -356,8 +380,8 @@ mod tests {
     /// **确定性**：同参数两遍逐位相同（缓存键靠它）。
     #[test]
     fn the_same_parameters_give_the_same_stars() {
-        let one = bake_stars(&params()).expect("烘星");
-        let two = bake_stars(&params()).expect("烘星");
+        let one = bake_stars(&params(), None).expect("烘星");
+        let two = bake_stars(&params(), None).expect("烘星");
         assert_eq!(one.stars, two.stars);
         assert_eq!(one.grid, two.grid);
     }
@@ -365,7 +389,7 @@ mod tests {
     /// **每颗星都落在它自己那一格里**：逐格回查，登记它的那一格必须就是它所在的格。
     #[test]
     fn every_star_sits_in_the_cell_that_claims_it() {
-        let field = bake_stars(&params()).expect("烘星");
+        let field = bake_stars(&params(), None).expect("烘星");
         let mut seen = 0;
         field.grid.for_each_cell(|cell, range| {
             for index in range {
@@ -401,7 +425,7 @@ mod tests {
     /// **邻域查询与逐颗暴力一致**：`stars_near` 是 CPU/GPU 共用的语义口。
     #[test]
     fn the_neighbourhood_query_matches_brute_force() {
-        let field = bake_stars(&params()).expect("烘星");
+        let field = bake_stars(&params(), None).expect("烘星");
         let radius = field.grid.meta.cell * 2.0;
         let probes = [
             [0.0, 0.0, 0.0],
@@ -443,7 +467,7 @@ mod tests {
             count: 20000,
             ..params()
         };
-        let field = bake_stars(&params).expect("烘星");
+        let field = bake_stars(&params, None).expect("烘星");
         let mut radii: Vec<f32> = (0..field.count())
             .map(|index| {
                 let p = field.star(index).position;
@@ -474,10 +498,13 @@ mod tests {
     ///   现在位置在世界坐标里按体积均匀 ⇒ 采样一批球心，星数的相对散布必须小。
     #[test]
     fn the_star_density_is_the_same_everywhere() {
-        let field = bake_stars(&StarsParams {
-            count: 60_000,
-            ..params()
-        })
+        let field = bake_stars(
+            &StarsParams {
+                count: 60_000,
+                ..params()
+            },
+            None,
+        )
         .expect("烘星");
         let radius = field.grid.meta.cell * 2.0;
         // 球心撒在一张壳上（与星的半径分布无关），方向按 Fibonacci 球均匀。
