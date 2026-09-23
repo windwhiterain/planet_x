@@ -15,11 +15,12 @@
 //!   里，它不知道世界尺度（壳的内外半径）；而步进要的是"世界里的一段区间"。把场搬进
 //!   `VolumeData` 时把半径一并钉下来，步进那一侧就只需要"方向 + 距离"。
 //!
-//! ⚠ **采样点的坐标要先把面偏移减掉**：上游那张场的**六面各自占噪声空间里一块区域**
-//!   （见 `px_field_schema::volume::face_offset`），而网格的行列只按面内位置排 ⇒
-//!   "读网格"必须走面内坐标。这一条在 `field.warp3` 里踩过一次（格心采样偏 0.40）。
+//! ⚠⚠ **面只是方向的参数化工具**（round 29 改）：密度/噪声是**位置的三维场**，
+//!   同一格在公共棱上无论从哪一面取样都是同一个值（见 `px_field_schema::volume::voxel_of`）
+//!   —— 从前那份"每面一个固定偏移"让场自己在棱上断开，读网格还得把偏移减掉；
+//!   现在两侧都按**方向**走，偏移这一层已经没有了。
 
-use px_field_schema::field::{CUBE_FACES, Field, cube_face_of};
+use px_field_schema::field::{CUBE_FACES, Field, cube_direction, cube_face_of};
 use px_field_schema::volume::VolumeShape;
 use px_volume_schema::VolumeData;
 use px_volume_schema::params::density::DensityParams;
@@ -186,18 +187,27 @@ pub fn sample_world(volume: &VolumeData, point: [f32; 3]) -> f32 {
     let y0 = sy.floor();
     let tx = snap(sx - x0);
     let ty = snap(sy - y0);
-    let clamp_cell = |value: f32| value.clamp(0.0, (res - 1) as f32) as u32;
-    let wrap_cell = |value: f32| (value.rem_euclid(res as f32)) as u32;
-    let (xa, xb) = (wrap_cell(x0), wrap_cell(x0 + 1.0));
-    let (ya, yb) = (clamp_cell(y0), clamp_cell(y0 + 1.0));
     let layer_at = |step: f32| (layer0 + step).clamp(0.0, last_layer as f32) as u32;
     let (la, lb) = (layer_at(0.0), layer_at(1.0));
 
-    let corner = |cell_s: u32, cell_t: u32, layer: u32| volume.at(face, layer, cell_t, cell_s);
-    let top = (corner(xa, ya, la) * (1.0 - tx) + corner(xb, ya, la) * tx) * (1.0 - ty)
-        + (corner(xa, yb, la) * (1.0 - tx) + corner(xb, yb, la) * tx) * ty;
-    let bottom = (corner(xa, ya, lb) * (1.0 - tx) + corner(xb, ya, lb) * tx) * (1.0 - ty)
-        + (corner(xa, yb, lb) * (1.0 - tx) + corner(xb, yb, lb) * tx) * ty;
+    // ⚠⚠ **三线性要跨面取邻居**（round 29 修）：`s` / `t` 走出本面时，落点是**相邻面**的
+    //   格子。从前这里只做 `wrap_cell(s)` + `clamp_cell(t)`，**四个角落都在同一面里**
+    //   （`volume.at(face, …)` 的面号写死）⇒ 视线跨过面棱时密度跳一下 ⇒ 画面上就是那道
+    //   通高的竖缝（⚠ 文档写着"要跨面"，实现没做 —— 这正是"注释与实现对不上"的那类）。
+    //   走法：格心 → 面内参数 → `cube_direction`（越界时它给出的仍是相邻面上的方向）
+    //   → `cube_face_of` 反查出**真正**的面与格子。
+    let corner = |cell_s: f32, cell_t: f32, layer: u32| -> f32 {
+        let s = (cell_s + 0.5) / res as f32;
+        let t = (cell_t + 0.5) / res as f32;
+        let (nf, ns, nt) = cube_face_of(cube_direction(face, s, t));
+        let cs = ((ns * res as f32) as u32).min(res - 1);
+        let ct = ((nt * res as f32) as u32).min(res - 1);
+        volume.at(nf, layer.min(volume.layers.max(1) - 1), ct, cs)
+    };
+    let top = (corner(x0, y0, la) * (1.0 - tx) + corner(x0 + 1.0, y0, la) * tx) * (1.0 - ty)
+        + (corner(x0, y0 + 1.0, la) * (1.0 - tx) + corner(x0 + 1.0, y0 + 1.0, la) * tx) * ty;
+    let bottom = (corner(x0, y0, lb) * (1.0 - tx) + corner(x0 + 1.0, y0, lb) * tx) * (1.0 - ty)
+        + (corner(x0, y0 + 1.0, lb) * (1.0 - tx) + corner(x0 + 1.0, y0 + 1.0, lb) * tx) * ty;
     top * (1.0 - tz) + bottom * tz
 }
 

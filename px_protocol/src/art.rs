@@ -605,26 +605,30 @@ impl Domain {
     }
 }
 
-/// 体网格的**画布尺寸**：`(res, res² × layers × 6)`。
+/// 体网格的**画布尺寸**：`(res, res × layers × 6)`。
 ///
 /// ⚠ 为什么第三维折进 `height` 而不是给 `Field` 加一个 `layers` 字段：`Field` 是
 ///   `width × height` 的 f32 网格（[`Field::to_blob`] 写的就是 `[height, width]`），
 ///   加一维要动线格式、动每一个消费方。折进 `height` 之后**体网格就是一张普通场**，
 ///   逐元素算子（`remap` / `mix`）一行都不用改就能用。
 ///
-/// ⚠ 一面是一块 `res × (layers × res)` 的平面（`res²·layers` 行），不是 `layers` 行 ——
-///   一"层"占 `res` 行。行号是 `face × (res·layers) + layer × res + t`
-///   （真源与推导见 `px_field_schema::volume` 的文件头）。
+/// ⚠ 一面是一块 `res × (layers × res)` 的平面 ⇒ **一面 `layers × res` 行**（一"层"占
+///   `res` 行），行号是 `face × (res·layers) + layer × res + t`。
+///
+/// ⚠⚠ **行数因此是 `res × layers × 6`**（原来写的是 `res² × layers × 6`，多乘了一个
+///   `res`）：行号公式只覆盖前 `1/res` 的行，其余的行 `slot_of` 会把面号夹到 5 ——
+///   也就是说**每张体积场有 98.4% 的行算了却没人读**（shape 64 时一张场 402 MB、
+///   而它描述的体积只有 157 万格），烘焙时间、内存与磁盘都跟着大 64 倍。
 pub fn volume_extent(res: u32, layers: u32) -> (u32, u32) {
     let res = res.max(1);
     let layers = layers.max(1);
-    (res, res * res * layers * CUBE_FACES)
+    (res, res * layers * CUBE_FACES)
 }
 
 /// 体网格的行数 → 层数（[`volume_extent`] 的逆）。
 pub fn volume_layers(height: u32, res: u32) -> Option<u32> {
     let res = res.max(1);
-    let block = res.checked_mul(res)?.checked_mul(CUBE_FACES)?;
+    let block = res.checked_mul(CUBE_FACES)?;
     if height == 0 || height % block != 0 {
         return None;
     }

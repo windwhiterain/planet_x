@@ -39,7 +39,11 @@ pub fn eval(params: &params::Ridged3Params, _inputs: &[&Field], grid: Grid) -> F
             let base = row * width;
             for x in 0..shape.res {
                 let mut voxel = voxel_of(&shape, face, x, y);
-                voxel[2] *= params.zonal;
+                // `zonal` 只动**径向**：采样点是"方向 × 半径" ⇒ 整体乘一个系数就是沿径向
+                // 拉长／压扁（切向不受影响），`1.0` = 各向同性。
+                for axis in 0..3 {
+                    voxel[axis] *= params.zonal;
+                }
                 out[base + x as usize] = noise::ridged_3(voxel, &settings, params.sharpness);
             }
         }
@@ -56,7 +60,7 @@ mod tests {
     fn grid(res: u32, layers: u32) -> Grid {
         Grid {
             width: res,
-            height: res * res * layers * CUBE_FACES,
+            height: res * layers * CUBE_FACES,
             projection: Projection::Volume,
         }
     }

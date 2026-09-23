@@ -4,7 +4,7 @@
 //!
 //! ```text
 //! width  = res                          （一面之内，s 方向的采样点数）
-//! height = res × res × layers × 6       （一面 = 一块 res × (layers × res) 的平面）
+//! height = res × layers × 6             （一面 = 一块 res × (layers × res) 的平面）
 //! data   = [face][layer][t][s]          （与 `VolumeData` 的摊平顺序**逐字相同**）
 //!
 //! 行号   = face × (res × layers) + layer × res + t      ← t 是**层内**的纵向格号
@@ -26,7 +26,7 @@
 //!   （它的 `height` 里混着面号与层号，解不出 `layers`）。所以世界点映射**只在这一份里**
 //!   —— 这是那件事的唯一真源，别处再写一遍就是第二个会漂开的真相。
 
-use px_protocol::art::{CUBE_FACES, Domain};
+use px_protocol::art::{CUBE_FACES, Domain, cube_direction};
 
 use crate::field::Field;
 use px_graph_schema::Grid;
@@ -96,26 +96,31 @@ impl VolumeShape {
     }
 }
 
-/// 一行 → 它的 **3D 体素坐标**：面内 `(s, t)` 与归一化径向高度 `altitude`，都在 `[0,1]`。
+/// 一行 → 它的**三维采样点**（方向 × 半径）—— 噪声/密度是**位置的三维场**。
 ///
-/// 每面再加一个只由面号决定的固定偏移（见 [`face_offset`]）—— 于是六面各自占噪声空间里
-/// 一块**互不重叠**的区域，而接缝处仍然连续（相邻面在公共棱上取到的是同一条棱上的点，
-/// 只是各自带了不同的偏移 ⇒ ⚠ **这一档在接缝上并不逐位相等**；体网格是给体渲染用的，
-/// 它按**方向**采样（`VolumeGrid` 那种读法），不靠"面与面逐位对齐"来焊合。
+/// ⚠⚠ **面只是"方向的参数化工具"**（round 29 改）：采样点取
+///   `cube_direction(face, s, t) × 半径`，而 `cube_direction` 在公共棱上给出**同一个方向**
+///   ⇒ 同一个三维点无论从哪一面取样都是**同一个值** ⇒ **棱上没有缝**。
 ///
-/// ⚠ `altitude` 归一化到 `[0,1]`（与 `s` / `t` 同量纲）⇒ 噪声空间是一个**立方体**。
-///   不归一化（径向用 `0..layers`）的话噪声格在径向上被拉扁，结构会沿径向拉长。
+/// ⚠ 六面天然各占三维空间里不同的一块（方向不同）⇒ **不再需要"每面一个固定偏移"**。
+///   从前那份偏移让相邻两面在公共棱上取到**不同的值** —— 场本身就是断的，接缝是它的
+///   必然后果（当时它的理由是"防六面长得一样"，而那条需求由"按三维位置取噪声"天然满足）。
 ///
-/// ⚠ **要"面内坐标"就用 [`local_voxel_of`]，不要把这一份减掉偏移**：偏移的量级可以到
-///   `31`（见 [`face_offset`]），在 `f32` 上"加上去再减回来"会丢掉低位 —— 实测 `res = 8`
-///   时那样反解出来的格心偏差达 `0.55`（整个值域的一半）。权威版本是**根本不加**。
+/// ⚠ 半径 = [`SHELL_FRONT`] + `altitude`：`FRONT = 2/π` 让一面的弧长
+///   `(π/2)·FRONT = 1.0` 与径向跨度 `1.0` **同量纲** ⇒ 噪声各向同性；旧坐标也是
+///   "一面一单位、径向一单位"，所以频率参数不用重调。
+///
+/// ⚠ **要"面内坐标"就用 [`local_voxel_of`]**（读网格的行列用它）—— 这一份是噪声空间。
+pub const SHELL_FRONT: f32 = std::f32::consts::FRAC_2_PI;
+
 pub fn voxel_of(shape: &VolumeShape, face: u32, x: u32, y: u32) -> [f32; 3] {
     let local = local_voxel_of(shape, face, x, y);
-    let offset = face_offset(face);
+    let radius = SHELL_FRONT + local[2];
+    let direction = cube_direction(face % CUBE_FACES, local[0], local[1]);
     [
-        local[0] + offset[0],
-        local[1] + offset[1],
-        local[2] + offset[2],
+        direction[0] * radius,
+        direction[1] * radius,
+        direction[2] * radius,
     ]
 }
 
@@ -165,31 +170,6 @@ pub fn local_voxel_of(shape: &VolumeShape, face: u32, x: u32, y: u32) -> [f32; 3
     ]
 }
 
-/// 面号 → 噪声空间里的固定偏移。
-///
-/// ⚠ **必须是"非整数且互不成比例"的数**（这一条是实测出来的）：整数偏移会让六面的
-///   `(s, t, altitude)` 落在**同样的格内位置**上（小数部分一样），于是六面取到的是
-///   同一个噪声函数、只差一个整数平移 —— 出来的就是**六块彼此旋转复制的云**
-///   （接缝照样连续，所以看上去不是裂缝而是"对称的花纹"，很难归因）。
-///   小数部分错开之后六面才是各自的噪声区域。
-///
-/// ⚠ 三个分量也不许成比例（比如都用 `7.31`）：那样六个点在噪声空间里排成一条直线，
-///   图案会带上一个方向性。
-///
-/// ⚠ **它是公开的**：读体素坐标的人（`field.warp3` 的三线性采样）必须把这一份减掉才能
-///   落回"面内位置" —— 网格的行列只按面内位置排。这是"布局只有一处真源"的一部分。
-pub fn face_offset(face: u32) -> [f32; 3] {
-    const UNIT: [[f32; 3]; CUBE_FACES as usize] = [
-        [0.0, 0.0, 0.0],
-        [7.31, 3.17, 11.93],
-        [5.47, 19.63, 2.71],
-        [22.19, 4.88, 17.03],
-        [9.11, 27.37, 6.23],
-        [31.07, 12.53, 23.89],
-    ];
-    UNIT[(face % CUBE_FACES) as usize]
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -205,7 +185,7 @@ mod tests {
     #[test]
     fn a_row_decodes_back_to_its_own_face_and_layer() {
         let shape = shape();
-        assert_eq!(shape.height(), 4 * 4 * 3 * CUBE_FACES);
+        assert_eq!(shape.height(), 4 * 3 * CUBE_FACES);
         let mut seen = 0;
         for face in 0..CUBE_FACES {
             for layer in 0..shape.layers {
@@ -260,22 +240,46 @@ mod tests {
         assert!(!shape.matches(&wrong_columns));
     }
 
-    /// **体素坐标落在 `[0,1]` 附近、径向按层单调**：它是噪声的采样点，量纲必须一致。
+    /// **体素坐标是"方向 × 半径"**：半径随层单调、落在这层壳里。
     #[test]
-    fn a_voxel_coordinate_is_normalised_and_climbs_with_the_layer() {
+    fn a_voxel_coordinate_is_a_point_in_three_dimensional_space() {
         let shape = shape();
+        let length = |v: [f32; 3]| (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
         let mut last = f32::NEG_INFINITY;
         for layer in 0..shape.layers {
             let row = shape.row_of(0, layer);
-            let voxel = voxel_of(&shape, 0, 1, row);
-            assert!((0.0..=1.0).contains(&voxel[2]), "高度跑出 [0,1]：{voxel:?}");
-            assert!(voxel[2] > last, "层号越大高度必须越大：{voxel:?}");
-            last = voxel[2];
+            let radius = length(voxel_of(&shape, 0, 1, row));
+            assert!(
+                (SHELL_FRONT..=SHELL_FRONT + 1.0 + 1e-4).contains(&radius),
+                "半径跑出壳：{radius}"
+            );
+            assert!(radius > last, "层号越大半径必须越大：{radius}");
+            last = radius;
         }
-        // 面内两维是格心 ⇒ 落在 (0, 1) 开区间里。
-        let voxel = voxel_of(&shape, 0, 2, 3);
-        assert!(voxel[0] > 0.0 && voxel[0] < 1.0, "{voxel:?}");
-        assert!(voxel[1] > 0.0 && voxel[1] < 1.0, "{voxel:?}");
+    }
+
+    /// ⚠⚠ **接缝的判据**：相邻两面在公共棱上取到的是**同一个三维点**。
+    ///
+    /// 面 0（`+x`）的 `s = 0` 棱与面 4（`+z`）的 `s = 1` 棱是同一条线 —— `cube_direction`
+    /// 在面 0 给 `[1, -b, -a]`（`a = -1` ⇒ `[1, -b, 1]`）、在面 4 给 `[a, -b, 1]`
+    /// （`a = 1` ⇒ 同一个）。两边**格心**各离棱半个纹素 ⇒ 距离只有一两个纹素；
+    /// 从前那份"每面一个固定偏移"会让它差到 `2.3` 以上 —— 那就是画面上那道缝的根。
+    #[test]
+    fn the_two_faces_meet_on_the_shared_edge() {
+        let shape = VolumeShape { res: 8, layers: 4 };
+        let texel = std::f32::consts::FRAC_PI_2 * SHELL_FRONT / shape.res as f32;
+        for layer in 0..shape.layers {
+            let left = voxel_of(&shape, 0, 0, shape.row_of(0, layer) + 3);
+            let right = voxel_of(&shape, 4, shape.res - 1, shape.row_of(4, layer) + 3);
+            let gap = (0..3)
+                .map(|axis| (left[axis] - right[axis]).powi(2))
+                .sum::<f32>()
+                .sqrt();
+            assert!(
+                gap < texel * 3.0,
+                "公共棱两侧的点差了 {gap}（一个纹素约 {texel}）—— 场在棱上是断的"
+            );
+        }
     }
 
     /// **面内坐标随行号走**：`t` 循环 `0..res`、层号递增，跨面时重新从 `(0, 0)` 起。
@@ -310,16 +314,20 @@ mod tests {
         }
     }
 
-    /// **六面在噪声空间里不重叠**：同一个 `(s, t, altitude)` 在六面上必须给出六个不同的点。
+    /// **六面在三维空间里不重叠**：同一个 `(s, t, altitude)` 在六面上必须给出六个不同的点。
     ///
-    /// ⚠ 这条判的就是"六面会不会长成同一个样子" —— 重叠时接缝仍然连续，
-    ///   所以画面上是**对称花纹**而不是裂缝，靠眼睛很难归因到布局。
+    /// ⚠ 这条判的就是"六面会不会长成同一个样子" —— 重叠时（旧坐标里靠"每面一个固定偏移"
+    ///   才避开）画面上是**对称花纹**而不是裂缝，靠眼睛很难归因到布局。
+    ///   ⚠ 门槛 `0.3` 而不是"差一个整数"：现在是**按位置**取噪声，六个方向本来就只差
+    ///   一个面转角（相邻面之间最近），要的是"不是同一个点"，不是"隔多远"。
     #[test]
     fn the_six_faces_do_not_share_one_noise_region() {
         let shape = shape();
+        // ⚠ 行号要落在**各自面**的区间里：`local_voxel_of` 用 `saturating_sub` 剥面，
+        //   给所有面都传 `y = 1` 会让第 1 面起全部塌到第 0 面的行上（本条第一版就这么错）。
         let mut points: Vec<[f32; 3]> = Vec::new();
         for face in 0..CUBE_FACES {
-            points.push(voxel_of(&shape, face, 1, 1));
+            points.push(voxel_of(&shape, face, 1, shape.row_of(face, 1) + 1));
         }
         for one in 0..points.len() {
             for two in (one + 1)..points.len() {
@@ -327,7 +335,7 @@ mod tests {
                     .map(|axis| (points[one][axis] - points[two][axis]).abs())
                     .fold(0.0_f32, f32::max);
                 assert!(
-                    gap > 1.0,
+                    gap > 0.3,
                     "面 {one} 与面 {two} 的采样点几乎重合（差 {gap}）"
                 );
             }

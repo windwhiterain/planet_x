@@ -165,7 +165,7 @@ mod tests {
     fn grid(res: u32, layers: u32) -> Grid {
         Grid {
             width: res,
-            height: res * res * layers * CUBE_FACES,
+            height: res * layers * CUBE_FACES,
             projection: Projection::Volume,
         }
     }
@@ -181,7 +181,7 @@ mod tests {
 
     /// 体网格的行数（`res² × layers × 6`）—— 测试里只此一处，免得每个字面量各自记一条公式。
     fn px_protocol_volume_height(res: u32, layers: u32) -> u32 {
-        res * res * layers * CUBE_FACES
+        res * layers * CUBE_FACES
     }
 
     /// **采样器在格心上返回那一格自己的值**（不带位移时的逐点恒等）。

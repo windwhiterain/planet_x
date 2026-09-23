@@ -147,7 +147,7 @@ fn main() -> Result<(), Fault> {
     let shape_graph = begin(GraphSpec {
         name: "nebula".to_string(),
         width: shape,
-        height: shape * shape * layers * 6,
+        height: shape * layers * 6,
         projection: Domain::Volume,
         cameras: Vec::new(),
     });
