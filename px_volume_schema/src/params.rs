@@ -269,13 +269,13 @@ pub mod sky {
         ///   斜度**决定世界空间里一个点的大小 —— 而立方图的纹素角跨一个面差 3 倍
         ///   （实测：面心的星核 σ≈1.0 纹素、面角 1.6 纹素，即"圆被存成椭圆"）。
         ///   给弧度之后，横向形状与位置无关；采样要多细是**输出面**自己的事。
-        pub star_core: f32,
+        pub star_core: f32, // 世界长度（不是弧度：角尺寸 = 它/距离 ⇒ 近大远小）
         /// 星点的**外晕半径**（弧度）与它的权重（参考图里那圈粉晕）。
         ///
         /// ⚠ 这一档只是"星自己的晕"；**被星照亮的气**那份晕住在 `cloud.emission`
         ///   （`starlight_*`），两者是两件事：前者是点光源本身的光学弥散，
         ///   后者是气被照亮 —— 后者天然有形状（气浓处亮），前者是各向同性的。
-        pub star_halo: f32,
+        pub star_halo: f32, // 世界长度
         pub star_halo_gain: f32,
         /// 背景天空的底色（通常是近黑）。
         pub background: [f32; 3],
@@ -369,6 +369,20 @@ pub mod stars {
         pub clump_radius: f32,
         /// 归到簇里的比例（`0` = 全均匀、`1` = 全部成团）。
         pub clump_share: f32,
+        /// **大尺度**：星按这一族 fbm 的密度偏置（与气用同一个噪声 ⇒ 星云在哪、星就在哪）。
+        ///
+        /// ⚠ 把这几个数写成 `art/nebula/envelope.toml`（或 `blobs.toml`）那一份，
+        ///   星与气的**大尺度图案就是同一个** —— 用户要的"近似"就是这么来的。
+        ///   ⚠ `sky_biased = false` 时整档不生效（与从前逐字相同的那一档）。
+        pub sky_biased: bool,
+        pub sky_frequency: f32,
+        pub sky_octaves: u32,
+        pub sky_lacunarity: f32,
+        pub sky_gain: f32,
+        pub sky_seed: u32,
+        pub sky_zonal: f32,
+        /// 偏置的**锐度**：接受概率 `= 噪声^这个`（越大 ⇒ 星越挤在气的峰上）。
+        pub sky_contrast: f32,
     }
 
     impl Default for StarsParams {
@@ -385,6 +399,14 @@ pub mod stars {
                 clump_count: 0,
                 clump_radius: 0.25,
                 clump_share: 0.0,
+                sky_biased: false,
+                sky_frequency: 0.35,
+                sky_octaves: 3,
+                sky_lacunarity: 2.0,
+                sky_gain: 0.5,
+                sky_seed: 9173,
+                sky_zonal: 0.9,
+                sky_contrast: 2.0,
                 cluster_count: 4,
                 // 与旧版 `emission.toml` 的 `cluster = [0.25, 0.35, 0.90]`（方向）
                 // 同一个方位，落在半径 2.0 处 ⇒ 世界点 ≈ 方向 × 2.0。

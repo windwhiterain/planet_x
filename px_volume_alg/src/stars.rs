@@ -84,6 +84,53 @@ fn radius_of(u: f32, params: &StarsParams) -> f32 {
     cube.max(0.0).cbrt()
 }
 
+/// **大尺度：星跟着气那一族的噪声走**（用户 2026-09-25："让星星和星云在大尺度上分布近似"）。
+///
+/// ⚠⚠ 算式与 `px_field_op::noise::fbm_3` **逐行相同**（同一条 `faded_gradient_noise_3`
+///   累加、同一个 `seed ^ octave`），只是搬在星场这一侧 —— 这样 `stars.toml` 里写
+///   上 `art/nebula/envelope.toml` 的频率/种子/octaves，星与气的**大尺度图案就是同一个**。
+///   ⚠ 抄的是**数值**（频率、种子），不是把那条 remap 链也搬过来：那串阈值/mix 是气自己的
+///   造型，星只要"跟它像" —— 用户的原话是"近似"。
+///
+/// ⚠ 为什么不用 `px_field_op` 那一份：那是 **op 层**（dylib），算法层不该反向依赖它。
+///   噪声的**原件**在 `px_field_alg::noise`（本函数用的就是它）。
+fn sky_density(direction: [f32; 3], params: &StarsParams) -> f32 {
+    let settings = px_field_schema::noise::FbmSettings {
+        frequency: params.sky_frequency,
+        octaves: params.sky_octaves,
+        lacunarity: params.sky_lacunarity,
+        gain: params.sky_gain,
+        seed: params.sky_seed,
+    };
+    // ⚠ `zonal` 只拉纬度分量（与 `fbm` 算子那一档同一条）：`1.0` = 各向同性。
+    let point = [direction[0], direction[1] * params.sky_zonal, direction[2]];
+    let mut total = 0.0_f32;
+    let mut amplitude = 1.0_f32;
+    let mut normalization = 0.0_f32;
+    let mut frequency = settings.frequency;
+    for octave in 0..settings.octaves {
+        total += amplitude
+            * px_field_alg::noise::faded_gradient_noise_3(
+                [
+                    point[0] * frequency,
+                    point[1] * frequency,
+                    point[2] * frequency,
+                ],
+                settings.seed ^ octave,
+            );
+        normalization += amplitude;
+        amplitude *= settings.gain;
+        frequency *= settings.lacunarity;
+    }
+    let value = if normalization > 0.0 {
+        total / normalization
+    } else {
+        0.0
+    };
+    // 梯度噪声在 `[-1, 1]`（夹一下再映射到 `[0, 1]`）。
+    value.clamp(-1.0, 1.0) * 0.5 + 0.5
+}
+
 /// 格的空间参数：**盒子要罩住壳，而且每边留两格**。
 ///
 /// ⚠ 留余量不是保险而是**必需**：查询点（体素/视线采样点）在壳内，而它要看的星可能在
@@ -163,7 +210,20 @@ pub fn bake_stars(params: &StarsParams) -> Result<StarField, String> {
             [direction[0] * r, direction[1] * r, direction[2] * r]
         };
         let r = (position[0] * position[0] + position[1] * position[1] + position[2] * position[2])
-            .sqrt();
+            .sqrt()
+            .max(1e-6);
+        // ⚠⚠ **大尺度偏置**（用户 2026-09-25："让星星和星云在大尺度上分布近似"）：
+        //   按"气那一族噪声"做一次**拒绝采样**（抽签也用哈希 ⇒ 确定性）⇒
+        //   留下来的星在大尺度上跟气同分布。
+        //   ⚠ 抽签的哈希与位置/亮度的哈希**各自独立** ⇒ 改锐度/频率不会挪动"哪些位置
+        //     被抽到"，只会改"哪些被留下"。
+        if params.sky_biased && params.sky_contrast > 0.0 {
+            let direction = [position[0] / r, position[1] / r, position[2] / r];
+            let chance = sky_density(direction, params).powf(params.sky_contrast);
+            if unit24(hash(seed ^ 0x2b9f_41c7, index as u32)) >= chance {
+                continue;
+            }
+        }
         // ⚠⚠ **按表观亮度剔除**（用户 2026-09-25）：直接看见那一档像素值 ∝ `B/r²`
         //   （辐照律，见 `raymarch::star_falloff`）⇒ 远处的暗星根本读不出来。
         //   剔掉它们等于**星等截断**（真实星表就是这么干的），而它的副产品正是

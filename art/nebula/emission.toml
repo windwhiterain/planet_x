@@ -13,7 +13,7 @@ light_radius = 0.28
 # 朝光源步进多少步算遮挡：步数越多边缘越锐（代价线性）。
 shadow_steps = 48
 # 遮挡的浓度：`exp(-τ × 这个)`。给大了只剩最靠近光源的一薄层亮。
-shadow_gain = 3.0
+shadow_gain = 40.0
 
 # 发射 = `density^power × gain`：power > 1 ⇒ 只有浓的地方才亮（薄雾几乎不发光）。
 #
@@ -48,7 +48,7 @@ shadow_gain = 3.0
 # ⇒ 幂**低**时底光在薄处也很强（`d¹` 不小），把暗部染蓝；
 #   幂**高**才只剩浓处那一段 ⇒ 核保住蓝白、暗部交回"主发射 + 消光"（玫红）。
 emission_power = 6.5
-emission_gain = 20.0
+emission_gain = 150.0
 glow_gain = 0.0
 glow_power = 1.6
 glow_threshold = 0.48

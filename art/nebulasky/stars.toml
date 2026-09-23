@@ -10,7 +10,7 @@
 #   ⇒ 现在星只是**世界坐标里的点**：位置按**体积**均匀撒在壳里，索引交给 R3 稀疏格。
 
 # 星数（撒在下面那层壳的**体积**里）。
-count = 180000
+count = 700000
 seed = 60613
 
 # 星所在的那层壳（世界单位）。⚠ 与 `art/nebula/density_volume.toml` 的 `inner`/`outer`
@@ -44,3 +44,18 @@ cluster = [0.50, 0.70, 1.80]
 cluster_radius = 0.35
 cluster_gain = 6.0
 cluster_tint = [0.72, 0.86, 1.0]
+
+# ── 大尺度：星跟着**气那一族噪声**走（用户 2026-09-25）────────────────────────
+# 下面这几个数**抄自 `art/nebula/envelope.toml`**（频率/种子/octaves/gain/zonal）：
+# 同一族 fbm ⇒ 星与气的大尺度图案是同一个（星云在哪、星就在哪）。
+# ⚠ 抄的是**数值**，不是把那条 remap 链（阈值/mix）也搬过来 —— 那是气自己的造型，
+#   星只要跟它"近似"（用户的原话）。
+# ⚠ 做法是**拒绝采样**（接受概率 = 噪声^sky_contrast）⇒ `count` 要按存活率抬上去。
+sky_biased = true
+sky_frequency = 0.35
+sky_octaves = 3
+sky_lacunarity = 2.0
+sky_gain = 0.5
+sky_seed = 9173
+sky_zonal = 0.9
+sky_contrast = 2.0

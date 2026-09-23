@@ -355,12 +355,15 @@ fn pick3(v: vec3<f32>, i: u32) -> f32 {
     return v.z;
 }
 
-// 一颗星的角向轮廓（核 + 晕），自变量是 `sin θ`。
-// ⚠ 与 CPU 的 `star_power` **同序**：先 `(sine/core)²` 再 `exp(-·)`，最后
+// 一颗星的轮廓（核 + 晕）：自变量是**世界横向偏移** `sinθ × d`。
+// ⚠⚠ 轮廓是**世界长度**（`star_meta.profile.x/y`），不是弧度 —— 星是个有半径的球，
+//   角尺寸 = 半径/距离 ⇒ **近大远小**（用户 2026-09-25）；亮度则决定"可见的那一圈到哪"。
+// ⚠ 与 CPU 的 `star_power` **同序**：先 `(offset/core)²` 再 `exp(-·)`，最后
 //   `核项 + 晕权重 × 晕项`；两个 `max(1e-6)` 已经在宿主上夹进 uniform 了。
-fn star_power(sine: f32) -> f32 {
-    let core = sine / star_meta.profile.x;
-    let halo = sine / star_meta.profile.y;
+fn star_power(sine: f32, distance: f32) -> f32 {
+    let offset = sine * max(distance, 1e-4);
+    let core = offset / star_meta.profile.x;
+    let halo = offset / star_meta.profile.y;
     return exp(-(core * core)) + star_meta.profile.z * exp(-(halo * halo));
 }
 
@@ -429,7 +432,11 @@ struct Sky {
 // GPU 这一侧边走边收（候选表按视线放不下），但**次序逐条相同**：
 //   * 层（半径的归属区间）按升序处理 ⇒ 后收的星半径只会更大 ⇒ 直接接在队尾；
 //   * 层内按 CPU 的遍历次序稳定插入 (半径, sin) ⇒ 与 CPU 那次**稳定**排序逐位同序。
-const STAR_PENDING_MAX: u32 = 32u;
+// ⚠ 容量要按**实测的单层候选**定，而且要看**整幅**（630 万条视线）的尾巴，不是探针的几千条：
+//   探针（4096 条）量到单层最多 28；而 `--face 2048` 那一轮实测溢出 —— 尾巴更长。
+//   ⚠ 世界尺寸的支持域（近大远小）让**近处那几层**的角度支持域最大（`support/t`）⇒
+//     那里是队列的瓶颈；把晕从 0.02 收到 0.012 之后候选按面积降 ~60%。
+const STAR_PENDING_MAX: u32 = 64u;
 var<private> star_pending_star: array<u32, STAR_PENDING_MAX>;
 var<private> star_pending_radius: array<f32, STAR_PENDING_MAX>;
 var<private> star_pending_sine: array<f32, STAR_PENDING_MAX>;
@@ -468,7 +475,10 @@ fn star_slab_collect(direction: vec3<f32>, t0: f32, t1: f32, support: f32) {
     let mark = star_pending_count;
     let cell = star_meta.space.x;
     let origin = star_meta.space.yzw;
-    let half = max(t1 * support + cell, cell);
+    // ⚠ 支持域是**世界长度** ⇒ 换算成角度 `support / t1`（近大远小），
+    //   横向半径因此是常数 `support + cell`（比从前省：远处不再扫一大片）。
+    let half = max(support + cell, cell);
+    let angular = support / max(t1, 1e-4);
     let centre = direction * t1;
     let edge = star_dims() - vec3<i32>(1);
     let lo = clamp(vec3<i32>(floor((centre - half - origin) / cell)), vec3<i32>(0), edge);
@@ -491,7 +501,7 @@ fn star_slab_collect(direction: vec3<f32>, t0: f32, t1: f32, support: f32) {
                     }
                     let cosine = dot(p, direction) / radius;
                     let sine = sqrt(max(1.0 - cosine * cosine, 0.0));
-                    if (sine > support) {
+                    if (sine > angular) {
                         continue;
                     }
                     star_pending_insert(mark, star, radius, sine);
@@ -547,7 +557,7 @@ fn march_radiance(direction: vec3<f32>, lane: u32, steps: u32, enter: f32, backg
                 let power = star_brightness(star) * pick3(star_tint(star), lane);
                 // 点源的辐照律：像素值 ∝ 1/r²，增益锚在内壁上（与 CPU 的 star_falloff 同一条）。
                 let falloff = (enter / max(star_pending_radius[taken], 1e-4));
-                radiance = radiance + ((transmittance * power) * star_power(star_pending_sine[taken])) * gain * (falloff * falloff);
+                radiance = radiance + ((transmittance * power) * star_power(star_pending_sine[taken], star_pending_radius[taken])) * gain * (falloff * falloff);
                 taken = taken + 1u;
             }
             if (taken > 0u) {
@@ -575,7 +585,7 @@ fn march_radiance(direction: vec3<f32>, lane: u32, steps: u32, enter: f32, backg
             let star = star_pending_star[i];
             let power = star_brightness(star) * pick3(star_tint(star), lane);
             let falloff = (enter / max(star_pending_radius[i], 1e-4));
-            radiance = radiance + ((transmittance * power) * star_power(star_pending_sine[i])) * gain * (falloff * falloff);
+            radiance = radiance + ((transmittance * power) * star_power(star_pending_sine[i], star_pending_radius[i])) * gain * (falloff * falloff);
         }
     }
     return radiance + transmittance * background;
@@ -934,18 +944,23 @@ fn bake_emission(@builtin(global_invocation_id) id: vec3<u32>) {
     let position = direction * radius;
     let d = emission_world(position);
 
-    // ---- 单方向光的遮挡 ----
+    // ---- 朝**点光源**的遮挡 + 1/d² 辐照（与 CPU 的 `bake_emission` 逐条对齐）----
+    // ⚠⚠ 从前是平行光 + 只算遮挡（无距离衰减）⇒ 整团气被均匀照亮 ⇒ 画面"像自发光"。
     let light_direction = normalize(emission.light.xyz);
     let light_radius = shell_radius(clamp(emission.params.x, 0.0, 1.0));
+    let light_position = light_direction * light_radius;
+    let to_light = light_position - position;
+    let light_distance = max(length(to_light), 1e-4);
+    let toward = to_light / light_distance;
     let steps = emission.counts.z;
-    let total = max(outer - light_radius, 1e-4);
-    let step = total / f32(steps);
+    let through = light_distance / f32(steps);
     var optical_depth = 0.0;
     for (var i = 1u; i <= steps; i = i + 1u) {
-        let probe = position + light_direction * (f32(i) * step);
-        optical_depth = optical_depth + emission_world(probe) * step;
+        let probe = position + toward * (f32(i) * through);
+        optical_depth = optical_depth + emission_world(probe) * through;
     }
-    let lit = exp(-optical_depth * emission.params.y);
+    let reach = clamp(light_radius / light_distance, 0.0, 1.0);
+    let lit = exp(-optical_depth * emission.params.y) * (reach * reach);
 
     // ---- 星光照气体：R3 星场里附近最亮的几颗 + 逐星遮挡 ----
     let star_lit = star_light(position);

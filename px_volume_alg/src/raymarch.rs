@@ -65,16 +65,30 @@ struct StarHit {
 /// ⚠⚠ 这是**世界空间**的量（弧度），与"这颗星落在哪个纹素、哪个面"完全无关 ——
 ///   旧版把核宽写成"几个纹素"（`π / width`），于是世界空间里一个点的大小被**存储网格
 ///   的斜度**决定（实测面心 σ 径向/切向 1.02、面角 1.57，一个圆被存成椭圆）。
-///   现在这颗星的形状只由 `star_core` / `star_halo` 两个弧度数决定，**放在哪里都一样**。
-pub fn star_power(sine: f32, params: &SkyParams) -> f32 {
-    let core = (params.star_core.max(1e-6)).max(1e-6);
+///   现在这颗星的形状只由 `star_core` / `star_halo` 决定 —— 而它们是**世界长度**
+///   （不是弧度）：星是个有半径的球，角尺寸 = `半径 / 距离` ⇒ **近大远小**。
+///   ⚠⚠ 用户 2026-09-25 的原话："光晕怎么都一样大？应该由亮度决定光晕大小，
+///   同时还要符合相机的近大远小。" —— 固定角半径的 PSF 两条都不满足：
+///   远处那颗与近处那颗占一样多的角 ⇒ 一样大。改成世界尺寸之后：
+///   * 角尺寸 `∝ 半径/距离` ⇒ 近大远小 ✓（并且**顺带省了远星的候选**，
+///     因为支持域 = `3·半径/距离` 随距离收窄）；
+///   * 亮度决定"可见的那一圈到哪"：世界高斯在阈值之上的半径
+///     `∝ 半径·√ln(亮度·增益/阈值)` ⇒ 亮的星看起来更大 ✓（与真实星空一致）。
+pub fn star_power(sine: f32, distance: f32, params: &SkyParams) -> f32 {
+    let core = params.star_core.max(1e-6);
     let halo = params.star_halo.max(1e-6);
-    let core_term = (-(sine / core).powi(2)).exp();
-    let halo_term = (-(sine / halo).powi(2)).exp();
+    // 角度 → **世界横向偏移**（小角近似：`sinθ × d`）。PSF 是世界空间里的一条高斯。
+    let offset = sine * distance.max(1e-4);
+    let core_term = (-(offset / core).powi(2)).exp();
+    let halo_term = (-(offset / halo).powi(2)).exp();
     core_term + params.star_halo_gain * halo_term
 }
 
-/// `PSF` 的**支持域**（角度正弦）：再远的地方 `exp(−9) ≈ 1.2e-4`，乘上增益已经读不出来。
+/// `PSF` 的**支持域**（世界长度）：再远的地方 `exp(−9) ≈ 1.2e-4`，乘上增益已经读不出来。
+///
+/// ⚠ 要换算成某个半径 `t` 上的**角度正弦**就用 `star_support(params) / t`
+///   （`sine ≈ 横向偏移 / 距离`）—— 这一步让"胖射线"的横向半径变成**常数**
+///   （`t × support/t + cell = support + cell`），既对又更省。
 pub fn star_support(params: &SkyParams) -> f32 {
     3.0 * params.star_core.max(params.star_halo).max(1e-6)
 }
@@ -96,7 +110,8 @@ pub fn slab_candidate_counts(
     let mut ranges: Vec<std::ops::Range<usize>> = Vec::new();
     while t0 <= exit {
         let t1 = t0 + cell;
-        let half = (t1 * support + cell).max(cell);
+        let half = (support + cell).max(cell);
+        let angular = support / t1.max(cell);
         let centre = [direction[0] * t1, direction[1] * t1, direction[2] * t1];
         let low = [centre[0] - half, centre[1] - half, centre[2] - half];
         let high = [centre[0] + half, centre[1] + half, centre[2] + half];
@@ -117,7 +132,7 @@ pub fn slab_candidate_counts(
                     + star.position[1] * direction[1]
                     + star.position[2] * direction[2])
                     / radius;
-                if (1.0 - cosine * cosine).max(0.0).sqrt() <= support {
+                if (1.0 - cosine * cosine).max(0.0).sqrt() <= angular {
                     count += 1;
                 }
             }
@@ -153,8 +168,11 @@ fn gather_stars(
     let mut ranges: Vec<std::ops::Range<usize>> = Vec::new();
     while t0 <= exit {
         let t1 = t0 + cell;
-        // 这一层的横向半径：层里**最远**那个半径上的支持域，再放一格（格是方的、锥是圆的）。
-        let half = (t1 * support + cell).max(cell);
+        // ⚠⚠ 支持域是**世界长度**（`support`），而这一层判的是角度 ⇒ 换算成 `support / t1`。
+        //   于是横向半径 `t1 × (support/t1) + cell = support + cell` 是**常数** ——
+        //   既对（近大远小的直接推论），又比从前省（远处不再扫一大片）。
+        let half = (support + cell).max(cell);
+        let angular = support / t1.max(cell);
         let centre = [direction[0] * t1, direction[1] * t1, direction[2] * t1];
         let low = [centre[0] - half, centre[1] - half, centre[2] - half];
         let high = [centre[0] + half, centre[1] + half, centre[2] + half];
@@ -176,7 +194,7 @@ fn gather_stars(
                     + star.position[2] * direction[2])
                     / radius;
                 let sine = (1.0 - cosine * cosine).max(0.0).sqrt();
-                if sine > support {
+                if sine > angular {
                     continue;
                 }
                 hits.push(StarHit {
@@ -456,7 +474,7 @@ fn march_channel(
             let hit = &hits[next_hit];
             radiance += transmittance
                 * hit.power[lane]
-                * star_power(hit.sine, params)
+                * star_power(hit.sine, hit.radius, params)
                 * params.star_gain
                 * star_falloff(hit.radius, enter);
             next_hit += 1;
@@ -475,7 +493,7 @@ fn march_channel(
         let hit = &hits[next_hit];
         radiance += transmittance
             * hit.power[lane]
-            * star_power(hit.sine, params)
+            * star_power(hit.sine, hit.radius, params)
             * params.star_gain
             * star_falloff(hit.radius, enter);
         next_hit += 1;

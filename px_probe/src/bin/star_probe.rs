@@ -335,6 +335,8 @@ fn main() -> Result<(), String> {
         .unwrap_or(128)
         .max(16);
     let artifact = args.next();
+    // 第三个参数（可选）：一份 `cloud.density` 产物 —— 有它才量"星 ↔ 气的大尺度相关"。
+    let density = args.next();
 
     let params = star_params()?;
     println!(
@@ -693,6 +695,34 @@ fn main() -> Result<(), String> {
         );
     }
 
+    // ⚠⚠ **大尺度是否跟气近似**（用户 2026-09-25）：这条是那个要求的判据。
+    //   两侧都在**方向**上取：星按方向数（小锥内的颗数），气按方向积**柱密度**
+    //   （从密度产物沿径向积，`density::sample_world`）。然后求皮尔逊相关。
+    //   ⚠ 只看大尺度 ⇒ 两个方向图都先按 6×8 的粗格分箱再算相关（细结构不该算进去）。
+    if let Some(path) = density {
+        let gas = column_density(&path, 32)?;
+        let mut stars_dir = vec![0.0_f64; gas.len()];
+        for index in 0..field.count() {
+            let p = field.star(index).position;
+            let r = ((p[0] as f64).powi(2) + (p[1] as f64).powi(2) + (p[2] as f64).powi(2)).sqrt();
+            if r <= 0.0 {
+                continue;
+            }
+            let direction = [p[0] as f64 / r, p[1] as f64 / r, p[2] as f64 / r];
+            let bin = coarse_bin(direction, 8);
+            stars_dir[bin] += 1.0;
+        }
+        // 两侧各自按"每球面度"归一（分箱的立体角不同）再算相关。
+        let solid = coarse_solid_angles(8);
+        let a: Vec<f64> = (0..gas.len()).map(|i| gas[i] / solid[i]).collect();
+        let b: Vec<f64> = (0..gas.len()).map(|i| stars_dir[i] / solid[i]).collect();
+        let correlation = pearson(&a, &b);
+        println!(
+            "星 ↔ 气的大尺度相关（{} 个方向格，各自按球面度归一）：**{correlation:+.3}**",
+            gas.len()
+        );
+    }
+
     if let Some(path) = artifact {
         // ⚠ 两个阈值都要看：**0.05 那一档量的是"整幅亮不亮"**（气也过线 ⇒ 它反映气的分布
         //   与分级曲线），而 **0.5 那一档只有星核过线**（气很少那么亮）⇒ 后者才是
@@ -715,4 +745,108 @@ fn main() -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// 方向 → 一个粗格（`bins × 2·bins` 的等距经纬网格，粗到只看大尺度）。
+fn coarse_bin(direction: [f64; 3], bins: usize) -> usize {
+    let theta = direction[2].clamp(-1.0, 1.0).acos() / std::f64::consts::PI;
+    let phi = direction[1].atan2(direction[0]) / std::f64::consts::TAU + 0.5;
+    let row = ((theta * bins as f64) as usize).min(bins - 1);
+    let column = ((phi * (2 * bins) as f64) as usize).min(2 * bins - 1);
+    row * 2 * bins + column
+}
+
+/// 每个粗格的立体角（等距经纬：`Δφ · Δ(cosθ)`）。
+fn coarse_solid_angles(bins: usize) -> Vec<f64> {
+    let dphi = std::f64::consts::TAU / (2 * bins) as f64;
+    let mut out = Vec::with_capacity(bins * 2 * bins);
+    for row in 0..bins {
+        let theta0 = std::f64::consts::PI * row as f64 / bins as f64;
+        let theta1 = std::f64::consts::PI * (row + 1) as f64 / bins as f64;
+        let band = (theta0.cos() - theta1.cos()).abs() * dphi;
+        for _ in 0..2 * bins {
+            out.push(band.max(1e-9));
+        }
+    }
+    out
+}
+
+/// 皮尔逊相关（判据用，不引统计库）。
+fn pearson(a: &[f64], b: &[f64]) -> f64 {
+    let n = a.len().min(b.len());
+    if n == 0 {
+        return 0.0;
+    }
+    let scale = n as f64;
+    let mean_a = a.iter().sum::<f64>() / scale;
+    let mean_b = b.iter().sum::<f64>() / scale;
+    let mut cov = 0.0;
+    let mut var_a = 0.0;
+    let mut var_b = 0.0;
+    for index in 0..n {
+        let da = a[index] - mean_a;
+        let db = b[index] - mean_b;
+        cov += da * db;
+        var_a += da * da;
+        var_b += db * db;
+    }
+    if var_a <= 0.0 || var_b <= 0.0 {
+        return 0.0;
+    }
+    cov / (var_a.sqrt() * var_b.sqrt())
+}
+
+/// **气沿方向的柱密度**：读一份 `cloud.density` 产物，逐方向把 `sample_world` 积起来。
+fn column_density(path: &str, samples: usize) -> Result<Vec<f64>, String> {
+    let bytes = std::fs::read(path).map_err(|err| format!("读不到 {path}：{err}"))?;
+    let bundle = px_protocol::payload::PayloadBundle::from_bytes(&bytes)
+        .map_err(|err| format!("{path} 不是一份产物：{err}"))?;
+    let volume = <px_volume_schema::VolumeData as px_protocol::payload::Build>::decode(
+        &bundle,
+        px_protocol::art::Domain::Volume,
+        "density",
+    )?;
+    let bins = 8_usize;
+    // ⚠ 先自检一次：读进来的密度场均值该与烘图日志里那一行对得上（不然下面的相关是噪声）。
+    {
+        let count = volume.data.len() as f64;
+        let mean = volume.data.iter().map(|v| *v as f64).sum::<f64>() / count.max(1.0);
+        let mut max = 0.0_f64;
+        for v in &volume.data {
+            max = max.max(*v as f64);
+        }
+        println!(
+            "  密度产物自检：{} 面 × {}² × {} 层｜均值 {:.4}（该与烘图日志那一行一致）、最大 {:.4}",
+            px_volume_schema::volume::PATCHES,
+            volume.res,
+            volume.layers,
+            mean,
+            max
+        );
+    }
+    let mut out = vec![0.0_f64; bins * 2 * bins];
+    let golden = 2.399_963_2_f64;
+    let total = bins * 2 * bins * 16;
+    let shell = px_volume_schema::volume::Shell::new(volume.inner, volume.outer);
+    for index in 0..total {
+        let z = 1.0 - 2.0 * (index as f64 + 0.5) / total as f64;
+        let ring = (1.0 - z * z).max(0.0).sqrt();
+        let phi = golden * index as f64;
+        let direction = [ring * phi.cos(), ring * phi.sin(), z];
+        let bin = coarse_bin(direction, bins);
+        let mut column = 0.0_f64;
+        for step in 0..samples {
+            let u = (step as f64 + 0.5) / samples as f64;
+            let radius = shell.radius_of(u as f32);
+            let point = [
+                direction[0] as f32 * radius,
+                direction[1] as f32 * radius,
+                direction[2] as f32 * radius,
+            ];
+            let step_world = shell.stretch_of(u as f32) as f64 / samples as f64;
+            column += px_volume_alg::density::sample_world(&volume, point) as f64 * step_world;
+        }
+        out[bin] = out[bin].max(column);
+    }
+    Ok(out)
 }

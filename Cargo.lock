@@ -1621,6 +1621,7 @@ dependencies = [
 name = "px_volume_alg"
 version = "0.1.0"
 dependencies = [
+ "px_field_alg",
  "px_field_schema",
  "px_fingerprint",
  "px_graph_schema",

@@ -74,11 +74,15 @@ pub fn bake_emission(
     let shell = px_volume_schema::volume::Shell::new(density.inner, density.outer);
     let light_direction = normalize(params.light);
     let light_radius = shell.radius_of(params.light_radius.clamp(0.0, 1.0));
+    // ⚠ 光是一个**点**（`light` 方向上、半径 `light_radius` 处）：方向与步长都随体素变。
+    let light_position = [
+        light_direction[0] * light_radius,
+        light_direction[1] * light_radius,
+        light_direction[2] * light_radius,
+    ];
 
-    // 朝光源的步长：整段壳分成 `shadow_steps` 段，逐段累加光深。
+    // 朝光源的步数（步长由**到光点的真实距离**除以它，逐体素不同）。
     let steps = params.shadow_steps.max(1);
-    let total = (density.outer - light_radius).max(1e-4);
-    let step = total / steps as f32;
 
     // 星光那一档的常数：查多远（`starlight_radius`，**物理**旋钮）、多软、逐星走几步、
     // 最多吃几颗。⚠ 它与 `stars.cell`（**存储**细格）是两个旋钮，这里只读前者。
@@ -126,18 +130,39 @@ pub fn bake_emission(
 
                 let d = sample_world(density, position).max(0.0);
 
-                // ---- 朝光源的遮挡 ----
+                // ---- 朝**点光源**的遮挡 + 1/d² 辐照 ----
+                //
+                // ⚠⚠ 这里从前是**平行光 + 只算遮挡**（`probe = position + light_direction × step`）
+                //   —— 没有任何距离衰减 ⇒ 整团气被均匀照亮 ⇒ 无论怎么调，画面都"像自发光"。
+                //   与星那一档缺 `1/r²` 是**同一类遗漏**（用户 2026-09-25 两次都是先看出画不对）。
+                //   现在：朝光**点**步进（方向随体素变）、长度是真实距离、再乘 `1/d²`。
+                let to_light = [
+                    light_position[0] - position[0],
+                    light_position[1] - position[1],
+                    light_position[2] - position[2],
+                ];
+                let light_distance = (to_light[0] * to_light[0]
+                    + to_light[1] * to_light[1]
+                    + to_light[2] * to_light[2])
+                    .sqrt()
+                    .max(1e-4);
+                let through = light_distance / steps as f32;
                 let mut optical_depth = 0.0_f32;
                 for step_index in 1..=steps {
-                    let distance = step_index as f32 * step;
+                    let far = step_index as f32 * through;
                     let probe = [
-                        position[0] + light_direction[0] * distance,
-                        position[1] + light_direction[1] * distance,
-                        position[2] + light_direction[2] * distance,
+                        position[0] + to_light[0] / light_distance * far,
+                        position[1] + to_light[1] / light_distance * far,
+                        position[2] + to_light[2] / light_distance * far,
                     ];
-                    optical_depth += sample_world(density, probe) * step;
+                    optical_depth += sample_world(density, probe) * through;
                 }
-                let lit = (-optical_depth * params.shadow_gain).exp();
+                // 辐照锚在**光自己的半径**上（那一圈是满强度）：`(light_radius / d)²`。
+                // ⚠ 这就是用户说的"遮挡必须和搜索范围比配"：`density × 距离 × shadow_gain`
+                //   要落在 O(1) 上，遮挡才读得出来（实测 0.06 × 0.4 × 3 = 0.07 ⇒ 只压 7%。
+                //   现在距离由光的位置定、`shadow_gain` 的量纲也跟着变）。
+                let reach = (light_radius / light_distance).clamp(0.0, 1.0);
+                let lit = (-optical_depth * params.shadow_gain).exp() * reach * reach;
 
                 // ---- 星光照气体：附近最亮的几颗 + 逐星遮挡 ----
                 //
