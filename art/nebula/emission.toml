@@ -47,7 +47,7 @@ shadow_gain = 40.0
 #
 # ⇒ 幂**低**时底光在薄处也很强（`d¹` 不小），把暗部染蓝；
 #   幂**高**才只剩浓处那一段 ⇒ 核保住蓝白、暗部交回"主发射 + 消光"（玫红）。
-emission_power = 6.5
+emission_power = 2.5
 emission_gain = 0.0
 glow_gain = 0.0
 glow_power = 1.6
@@ -108,7 +108,7 @@ starlight_gain = 0.003
 #   0.2 时一颗星大约照到 `0.2³ × 4000/单位³ ≈ 32` 颗邻居星里最近的那几颗。
 starlight_radius = 0.4
 # 辐照的软化半径：`亮度 / (d² + soft²)`（`d → 0` 时不发散）。
-starlight_soft = 0.05
+starlight_soft = 0.15
 # 逐星阴影步数（与 `shadow_steps` 同量纲）。
 starlight_steps = 12
 # 每个体素最多吃几颗星（按亮度取前几名；星的亮度是幂律的 ⇒ 前几名之外可忽略）。
