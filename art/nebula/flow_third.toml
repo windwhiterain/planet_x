@@ -1,6 +1,6 @@
 # 域扭曲的**第三轴（径向）偏移**。
-frequency = 3.8
-octaves = 4
+frequency = 0.4
+octaves = 1
 lacunarity = 2.0
 gain = 0.5
 seed = 44819

@@ -173,11 +173,3 @@ px_op! {
     ///   位移就落在一条对角线上（图形上表现为"沿一个方向的错切"，不是扭曲）。
     Warp3, "field.warp3", "px_field_op", params::Warp3Params, Warp3Input, Field
 }
-
-px_op! {
-    /// **球面上的星点**（`params::StarsParams`）：稀疏亮点，出的是**场**。
-    ///
-    /// ⚠ 与 `px_graph::generate::texture::stars`（星空**贴图**）不是一回事：星点要参与
-    ///   体渲染的积分（被气遮住、被尘埃染红）⇒ 必须是场。那一份出的是贴图字节。
-    Stars, "field.stars", "px_field_op", params::StarsParams, (), Field
-}

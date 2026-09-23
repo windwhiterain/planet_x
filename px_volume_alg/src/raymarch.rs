@@ -17,6 +17,7 @@
 //!   光照在 `cloud.emission` 里（按体素算过一遍）。这里只有积分。
 
 use px_field_schema::field::{CUBE_FACES, Field, Projection, art_direction_at, cube_face_of};
+use px_sparse::StarField;
 use px_volume_schema::params::sky::SkyParams;
 use px_volume_schema::{TextureData, TextureFormat, VolumeData};
 
@@ -41,25 +42,187 @@ fn jitter_at(texel: u32, step: u32, seed: u32) -> f32 {
     (hash & 0xffff) as f32 / 65535.0
 }
 
-/// 星点的亮度（给一个方向，回它压到多少）。星图是 `CubeMap` 场。
-/// **判据用**：星点查表的公开口（GPU 那份是同一套语义的第二份实现）。
-pub fn star_level_at(stars: &Field, direction: [f32; 3], params: &SkyParams) -> f32 {
-    star_level(stars, direction, params)
+/// 一条视线的**星点候选**：查一次 R3 星场就够（与"步进到哪一步"无关）。
+///
+/// ⚠ 半径要**留着**：每一颗星用**它自己那一步**的透过率（近处的星不被整层气遮住、
+///   远处的被前面的气吃掉）—— 那正是"星嵌在星云里"这件事。
+#[derive(Clone, Copy)]
+struct StarHit {
+    /// 星到相机（原点）的距离。
+    radius: f32,
+    /// 视线与星方向的夹角正弦（`PSF` 用它，见 [`star_power`]）。
+    sine: f32,
+    /// 星自己的光（亮度 × 色）。
+    power: [f32; 3],
 }
 
-fn star_level(stars: &Field, direction: [f32; 3], params: &SkyParams) -> f32 {
-    if stars.projection != Projection::CubeMap {
-        return 0.0;
+/// 一颗星的**角向轮廓**（核 + 晕），自变量是 `sin θ`。
+///
+/// ⚠⚠ 用 `sin θ` 而不是 `θ`：`θ` 要么走 `acos`（贵的），要么在近轴处丢掉精度；
+///   而支持域本来就只有几十毫弧度 ⇒ `sin θ` 与 `θ` 的差在 `1e-5` 量级（可以忽略），
+///   换成它之后两侧都只剩两次平方根、零次反三角。
+///
+/// ⚠⚠ 这是**世界空间**的量（弧度），与"这颗星落在哪个纹素、哪个面"完全无关 ——
+///   旧版把核宽写成"几个纹素"（`π / width`），于是世界空间里一个点的大小被**存储网格
+///   的斜度**决定（实测面心 σ 径向/切向 1.02、面角 1.57，一个圆被存成椭圆）。
+///   现在这颗星的形状只由 `star_core` / `star_halo` 决定 —— 而它们是**世界长度**
+///   （不是弧度）：星是个有半径的球，角尺寸 = `半径 / 距离` ⇒ **近大远小**。
+///   ⚠⚠ 用户 2026-09-25 的原话："光晕怎么都一样大？应该由亮度决定光晕大小，
+///   同时还要符合相机的近大远小。" —— 固定角半径的 PSF 两条都不满足：
+///   远处那颗与近处那颗占一样多的角 ⇒ 一样大。改成世界尺寸之后：
+///   * 角尺寸 `∝ 半径/距离` ⇒ 近大远小 ✓（并且**顺带省了远星的候选**，
+///     因为支持域 = `3·半径/距离` 随距离收窄）；
+///   * 亮度决定"可见的那一圈到哪"：世界高斯在阈值之上的半径
+///     `∝ 半径·√ln(亮度·增益/阈值)` ⇒ 亮的星看起来更大 ✓（与真实星空一致）。
+pub fn star_power(sine: f32, distance: f32, params: &SkyParams) -> f32 {
+    let core = params.star_core.max(1e-6);
+    let halo = params.star_halo.max(1e-6);
+    // 角度 → **世界横向偏移**（小角近似：`sinθ × d`）。PSF 是世界空间里的一条高斯。
+    let offset = sine * distance.max(1e-4);
+    let core_term = (-(offset / core).powi(2)).exp();
+    let halo_term = (-(offset / halo).powi(2)).exp();
+    core_term + params.star_halo_gain * halo_term
+}
+
+/// `PSF` 的**支持域**（世界长度）：再远的地方 `exp(−9) ≈ 1.2e-4`，乘上增益已经读不出来。
+///
+/// ⚠ 要换算成某个半径 `t` 上的**角度正弦**就用 `star_support(params) / t`
+///   （`sine ≈ 横向偏移 / 距离`）—— 这一步让"胖射线"的横向半径变成**常数**
+///   （`t × support/t + cell = support + cell`），既对又更省。
+pub fn star_support(params: &SkyParams) -> f32 {
+    3.0 * params.star_core.max(params.star_halo).max(1e-6)
+}
+
+/// **判据与探针用**：一条视线上"每层收下几颗星"（GPU 那份定长队列该开多大，靠这个数说话）。
+///
+/// ⚠ 它回的是**逐层的候选数**，不是总数：GPU 的待消费队列是逐层收、按半径消费的
+///   （队列里最多同时待着一层多一点的星），所以上限由"单层最多几颗"决定，而不是总数。
+pub fn slab_candidate_counts(
+    field: &StarField,
+    direction: [f32; 3],
+    enter: f32,
+    exit: f32,
+    support: f32,
+) -> Vec<usize> {
+    let cell = field.grid.meta.cell;
+    let mut out = Vec::new();
+    let mut t0 = (enter - cell).max(0.0);
+    let mut ranges: Vec<std::ops::Range<usize>> = Vec::new();
+    while t0 <= exit {
+        let t1 = t0 + cell;
+        let half = (support + cell).max(cell);
+        let angular = support / t1.max(cell);
+        let centre = [direction[0] * t1, direction[1] * t1, direction[2] * t1];
+        let low = [centre[0] - half, centre[1] - half, centre[2] - half];
+        let high = [centre[0] + half, centre[1] + half, centre[2] + half];
+        ranges.clear();
+        field.for_each_cell_in(low, high, |_, range| ranges.push(range));
+        let mut count = 0;
+        for range in &ranges {
+            for index in range.clone() {
+                let star = field.star(index);
+                let radius = (star.position[0] * star.position[0]
+                    + star.position[1] * star.position[1]
+                    + star.position[2] * star.position[2])
+                    .sqrt();
+                if radius < t0 || radius >= t1 || radius <= f32::EPSILON {
+                    continue;
+                }
+                let cosine = (star.position[0] * direction[0]
+                    + star.position[1] * direction[1]
+                    + star.position[2] * direction[2])
+                    / radius;
+                if (1.0 - cosine * cosine).max(0.0).sqrt() <= angular {
+                    count += 1;
+                }
+            }
+        }
+        out.push(count);
+        t0 = t1;
     }
-    let face_size = stars.width.max(1);
-    let (face, s, t) = cube_face_of(direction);
-    let x = ((s * face_size as f32) as u32).min(face_size - 1);
-    let y = (face * face_size + (t * face_size as f32) as u32).min(stars.height - 1);
-    let raw = stars.at(x, y);
-    if raw <= params.star_floor {
-        return 0.0;
+    out
+}
+
+/// **沿视线查 R3 星场**：按径向一层层扫"胖射线"（横向半径 = `t · support` 的锥）覆盖的细格，
+/// 收下支持域内的星，**按半径升序**交出来。
+///
+/// ⚠ 这一份是**判据用的朴素版**（逐层的 AABB 里逐格下探）：它慢，但**明显正确**，
+///   而且与 GPU 那份**找到的星完全一样** —— 因为"收哪些星"是一条**谓词**
+///   （半径落在这一段 + 角偏移在支持域内），与遍历怎么走无关。GPU 那份走的是
+///   沿视线的 DDA + 横向格点（快得多），两份的**累积次序**都由"按半径升序"钉住
+///   ⇒ 逐位对账才成立。
+fn gather_stars(
+    field: &StarField,
+    direction: [f32; 3],
+    enter: f32,
+    exit: f32,
+    support: f32,
+) -> Vec<StarHit> {
+    let mut hits: Vec<StarHit> = Vec::new();
+    if field.count() == 0 || support <= 0.0 || exit <= enter {
+        return hits;
     }
-    (raw - params.star_floor) / (1.0 - params.star_floor).max(1e-4)
+    let cell = field.grid.meta.cell;
+    // 径向逐层：层的厚度 = 一个细格（**半径归属**就是按层判的 ⇒ 一颗星只会被收一次）。
+    let mut t0 = (enter - cell).max(0.0);
+    let mut ranges: Vec<std::ops::Range<usize>> = Vec::new();
+    while t0 <= exit {
+        let t1 = t0 + cell;
+        // ⚠⚠ 支持域是**世界长度**（`support`），而这一层判的是角度 ⇒ 换算成 `support / t1`。
+        //   于是横向半径 `t1 × (support/t1) + cell = support + cell` 是**常数** ——
+        //   既对（近大远小的直接推论），又比从前省（远处不再扫一大片）。
+        let half = (support + cell).max(cell);
+        let angular = support / t1.max(cell);
+        let centre = [direction[0] * t1, direction[1] * t1, direction[2] * t1];
+        let low = [centre[0] - half, centre[1] - half, centre[2] - half];
+        let high = [centre[0] + half, centre[1] + half, centre[2] + half];
+        ranges.clear();
+        field.for_each_cell_in(low, high, |_, range| ranges.push(range));
+        for range in &ranges {
+            for index in range.clone() {
+                let star = field.star(index);
+                let radius = (star.position[0] * star.position[0]
+                    + star.position[1] * star.position[1]
+                    + star.position[2] * star.position[2])
+                    .sqrt();
+                if radius < t0 || radius >= t1 || radius <= f32::EPSILON {
+                    continue;
+                }
+                // `sin θ`：`cos θ = (p · d) / |p|` ⇒ `sin² = 1 − cos²`（比 `acos` 稳且快）。
+                let cosine = (star.position[0] * direction[0]
+                    + star.position[1] * direction[1]
+                    + star.position[2] * direction[2])
+                    / radius;
+                let sine = (1.0 - cosine * cosine).max(0.0).sqrt();
+                if sine > angular {
+                    continue;
+                }
+                hits.push(StarHit {
+                    radius,
+                    sine,
+                    power: [
+                        star.brightness * star.tint[0],
+                        star.brightness * star.tint[1],
+                        star.brightness * star.tint[2],
+                    ],
+                });
+            }
+        }
+        t0 = t1;
+    }
+    // ⚠ 升序排一次（半径并列时按 `sin`）：步进是**按半径消费**候选的，
+    //   次序两侧一致，逐位对账才有意义。
+    hits.sort_by(|a, b| {
+        a.radius
+            .partial_cmp(&b.radius)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(
+                a.sine
+                    .partial_cmp(&b.sine)
+                    .unwrap_or(std::cmp::Ordering::Equal),
+            )
+    });
+    hits
 }
 
 /// **一次采样的几何**：世界点 → 体网格的八个角与三个权重。
@@ -155,7 +318,8 @@ fn sample_at(volume: &VolumeData, point: [f32; 3]) -> Sample {
     let res = volume.res.max(2);
     let layers = volume.layers.max(2);
     let last_layer = layers - 1;
-    let altitude = ((radius - volume.inner) / span).clamp(0.0, 1.0);
+    let altitude =
+        px_volume_schema::volume::Shell::new(volume.inner, volume.outer).altitude_of(radius);
     let sz = altitude * last_layer as f32;
     let nearest = sz.round();
     let layer0 = if (sz - nearest).abs() < 1e-3 {
@@ -216,13 +380,31 @@ fn sample_at(volume: &VolumeData, point: [f32; 3]) -> Sample {
     }
 }
 
+/// **点源的辐照律**：相机（在壳心）看一颗距离 `r` 的星，像素值 ∝ `1/r²`。
+///
+/// ⚠⚠ 2026-09-25 用户定的：`1/r²` 是辐照度、必须成立。此前直接看见那一档**漏了它**
+///   （`B·PSF` 与距离无关），而"照亮气体"那一档早就是 `B/(d²+soft²)` ——
+///   **同一个 `B` 在两档里含义不同**，那才是真正的不一致。
+///
+/// ⚠ 增益**锚在内壁上**（`(inner/r)²`）：`star_gain` 的含义因此是"内壁上一颗星的
+///   表观亮度"⇒ 近处的星亮度与从前一样、远处的按 `1/r²` 变暗（`r = outer` 处是 1/9）。
+///   不锚的话整套增益要重标一遍，而那会把"哪一档变了"搅在一起。
+///
+/// ⚠ 这里**不含任何介质**（用户："先不管介质"）：均匀稀薄介质要么进 RTE、要么进
+///   假想的星等，两样都不是这一档该干的事。气自己的消光仍然照旧（那是星云本身）。
+pub fn star_falloff(radius: f32, inner: f32) -> f32 {
+    let reference = inner.max(1e-4);
+    let distance = radius.max(1e-4);
+    (reference / distance) * (reference / distance)
+}
+
 /// 一条视线的积分（出一条通道）。
 ///
 /// ⚠ 步长是**弦长除以步数**：弧长参数化下每步的 `ds` 相同 ⇒ 透过率可以逐步累乘，
 ///   不必重算前缀和。
 fn march_channel(
     emission: &VolumeData,
-    stars: Option<&Field>,
+    stars: Option<&StarField>,
     params: &SkyParams,
     channel: usize,
     direction: [f32; 3],
@@ -231,15 +413,31 @@ fn march_channel(
     let enter = emission.inner;
     let exit = emission.outer;
     let steps = params.steps.max(1);
-    let step = (exit - enter) / steps as f32;
+    // ⚠⚠ **步长在参数空间里取固定**（用户 2026-09-25 的口径）：`u` 均匀 ⇒ 落到世界里是
+    //   等比步长（∝ r），与角向格子 `r·Δθ` 配成各向同性。世界长度仍然要算出来
+    //   （光学深度是世界的量）：第 `i` 步的世界长度 = 那一格 `[i·Δu, (i+1)·Δu]` 的
+    //   `R` 之差 —— 它与抖动无关，所以期望值不变。
+    let shell = px_volume_schema::volume::Shell::new(enter, exit);
+    let du = 1.0 / steps as f32;
     let seed = 0x51ed_270b_u32.wrapping_add(channel as u32);
     // ⚠ 这一通道自己的消光（`1 + channel`）⇒ 蓝被吃得比红多 ⇒ 尘埃染红。
     let sigma_lane = 3 + channel.min(2);
+    let lane = channel.min(2);
 
     // ⚠ **壳外的那一段不必采样**：相机在壳心 ⇒ 每条视线的入射半径就是 `inner`，
     //   所以从相机出发**整段都在壳内**，解析的入射/出射点没有意义。
     //   但 `inner` 是"近处留的空"：`inner > 0` 时最里面那一小段也是空的。
     //   真正的省法在别处（见 `Sample` 那条：几何只算一遍）。
+
+    // ⚠ 星点候选**每条视线查一次**（与步长无关）：每颗星按**它自己的半径**用那一步的
+    //   透过率 —— 近处的星不被整层气遮住、远处的被前面的气吃掉。
+    let hits = match stars {
+        Some(field) if params.star_gain > 0.0 => {
+            gather_stars(field, direction, enter, exit, star_support(params))
+        }
+        _ => Vec::new(),
+    };
+    let mut next_hit = 0_usize;
 
     let mut transmittance = 1.0_f32;
     let mut radiance = 0.0_f32;
@@ -250,7 +448,9 @@ fn march_channel(
         } else {
             0.5
         };
-        let distance = enter + (index as f32 + offset) * step;
+        let distance = shell.radius_of((index as f32 + offset) * du);
+        // 这一格的世界长度（`u` 均匀、世界等比 ⇒ 每步都不一样）。
+        let step = shell.radius_of((index + 1) as f32 * du) - shell.radius_of(index as f32 * du);
         let point = [
             direction[0] * distance,
             direction[1] * distance,
@@ -259,25 +459,49 @@ fn march_channel(
         // ⚠ 几何**算一遍**，发射与消光各 gather 一次（见 [`Sample`]）。
         let sample = sample_at(emission, point);
         // ⚠ **逐通道的发射**：lane c 是这一条通道自己的发射（见 cloud.emission 的六通道布局）。
-        let emit = sample.gather(&emission.data, channel.min(2));
+        let emit = sample.gather(&emission.data, lane);
         let sigma = sample.gather(&emission.data, sigma_lane);
         if emit > 0.0 {
             radiance += transmittance * emit * step;
         }
         if sigma > 0.0 {
             transmittance *= (-sigma * step).exp();
-            if transmittance < 1e-4 {
-                break;
-            }
+        }
+        // ⚠ **这一步负责的星**（半径落在这一步里）：用当前的透过率加上去 —— 于是
+        //   "每步查一次星"在物理上就是"这一步之前的吸收算完了，星的光从那里过来"。
+        //   ⚠ 摆在透过率**更新之后**：星在这一步里，它前面那些气也该算上。
+        while next_hit < hits.len() && hits[next_hit].radius <= distance {
+            let hit = &hits[next_hit];
+            radiance += transmittance
+                * hit.power[lane]
+                * star_power(hit.sine, hit.radius, params)
+                * params.star_gain
+                * params.star_tint[lane]
+                * star_falloff(hit.radius, enter);
+            next_hit += 1;
+        }
+        if transmittance < 1e-4 {
+            // ⚠ 剩下的星还在后面（更远）⇒ 它们的贡献是 `T × …`，`T < 1e-4` 已经读不出来。
+            //   但**必须**把候选游标走完：不然下一层的判据会看到"星少了几颗"。
+            next_hit = hits.len();
+            break;
         }
     }
 
-    // 星点与背景：**乘透射率** ⇒ 被前面的气遮住、被尘埃染红。
-    let mut result = radiance;
-    if let Some(stars) = stars {
-        result += transmittance * star_level(stars, direction, params) * params.star_gain;
+    // 远处的星（半径超过最后一个采样点、或提前 break 掉的那一批）用最后的透过率兜底：
+    // 它们的贡献是 `T_end × …`，与"星在天穹上"那一档逐字一致。
+    while next_hit < hits.len() {
+        let hit = &hits[next_hit];
+        radiance += transmittance
+            * hit.power[lane]
+            * star_power(hit.sine, hit.radius, params)
+            * params.star_gain
+            * params.star_tint[lane]
+            * star_falloff(hit.radius, enter);
+        next_hit += 1;
     }
-    result + transmittance * params.background[channel.min(2)]
+
+    radiance + transmittance * params.background[lane]
 }
 
 /// **把整条天空积出来**（一条通道）。
@@ -286,7 +510,7 @@ fn march_channel(
 /// ⚠ 出的是**线性**值（不钳到 `[0,1]`）：曝光是渲染期的事，烘图时钳掉就把高光砍了。
 pub fn raymarch_channel(
     emission: &VolumeData,
-    stars: Option<&Field>,
+    stars: Option<&StarField>,
     params: &SkyParams,
     channel: usize,
 ) -> Field {
@@ -372,6 +596,9 @@ pub const RAMP_HUE: [[f32; 3]; 4] = [
     [1.00, 0.95, 1.05], // 极亮：星核（白）
 ];
 /// 朝目标色相走多满（`1` = 完全替换；`< 1` 保留一点原色变化）。
+/// ⚠⚠ 2026-09-25：**分色诊断期间关掉**（`0`）—— 斜坡是按**亮度**取档的，
+///   开着就会把"散射红 / 星光蓝"重新染成蓝云 + 暗红 ✗（那正是用户看出来的那两件事）。
+///   要回到参考图那一版调色，把它改回 `0.95`。
 pub const GRADE_STRENGTH: f32 = 0.95;
 
 /// **亮度响应**（S 形对比曲线）—— 分级里的第二件事（第一件是色相斜坡）。
@@ -499,7 +726,7 @@ fn grade_pixel(rgb: [f32; 3]) -> [f32; 3] {
 
 pub fn raymarch_sky(
     emission: &VolumeData,
-    stars: &Field,
+    stars: &StarField,
     sky_params: &SkyParams,
 ) -> Result<TextureData, String> {
     let mut planes = Vec::with_capacity(3);
@@ -587,6 +814,7 @@ mod tests {
             chunk[5] = alpha[2];
         }
         VolumeData {
+            lanes: 1,
             res,
             layers,
             inner: 1.0,
@@ -633,6 +861,7 @@ mod tests {
             }
         }
         let volume = VolumeData {
+            lanes: 1,
             res,
             layers,
             inner: 1.0,
@@ -722,10 +951,42 @@ mod tests {
         assert!(worst < 1e-4, "空体积应当只剩背景 0.02，最大偏差 {worst}");
     }
 
+    /// 一片**够密**的星：方向按 Fibonacci 球均匀撒满，半径都一样（球形壳）。
+    ///
+    /// ⚠ 判据只关心"星的贡献怎么被气吃掉"与"轮廓是不是圆的"，所以星位要**均匀**
+    ///   （否则量到的差异可能来自"这一条视线附近恰好没星"）。
+    fn star_shell(count: usize, radius: f32, brightness: f32) -> StarField {
+        // 方向按 Fibonacci 球均匀（壳上每球面度一样密）+ 统一稀疏格。
+        let block = px_sparse::grid::CHUNK_CELLS;
+        let cell = 0.25_f32;
+        let half = radius + 2.0 * cell;
+        let dims = (((2.0 * half) / cell).ceil() as u32).div_ceil(block) * block;
+        let meta = px_sparse::GridMeta {
+            cell,
+            origin: [-(dims as f32) * cell * 0.5; 3],
+            dims: [dims, dims, dims],
+        };
+        let golden = 2.399_963_2_f32;
+        let mut positions: Vec<[f32; 3]> = Vec::with_capacity(count);
+        for index in 0..count {
+            let z = 1.0 - 2.0 * (index as f32 + 0.5) / count as f32;
+            let ring = (1.0 - z * z).max(0.0).sqrt();
+            let phi = golden * index as f32;
+            positions.push([
+                ring * phi.cos() * radius,
+                ring * phi.sin() * radius,
+                z * radius,
+            ]);
+        }
+        let values = vec![brightness; count];
+        let tints = vec![[1.0, 1.0, 1.0]; count];
+        StarField::build(meta, &positions, &values, &tints).expect("造星壳")
+    }
+
     /// **星的亮度乘透射率**：前面挡一层浓气，星就暗下去。
     #[test]
     fn a_star_behind_extinction_is_dimmer() {
-        let stars = Field::filled_with(8, 8 * CUBE_FACES, 1.0, Projection::CubeMap);
+        let stars = star_shell(512, 2.0, 1.0);
         let clear = raymarch_channel(&uniform(8, 4, 0.0, 0.0), Some(&stars), &params(), 0);
         let dusty = raymarch_channel(&uniform(8, 4, 0.0, 3.0), Some(&stars), &params(), 0);
         let mean = |field: &Field| -> f64 {
@@ -736,6 +997,73 @@ mod tests {
             "尘埃必须把星压暗：{} vs {}",
             mean(&dusty),
             mean(&clear)
+        );
+    }
+
+    /// ⚠⚠ **这一档换掉旧星图的全部理由**：星的密度与强度必须**与位置无关**。
+    ///
+    /// 旧版把星画进立方图，于是同一片天在**面心**与**面角**上表现不同，实测：
+    ///   * 位置分布（立方格投到球面）：面心 11.2e3 星/球面度 → 面角 15.9e3（1.43x）；
+    ///   * 成品天空的亮面积占球面度之比：面心 2.75% → 面角 4.33%（**1.58x**）。
+    ///   用户的原话是"星星在 cubemap 棱附近好像被压缩了"。
+    ///
+    /// 现在星是 R3 里的点、轮廓是世界空间的角函数、每条视线按**方向**解析求值
+    /// ⇒ 每球面度看到的星数必须一致。这条判据直接量那 1.58x 有没有回来：
+    /// 在真空里烘一张天空，按**半径分箱**数亮面积，面角那一箱不许比面心高一截。
+    #[test]
+    fn the_star_light_is_uniform_across_a_face() {
+        let params = SkyParams {
+            face: 128,
+            steps: 4,
+            jitter: 0.0,
+            star_gain: 1.0,
+            star_halo_gain: 0.0,
+            ..Default::default()
+        };
+        let vacuum = uniform(8, 4, 0.0, 0.0);
+        // 方向均匀撒满（Fibonacci 球）⇒ 每球面度的星数一样。
+        let stars = star_shell(20000, 2.0, 8.0);
+        let sky = raymarch_channel(&vacuum, Some(&stars), &params, 0);
+        let face = params.face;
+        // 分箱：格心到面心（a=b=0）的距离，取三个环带。
+        let mut lit = [0.0_f64; 3];
+        let mut area = [0.0_f64; 3];
+        let mut all = 0.0_f64;
+        for face_index in 0..CUBE_FACES {
+            for y in 0..face {
+                for x in 0..face {
+                    let s = (x as f32 + 0.5) / face as f32;
+                    let t = (y as f32 + 0.5) / face as f32;
+                    let a = s * 2.0 - 1.0;
+                    let b = t * 2.0 - 1.0;
+                    let r = (a * a + b * b).sqrt();
+                    let band = if r < 0.5 {
+                        0
+                    } else if r < 0.9 {
+                        1
+                    } else {
+                        2
+                    };
+                    let value = sky.at(x, face_index * face + y) as f64;
+                    area[band] += 1.0;
+                    if value > 0.05 {
+                        lit[band] += 1.0;
+                    }
+                    all += value;
+                }
+            }
+        }
+        assert!(all > 0.0, "一颗星都没画出来");
+        let centre = lit[0] / area[0];
+        let corner = lit[2] / area[2];
+        assert!(
+            centre > 0.0 && corner > 0.0,
+            "有的环带一颗星都没有（面心 {centre:.5} / 面角 {corner:.5}）"
+        );
+        let ratio = corner / centre;
+        assert!(
+            (0.9..1.1).contains(&ratio),
+            "面角/面心的星点密度比是 {ratio:.3}（旧版实测 1.58）—— 星又被位置影响了"
         );
     }
 

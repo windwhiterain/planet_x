@@ -345,6 +345,7 @@ mod volume_tests {
             layers,
             inner: 1.0,
             outer: 2.5,
+            lanes: 6,
             data: data.clone(),
         };
         let bundle = <VolumeData as Build>::encode(&volume).expect("编得出来");

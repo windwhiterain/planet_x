@@ -168,6 +168,7 @@ fn main() {
     let outer = params["outer"] as f32;
     let data = blob.f32s().expect("不是 f32 数据");
     let volume = VolumeData {
+        lanes: 6,
         res,
         layers,
         inner,

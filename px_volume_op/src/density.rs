@@ -11,10 +11,39 @@
 //! ⚠ 失败要**当场说清**（`bake_density` 返回 `Result`），所以这里用 `?` 把它往外传 ——
 //!   `px_body!` 外面会套一层 `Ok`，直接写 `bake_density(...)` 就成了 `Ok(Result<…>)`
 //!   （类型对不上，而且真出错时会被当成"成功"）。
+//!
+//! ⚠⚠ **链尾的硬闸**（用户 2026-09-25："不为 0 根本就不是稀疏结构"）。
+//!   实测（`px_probe` 的稀疏度判据，shape 256）：恰好 0 的体素 31.6%，而
+//!   `(0, 0.01]` 的还有 **20.9%** —— 那是一片稀薄雾 ✗。它只可能来自**混合里那个
+//!   fbm 操作数**：`carved`/`weight`/`extent` 都是 `remap`（`out_min = 0` ⇒ 0 进 0 出 ✓），
+//!   而 **fbm 永远不精确为 0** ✗ ⇒ 线性混合必然泄漏一个 ε 级尾巴。
+//!   ⇒ 稀疏是**结构**问题（"这里有没有物质"），不是数值大小问题 ⇒ 只能在链尾一刀切：
+//!   `密度 < GATE ⇒ 0`，以上线性重标定（云体值域几乎不变）。放在算子这一层是因为
+//!   它是链尾、跑在 CPU 上、且没有 CPU/GPU 对账的负担。
+//!   ⚠ 闸门同时**省掉**一整片"稀薄气被附近星光照亮"的积分（背景发红的来源 ✓）。
 
 use px_volume_schema::ops::Density;
 
+/// 密度闸门：低于它一律是精确 0（`0` = 关闭，行为与从前逐位相同）。
+///
+/// ⚠ 取 `0.02` 的依据：非零分位的 p10 是 0.0002、p50 是 0.05 ⇒ 0.02 把那条
+///   "极稀薄尾巴"切掉，而云体（p50 以上）只被线性压缩一点点。
+const DENSITY_GATE: f32 = 0.02;
+
 px_graph_schema::px_body! {
     Density,
-    |p, i, g| px_volume_alg::bake_density(p, g.width, i.density.value())?
+    |p, i, g| {
+        let mut volume = px_volume_alg::bake_density(p, g.width, i.density.value())?;
+        if DENSITY_GATE > 0.0 {
+            let span = 1.0 - DENSITY_GATE;
+            for value in &mut volume.data {
+                *value = if *value < DENSITY_GATE {
+                    0.0
+                } else {
+                    (*value - DENSITY_GATE) / span
+                };
+            }
+        }
+        volume
+    }
 }

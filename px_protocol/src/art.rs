@@ -37,6 +37,14 @@ pub enum AssetKind {
     /// 位深与 sRGB 不是 blob 头那一档（`DType`）能表达的东西。
     /// 渲染器**不生成**它 —— 色板、覆盖度立方图、星空都由烘图侧烘成产物（§65）。
     Texture,
+    /// **R3 星场**（`px_sparse::StarField`）：世界坐标里的一批点光源 + 统一稀疏格。
+    ///   **渲染器不读它** —— 它只喂天空烘焙那一档（`sky.nebula` 的直射项与
+    ///   `cloud.emission` 的星光照）。
+    ///
+    /// ⚠ 它必须有自己的种类：载荷是 f32 点表 + 五段 u32 索引，形状既不是"二维场"
+    ///   也不是"四维体积"，借任何一档都会在读回时把形状解错
+    ///   （与 [`Self::VoxelField`] 同一条理由）。
+    StarField,
 }
 
 /// 贴图产物的格式档。数字写进清单参数 `format`（清单参数只有 f64）。
@@ -347,13 +355,39 @@ impl MeshData {
 /// （0 = `inner`、`layers-1` = `outer`）。
 ///
 /// 它只是**等值面算子的输入**：渲染器不读它（见 `AssetKind::Volume` 的注释）。
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct VolumeData {
     pub res: u32,
     pub layers: u32,
     pub inner: f32,
     pub outer: f32,
+    /// **每体素几条通道**（`data` 按体素交错）。
+    ///
+    /// ⚠⚠ 用户 2026-09-25："你为什么要用六通道交错存？为什么不用结构体？"
+    ///   交错本身是为了采样器（一次 gather 8 个角，每个角的通道连续 ⇒ 一个 cache line
+    ///   拿下全部通道；SoA 要按通道各扫一遍 ✗）。**真正错的是通道数没进类型** ✗：
+    ///   从前 `data` 的长度由读者自己反推 ⇒ 任何一个"假设每体素一个值"的读取者都会
+    ///   **静默读错**（实际发生过：星场吃了六通道的发射体积 ⇒ 读出来是乱的 ✗）。
+    ///   现在它就在结构体里：读者必须显式面对"这是几通道"，编译器逼着每个构造点写出来 ✓。
+    ///
+    /// `1` = 密度（等值面/星场的输入）；`6` = 发射（`[发射 R,G,B, σ_R,σ_G,σ_B]`）。
+    pub lanes: u32,
     pub data: Vec<f32>,
+}
+
+impl Default for VolumeData {
+    /// ⚠ 手工实现（不是 derive）：derive 会给 `lanes = 0`，而 0 通道的体积没有意义 ⇒
+    ///   默认按**单通道**（密度的语义）。
+    fn default() -> Self {
+        Self {
+            res: 0,
+            layers: 0,
+            inner: 0.0,
+            outer: 0.0,
+            lanes: 1,
+            data: Vec::new(),
+        }
+    }
 }
 
 /// Volume 载荷的 blob 形状：`[面, 径向层, t, s]`。
@@ -362,6 +396,35 @@ pub struct VolumeData {
 pub const VOLUME_SHAPE: [u32; 4] = [CUBE_FACES, 0, 0, 0];
 
 impl VolumeData {
+    /// 体素下标 → `data` 下标（**唯一的**通道步长来源）。
+    #[inline]
+    pub fn lane_slot(&self, voxel: usize, lane: usize) -> usize {
+        voxel * self.lanes.max(1) as usize + lane
+    }
+
+    /// ⚠ 只对**单通道**（密度）体积有效的读者，必须先过这一关。
+    ///
+    /// 从前这层约定只写在注释里（`density::sample_world` 的文档 ✗），而类型上拦不住
+    /// ⇒ 把六通道的发射喂进去就会静默读错。现在它是运行期断言 ✓。
+    #[inline]
+    pub fn expect_single(&self) -> &Self {
+        assert_eq!(
+            self.lanes.max(1),
+            1,
+            "这是 {}-通道体积（发射 = 6 通道交错）；单通道读者（密度/星场）不能吃它 —— \
+             要么改用按通道的读法，要么传密度那一档",
+            self.lanes
+        );
+        self
+    }
+
+    /// 发射通道（`0..3` = RGB、`3..6` = σ）的一个体素值；**非**发射体积上会断言。
+    #[inline]
+    pub fn emission_at(&self, voxel: usize, channel: usize) -> f32 {
+        assert!(channel < self.lanes.max(1) as usize, "通道越界");
+        self.data[self.lane_slot(voxel, channel)]
+    }
+
     pub fn samples(&self) -> usize {
         self.res as usize * self.layers as usize * self.res as usize * CUBE_FACES as usize
     }
@@ -371,15 +434,21 @@ impl VolumeData {
     /// ⚠⚠ **通道数必须编进 blob 形状**（见 [`Self::blobs`]）—— 这一档踩过一次：
     ///   形状只写单通道的量、字节却是 `samples × 6` ⇒ 产物**自相矛盾**、读回被拒，
     ///   而症状只是"每次烘图都重算"（不报错、不崩溃）。
+    /// 通道数（`usize` 版，方便按 index 用）。
+    ///
+    /// ⚠⚠ 从前它是 `data.len() / samples()`（**反推**）✗ —— 那正是"通道数没进类型"
+    ///   的残余：只要有一个构造点忘了写对，反推就会跟着错，而错法是完全静默的。
+    ///   现在唯一来源是字段 [`Self::lanes`]（`1` = 密度、`6` = 发射）。
     pub fn lanes(&self) -> usize {
-        let samples = self.samples().max(1);
-        self.data.len() / samples
+        self.lanes.max(1) as usize
     }
 
     pub fn at(&self, face: u32, layer: u32, t: u32, s: u32) -> f32 {
         // ⚠ 多通道体积**不能**用 `at`：布局是交错的（`data[格 × lanes + 通道]`），
         //   单通道下标式只对 `lanes == 1` 有意义。
-        debug_assert_eq!(self.lanes(), 1, "多通道体积请逐通道取（见 `lanes`）");
+        // ⚠ 从前是 `debug_assert` ⇒ release 里**静默**按单通道下标读六通道体积 ✗。
+        //   这一档踩过真实的坑（星场吃掉发射体积）⇒ 改成硬断言。
+        assert_eq!(self.lanes(), 1, "多通道体积请逐通道取（见 `lanes`）");
         self.data[(((face * self.layers + layer) * self.res + t) * self.res + s) as usize]
     }
 
@@ -394,8 +463,9 @@ impl VolumeData {
     /// 而老的单通道产物（4 维形状）**照旧能读**。
     pub fn blobs(&self) -> Vec<Blob> {
         let mut shape = vec![CUBE_FACES, self.layers, self.res, self.res];
-        if self.lanes() > 1 {
-            shape.push(self.lanes() as u32);
+        // ⚠ 用**字段**（不是 `lanes()`）：编码路径从此不含任何反推。
+        if self.lanes > 1 {
+            shape.push(self.lanes);
         }
         vec![Blob::from_f32(shape, &self.data)]
     }
@@ -415,6 +485,7 @@ impl VolumeData {
             layers: shape[1],
             inner: 0.0,
             outer: 0.0,
+            lanes: lanes as u32,
             data,
         };
         if volume.data.len() != volume.samples() * lanes {

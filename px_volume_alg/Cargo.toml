@@ -16,6 +16,13 @@ px_graph_schema = { path = "../px_graph_schema" }
 px_volume_schema = { path = "../px_volume_schema" }
 # 算子的输入就是一张场（`eval_sampled` 的签名里就是它）。
 px_field_schema = { path = "../px_field_schema" }
+# 噪声的**原件**：大尺度上让星跟着气走要采同一族的 fbm（`stars::sky_density`）
+px_field_alg = { path = "../px_field_alg" }
+# 星场的载荷类型（`px_sparse::StarField`）**不再住协议层**：R3 稀疏格是通用的那一层
+# （用户 2026-09-25：统一稀疏结构，星云也用这个）⇒ 索引进键、载荷自己说话。
+px_sparse = { path = "../px_sparse" }
+# 线格式那一条（`Blob`）：只在载荷的编解码里用到。
+px_protocol = { path = "../px_protocol" }
 # 参照场那一侧：烘出来的粗场要能与它逐位对上（§28.2 的共享依赖）。
 px_verify = { path = "../px_verify" }
 

@@ -288,6 +288,7 @@ mod sampler_tests {
             }
         }
         VolumeData {
+            lanes: 1,
             res,
             layers,
             inner,
@@ -354,13 +355,17 @@ mod sampler_tests {
 // 布局按 uniform 的 16 字节规矩排（每 4 个 f32/u32 一组一个 vec4），
 // size_of 与 to_bytes().len() 必须相等，并且有判据钉住。
 
-/// raymarch_channel 的步进参数 + raymarch_sky 的星点与分级表。
+/// raymarch_channel 的步进参数 + raymarch_sky 的分级表。
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SkyUniform {
     /// (steps, face, 未用, 未用)
     pub counts: [u32; 4],
-    /// (jitter, star_gain, star_floor, enter) —— enter 是壳的内半径（步进起点）。
+    /// (jitter, 未用, 未用, enter) —— enter 是壳的内半径（步进起点）。
+    ///
+    /// ⚠ 星点的旋钮（轮廓、增益）**不在这里**：它们与格、星表同住 [`StarMeta`]
+    ///   （`star_gain` 与 `starlight_gain` 是"同一个增益的两个调用点" ⇒ 两处各存一份
+    ///   迟早会漂开，而症状只是"天上与气里的星不一样"）。
     pub scalars: [f32; 4],
     /// 太空底色（rgb + 未用）。
     pub background: [f32; 4],
@@ -444,6 +449,43 @@ mod uniform_tests {
             "字段变了就要同步 WGSL 的 struct（现为 16*7+64）"
         );
     }
+
+    /// 布局判据：星场那一块 uniform 的 16 字节规矩 + 字段次序。
+    ///
+    /// ⚠ 次序就是 WGSL 里 `struct StarMeta` 的**声明次序**（u32 与 f32 交错）：
+    ///   差一格就是"星的参数整片错位"（增益跑到原点、步数跑到段起点上），
+    ///   而画面上的症状只是"星辉不对" —— 归因不到 uniform。
+    #[test]
+    fn the_star_meta_layout_is_pinned() {
+        let value = StarMeta {
+            counts: [7, 32, 32, 48],
+            space: [0.05, -0.8, -0.8, -1.2],
+            segments_a: [0, 12, 44, 900],
+            segments_b: [1200, 12, 8, 0],
+            light: [0.2, 0.05, 1.6, 0.0],
+            profile: [0.0029, 0.01, 0.035, 0.03],
+        };
+        let bytes = value.to_bytes();
+        assert_eq!(
+            bytes.len(),
+            std::mem::size_of::<StarMeta>(),
+            "逐字段导出应当正好等于内存布局"
+        );
+        assert_eq!(bytes.len() % 16, 0, "uniform 块必须是 16 的倍数");
+        assert_eq!(
+            bytes.len(),
+            96,
+            "字段变了就要同步 WGSL 的 struct StarMeta（现为 6 个 vec4）"
+        );
+        // 字段次序：第 4 个 u32 是 counts.w，第 5 个是 space.x（不是 segments_a.x）。
+        assert_eq!(u32::from_le_bytes(bytes[12..16].try_into().unwrap()), 48);
+        assert_eq!(f32::from_le_bytes(bytes[16..20].try_into().unwrap()), 0.05);
+        assert_eq!(u32::from_le_bytes(bytes[32..36].try_into().unwrap()), 0);
+        assert_eq!(
+            f32::from_le_bytes(bytes[80..84].try_into().unwrap()),
+            0.0029
+        );
+    }
 }
 
 // --------------------- 移植路线上的两个硬约束（WGSL 语言层面） ---------------------
@@ -472,19 +514,263 @@ mod uniform_tests {
 // 「步长约定 / 透过率递推 / 起点 enter」这三件事单独钉死；等这一条绿了，
 // 再拿真体积与 px_volume_alg::raymarch_channel 对账。
 
-/// 步进的**可选**输入（星图与底色）：与分级表一样，参数只有一处真源。
+/// **GPU 那一侧的星场索引**：五段 u32 拼成**一个** storage buffer + 星表 + 元数据。
+///
+/// ⚠⚠ 五段为什么要拼成一个 buffer：天空那一档的入口现在已经有 **5 个** storage 绑定
+///   （体数据 / 图 / 星表 / 索引 / 溢出计数），而把五段拆成五个绑定就是 **9 个** ——
+///   越过 WebGPU 的 `maxStorageBuffersPerShaderStage = 8`（默认下限）。症状是"某些设备上
+///   这个入口直接起不来"，而归因不到"是星场那几个绑定"。段的起点走 uniform
+///   （[`StarMeta::segments_a`] / [`StarMeta::segments_b`]），shader 按偏移寻址。
+///
+/// ⚠ 五段的次序与 `px_sparse::Grid` 的字段次序一致：
+///   `chunk_start ‖ brick_slot ‖ brick_mask ‖ brick_sub ‖ sub_start`。
+///   ⚠ 拼接按 **u32 元素**（不是字节）：`starts` 是元素下标，WGSL 那一侧
+///   `array<u32>` 按下标读就够 —— 两侧不必各自再换算一次字节偏移。
+pub struct StarGrid {
+    /// 五段拼起来的索引。
+    pub index: Vec<u32>,
+    /// 五段各自的起点（`starts[i]` = 第 `i` 段在 `index` 里的第一个下标）。
+    pub starts: [u32; 5],
+    /// 细格边长（世界单位）。
+    pub cell: f32,
+    /// 格 `(0,0,0)` 的近角。
+    pub origin: [f32; 3],
+    /// 每轴细格数（`CHUNK_CELLS` 的整数倍）。
+    pub dims: [u32; 3],
+    /// 星数（点表的项数）。
+    pub count: u32,
+}
+
+impl StarGrid {
+    /// 从星场拼出 GPU 那一侧的索引。
+    pub fn of(field: &px_sparse::StarField) -> Self {
+        let grid = &field.grid;
+        let mut index: Vec<u32> = Vec::with_capacity(
+            grid.chunk_start.len()
+                + grid.brick_slot.len()
+                + grid.brick_mask.len()
+                + grid.brick_sub.len()
+                + grid.sub_start.len(),
+        );
+        let mut starts = [0_u32; 5];
+        for (segment, values) in [
+            &grid.chunk_start,
+            &grid.brick_slot,
+            &grid.brick_mask,
+            &grid.brick_sub,
+            &grid.sub_start,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            starts[segment] = index.len() as u32;
+            index.extend_from_slice(values);
+        }
+        Self {
+            index,
+            starts,
+            cell: grid.meta.cell,
+            origin: grid.meta.origin,
+            dims: grid.meta.dims,
+            count: field.count() as u32,
+        }
+    }
+}
+
+/// 星场那一档的 **uniform 参数块**：格的形状 + 五段起点 + 两个调用点各自的旋钮。
+///
+/// ⚠ 布局按 uniform 的 16 字节规矩排（每 4 个数一个 `vec4`）：`to_bytes().len()` 必须等于
+///   `size_of`，而 WGSL 那边的 `struct StarMeta` 必须逐字段对上（判据钉着）。
+///
+/// ⚠ `light[2]`（增益）是**两个调用点共用**的一格：天空填 `star_gain`、发射填
+///   `starlight_gain`（它们本来就同名同义，各存一份就是迟早漂开）。
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+pub struct StarMeta {
+    /// (星数, dims.x, dims.y, dims.z)。
+    pub counts: [u32; 4],
+    /// (细格边长, origin.x, origin.y, origin.z)。
+    pub space: [f32; 4],
+    /// 前四段起点：chunk_start / brick_slot / brick_mask / brick_sub。
+    pub segments_a: [u32; 4],
+    /// (sub_start 起点, 逐星阴影步数, 每体素最多吃几颗星, 未用)。
+    pub segments_b: [u32; 4],
+    /// 星光球（发射那一档）：(查询半径, 软化半径, 增益, 未用)。
+    pub light: [f32; 4],
+    /// 星点轮廓（天空那一档）：(核, 晕, 晕权重, 支持域)。
+    pub profile: [f32; 4],
+}
+
+impl StarMeta {
+    /// 与格有关的那几格（两个调用点共用）。
+    fn of(grid: &StarGrid) -> Self {
+        Self {
+            counts: [grid.count, grid.dims[0], grid.dims[1], grid.dims[2]],
+            space: [grid.cell, grid.origin[0], grid.origin[1], grid.origin[2]],
+            segments_a: [
+                grid.starts[0],
+                grid.starts[1],
+                grid.starts[2],
+                grid.starts[3],
+            ],
+            segments_b: [grid.starts[4], 0, 0, 0],
+            light: [0.0; 4],
+            profile: [0.0; 4],
+        }
+    }
+
+    /// 天空那一档：轮廓与支持域读 [`SkyParams`]，增益走 `star_gain`。
+    ///
+    /// ⚠ `core` / `halo` 的 `max(1e-6)`、`support` 的 `3 × max(core, halo)` 全部**在宿主上**
+    ///   按 CPU 那一份算好（`star_support` 就是它的真源）⇒ WGSL 里只做 `exp`，不重算阈值。
+    pub fn sky(grid: &StarGrid, params: &px_volume_schema::params::sky::SkyParams) -> Self {
+        Self {
+            segments_b: [grid.starts[4], 0, 0, 0],
+            light: [0.0, 0.0, params.star_gain, 0.0],
+            profile: [
+                params.star_core.max(1e-6),
+                params.star_halo.max(1e-6),
+                params.star_halo_gain,
+                px_volume_alg::raymarch::star_support(params),
+            ],
+            ..Self::of(grid)
+        }
+    }
+
+    /// 发射那一档：星光球读 `starlight_*`，增益走 `starlight_gain`。
+    pub fn emission(
+        grid: &StarGrid,
+        params: &px_volume_schema::params::emission::EmissionParams,
+    ) -> Self {
+        Self {
+            segments_b: [
+                grid.starts[4],
+                params.starlight_steps.max(1),
+                params.starlight_max,
+                0,
+            ],
+            light: [
+                params.starlight_radius.max(1e-4),
+                params.starlight_soft.max(1e-4),
+                params.starlight_gain,
+                0.0,
+            ],
+            ..Self::of(grid)
+        }
+    }
+
+    /// 按内存布局导出：WGSL 那边的 struct 必须逐字段对上（判据钉住字节数）。
+    ///
+    /// ⚠ 次序就是 WGSL 里 `struct StarMeta` 的**声明次序**（u32 与 f32 交错）：
+    ///   两边的字段次序只要差一格，症状是"星的参数整片错位"，而归因不到 uniform 上。
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(std::mem::size_of::<Self>());
+        for value in self.counts {
+            out.extend_from_slice(&value.to_le_bytes());
+        }
+        for value in self.space {
+            out.extend_from_slice(&value.to_le_bytes());
+        }
+        for value in self.segments_a {
+            out.extend_from_slice(&value.to_le_bytes());
+        }
+        for value in self.segments_b {
+            out.extend_from_slice(&value.to_le_bytes());
+        }
+        for value in self.light {
+            out.extend_from_slice(&value.to_le_bytes());
+        }
+        for value in self.profile {
+            out.extend_from_slice(&value.to_le_bytes());
+        }
+        out
+    }
+}
+
+/// ⚠⚠ **星光球的定长表上限**：WGSL 没有变长数组，`star_light` 的"前几名"表是定长的
+///   （`StarMeta::segments_b.z` = `starlight_max`）。超过它就**没有**忠实的镜像 ——
+///   与其静默按 32 截断（那是"两边的气亮度差一点点"，最难看出来的一类分叉），
+///   不如在派发之前当场报错。
+pub const STAR_KEEP_MAX: u32 = 32;
+
+/// 步进的**可选**输入（星场与底色）：与分级表一样，参数只有一处真源。
 #[derive(Default, Clone, Copy)]
 pub struct MarchExtras<'a> {
-    /// 星图（立方贴图场，行主序：下标 = y * face_size + x）。`face_size = 0` 表示没有星。
-    pub stars: Option<&'a [f32]>,
-    /// 星图一面多大（0 = 没有星图）。
-    pub star_face: u32,
-    /// 星点增益（`SkyParams::star_gain`）。
-    pub star_gain: f32,
-    /// 星点地板（`SkyParams::star_floor`）。
-    pub star_floor: f32,
+    /// R3 星场的索引（`None` = 这一档没有星）。
+    pub star_grid: Option<&'a StarGrid>,
+    /// 星表（每颗 `StarField::STRIDE` 个 f32）；`star_grid` 是 `None` 时忽略。
+    pub star_table: &'a [f32],
+    /// 星场参数块（两个调用点各填自己那一份）。
+    pub star_meta: StarMeta,
     /// 太空底色（`SkyParams::background`）。
     pub background: [f32; 3],
+}
+
+/// `f32` 一串 → 小端字节。
+///
+/// ⚠ 空的那一份给 4 个字节：storage buffer 的绑定**不能是 0 字节**（wgpu 的
+///   `create_buffer` 会拿到 0，而 shader 里 `arrayLength` 与读一次都要有地方落）。
+///   星数为 0 时那几条路一次都不进，读不到这 4 个字节。
+fn f32_bytes(values: &[f32]) -> Vec<u8> {
+    if values.is_empty() {
+        return vec![0_u8; 4];
+    }
+    values
+        .iter()
+        .flat_map(|value| value.to_le_bytes())
+        .collect()
+}
+
+/// `u32` 一串 → 小端字节（空的理由见 [`f32_bytes`]）。
+fn u32_bytes(values: &[u32]) -> Vec<u8> {
+    if values.is_empty() {
+        return vec![0_u8; 4];
+    }
+    values
+        .iter()
+        .flat_map(|value| value.to_le_bytes())
+        .collect()
+}
+
+/// 星场那三个绑定（星表 / 索引 / 参数块）的字节。
+///
+/// ⚠ 三份**永远都绑**（哪怕没有星）：`march` / `sky_radiance` / `bake_emission` 三个入口
+///   的代码里都引用了它们，管线的绑定布局要求"入口用到的每一条都在"。
+struct StarSlots {
+    table: Vec<u8>,
+    index: Vec<u8>,
+    meta: Vec<u8>,
+}
+
+impl StarSlots {
+    fn of(extras: &MarchExtras<'_>) -> Self {
+        match extras.star_grid {
+            Some(grid) => Self {
+                table: f32_bytes(extras.star_table),
+                index: u32_bytes(&grid.index),
+                meta: extras.star_meta.to_bytes(),
+            },
+            None => Self {
+                table: f32_bytes(&[]),
+                index: u32_bytes(&[]),
+                meta: StarMeta::default().to_bytes(),
+            },
+        }
+    }
+}
+
+/// 溢出计数（`star_overflow[0]`）非零 ⇒ 天空那一档的定长队列装不下某一层的星。
+///
+/// ⚠⚠ 不报的话症状是"某几条视线上少了几颗星"—— 画面**看起来只是暗一点**，
+///   归因不到队列容量。宁可当场 Err。
+fn check_star_overflow(readback: &[u8]) -> Result<(), String> {
+    let count = u32::from_le_bytes(readback[0..4].try_into().unwrap());
+    if count > 0 {
+        return Err(format!(
+            "星候选的定长队列溢出 {count} 次（`STAR_PENDING_MAX` 装不下某一层里的星）"
+        ));
+    }
+    Ok(())
 }
 
 /// 跑一遍响应曲线（逐格，就地）：输入 luma 数组，输出同一长度。
@@ -612,8 +898,8 @@ pub fn march(
     ]
     .concat();
     let sky = SkyUniform {
-        counts: [steps, face, lane, extras.star_face],
-        scalars: [0.0, extras.star_gain, extras.star_floor, enter],
+        counts: [steps, face, lane, 0],
+        scalars: [0.0, 0.0, 0.0, enter],
         background: [
             extras.background[0],
             extras.background[1],
@@ -629,6 +915,7 @@ pub fn march(
     let texels = (face * face * 6) as usize;
     let bytes =
         |values: &[f32]| -> Vec<u8> { values.iter().flat_map(|v| v.to_le_bytes()).collect() };
+    let stars = StarSlots::of(extras);
     let out = px_gpu::dispatch_slots(
         gpu,
         SAMPLER_WGSL,
@@ -652,14 +939,24 @@ pub fn march(
             },
             px_gpu::Slot {
                 binding: 6,
-                value: Binding::Storage(&match extras.stars {
-                    Some(stars) => bytes(stars),
-                    None => vec![0_u8; 4],
-                }),
+                value: Binding::Storage(&stars.table),
+            },
+            px_gpu::Slot {
+                binding: 10,
+                value: Binding::Storage(&stars.index),
+            },
+            px_gpu::Slot {
+                binding: 11,
+                value: Binding::Uniform(&stars.meta),
+            },
+            px_gpu::Slot {
+                binding: 12,
+                value: Binding::Write(&vec![0_u8; 4]),
             },
         ],
         workgroups(texels),
     )?;
+    check_star_overflow(&out[1])?;
     Ok(out[0]
         .chunks_exact(4)
         .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap()))
@@ -742,6 +1039,7 @@ mod crosscheck_tests {
             }
         }
         VolumeData {
+            lanes: 1,
             res,
             layers,
             inner,
@@ -807,14 +1105,100 @@ mod crosscheck_tests {
     }
 }
 
+/// 判据用的**空星场**：没有星 ⇒ 星点与星光两条路都必须一个字都不产生
+/// （（空星场）与（没有星场）等价 —— 那是 `starlight_gain` 能与别的档共存的理由）。
+#[cfg(test)]
+fn empty_star_field() -> px_sparse::StarField {
+    let block = px_sparse::CHUNK_CELLS;
+    px_sparse::StarField::build(
+        px_sparse::GridMeta {
+            cell: 0.5,
+            origin: [-4.0; 3],
+            dims: [block, block, block],
+        },
+        &[],
+        &[],
+        &[],
+    )
+    .expect("造空星场")
+}
+
+/// 判据用的星场：壳 `[inner, outer]` 里按**体积**撒 `count` 颗（Fibonacci 方向 + `r³` 半径），
+/// 亮度给常数、色温掺两种 ⇒ CPU 与 GPU 两侧读的是同一张表（真源是同一个 `StarField`）。
+///
+/// ⚠ 半径**要散开**（不是一层壳）：天空那一档的候选是按半径分层归属的，全挤在一层上就测不到
+///   "同一颗星只被收一次"和"按半径升序消费"这两条。
+#[cfg(test)]
+fn fixture_star_field(
+    count: usize,
+    cell: f32,
+    inner: f32,
+    outer: f32,
+    brightness: f32,
+) -> px_sparse::StarField {
+    let mut positions = Vec::with_capacity(count);
+    let golden = 2.399_963_2_f32;
+    for index in 0..count {
+        let z = 1.0 - 2.0 * (index as f32 + 0.5) / count as f32;
+        let ring = (1.0 - z * z).max(0.0).sqrt();
+        let phi = golden * index as f32;
+        let draw = ((index.wrapping_mul(2654435761)) % 1000) as f32 / 1000.0;
+        let cube = inner * inner * inner + draw * (outer * outer * outer - inner * inner * inner);
+        let radius = cube.max(0.0).cbrt();
+        positions.push([
+            ring * phi.cos() * radius,
+            ring * phi.sin() * radius,
+            z * radius,
+        ]);
+    }
+    let values = vec![brightness; count];
+    let tints: Vec<[f32; 3]> = (0..count)
+        .map(|index| {
+            if index % 3 == 0 {
+                [0.72, 0.86, 1.0]
+            } else {
+                [1.0, 1.0, 1.0]
+            }
+        })
+        .collect();
+    let block = px_sparse::CHUNK_CELLS;
+    let half = outer + 2.0 * cell;
+    let dims = (((2.0 * half) / cell).ceil() as u32).div_ceil(block) * block;
+    px_sparse::StarField::build(
+        px_sparse::GridMeta {
+            cell,
+            origin: [-(dims as f32) * cell * 0.5; 3],
+            dims: [dims, dims, dims],
+        },
+        &positions,
+        &values,
+        &tints,
+    )
+    .expect("造星场")
+}
+
 #[cfg(test)]
 mod star_tests {
     use super::*;
-    use px_field_schema::field::{Field, Projection};
     use px_volume_schema::VolumeData;
 
-    /// **星点 + 底色**也要与 CPU 一致：这一条把"加性部分"（乘透射率的星与背景）
-    /// 与已对上的步进语义分开钉住。
+    /// **星点 + 底色**也要与 CPU 一致：这一条把"加性部分"（星点乘透射率、底色）与已对上的
+    /// 步进语义分开钉住。
+    ///
+    /// ⚠⚠ 现在星点是 **R3 星场里的点**（不是一张立方图）⇒ 这一条同时钉住三件事：
+    ///   ① 五段索引的寻址（块 → brick → 掩码 → 子 CSR）；② 半径分层归属（每颗只收一次）；
+    ///   ③ 按半径升序消费（每颗用它**自己那一步**的透过率）。
+    ///
+    /// ⚠⚠ **这里不可能逐位相同，而且原因是 CPU 那份公式自己的病**：
+    ///   `sin θ = √(1 − cos²θ)` 在**星正落在视线上**时是灾难性抵消 —— 实测那一条视线上
+    ///   `cos = 1.000000000`（`1 − cos²` 正好 0），而 `cos` 差 1 个 ulp 就让 `sin` 从 0 跳到
+    ///   ~5e-4，再被 `exp(−(sin/core)²)` 的陡坡放大成**星点那一笔差 3.9%**。
+    ///   两侧的 `cos` 差 1 个 ulp 是**跨语言必然**的（Rust 不做 FMA 收缩，HLSL/DXC 会做），
+    ///   要逐位相同就得改 CPU 的公式 —— 那是"另一件事"。
+    ///   实测分布（face 8 / 1500 颗星）：384 个 texel 里 4 个的相对偏差 > 1e-4、
+    ///   只有 1 个 > 1e-2（就是那个正轴上的星），其余 380 个在 1e-6 量级。
+    ///   ⇒ 判据取**相对口径**（地板 1e-2，与 `sky_tests` 同一条约定）+ 3e-2 的阈值：
+    ///   真正的语义分叉（少一颗星 = 星点那一笔整个不见）是 60% 量级，这条仍然抓得住。
     #[test]
     fn the_gpu_march_matches_the_cpu_with_stars_and_background() {
         let (res, layers) = (8_u32, 4_u32);
@@ -828,40 +1212,28 @@ mod star_tests {
             }
         }
         let volume = VolumeData {
+            lanes: 1,
             res,
             layers,
             inner,
             outer,
             data,
         };
-        // 星图：一面 4 格，值散开（含低于地板的一档，测地板分支）。
-        let star_face = 4_u32;
-        let stars: Vec<f32> = (0..(star_face * star_face * 6) as usize)
-            .map(|index| {
-                if index % 7 == 0 {
-                    0.1
-                } else {
-                    0.2 + (index % 5) as f32 * 0.15
-                }
-            })
-            .collect();
-        let stars_field =
-            Field::with_projection(star_face, star_face * 6, stars.clone(), Projection::CubeMap);
+        let stars = fixture_star_field(1500, 0.25, inner, outer, 8.0);
         let params = px_volume_schema::params::sky::SkyParams {
             face: 8,
             steps: 32,
             jitter: 0.0,
-            star_gain: 0.07,
-            star_floor: 0.25,
+            star_gain: 0.05,
             background: [0.0011, 0.0007, 0.0009],
             ..Default::default()
         };
-        let reference = px_volume_alg::raymarch_channel(&volume, Some(&stars_field), &params, 0);
+        let reference = px_volume_alg::raymarch_channel(&volume, Some(&stars), &params, 0);
+        let grid = StarGrid::of(&stars);
         let extras = MarchExtras {
-            stars: Some(&stars),
-            star_face,
-            star_gain: params.star_gain,
-            star_floor: params.star_floor,
+            star_grid: Some(&grid),
+            star_table: &stars.stars,
+            star_meta: StarMeta::sky(&grid, &params),
             background: params.background,
         };
         let Ok(gpu_side) = march(
@@ -880,11 +1252,20 @@ mod star_tests {
             return;
         };
         let mut worst = 0.0_f32;
+        let mut worst_at = 0usize;
         for (index, value) in gpu_side.iter().enumerate() {
-            worst = worst.max((value - reference.data[index]).abs());
+            let diff =
+                (value - reference.data[index]).abs() / reference.data[index].abs().max(1e-2);
+            if diff > worst {
+                worst = diff;
+                worst_at = index;
+            }
         }
-        assert!(worst < 5e-3, "星点+底色对账最大偏差 {worst:.6}");
-        println!("px_volume_gpu_op：星点+底色对账最大偏差 {worst:.6}");
+        println!(
+            "px_volume_gpu_op：星点+底色最大相对偏差 {worst:.6}（第 {worst_at} 个 texel：GPU {} 对 CPU {}）",
+            gpu_side[worst_at], reference.data[worst_at]
+        );
+        assert!(worst < 3e-2, "星点+底色对账最大相对偏差 {worst:.6}");
     }
 }
 
@@ -1027,8 +1408,8 @@ pub fn sky(
     ]
     .concat();
     let sky_uniform = SkyUniform {
-        counts: [steps, face, 0, extras.star_face],
-        scalars: [0.0, extras.star_gain, extras.star_floor, enter],
+        counts: [steps, face, 0, 0],
+        scalars: [0.0, 0.0, 0.0, enter],
         background: [
             extras.background[0],
             extras.background[1],
@@ -1042,28 +1423,50 @@ pub fn sky(
         limits: [tone.2[0], tone.2[1], grade_strength, 0.0],
     };
     let texels = (face * face * 6) as usize;
-    let bytes = |values: &[f32]| -> Vec<u8> {
-        values.iter().flat_map(|v| v.to_le_bytes()).collect()
-    };
+    let bytes =
+        |values: &[f32]| -> Vec<u8> { values.iter().flat_map(|v| v.to_le_bytes()).collect() };
+    let stars = StarSlots::of(extras);
     let out = px_gpu::dispatch_slots(
         gpu,
         SAMPLER_WGSL,
         "sky_radiance",
         &[
-            px_gpu::Slot { binding: 0, value: Binding::Uniform(&volume_uniform) },
-            px_gpu::Slot { binding: 1, value: Binding::Storage(&bytes(data)) },
-            px_gpu::Slot { binding: 4, value: Binding::Uniform(&sky_uniform.to_bytes()) },
-            px_gpu::Slot { binding: 5, value: Binding::Write(&vec![0_u8; texels * 12]) },
+            px_gpu::Slot {
+                binding: 0,
+                value: Binding::Uniform(&volume_uniform),
+            },
+            px_gpu::Slot {
+                binding: 1,
+                value: Binding::Storage(&bytes(data)),
+            },
+            px_gpu::Slot {
+                binding: 4,
+                value: Binding::Uniform(&sky_uniform.to_bytes()),
+            },
+            px_gpu::Slot {
+                binding: 5,
+                value: Binding::Write(&vec![0_u8; texels * 12]),
+            },
             px_gpu::Slot {
                 binding: 6,
-                value: Binding::Storage(&match extras.stars {
-                    Some(stars) => bytes(stars),
-                    None => vec![0_u8; 4],
-                }),
+                value: Binding::Storage(&stars.table),
+            },
+            px_gpu::Slot {
+                binding: 10,
+                value: Binding::Storage(&stars.index),
+            },
+            px_gpu::Slot {
+                binding: 11,
+                value: Binding::Uniform(&stars.meta),
+            },
+            px_gpu::Slot {
+                binding: 12,
+                value: Binding::Write(&vec![0_u8; 4]),
             },
         ],
         workgroups(texels),
     )?;
+    check_star_overflow(&out[1])?;
     let radiance = out[0]
         .chunks_exact(4)
         .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap()))
@@ -1083,8 +1486,14 @@ fn grade_pixels(
         SAMPLER_WGSL,
         "grade_pixels",
         &[
-            px_gpu::Slot { binding: 4, value: Binding::Uniform(&sky_uniform.to_bytes()) },
-            px_gpu::Slot { binding: 5, value: Binding::Write(&bytes) },
+            px_gpu::Slot {
+                binding: 4,
+                value: Binding::Uniform(&sky_uniform.to_bytes()),
+            },
+            px_gpu::Slot {
+                binding: 5,
+                value: Binding::Write(&bytes),
+            },
         ],
         workgroups(radiance.len() / 3),
     )?;
@@ -1111,9 +1520,18 @@ pub fn anchors_from_radiance(
         SAMPLER_WGSL,
         "bin_luma",
         &[
-            px_gpu::Slot { binding: 4, value: Binding::Uniform(&sky_uniform.to_bytes()) },
-            px_gpu::Slot { binding: 5, value: Binding::Write(&bytes) },
-            px_gpu::Slot { binding: 7, value: Binding::Write(&vec![0_u8; BIN_COUNT * 4]) },
+            px_gpu::Slot {
+                binding: 4,
+                value: Binding::Uniform(&sky_uniform.to_bytes()),
+            },
+            px_gpu::Slot {
+                binding: 5,
+                value: Binding::Write(&bytes),
+            },
+            px_gpu::Slot {
+                binding: 7,
+                value: Binding::Write(&vec![0_u8; BIN_COUNT * 4]),
+            },
         ],
         workgroups(radiance.len() / 3),
     )?;
@@ -1158,7 +1576,6 @@ pub fn anchors_from_radiance(
 #[cfg(test)]
 mod sky_tests {
     use super::*;
-    use px_field_schema::field::{Field, Projection};
     use px_volume_schema::VolumeData;
 
     /// 标准 IEEE-754 binary16 -> f32（**判据侧自带**：`px_volume_alg::half` 只有编码口，
@@ -1170,7 +1587,11 @@ mod sky_tests {
         match exponent {
             0 => sign * mantissa * 2.0_f32.powi(-24),
             31 => {
-                if mantissa == 0.0 { sign * f32::INFINITY } else { f32::NAN }
+                if mantissa == 0.0 {
+                    sign * f32::INFINITY
+                } else {
+                    f32::NAN
+                }
             }
             _ => sign * (1.0 + mantissa / 1024.0) * 2.0_f32.powi(exponent - 15),
         }
@@ -1201,34 +1622,37 @@ mod sky_tests {
                 }
             }
         }
-        VolumeData { res, layers, inner, outer, data }
+        VolumeData {
+            lanes: 1,
+            res,
+            layers,
+            inner,
+            outer,
+            data,
+        }
     }
 
     /// **整条天空逐 texel 对账**：三条通道的步进 + 星点/底色 + 亮度响应 + 色相分级，
     /// 合起来必须与 CPU 的 `raymarch_sky` 一致（容差取半精度的量级：参考图那一侧是
     /// `Rgba16Float`，有效位就那么多）。
+    ///
+    /// ⚠ 星场是 **R3 稀疏格**（星点按世界半径分层归属、按半径升序消费）—— 这一条同时钉住
+    ///   索引寻址、分层归属与消费次序；三条通道各收一遍候选，与 CPU 的三趟逐字对应。
     #[test]
     fn the_gpu_sky_matches_the_cpu_end_to_end() {
         let (res, layers) = (8_u32, 4_u32);
         let (inner, outer) = (1.0_f32, 2.0_f32);
         let volume = fixture(res, layers, inner, outer);
-        let star_face = 4_u32;
-        let stars: Vec<f32> = (0..(star_face * star_face * 6) as usize)
-            .map(|index| if index % 7 == 0 { 0.1 } else { 0.2 + (index % 5) as f32 * 0.15 })
-            .collect();
-        let stars_field =
-            Field::with_projection(star_face, star_face * 6, stars.clone(), Projection::CubeMap);
+        let stars = fixture_star_field(2000, 0.2, inner, outer, 8.0);
         let params = px_volume_schema::params::sky::SkyParams {
             face: 8,
             steps: 32,
             jitter: 0.0,
-            star_gain: 0.07,
-            star_floor: 0.25,
+            star_gain: 0.05,
             background: [0.0011, 0.0007, 0.0009],
             ..Default::default()
         };
-        let reference =
-            px_volume_alg::raymarch_sky(&volume, &stars_field, &params).expect("CPU 出图");
+        let reference = px_volume_alg::raymarch_sky(&volume, &stars, &params).expect("CPU 出图");
         let table = px_volume_alg::raymarch::RAMP_HUE;
         let ramp_hue_table = [
             [table[0][0], table[0][1], table[0][2], 0.0],
@@ -1236,11 +1660,11 @@ mod sky_tests {
             [table[2][0], table[2][1], table[2][2], 0.0],
             [table[3][0], table[3][1], table[3][2], 0.0],
         ];
+        let grid = StarGrid::of(&stars);
         let extras = MarchExtras {
-            stars: Some(&stars),
-            star_face,
-            star_gain: params.star_gain,
-            star_floor: params.star_floor,
+            star_grid: Some(&grid),
+            star_table: &stars.stars,
+            star_meta: StarMeta::sky(&grid, &params),
             background: params.background,
         };
         let Ok(gpu_side) = sky(
@@ -1331,16 +1755,18 @@ mod sky_tests {
 ///   ⚠ 混合权重必须**随离棱距离平滑到 0**（否则把折痕换成一条更软的带）。
 pub fn raymarch_sky(
     emission: &px_volume_schema::VolumeData,
-    stars: &px_field_schema::field::Field,
+    stars: &px_sparse::StarField,
     sky_params: &px_volume_schema::params::sky::SkyParams,
 ) -> Result<px_volume_schema::TextureData, String> {
     let face = sky_params.face.max(1);
     let steps = sky_params.steps.max(1);
+    // ⚠ 星场是 **R3 稀疏格**（不是一张立方图）：索引拼成一个 buffer、参数走 uniform，
+    //   与 `bake_emission` 那一档共用同一份 WGSL（星的查询那几条只有一处实现）。
+    let star_grid = StarGrid::of(stars);
     let extras = MarchExtras {
-        stars: Some(&stars.data),
-        star_face: stars.width,
-        star_gain: sky_params.star_gain,
-        star_floor: sky_params.star_floor,
+        star_grid: Some(&star_grid),
+        star_table: &stars.stars,
+        star_meta: StarMeta::sky(&star_grid, sky_params),
         background: sky_params.background,
     };
     let hue = px_volume_alg::raymarch::RAMP_HUE;
@@ -1365,8 +1791,8 @@ pub fn raymarch_sky(
     ]
     .concat();
     let mut uniform = SkyUniform {
-        counts: [steps, face, 0, extras.star_face],
-        scalars: [0.0, extras.star_gain, extras.star_floor, emission.inner],
+        counts: [steps, face, 0, 0],
+        scalars: [0.0, 0.0, 0.0, emission.inner],
         background: [
             extras.background[0],
             extras.background[1],
@@ -1384,11 +1810,10 @@ pub fn raymarch_sky(
             0.0,
         ],
     };
-    let bytes = |values: &[f32]| -> Vec<u8> {
-        values.iter().flat_map(|v| v.to_le_bytes()).collect()
-    };
+    let bytes =
+        |values: &[f32]| -> Vec<u8> { values.iter().flat_map(|v| v.to_le_bytes()).collect() };
     let texels = (face * face * 6) as usize;
-    let star_bytes = bytes(&extras.stars.map(|s| s.to_vec()).unwrap_or_else(|| vec![0.0; 1]));
+    let star_slots = StarSlots::of(&extras);
 
     // 1) 辐射。
     let out = px_gpu::dispatch_slots(
@@ -1396,14 +1821,42 @@ pub fn raymarch_sky(
         SAMPLER_WGSL,
         "sky_radiance",
         &[
-            px_gpu::Slot { binding: 0, value: Binding::Uniform(&volume_uniform) },
-            px_gpu::Slot { binding: 1, value: Binding::Storage(&bytes(&emission.data)) },
-            px_gpu::Slot { binding: 4, value: Binding::Uniform(&uniform.to_bytes()) },
-            px_gpu::Slot { binding: 5, value: Binding::Write(&vec![0_u8; texels * 12]) },
-            px_gpu::Slot { binding: 6, value: Binding::Storage(&star_bytes) },
+            px_gpu::Slot {
+                binding: 0,
+                value: Binding::Uniform(&volume_uniform),
+            },
+            px_gpu::Slot {
+                binding: 1,
+                value: Binding::Storage(&bytes(&emission.data)),
+            },
+            px_gpu::Slot {
+                binding: 4,
+                value: Binding::Uniform(&uniform.to_bytes()),
+            },
+            px_gpu::Slot {
+                binding: 5,
+                value: Binding::Write(&vec![0_u8; texels * 12]),
+            },
+            px_gpu::Slot {
+                binding: 6,
+                value: Binding::Storage(&star_slots.table),
+            },
+            px_gpu::Slot {
+                binding: 10,
+                value: Binding::Storage(&star_slots.index),
+            },
+            px_gpu::Slot {
+                binding: 11,
+                value: Binding::Uniform(&star_slots.meta),
+            },
+            px_gpu::Slot {
+                binding: 12,
+                value: Binding::Write(&vec![0_u8; 4]),
+            },
         ],
         workgroups(texels),
     )?;
+    check_star_overflow(&out[1])?;
     let radiance: Vec<f32> = out[0]
         .chunks_exact(4)
         .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap()))
@@ -1440,9 +1893,6 @@ pub fn raymarch_sky(
         packed,
     ))
 }
-
-
-
 
 #[cfg(test)]
 mod size_tests {
@@ -1481,7 +1931,6 @@ mod size_tests {
 #[cfg(test)]
 mod seam_tests {
     use super::*;
-    use px_field_schema::field::{Field, Projection};
     use px_volume_schema::VolumeData;
 
     fn f32_from_half(bits: u16) -> f32 {
@@ -1491,7 +1940,11 @@ mod seam_tests {
         match exponent {
             0 => sign * mantissa * 2.0_f32.powi(-24),
             31 => {
-                if mantissa == 0.0 { sign * f32::INFINITY } else { f32::NAN }
+                if mantissa == 0.0 {
+                    sign * f32::INFINITY
+                } else {
+                    f32::NAN
+                }
             }
             _ => sign * (1.0 + mantissa / 1024.0) * 2.0_f32.powi(exponent - 15),
         }
@@ -1529,25 +1982,34 @@ mod seam_tests {
         for (index, value) in data.iter_mut().enumerate() {
             *value = ((index.wrapping_mul(2654435761)) % 1000) as f32 / 1000.0;
         }
-        let volume = VolumeData { res, layers, inner, outer, data };
-        // 星图：一面 2 格 ⇒ 高 2*6 = 12，像素数 24。
-        let stars_field = Field::with_projection(2, 12, vec![0.0; 24], Projection::CubeMap);
+        let volume = VolumeData {
+            lanes: 1,
+            res,
+            layers,
+            inner,
+            outer,
+            data,
+        };
+        // 空星场 + `star_gain = 0`：这一条只测"面棱两侧连不连续"，星点会盖掉结构性的错配。
+        let stars = empty_star_field();
         let params = px_volume_schema::params::sky::SkyParams {
             face: 32,
             steps: 16,
             jitter: 0.0,
             star_gain: 0.0,
-            star_floor: 0.9,
             ..Default::default()
         };
-        let texture = match raymarch_sky(&volume, &stars_field, &params) {
+        let texture = match raymarch_sky(&volume, &stars, &params) {
             Ok(texture) => texture,
             Err(message) => panic!("烘焙失败：{message}"),
         };
         let face = params.face;
         let lum = |x: u32, y: u32| -> f32 {
             let at = ((y * face + x) * 8) as usize;
-            f32_from_half(u16::from_le_bytes([texture.bytes[at], texture.bytes[at + 1]]))
+            f32_from_half(u16::from_le_bytes([
+                texture.bytes[at],
+                texture.bytes[at + 1],
+            ]))
         };
         let direction = |face_index: u32, x: u32, y: u32| -> [f32; 3] {
             px_volume_schema::direction_of(
@@ -1611,12 +2073,17 @@ mod seam_tests {
                 let mut best = f32::MAX;
                 let mut best_value = 0.0_f32;
                 for other in 0..6_u32 {
-                    if other == face_index { continue; }
+                    if other == face_index {
+                        continue;
+                    }
                     for oy in 0..face {
                         for ox in 0..face {
                             let there = direction(other, ox, oy);
-                            let dot = here[0]*there[0] + here[1]*there[1] + here[2]*there[2];
-                            if 1.0 - dot < best { best = 1.0 - dot; best_value = lum(ox, oy); }
+                            let dot = here[0] * there[0] + here[1] * there[1] + here[2] * there[2];
+                            if 1.0 - dot < best {
+                                best = 1.0 - dot;
+                                best_value = lum(ox, oy);
+                            }
                         }
                     }
                 }
@@ -1636,12 +2103,16 @@ mod seam_tests {
                 let here = direction(face_index, 0, row);
                 let mut best = f32::MAX;
                 for other in 0..6_u32 {
-                    if other == face_index { continue; }
+                    if other == face_index {
+                        continue;
+                    }
                     for oy in 0..face {
                         for ox in 0..face {
                             let there = direction(other, ox, oy);
-                            let dot = here[0]*there[0] + here[1]*there[1] + here[2]*there[2];
-                            if 1.0 - dot < best { best = 1.0 - dot; }
+                            let dot = here[0] * there[0] + here[1] * there[1] + here[2] * there[2];
+                            if 1.0 - dot < best {
+                                best = 1.0 - dot;
+                            }
                         }
                     }
                 }
@@ -1652,16 +2123,26 @@ mod seam_tests {
         // 面内相邻格的角度距离（同一面里左右相邻）。
         let a0 = direction(0, 0, 5);
         let a1 = direction(0, 1, 5);
-        let interior_angle = 1.0 - (a0[0]*a1[0] + a0[1]*a1[1] + a0[2]*a1[2]);
+        let interior_angle = 1.0 - (a0[0] * a1[0] + a0[1] * a1[1] + a0[2] * a1[2]);
         println!(
             "角度距离：跨棱最近格 {:.6} / 面内相邻格 {:.6} = {:.2}x",
             edge_angle / edge_angle_count,
             interior_angle,
             (edge_angle / edge_angle_count) / interior_angle.max(1e-9)
         );
-        println!("逐面棱差：{:?}", per_face.map(|v| (v / face as f32 * 1000.0).round() / 1000.0));
-        println!("棱上分段（0=一端 3=另一端）：{:?}", std::array::from_fn::<f32, 4, _>(|i| per_band[i] / per_band_count[i].max(1.0) * 1000.0).map(|v| (v).round() / 1000.0));
-        println!("面内基准 {interior:.5}（乘 1000 后 {:.3}）", interior * 1000.0);
+        println!(
+            "逐面棱差：{:?}",
+            per_face.map(|v| (v / face as f32 * 1000.0).round() / 1000.0)
+        );
+        println!(
+            "棱上分段（0=一端 3=另一端）：{:?}",
+            std::array::from_fn::<f32, 4, _>(|i| per_band[i] / per_band_count[i].max(1.0) * 1000.0)
+                .map(|v| (v).round() / 1000.0)
+        );
+        println!(
+            "面内基准 {interior:.5}（乘 1000 后 {:.3}）",
+            interior * 1000.0
+        );
         assert!(
             ratio < 2.0,
             "面棱上的差 {edge:.5} 是面内基准 {interior:.5} 的 {ratio:.2} 倍（最大 {worst:.5}）\
@@ -1697,7 +2178,14 @@ mod sampler_seam_tests {
         for (index, value) in data.iter_mut().enumerate() {
             *value = ((index * 2654435761usize) % 1000) as f32 / 1000.0;
         }
-        let volume = VolumeData { res, layers, inner, outer, data };
+        let volume = VolumeData {
+            lanes: 1,
+            res,
+            layers,
+            inner,
+            outer,
+            data,
+        };
         // 多半径扫描：缝若只在某些半径上出现，就能直接指到"层/高度"那一层的约定。
         let mut worst = (0.0_f32, 0.0_f32, 0.0_f32);
         for step_index in 0..16 {
@@ -1722,14 +2210,21 @@ mod sampler_seam_tests {
             let edge = edge / count;
             let inside = inside / count;
             let ratio = edge / inside.max(1e-6);
-            println!("  半径 {radius:.3}（高度 {:.3}）：跨棱 {edge:.5} / 面内 {inside:.5} = {ratio:.2}x",
-                (radius - inner) / (outer - inner));
+            println!(
+                "  半径 {radius:.3}（高度 {:.3}）：跨棱 {edge:.5} / 面内 {inside:.5} = {ratio:.2}x",
+                (radius - inner) / (outer - inner)
+            );
             if ratio > worst.2 {
                 worst = (radius, edge, ratio);
             }
         }
         println!("采样器：最差在半径 {:.3} —— {:.2}x", worst.0, worst.2);
-        assert!(worst.2 < 2.0, "半径 {:.3} 上跨棱的采样差是面内的 {:.2} 倍 —— 采样语义在该处不连续", worst.0, worst.2);
+        assert!(
+            worst.2 < 2.0,
+            "半径 {:.3} 上跨棱的采样差是面内的 {:.2} 倍 —— 采样语义在该处不连续",
+            worst.0,
+            worst.2
+        );
     }
 }
 
@@ -1751,14 +2246,20 @@ mod march_seam_tests {
         for (index, value) in data.iter_mut().enumerate() {
             *value = ((index * 2654435761usize) % 1000) as f32 / 1000.0;
         }
-        let volume = VolumeData { res, layers, inner, outer, data };
+        let volume = VolumeData {
+            lanes: 1,
+            res,
+            layers,
+            inner,
+            outer,
+            data,
+        };
         let face = 32_u32;
         let params = px_volume_schema::params::sky::SkyParams {
             face,
             steps: 16,
             jitter: 0.0,
             star_gain: 0.0,
-            star_floor: 0.9,
             ..Default::default()
         };
         let field = px_volume_alg::raymarch_channel(&volume, None, &params, 0);
@@ -1790,11 +2291,13 @@ mod march_seam_tests {
                 let mut best = f32::MAX;
                 let mut best_value = 0.0_f32;
                 for other in 0..6_u32 {
-                    if other == face_index { continue; }
+                    if other == face_index {
+                        continue;
+                    }
                     for oy in 0..face {
                         for ox in 0..face {
                             let there = direction(other, ox, oy);
-                            let dot = here[0]*there[0] + here[1]*there[1] + here[2]*there[2];
+                            let dot = here[0] * there[0] + here[1] * there[1] + here[2] * there[2];
                             if 1.0 - dot < best {
                                 best = 1.0 - dot;
                                 best_value = lum(ox, other * face + oy);
@@ -1824,7 +2327,6 @@ mod march_seam_tests {
 #[cfg(test)]
 mod identity_grade_tests {
     use super::*;
-    use px_field_schema::field::{Field, Projection};
     use px_volume_schema::VolumeData;
 
     fn f32_from_half(bits: u16) -> f32 {
@@ -1834,7 +2336,11 @@ mod identity_grade_tests {
         match exponent {
             0 => sign * mantissa * 2.0_f32.powi(-24),
             31 => {
-                if mantissa == 0.0 { sign * f32::INFINITY } else { f32::NAN }
+                if mantissa == 0.0 {
+                    sign * f32::INFINITY
+                } else {
+                    f32::NAN
+                }
             }
             _ => sign * (1.0 + mantissa / 1024.0) * 2.0_f32.powi(exponent - 15),
         }
@@ -1852,15 +2358,20 @@ mod identity_grade_tests {
         for (index, value) in data.iter_mut().enumerate() {
             *value = ((index * 2654435761usize) % 1000) as f32 / 1000.0;
         }
-        let volume = VolumeData { res, layers, inner, outer, data };
+        let volume = VolumeData {
+            lanes: 1,
+            res,
+            layers,
+            inner,
+            outer,
+            data,
+        };
         let face = 32_u32;
-        let stars_field = Field::with_projection(2, 12, vec![0.0; 24], Projection::CubeMap);
         let params = px_volume_schema::params::sky::SkyParams {
             face,
             steps: 16,
             jitter: 0.0,
             star_gain: 0.0,
-            star_floor: 0.9,
             ..Default::default()
         };
         let identity = [0.01_f32, 0.1, 1.0, 10.0];
@@ -1873,9 +2384,17 @@ mod identity_grade_tests {
             inner,
             outer,
             &volume.data,
-            &MarchExtras { stars: Some(&[0.0; 24]), star_face: 2, star_gain: 0.0, star_floor: 0.9, background: [0.0; 3] },
+            &MarchExtras {
+                star_grid: None,
+                star_table: &[],
+                star_meta: StarMeta::default(),
+                background: [0.0; 3],
+            },
             (identity, identity, [1.0e9, 1.0e9]),
-            (px_volume_alg::raymarch::RAMP_LUMA, [[1.0, 1.0, 1.0, 0.0]; 4]),
+            (
+                px_volume_alg::raymarch::RAMP_LUMA,
+                [[1.0, 1.0, 1.0, 0.0]; 4],
+            ),
             0.0,
         )
         .expect("恒等分级下出图");
@@ -1907,11 +2426,13 @@ mod identity_grade_tests {
                 let mut best = f32::MAX;
                 let mut best_value = 0.0_f32;
                 for other in 0..6_u32 {
-                    if other == face_index { continue; }
+                    if other == face_index {
+                        continue;
+                    }
                     for oy in 0..face {
                         for ox in 0..face {
                             let there = direction(other, ox, oy);
-                            let dot = here[0]*there[0] + here[1]*there[1] + here[2]*there[2];
+                            let dot = here[0] * there[0] + here[1] * there[1] + here[2] * there[2];
                             if 1.0 - dot < best {
                                 best = 1.0 - dot;
                                 best_value = lum(ox, other * face + oy);
@@ -1934,7 +2455,6 @@ mod identity_grade_tests {
 #[cfg(test)]
 mod chain_tests {
     use super::*;
-    use px_field_schema::field::{Field, Projection};
     use px_volume_schema::VolumeData;
 
     const RES: u32 = 8;
@@ -1949,7 +2469,14 @@ mod chain_tests {
         for (index, value) in data.iter_mut().enumerate() {
             *value = 0.2 + 0.6 * ((index % 97) as f32 / 97.0);
         }
-        VolumeData { res: RES, layers: LAYERS, inner: INNER, outer: OUTER, data }
+        VolumeData {
+            lanes: 1,
+            res: RES,
+            layers: LAYERS,
+            inner: INNER,
+            outer: OUTER,
+            data,
+        }
     }
 
     fn direction(face_index: u32, x: u32, y: u32) -> [f32; 3] {
@@ -1987,8 +2514,7 @@ mod chain_tests {
                     for oy in 0..FACE {
                         for ox in 0..FACE {
                             let there = direction(other, ox, oy);
-                            let dot =
-                                here[0] * there[0] + here[1] * there[1] + here[2] * there[2];
+                            let dot = here[0] * there[0] + here[1] * there[1] + here[2] * there[2];
                             if 1.0 - dot < best {
                                 best = 1.0 - dot;
                                 best_value = sample(other, ox, oy);
@@ -2012,25 +2538,22 @@ mod chain_tests {
             steps: 16,
             jitter: 0.0,
             star_gain: 0.0,
-            star_floor: 0.9,
             ..Default::default()
         };
         // 1) 采样器（半径取壳中）
-        let radius = (INNER + OUTER) * 0.5;
+        // ⚠ "壳中"是**参数空间中点**（`u = 0.5`）⇒ 世界半径是几何平均 `√(inner·outer)`，
+        //   不是算术平均：径向律改了之后算术平均落在 `u = 0.585` 上，这一条量的
+        //   "跨棱噪声 / 面内噪声"会跟着换一层（阈值 2.0 就在边上）。
+        let radius = (INNER * OUTER).sqrt();
         let sampler = ratio_of(&|face_index, x, y| {
             let d = direction(face_index, x, y);
-            px_volume_alg::sample_volume(
-                &volume,
-                [d[0] * radius, d[1] * radius, d[2] * radius],
-                0,
-            )
+            px_volume_alg::sample_volume(&volume, [d[0] * radius, d[1] * radius, d[2] * radius], 0)
         });
         // 2) 步进（CPU，无分级）
         let field = px_volume_alg::raymarch_channel(&volume, None, &params, 0);
         let march = ratio_of(&|face_index, x, y| field.at(x, face_index * FACE + y));
         // 3) GPU 辐射（恒等分级）
         let identity = [0.01_f32, 0.1, 1.0, 10.0];
-        let stars = vec![0.0_f32; 24];
         let radiance = sky(
             FACE,
             params.steps,
@@ -2041,26 +2564,32 @@ mod chain_tests {
             OUTER,
             &volume.data,
             &MarchExtras {
-                stars: Some(&stars),
-                star_face: 2,
-                star_gain: 0.0,
-                star_floor: 0.9,
+                star_grid: None,
+                star_table: &[],
+                star_meta: StarMeta::default(),
                 background: [0.0; 3],
             },
             (identity, identity, [1.0e9, 1.0e9]),
-            (px_volume_alg::raymarch::RAMP_LUMA, [[1.0, 1.0, 1.0, 0.0]; 4]),
+            (
+                px_volume_alg::raymarch::RAMP_LUMA,
+                [[1.0, 1.0, 1.0, 0.0]; 4],
+            ),
             0.0,
         )
         .expect("GPU 辐射");
-        let gpu_radiance =
-            ratio_of(&|face_index, x, y| radiance[((face_index * FACE + y) * FACE + x) as usize * 3]);
+        let gpu_radiance = ratio_of(&|face_index, x, y| {
+            radiance[((face_index * FACE + y) * FACE + x) as usize * 3]
+        });
         // 4) 整链（自动分位 + 真分级）
-        let stars_field =
-            Field::with_projection(2, 12, stars.clone(), Projection::CubeMap);
-        let texture = raymarch_sky(&volume, &stars_field, &params).expect("整链");
+        let stars = empty_star_field();
+        let texture = raymarch_sky(&volume, &stars, &params).expect("整链");
         let full = ratio_of(&|face_index, x, y| {
             let at = (((face_index * FACE + y) * FACE + x) * 8) as usize;
-            let sign = if texture.bytes[at + 1] & 0x80 != 0 { -1.0_f32 } else { 1.0 };
+            let sign = if texture.bytes[at + 1] & 0x80 != 0 {
+                -1.0_f32
+            } else {
+                1.0
+            };
             let bits = u16::from_le_bytes([texture.bytes[at], texture.bytes[at + 1]]);
             let exponent = ((bits >> 10) & 0x1f) as i32;
             let mantissa = (bits & 0x3ff) as f32;
@@ -2080,13 +2609,24 @@ mod chain_tests {
 
 /// **GPU 版发射烘焙**：与 `px_volume_alg::bake_emission` 同一入参/产物。
 ///
-/// ⚠ 为什么值得搬：这是体积链上最贵的一处（每体素一次阴影行进），而且逐体素独立。
-///   CPU 版在 shape 192 上把核跑满还要几分钟（加了中心星团后每体素 64 步）。
+/// ⚠ 为什么值得搬：这是体积链上最贵的一处（每体素一次阴影行进 + 星光球那一趟），
+///   而且逐体素独立。
+///
+/// ⚠⚠ `starlight_max > STAR_KEEP_MAX` 当场拒：WGSL 那一侧的"亮度前几名"是定长表
+///   （见 [`STAR_KEEP_MAX`]）。静默按 32 截断就是"两边的气亮度差一点点"——
+///   那是最难看出来的一类分叉，所以宁可让它在这里失败。
 #[allow(clippy::too_many_arguments)]
 pub fn bake_emission(
     density: &px_volume_schema::VolumeData,
+    stars: &px_sparse::StarField,
     params: &px_volume_schema::params::emission::EmissionParams,
 ) -> Result<px_volume_schema::VolumeData, String> {
+    if params.starlight_gain > 0.0 && params.starlight_max > STAR_KEEP_MAX {
+        return Err(format!(
+            "`starlight_max` 是 {}，超过 GPU 这一侧的定长表上限 {STAR_KEEP_MAX}",
+            params.starlight_max
+        ));
+    }
     let Some(gpu) = connect() else {
         return Err("没有可用 GPU".to_string());
     };
@@ -2117,15 +2657,39 @@ pub fn bake_emission(
         0.0_f32.to_le_bytes(),
     ]
     .concat();
+    // ⚠ 七个 `vec4<f32>` + 一个 `vec4<u32>`：`scatter_tint` 是**后加**的一格（分色诊断），
+    //   它必须与 WGSL 那一边的 `struct EmissionUniform` **逐字段同序** —— 差一格就是
+    //   "消光跑进颜色里"那一类静默错位。`cluster_*` 那一对**已经删掉**（星团现在是星表里
+    //   真实的星，走 `star_meta`）。
     let uniform = [
-        params.light_radius, params.shadow_gain, params.emission_power, params.emission_gain,
-        params.light[0], params.light[1], params.light[2], 0.0,
-        params.glow_gain, params.glow_power, params.glow_threshold, 0.0,
-        params.glow_tint[0], params.glow_tint[1], params.glow_tint[2], 0.0,
-        params.extinction[0], params.extinction[1], params.extinction[2], params.extinction_power,
-        params.dust_bias, params.dust_threshold, 0.0, 0.0,
-        params.cluster_count as f32, params.cluster_gain, params.cluster_steps as f32, params.cluster_spread,
-        params.cluster_tint[0], params.cluster_tint[1], params.cluster_tint[2], 0.0,
+        params.light_radius,
+        params.shadow_gain,
+        params.emission_power,
+        params.emission_gain,
+        params.light[0],
+        params.light[1],
+        params.light[2],
+        0.0,
+        params.glow_gain,
+        params.glow_power,
+        params.glow_threshold,
+        0.0,
+        params.glow_tint[0],
+        params.glow_tint[1],
+        params.glow_tint[2],
+        0.0,
+        params.scatter_tint[0],
+        params.scatter_tint[1],
+        params.scatter_tint[2],
+        0.0,
+        params.extinction[0],
+        params.extinction[1],
+        params.extinction[2],
+        params.extinction_power,
+        params.dust_bias,
+        params.dust_threshold,
+        0.0,
+        0.0,
     ]
     .iter()
     .flat_map(|value| value.to_le_bytes())
@@ -2136,18 +2700,52 @@ pub fn bake_emission(
     )
     .collect::<Vec<u8>>();
     let voxels = (6 * layers * res * res) as usize;
-    let bytes = |values: &[f32]| -> Vec<u8> {
-        values.iter().flat_map(|v| v.to_le_bytes()).collect()
-    };
+    let bytes =
+        |values: &[f32]| -> Vec<u8> { values.iter().flat_map(|v| v.to_le_bytes()).collect() };
+    // ⚠⚠ 星光照气体那一档**恢复了**（2026-09-25 晚：星云不许自发光，亮度只能来自星光的散射）
+    //   ⇒ 这里喂**真星场**（不再是那一份占位空表）。星表/索引/参数块三个绑定与 `sky_radiance`
+    //   那一档共用同一套 WGSL（星的球查询只有一处实现）。
+    let star_grid = StarGrid::of(stars);
+    let star_meta = StarMeta::emission(&star_grid, params);
+    let star_slots = StarSlots::of(&MarchExtras {
+        star_grid: Some(&star_grid),
+        star_table: &stars.stars,
+        star_meta,
+        background: [0.0; 3],
+    });
     let out = px_gpu::dispatch_slots(
         gpu,
         SAMPLER_WGSL,
         "bake_emission",
         &[
-            px_gpu::Slot { binding: 0, value: Binding::Uniform(&volume_uniform) },
-            px_gpu::Slot { binding: 1, value: Binding::Storage(&bytes(&wanted)) },
-            px_gpu::Slot { binding: 8, value: Binding::Uniform(&uniform) },
-            px_gpu::Slot { binding: 9, value: Binding::Write(&vec![0_u8; voxels * 6 * 4]) },
+            px_gpu::Slot {
+                binding: 0,
+                value: Binding::Uniform(&volume_uniform),
+            },
+            px_gpu::Slot {
+                binding: 1,
+                value: Binding::Storage(&bytes(&wanted)),
+            },
+            px_gpu::Slot {
+                binding: 6,
+                value: Binding::Storage(&star_slots.table),
+            },
+            px_gpu::Slot {
+                binding: 8,
+                value: Binding::Uniform(&uniform),
+            },
+            px_gpu::Slot {
+                binding: 9,
+                value: Binding::Write(&vec![0_u8; voxels * 6 * 4]),
+            },
+            px_gpu::Slot {
+                binding: 10,
+                value: Binding::Storage(&star_slots.index),
+            },
+            px_gpu::Slot {
+                binding: 11,
+                value: Binding::Uniform(&star_slots.meta),
+            },
         ],
         workgroups(voxels),
     )?;
@@ -2156,6 +2754,7 @@ pub fn bake_emission(
         .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap()))
         .collect();
     Ok(px_volume_schema::VolumeData {
+        lanes: 6,
         res,
         layers,
         inner: density.inner,
@@ -2169,8 +2768,17 @@ mod emission_tests {
     use super::*;
     use px_volume_schema::VolumeData;
 
-    /// **发射烘焙：GPU 与 CPU 逐体素一致**（含中心星团那条路）。
+    /// **发射烘焙：GPU 与 CPU 逐体素一致**（含星光球那一趟）。
     /// 小体积即可 —— 这里验的是语义，不是性能。
+    ///
+    /// ⚠⚠ 三个 `starlight_max` 各跑一遍不是冗余：CPU 的 `brightest_near` 有**三条路**
+    ///   —— `0`（不封顶、不排序，直接按遍历次序）／候选不多于 `keep`（遍历次序）／
+    ///   候选多于 `keep`（稳定降序）—— 而求和是浮点加法 ⇒ 只跑一档就有两条没人看着。
+    ///
+    /// ⚠ 判据是**相对**口径：星光照是 `亮度 / (d² + soft²)`，一颗贴到体素上的星能让那一格
+    ///   到 1e3 量级（实测最亮 1663），绝对容差在这里没有可比性（旧的 5e-4 绝对阈值是
+    ///   "值域 O(1)" 那一版留下的）。实测最大相对偏差 **1.5e-6**（两侧的 `exp`/`pow`
+    ///   差一两个 ulp），阈值留到 5e-4。
     #[test]
     fn the_gpu_emission_matches_the_cpu() {
         let (res, layers) = (8_u32, 4_u32);
@@ -2180,40 +2788,59 @@ mod emission_tests {
         for (index, value) in data.iter_mut().enumerate() {
             *value = ((index.wrapping_mul(2654435761)) % 1000) as f32 / 1000.0;
         }
-        let density = VolumeData { res, layers, inner, outer, data };
-        let params = px_volume_schema::params::emission::EmissionParams {
-            light: [0.4, 0.7, -0.3],
-            light_radius: 0.2,
-            shadow_steps: 8,
-            shadow_gain: 1.6,
-            cluster_count: 3,
-            cluster_gain: 0.8,
-            cluster_tint: [0.72, 0.86, 1.0],
-            cluster_steps: 5,
-            cluster_spread: 0.35,
-            ..Default::default()
+        let density = VolumeData {
+            lanes: 1,
+            res,
+            layers,
+            inner,
+            outer,
+            data,
         };
-        let reference = px_volume_alg::bake_emission(&density, &params);
-        let gpu_side = match bake_emission(&density, &params) {
-            Ok(volume) => volume,
-            Err(message) => panic!("GPU 发射烘焙失败：{message}"),
-        };
-        assert_eq!(gpu_side.data.len(), reference.data.len(), "体素数");
-        let mut worst = 0.0_f32;
-        let mut worst_at = 0usize;
-        for (index, value) in gpu_side.data.iter().enumerate() {
-            let diff = (value - reference.data[index]).abs();
-            if diff > worst {
-                worst = diff;
-                worst_at = index;
+        // 星场够密（中心 0.2 的球里平均二十来颗）⇒ 两档各自的路径都被走到。
+        let stars = fixture_star_field(20_000, 0.1, inner, outer, 2.0);
+        for keep in [32_u32, 2, 0] {
+            let params = px_volume_schema::params::emission::EmissionParams {
+                light: [0.4, 0.7, -0.3],
+                light_radius: 0.2,
+                shadow_steps: 8,
+                shadow_gain: 1.6,
+                starlight_gain: 1.4,
+                starlight_soft: 0.05,
+                starlight_radius: 0.2,
+                starlight_steps: 4,
+                starlight_max: keep,
+                // ⚠ 两份配比都给**非平凡**的值：`glow_tint` 与 `scatter_tint` 是后加的 uniform
+                //   格子，给 `[1,1,1]` 的话"消光跑进颜色里"那类错位测不出来。
+                glow_tint: [0.85, 0.30, 0.55],
+                scatter_tint: [1.0, 0.6, 0.25],
+                ..Default::default()
+            };
+            let reference = px_volume_alg::bake_emission(&density, &stars, &params);
+            let gpu_side = match bake_emission(&density, &stars, &params) {
+                Ok(volume) => volume,
+                Err(message) => panic!("GPU 发射烘焙失败：{message}"),
+            };
+            assert_eq!(gpu_side.data.len(), reference.data.len(), "体素数");
+            let mut worst = 0.0_f32;
+            let mut worst_at = 0usize;
+            for (index, value) in gpu_side.data.iter().enumerate() {
+                let diff =
+                    (value - reference.data[index]).abs() / reference.data[index].abs().max(1e-2);
+                if diff > worst {
+                    worst = diff;
+                    worst_at = index;
+                }
             }
+            assert!(
+                worst < 5e-4,
+                "发射烘焙（keep {keep}）最大相对偏差 {worst:.6} 在第 {worst_at} 个分量（GPU {} 对 CPU {}）",
+                gpu_side.data[worst_at],
+                reference.data[worst_at]
+            );
+            println!(
+                "px_volume_gpu_op：发射烘焙（keep {keep}）最大相对偏差 {worst:.6}（{} 个体素 x 6）",
+                gpu_side.data.len() / 6
+            );
         }
-        assert!(
-            worst < 5e-4,
-            "发射烘焙最大偏差 {worst:.6} 在第 {worst_at} 个分量（GPU {} 对 CPU {}）",
-            gpu_side.data[worst_at],
-            reference.data[worst_at]
-        );
-        println!("px_volume_gpu_op：发射烘焙最大偏差 {worst:.6}（{} 个体素 x 6）", gpu_side.data.len() / 6);
     }
 }

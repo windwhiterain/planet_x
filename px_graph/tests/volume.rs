@@ -19,6 +19,7 @@ fn volume(res: u32, layers: u32) -> VolumeData {
         layers,
         inner: 1.01,
         outer: 1.06,
+        lanes: 1,
         data,
     }
 }

@@ -22,6 +22,7 @@ pub mod emission;
 pub mod field_fn;
 pub mod half;
 pub mod raymarch;
+pub mod stars;
 
 pub use density::{bake_density, sample_world};
 pub use emission::{bake_emission, emit_from_field};
@@ -29,6 +30,7 @@ pub use raymarch::{
     GRADE_STRENGTH, TONE_LIMITS, ramp_hue_at, raymarch_channel, raymarch_sky, sample_volume,
     tone_at,
 };
+pub use stars::{bake_stars, stars_near};
 
 use field_fn::{FieldFn, SampleField};
 use px_field_schema::field::{Field, tangent_frame};
@@ -164,6 +166,7 @@ pub fn bake<F: FieldFn>(params: &params::Params, cover: &F) -> VolumeData {
         layers,
         inner: params.inner,
         outer: params.outer,
+        lanes: 1,
         data,
     }
 }

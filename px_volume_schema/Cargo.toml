@@ -9,6 +9,8 @@ px_derive = { path = "../px_derive" }
 blake3 = "1"
 # 体积域的数据与参数（立方球参数空间约定 + 烘培参数）：没有算法、没有驱动。
 px_protocol = { path = "../px_protocol" }
+# 统一稀疏 R3 格（星场载荷住在这一层；体素那一档将来也搬过去）。
+px_sparse = { path = "../px_sparse" }
 px_graph_schema = { path = "../px_graph_schema" }
 # ⚠ 算子的**输入**就是一张场（`ops.rs` 的 `CloudCoarseInput`），所以声明这一层要它。
 px_field_schema = { path = "../px_field_schema" }

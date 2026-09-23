@@ -131,61 +131,6 @@ impl Default for Warp3Params {
     }
 }
 
-/// **`field.stars` 的参数**：球面上一颗颗的星点（稀疏的亮点）。
-///
-/// ⚠ 这一档与 `px_graph::generate::texture::stars`（星空**贴图**）不是一回事：那一份出的是
-///   贴图字节，而 `sky.nebula` 的星点要**参与积分**（被气遮住、被尘埃染红）⇒ 必须是**场**。
-#[derive(Debug, Clone, Serialize, Deserialize, px_derive::PxParams)]
-#[serde(default, deny_unknown_fields)]
-pub struct StarsParams {
-    /// 格的大小，单位是**纹素宽**（`1.0` ≈ 一格一个纹素）。
-    ///
-    /// ⚠ 它是"每格多大"而不是"总共多少格"：总共多少格是分辨率相关的量，而星点天生
-    ///   分辨率相关 —— 给固定格数的话，低分辨率下一格会跨住上百个纹素，一颗星的核就
-    ///   糊住半面（实测 98.3% 的纹素都被点亮）。
-    pub cells_per_texel: f32,
-    /// 有星的比例（`0..1`）：抽样决定这一格里放不放星。
-    pub fill: f32,
-    /// 星的亮度分布指数的**倒数**（越小越容易出现亮星；`1.0` = 均匀）。
-    pub brightness_power: f32,
-    pub seed: u32,
-    /// 核的半径，单位是**纹素的角宽**（`1.0` = 一个纹素）。
-    ///
-    /// ⚠ **必须按纹素、不能按绝对弧度**：星空是分辨率相关的 —— 给固定弧度的话，
-    ///   面分辨率一降，一个"0.0075 弧度"的光晕就糊住整面（实测 `face = 128` 时亮纹素
-    ///   占 66.8%，那已经不是星，是一层纱）。按纹素给 ⇒ 任何分辨率下星都是"几个像素的点"。
-    pub size: f32,
-    /// 光晕半径（同样是**纹素的角宽**倍数）与强度。
-    pub halo: f32,
-    pub halo_gain: f32,
-    /// 星系里的星比外面的亮多少（参考图里有一簇嵌在气里的亮星）。
-    pub cluster_gain: f32,
-    /// 那一簇的中心方向与角半径（弧度）。
-    pub cluster: [f32; 3],
-    pub cluster_radius: f32,
-}
-
-impl Default for StarsParams {
-    fn default() -> Self {
-        Self {
-            // ⚠ 一格 8 个纹素宽 + `fill = 0.005`：星点要**稀**。
-            //   这两个数是"每颗星占多大空间"与"多少格里有星"的乘积，而**它俩一起**才决定
-            //   星空的密度 —— 一格一纹素、或 `fill` 给到 0.1，得到的都是"一层纱"而不是星
-            //   （实测：0.25/1.0 时 82%、0.02/0.125 时 42% 的纹素被点亮）。
-            cells_per_texel: 0.125,
-            fill: 0.005,
-            brightness_power: 1.6,
-            seed: 60613,
-            size: 0.8,
-            halo: 2.2,
-            halo_gain: 0.10,
-            cluster_gain: 2.4,
-            cluster: [0.2, 0.35, 0.9],
-            cluster_radius: 0.35,
-        }
-    }
-}
-
 pub mod constant {
     use serde::{Deserialize, Serialize};
 

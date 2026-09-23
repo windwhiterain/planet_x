@@ -1,6 +1,6 @@
 # 域扭曲的**第二轴偏移**（种子与 `flow` / `flow_third` 都不同）。
-frequency = 3.1
-octaves = 5
+frequency = 0.4
+octaves = 1
 lacunarity = 2.0
 gain = 0.5
 seed = 5732

@@ -1,0 +1,11 @@
+[package]
+name = "px_sparse"
+version = "0.1.0"
+edition = "2024"
+
+# ⚠ **rlib**：它是**数据结构**（索引 + 遍历语义），不是被装载的实现库，也不是载荷本身。
+#   载荷类型（星场；体素那一档将来也住这里）与它们的 `Build` 实现都在这一层
+#   ——"载荷编解码与载荷类型住一起"那条口径（见 `px_protocol::payload` 的文件头）。
+[dependencies]
+# 线格式（`Blob` / `DType`）与载荷契约（`Build` / `PayloadBundle` / `AssetKind`）。
+px_protocol = { path = "../px_protocol" }

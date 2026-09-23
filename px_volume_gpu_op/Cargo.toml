@@ -8,6 +8,9 @@ px_volume_schema = { path = "../px_volume_schema" }
 px_field_schema = { path = "../px_field_schema" }
 px_volume_alg = { path = "../px_volume_alg" }
 px_gpu = { path = "../px_gpu" }
+# 星场的载荷与**索引**（`StarField` / `GridMeta`）：五段索引要按 `px_sparse::grid` 的
+# 次序拼成一个 buffer 交给 WGSL。
+px_sparse = { path = "../px_sparse" }
 
 [dev-dependencies]
 px_field_schema = { path = "../px_field_schema" }

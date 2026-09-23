@@ -25,6 +25,10 @@ fn asset_kind_name(kind: AssetKind) -> &'static str {
         AssetKind::Scene => "scene",
         AssetKind::Shader => "shader",
         AssetKind::Texture => "texture",
+        // ⚠ 星场**不是场**：它是世界坐标里的一批点光源 + 一个稀疏三维格（blob 是
+        //   f32 星表 + u32 格键/CSR 两份），借 `field2d` 或 `voxel_field` 都会在读回时
+        //   把形状解错 ⇒ 与 `voxel_field` 同一条理由，必须有自己的种类。
+        AssetKind::StarField => "star_field",
     }
 }
 
@@ -414,6 +418,7 @@ fn canonical() -> String {
         layers: 65,
         inner: 1.01,
         outer: 1.06,
+        lanes: 1,
         data: vec![0.0; 6 * 65 * 65 * 65],
     }
     .blobs()
