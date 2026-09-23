@@ -281,15 +281,6 @@ pub fn pages_for(radius: f32, density: f32) -> u32 {
     texels_for(radius, density).div_ceil(PAGE_SIZE).max(1)
 }
 
-/// `atlas` 每层的页格边长：2 的幂，≥ `pages_per_side`。
-fn atlas_side_for(pages_per_side: u32) -> u32 {
-    let mut side = 1_u32;
-    while side < pages_per_side {
-        side *= 2;
-    }
-    side
-}
-
 /// 装得下 `pages` 页的方形网格边长（向上取整），**不**取 2 的幂。
 fn ceil_sqrt(pages: u32) -> u32 {
     let mut side = 1_u32;
