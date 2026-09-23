@@ -29,7 +29,7 @@ use px_volume_schema::params::density::DensityParams;
 ///
 /// ⚠ `0.10` = 每端 10% 的径向 —— 够宽到看不出"边界"，又窄到不动中段的主体结构。
 ///   实测 0.18 太宽：亮的面积 46.9% → 32.0%、暗的 7.2% → 18.7%（参考 45.2% / 9.4%）。
-const SHELL_WALL_FADE: f32 = 0.28;
+const SHELL_WALL_FADE: f32 = 0.14;
 
 /// **壳壁上那一条归零窗**：`altitude ∈ [0,1]`（0 = 内壁、1 = 外壁）→ 密度上的系数。
 ///
