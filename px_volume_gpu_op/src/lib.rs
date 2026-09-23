@@ -61,6 +61,14 @@
 //!   s = (a/major)*0.5 + 0.5；t = (b/major)*0.5 + 0.5；两者 clamp 到 [0,1]
 //! `
 
+/// **跨面三线性采样核**（WGSL 源与 crate 同住：src/sampler.wgsl）。
+///
+/// 语义与 px_volume_alg::raymarch::sample_at 逐条对齐（规格见本文件的"移植规格"一节）。
+/// ⚠ 它现在只是"随 crate 一起装运的源"：**接上判据那一刻**才会被 GPU 真正编译，
+///   所以在那之前 cargo test 不会替它把关 —— 下一轮的第一件事就是给它配
+///   GPU↔CPU 逐点等价判据（多方向 + 棱上取点）。
+pub const SAMPLER_WGSL: &str = include_str!("sampler.wgsl");
+
 use px_gpu::{Binding, connect, dispatch};
 
 /// 每个体素几条通道：`[发射 R, G, B, σ_R, σ_G, σ_B]`。
