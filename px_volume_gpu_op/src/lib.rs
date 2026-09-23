@@ -337,3 +337,96 @@ mod sampler_tests {
         println!("px_volume_gpu_op：{} 个点最大偏差 {worst:.6}", points.len());
     }
 }
+
+// ------------------------- 天空那一档的只读参数块 -------------------------
+//
+// 分级表与调参常量只有一处真源（Rust）：WGSL 只读这一块，不复制任何手调数字。
+// 否则「改了色相却只改了 CPU 那份」会表现为「GPU 与 CPU 出图不同」，而归因不到常量。
+// 布局按 uniform 的 16 字节规矩排（每 4 个 f32/u32 一组一个 vec4），
+// size_of 与 to_bytes().len() 必须相等，并且有判据钉住。
+
+/// raymarch_channel 的步进参数 + raymarch_sky 的星点与分级表。
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SkyUniform {
+    /// (steps, face, 未用, 未用)
+    pub counts: [u32; 4],
+    /// (jitter, star_gain, star_floor, enter) —— enter 是壳的内半径（步进起点）。
+    pub scalars: [f32; 4],
+    /// 太空底色（rgb + 未用）。
+    pub background: [f32; 4],
+    /// 响应曲线的输入锚点（本次烘焙实测的输入分位）。
+    pub tone_in: [f32; 4],
+    /// 响应曲线的输出锚点（参考图的分位）。
+    pub tone_out: [f32; 4],
+    /// 逐格分级的档位亮度（4 档）。
+    pub ramp_luma: [f32; 4],
+    /// 逐格分级的档位色相（4 x rgb + 未用）。
+    pub ramp_hue: [[f32; 4]; 4],
+}
+
+impl SkyUniform {
+    /// 按内存布局导出：WGSL 那边的 struct 必须逐字段对上（判据钉住字节数）。
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(std::mem::size_of::<Self>());
+        for value in self.counts {
+            out.extend_from_slice(&value.to_le_bytes());
+        }
+        for value in self.scalars {
+            out.extend_from_slice(&value.to_le_bytes());
+        }
+        for group in [self.background, self.tone_in, self.tone_out, self.ramp_luma] {
+            for value in group {
+                out.extend_from_slice(&value.to_le_bytes());
+            }
+        }
+        for hue in self.ramp_hue {
+            for value in hue {
+                out.extend_from_slice(&value.to_le_bytes());
+            }
+        }
+        out
+    }
+}
+
+#[cfg(test)]
+mod uniform_tests {
+    use super::*;
+
+    /// 布局判据：uniform 的 16 字节规矩 + Rust 与 WGSL 两侧字段一处不差。
+    /// 错法的症状是「画面整体错位/花屏」，根因在字节排布 —— 归因极远。
+    #[test]
+    fn the_sky_uniform_layout_is_pinned() {
+        let value = SkyUniform {
+            counts: [96, 1024, 0, 0],
+            scalars: [1.0, 0.024, 0.4, 1.0],
+            background: [0.0006, 0.0004, 0.0005, 0.0],
+            tone_in: [0.002672, 0.014921, 0.041914, 0.110530],
+            tone_out: [0.0051, 0.0171, 0.0746, 0.2489],
+            ramp_luma: [0.028, 0.034, 0.12, 0.35],
+            ramp_hue: [
+                [1.0, 0.24, 0.41, 0.0],
+                [1.0, 0.42, 0.58, 0.0],
+                [1.0, 1.14, 2.30, 0.0],
+                [1.0, 0.95, 1.05, 0.0],
+            ],
+        };
+        let bytes = value.to_bytes();
+        assert_eq!(
+            bytes.len(),
+            std::mem::size_of::<SkyUniform>(),
+            "逐字段导出应当正好等于内存布局"
+        );
+        assert_eq!(
+            bytes.len() % 16,
+            0,
+            "uniform 块必须是 16 的倍数，实际 {}",
+            bytes.len()
+        );
+        assert_eq!(
+            bytes.len(),
+            160,
+            "字段变了就要同步 WGSL 的 struct（现为 16*6+64）"
+        );
+    }
+}
