@@ -1290,6 +1290,18 @@ fn run_spans(
 ///   `px_protocol::art` 有 `cube_atlas_uv` —— "6 层"与"2x3 图集"这类分歧，边界正好
 ///   落在 `width/2`，且每面内容单看仍然像天空（与实测"内容随相机变、边界不变"一致）。
 ///   下一步：读 `cube_atlas_uv` 与渲染器绑立方图那一段，核对两者说的是不是同一种排布。
+/// ---- 续（第 62 轮）----
+///
+/// 帧链（`art/frame/default.toml`）已经列清：`prepass` / `point_shadow` /
+/// `shadow_down_l1..l3` / `copy_depth` / `opaque` / `sky` / `transparent` / `blit`
+/// —— **没有 vignette、也没有 grade**，所以那两个 shader 与这条台阶无关。
+/// `sky` 是 `kind = "geometry"` + `vertex_sky.wgsl`（全屏三角），与 `opaque` 写到**同一张**
+/// `scene_color_a`。
+///
+/// ⇒ **下一轮别再靠读码猜**：用渲染器已有的**中间目标抓取**能力（`render::Session::draw_stamps`
+///   与 CLI 的 `--diff`）把每一步的输出各存一张，看**台阶是从哪一步开始出现的**：
+///   `opaque` 之后有 ⇒ 病在几何/材质那条路；只有 `sky` 之后才出现 ⇒ 病在天空那一步；
+///   `blit` 之后才有 ⇒ 病在最后搬运。这一步能把候选从"整个场景渲染"缩到**一个 pass**。
 fn views_of(options: &Options) -> render::Views {
     if options.sheet {
         render::Views::Sheet {
