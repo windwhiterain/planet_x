@@ -363,6 +363,8 @@ pub struct SkyUniform {
     pub ramp_luma: [f32; 4],
     /// 逐格分级的档位色相（4 x rgb + 未用）。
     pub ramp_hue: [[f32; 4]; 4],
+    /// 响应曲线的软肩起点与上限（`(shoulder, ceil, 未用, 未用)`）。
+    pub limits: [f32; 4],
 }
 
 impl SkyUniform {
@@ -385,6 +387,9 @@ impl SkyUniform {
                 out.extend_from_slice(&value.to_le_bytes());
             }
         }
+        for value in self.limits {
+            out.extend_from_slice(&value.to_le_bytes());
+        }
         out
     }
 }
@@ -404,6 +409,7 @@ mod uniform_tests {
             tone_in: [0.002672, 0.014921, 0.041914, 0.110530],
             tone_out: [0.0051, 0.0171, 0.0746, 0.2489],
             ramp_luma: [0.028, 0.034, 0.12, 0.35],
+            limits: [0.72, 0.95, 0.0, 0.0],
             ramp_hue: [
                 [1.0, 0.24, 0.41, 0.0],
                 [1.0, 0.42, 0.58, 0.0],
@@ -425,8 +431,8 @@ mod uniform_tests {
         );
         assert_eq!(
             bytes.len(),
-            160,
-            "字段变了就要同步 WGSL 的 struct（现为 16*6+64）"
+            176,
+            "字段变了就要同步 WGSL 的 struct（现为 16*7+64）"
         );
     }
 }
@@ -472,6 +478,100 @@ pub struct MarchExtras<'a> {
     pub background: [f32; 3],
 }
 
+/// 跑一遍响应曲线（逐格，就地）：输入 luma 数组，输出同一长度。
+pub fn tone_of(
+    values: &[f32],
+    tone_in: [f32; 4],
+    tone_out: [f32; 4],
+    limits: [f32; 2],
+) -> Result<Vec<f32>, String> {
+    let Some(gpu) = connect() else {
+        return Err("没有可用 GPU".to_string());
+    };
+    let sky = SkyUniform {
+        counts: [0; 4],
+        scalars: [0.0; 4],
+        background: [0.0; 4],
+        tone_in,
+        tone_out,
+        ramp_luma: [0.0; 4],
+        ramp_hue: [[0.0; 4]; 4],
+        limits: [limits[0], limits[1], 0.0, 0.0],
+    };
+    let bytes: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
+    let out = px_gpu::dispatch_slots(
+        gpu,
+        SAMPLER_WGSL,
+        "tone_of",
+        &[
+            px_gpu::Slot {
+                binding: 4,
+                value: Binding::Uniform(&sky.to_bytes()),
+            },
+            px_gpu::Slot {
+                binding: 5,
+                value: Binding::Write(&bytes),
+            },
+        ],
+        workgroups(values.len()),
+    )?;
+    Ok(out[0]
+        .chunks_exact(4)
+        .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap()))
+        .collect())
+}
+
+#[cfg(test)]
+mod tone_tests {
+    use super::*;
+
+    /// **响应曲线**：GPU 与 CPU 在同一组锚点上必须一致。
+    /// 取点覆盖四段（两端外推 + 中间两段）与软肩折点附近 —— 每一段的错法都不同。
+    #[test]
+    fn the_gpu_tone_matches_the_cpu() {
+        let mut values: Vec<f32> = Vec::new();
+        // 对数扫：1e-5 .. 2.0，覆盖两端外推与三段插值。
+        let mut l = 1e-5_f32;
+        while l < 2.0 {
+            values.push(l);
+            values.push(l * 1.0007);
+            l *= 1.13;
+        }
+        for extra in [0.0_f32, 1e-9, 0.72, 0.95, 1.0, 5.0] {
+            values.push(extra);
+        }
+        let anchors_in = px_volume_alg::raymarch::TONE_IN;
+        let anchors_out = px_volume_alg::raymarch::TONE_OUT;
+        let limits = px_volume_alg::TONE_LIMITS;
+        let Ok(gpu_side) = tone_of(&values, anchors_in, anchors_out, limits) else {
+            println!("px_volume_gpu_op：没有可用 GPU，跳过");
+            return;
+        };
+        let mut worst = 0.0_f32;
+        let mut worst_at = 0usize;
+        for (index, value) in values.iter().enumerate() {
+            let want = px_volume_alg::tone_at(*value);
+            let got = gpu_side[index];
+            let diff = (got - want).abs() / want.abs().max(1e-3);
+            if diff > worst {
+                worst = diff;
+                worst_at = index;
+            }
+        }
+        assert!(
+            worst < 3e-3,
+            "响应曲线最大相对偏差 {worst:.6} 在 luma {}（GPU {} 对 CPU {}）",
+            values[worst_at],
+            gpu_side[worst_at],
+            px_volume_alg::tone_at(values[worst_at])
+        );
+        println!(
+            "px_volume_gpu_op：响应曲线最大相对偏差 {worst:.6}（{} 点）",
+            values.len()
+        );
+    }
+}
+
 /// 跑一遍步进核（单通道）；返回 面 x 面 x 6 个 texel 的辐射，布局 row = 面 * face + y。
 ///
 /// ⚠ 起点约定（与 CPU 那份对齐前先自己说清）：中点取样，第 i 步在
@@ -515,6 +615,7 @@ pub fn march(
         tone_out: [0.0; 4],
         ramp_luma: [0.0; 4],
         ramp_hue: [[0.0; 4]; 4],
+        limits: [0.0; 4],
     };
     let texels = (face * face * 6) as usize;
     let bytes =

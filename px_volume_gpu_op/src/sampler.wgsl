@@ -189,6 +189,7 @@ struct Sky {
     ramp_hue_1: vec4<f32>,
     ramp_hue_2: vec4<f32>,
     ramp_hue_3: vec4<f32>,
+    limits: vec4<f32>,        // (shoulder, ceil, 未用, 未用)
 };
 
 @group(0) @binding(4) var<uniform> sky: Sky;
@@ -258,4 +259,55 @@ fn star_level(direction: vec3<f32>) -> f32 {
         return 0.0;
     }
     return (raw - floor_value) / max(1.0 - floor_value, 1e-4);
+}
+
+// 取 vec4 的第 i 个分量（显式分支：动态 vec 下标在语言间有差异，不碰它）。
+fn pick(v: vec4<f32>, i: u32) -> f32 {
+    if (i == 0u) { return v.x; }
+    if (i == 1u) { return v.y; }
+    if (i == 2u) { return v.z; }
+    return v.w;
+}
+
+// 响应曲线：log-log 分段线性（锚点间插值，两端按最外一段的斜率幂外推）+ 指数软肩。
+// 与 CPU 的 tone 逐条对齐；三个常量（锚点 x2、肩/上限）全部走 uniform，不在这里复制。
+fn tone(l: f32, tone_in: vec4<f32>, tone_out: vec4<f32>) -> f32 {
+    if (l <= 0.0) {
+        return 0.0;
+    }
+    let x = log(l);
+    var y = tone_out.x;
+    if (l <= tone_in.x) {
+        let slope = log(tone_out.y / tone_out.x) / log(tone_in.y / tone_in.x);
+        y = exp(log(tone_out.x) + (x - log(tone_in.x)) * slope);
+    } else if (l >= tone_in.w) {
+        let slope = log(tone_out.w / tone_out.z) / log(tone_in.w / tone_in.z);
+        y = exp(log(tone_out.w) + (x - log(tone_in.w)) * slope);
+    } else {
+        for (var stop = 0u; stop < 3u; stop = stop + 1u) {
+            let hi = pick(tone_in, stop + 1u);
+            if (l < hi) {
+                let lo = pick(tone_in, stop);
+                let lo_out = pick(tone_out, stop);
+                let w = (x - log(lo)) / (log(hi) - log(lo));
+                y = exp(log(lo_out) + w * log(pick(tone_out, stop + 1u) / lo_out));
+                break;
+            }
+        }
+    }
+    let shoulder = sky.limits.x;
+    if (y <= shoulder) {
+        return y;
+    }
+    let span = sky.limits.y - shoulder;
+    return shoulder + span * (1.0 - exp(-(y - shoulder) / span));
+}
+
+@compute @workgroup_size(64)
+fn tone_of(@builtin(global_invocation_id) id: vec3<u32>) {
+    let count = arrayLength(&image);
+    if (id.x >= count) {
+        return;
+    }
+    image[id.x] = tone(image[id.x], sky.tone_in, sky.tone_out);
 }

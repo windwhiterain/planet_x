@@ -25,7 +25,7 @@ pub mod raymarch;
 
 pub use density::{bake_density, sample_world};
 pub use emission::{bake_emission, emit_from_field};
-pub use raymarch::{raymarch_channel, raymarch_sky, sample_volume};
+pub use raymarch::{TONE_LIMITS, raymarch_channel, raymarch_sky, sample_volume, tone_at};
 
 use field_fn::{FieldFn, SampleField};
 use px_field_schema::field::{Field, tangent_frame};

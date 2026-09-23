@@ -379,6 +379,14 @@ pub const TONE_OUT: [f32; 4] = [0.0051, 0.0171, 0.0746, 0.2489];
 const TONE_SHOULDER: f32 = 0.72;
 const TONE_CEIL: f32 = 0.95;
 
+/// **判据用**：响应曲线（分级的前一半）的公开口；GPU 那份走同一套锚点。
+pub fn tone_at(l: f32) -> f32 {
+    tone(l)
+}
+
+/// 响应曲线的软肩起点与上限（GPU 侧从 uniform 读同一对值）。
+pub const TONE_LIMITS: [f32; 2] = [TONE_SHOULDER, TONE_CEIL];
+
 fn tone(l: f32) -> f32 {
     if l <= 0.0 {
         return 0.0;
