@@ -261,13 +261,19 @@ pub fn raymarch_channel(
         px_field_schema::parallel::rows(face as usize, height as usize, |first, count, out| {
             for row in 0..count {
                 let y = (first + row) as u32;
-                let face_index = (y / face).min(CUBE_FACES - 1);
                 let base = row * face as usize;
                 for x in 0..face {
                     let direction = art_direction_at(Projection::CubeMap, face, height, x, y);
-                    // ⚠ 逐格唯一：`y * face + x` **必须**带上 x（行号 y 一样的格会拿到同一个抖动
-                    //   ⇒ 横向条纹）。`face_index << 20` 只是把六个面分开。
-                    let texel = (y * face + x) ^ (face_index << 20);
+                    // ⚠⚠ 抖动种子**按方向取**（round 30 修）：从前是
+                    //   `(y * face + x) ^ (face_index << 20)` —— 贴图坐标在**面边界上跳变**
+                    //   （面号那一项整块换掉）⇒ 棱两侧的抖动模式互不相关 ⇒ 抖动打散出来的
+                    //   噪声在棱上断层，画面上就是那条通高的**竖缝**（列跳变 0.0179，
+                    //   而全图中位只有 0.0024、参考图全图最大 0.0115）。
+                    //   方向是**连续**的（`cube_direction` 在公共棱上同值）⇒ 按它取种子，
+                    //   棱两侧就落在同一套模式里；逐格仍然唯一（每格的方向都不同）。
+                    let texel = direction[0].to_bits()
+                        ^ direction[1].to_bits().rotate_left(11)
+                        ^ direction[2].to_bits().rotate_left(22);
                     out[base + x as usize] =
                         march_channel(emission, stars, params, channel, direction, texel);
                 }
@@ -347,7 +353,7 @@ pub const GRADE_STRENGTH: f32 = 0.95;
 /// ⚠ p99 之上走**软肩**（C¹ 连续、渐近 [`TONE_CEIL`]）：星核该白但**不许撞顶**
 ///   （参考图削顶 0.000%、线性最高 0.9868）。
 /// ⚠ `tone(0) = 0`：纯黑原样（"深黑太空"靠它）。
-pub const TONE_IN: [f32; 4] = [0.0070, 0.0344, 0.0731, 0.156];
+pub const TONE_IN: [f32; 4] = [0.0060, 0.0292, 0.0621, 0.1326];
 pub const TONE_OUT: [f32; 4] = [0.0051, 0.0171, 0.0746, 0.2489];
 const TONE_SHOULDER: f32 = 0.72;
 const TONE_CEIL: f32 = 0.95;
