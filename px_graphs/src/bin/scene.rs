@@ -15,7 +15,7 @@
 //!
 //! ⚠ **键与字节不许动**：`scene_key`（`px_cook::scene_key`）与
 //! `px_protocol::scene::write_scene` 一起定下了那份 `.pxart` 的**文件字节**，而
-//! `art/anchor/hashes.txt` §三 那六格判的就是它（逃生门）。改这两个中的任何一个，
+//! 那条已退休的"逃生门"判据（`docs/anchors.md`）判的就是它（逃生门）。改这两个中的任何一个，
 //! 那六份冻产物就不再"逐字节可复现"。
 
 use px_scene::baked::Baked;
@@ -71,7 +71,7 @@ fn main() {
 
     println!("{}", compiled.document.audit());
     // ⚠ 尾巴上那一格是**内容键**（`scene_key` 算出来的、也嵌在文件名里那个），**不是文件字节的
-    //    sha256** —— 两者是两个量。`art/anchor/hashes.txt` §三 那六格判的是**文件字节**，
+    //    sha256** —— 两者是两个量。那条已退休的"逃生门"判据（`docs/anchors.md`）判的是**文件字节**，
     //    而这一行印的是键：拿这一格去比登记值，六份会**全报 ✗ 而真值其实是对的**。
     println!(
         "产物 scene -> {}（内容键 {}，不是文件字节的 sha256）",

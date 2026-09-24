@@ -48,13 +48,13 @@
      两路要的是「计时用的帧循环」（逐帧采样 / 丢窗 / 等 K 帧 + 每条 pass 的编码器级
      GPU 时间戳），而新宿主**按需渲染**（一条请求画一帧就回话）⇒ 服务端**当场拒**，
      拒词自己写着理由（`px_render/src/serve.rs`）。**能读出可比计时数的那支宿主
-     已经不在了**（锚 exe 不可重建，见 `art/anchor/README.md`）⇒ 这两路**不再修**，
+     已经不在了**（锚 exe 不可重建，见 `docs/anchors.md`）⇒ 这两路**不再修**，
      ⚠ **§157 修正（2026-09-19）：上面那句话在写下时（S8-c）不成立** —— 实测
      `target/debug/px_render.exe` 是一支**还能跑的 Bevy 宿主**（六份冻产物出图与
-     `art/anchor/*.png` **逐字节全中**，仪器 `target/pre-rename/bevy-six.ps1`）。
+     那六张已删除的判据图 **逐字节全中**，仪器 `target/pre-rename/bevy-six.ps1`）。
      而**裁决是不留**，改名又覆盖那个路径 ⇒ **从 §157 那一笔起这句话成立**。
      被钉住的那支锚（`D7ED54FDB8323EDD…`）确实找不回来 —— 这两件事不矛盾，全文见
-     `art/anchor/README.md` 与 §157。要拿回这条路：源码在 `f121ee3^`，命令见 §157。
+     `docs/anchors.md` 与 `docs/archive/render-wgpu.md` §157。要拿回这条路：源码在 `f121ee3^`，命令见 §157。
      它们的量法留在 git 历史与 `docs/archive/render-wgpu.md` §147/§153 里。
      本宿主**有的**那件计时仪器是 `px_render --spans 预热,测量`（§153 的 J4 仪器，
      量的是**逐条 pass** 的编码器级时间戳），它不是 `--perf` 的替代品 —— 名字与口径都不同。

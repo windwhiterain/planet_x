@@ -534,7 +534,7 @@ pub struct Object {
     /// 乘上物体半径才是"它需要多少 texel"（`2·R·ρ`），**与光源多远无关** ——
     /// 这正是旧的全局 1024² cube 做不到的那件事（太阳拉远 ⇒ texel 的世界尺寸按比例变大）。
     ///
-    /// ⚠ 缺省 **0**，而且 `skip_serializing_if` 一起给：六份冻产物（`art/anchor/frozen/*.pxart`）
+    /// ⚠ 缺省 **0**，而且 `skip_serializing_if` 一起给：六份冻产物（那几份已退休的冻产物（`docs/anchors.md`））
     /// 里没有这一栏，加上它以后那些字节**仍然逐字节可复现**（逃生门那条判据）。
     #[serde(default, skip_serializing_if = "is_zero_f32")]
     pub shadow_density: f32,
@@ -1591,106 +1591,15 @@ mod tests {
         assert!(err.to_string().contains("matrial"), "{err}");
     }
 
-    /// 允许漂移的名单 —— **现在是空的，而且必须一直是空的**。
+    /// 一份**老形状**的文档：**没有** `passes` 这一节（只有 `lights`）。
     ///
-    /// 它曾经有两份：`orbit-proxy-fine-bound.pxart` 与 `orbit-soft.pxart` 里的
-    /// `"slope_scale":0.11999999731779099`（`0.12f32` 的精确 f64 值）读回来会**大 1 个 ulp**，
-    /// 写回去少 2 字节。根因不在这个 crate：**`serde_json` 默认的浮点解析不是正确舍入的**
-    /// （`float_roundtrip` 特性默认关着）。实测：
-    /// `"0.11999999731779099".parse::<f64>()` = `…000`，而
-    /// `serde_json::from_str::<f64>(同串)` = `…001`。
-    ///
-    /// 那个特性已经在五个 `Cargo.toml` 里打开，实测六份现在**全部**逐字节相同。
-    /// ⚠ 名单空着不等于判据松了：下面那条"只差 1 个 ulp"的宽容通道还在，
-    /// 只是**谁都不许走** —— 将来再漂一份，这里就该红，而不是被宽容掉。
-    const KNOWN_DRIFT: [&str; 0] = [];
-
-    /// 两份载荷的差异是不是**只在一个数上、而且只差 1 个 ulp**（连 `f32` 视角都相同）。
-    ///
-    /// 返回一句人能读的结论；不成立就返回原因。判据比"长度差不多"严得多：
-    /// 它把左边那一处数换成右边的写法之后，两份必须**逐字节相同** —— 也就是
-    /// 「除了这一个数，别的地方一处都不许变」。
-    fn only_one_ulp_of_one_number(left: &str, right: &str) -> Result<String, String> {
-        let a = left.as_bytes();
-        let b = right.as_bytes();
-        let at = a
-            .iter()
-            .zip(b.iter())
-            .position(|(x, y)| x != y)
-            .ok_or_else(|| "两份载荷逐字节相同（那它不该走到这里）".to_string())?;
-        let is_number = |c: u8| c.is_ascii_digit() || matches!(c, b'-' | b'+' | b'.' | b'e' | b'E');
-        let token_at = |bytes: &[u8], from: usize| -> (String, usize, usize) {
-            let mut start = from;
-            while start > 0 && is_number(bytes[start - 1]) {
-                start -= 1;
-            }
-            let mut end = from;
-            while end < bytes.len() && is_number(bytes[end]) {
-                end += 1;
-            }
-            (
-                String::from_utf8_lossy(&bytes[start..end]).to_string(),
-                start,
-                end,
-            )
-        };
-        let (left_token, left_start, left_end) = token_at(a, at);
-        let (right_token, _, _) = token_at(b, at);
-        let x: f64 = left_token
-            .parse()
-            .map_err(|err| format!("'{left_token}' 不是数：{err}"))?;
-        let y: f64 = right_token
-            .parse()
-            .map_err(|err| format!("'{right_token}' 不是数：{err}"))?;
-        if x == y {
-            return Err(format!(
-                "'{left_token}' 与 '{right_token}' 是同一个值 —— 差异不在值上"
-            ));
-        }
-        let ulps = (i128::from(x.to_bits()) - i128::from(y.to_bits())).abs();
-        if ulps > 1 {
-            return Err(format!(
-                "'{left_token}' 与 '{right_token}' 差了 {ulps} 个 ulp"
-            ));
-        }
-        if (x as f32) != (y as f32) {
-            return Err(format!(
-                "'{left_token}' 与 '{right_token}' 只差 1 个 ulp，但 **f32 视角也不同** —— \
-                 渲染器吃的就是 f32，那就不再是「看不见的漂移」了"
-            ));
-        }
-        let mut mended = left.to_string();
-        mended.replace_range(left_start..left_end, &right_token);
-        if mended != right {
-            return Err("除了这一处数，别的地方也变了".to_string());
-        }
-        Ok(format!(
-            "'{left_token}' → '{right_token}'（差 1 个 ulp，f32 视角相同，别处一字未动）"
-        ))
-    }
-
-    /// 一份**老形状**的文档：pass 表只有全屏那一档，新字段一个都不出现。
+    /// 它是"新字段缺省时逐字节不变"那一侧的靶子 —— 老文档读进来、再写回去，
+    /// 不该因为多了可选的一节而多出任何字节（`skip_serializing_if` 那几栏就是为它加的）。
     fn old_pass_doc() -> String {
         doc().replace(
             r#""lights": ["#,
             r#""passes": [{"kind": "fullscreen", "shader": {"graph": "shaders", "node": "grade", "key": "22"}, "writes": ["view"]}], "lights": ["#,
         )
-    }
-
-    /// 把一个流的 `(载荷起点, 载荷长度)` 逐个切出来（跳过 MAGIC + 版本号）。
-    ///
-    /// 判据要在**原始字节**上比，所以需要这个：解码再编码会把"两种写法、同一个值"
-    /// 的差异抹平 —— 而那种差异正是会改产物键的东西。
-    fn payload_spans(bytes: &[u8]) -> Vec<(usize, usize)> {
-        let mut spans = Vec::new();
-        let mut at = 8;
-        while at + 4 <= bytes.len() {
-            let len = u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
-                as usize;
-            spans.push((at + 4, len));
-            at += 4 + len;
-        }
-        spans
     }
 
     /// 一份**新形状**的文档：一条几何 pass，四栏新字段全用上。
@@ -1905,170 +1814,55 @@ mod tests {
         }
     }
 
-    /// **§125 的硬判据**：六份冻结的原始产物，读进来再写回去必须**逐字节相同**。
+    /// **写出来的字节读回来再写一遍，必须逐字节相同**（"读→写幂等"）。
     ///
-    /// 这是"给 `PassSpec` 加字段是纯加法"的唯一证据：字节不动 ⇒ 产物键不动 ⇒
-    /// 五个锚**由构造保证**仍然有效。⚠ 只判"还能解析"是不够的 —— 那种判据在
-    /// "新字段被写成默认值落盘"时照样绿，而那正是会改字节的情形。
+    /// 这是"给 `PassSpec` / `SceneSpec` 加字段是纯加法"这条性质**今天**的判据：
+    /// 追加一栏若被写成**默认值落盘**、或者读回来丢掉了一栏，第二次写出的字节就不再相同。
+    /// 靶子就是本模块自己的最小夹具 [`doc`]，所以这条判据**几毫秒**，也不需要 GPU 或实例库。
     ///
-    /// sha256 那一栏是烘图时的 oracle 读数（`Get-FileHash`，§125 那张表）；这里对的是
-    /// **字节数**，因为 `px_protocol` 里没有 sha256，而"为一个判据引 crate"或
-    /// "抄第三份摘要"都被本仓库自己的口径否掉（`px_render::digest` 开头那段）。
-    /// 逐字节相同比 sha256 相同**更强**，所以缺的不是判据、只是"输入没被人换过"那道保险。
+    /// ## ⚠ 它的前身，与为什么换成现在这样（2026-09-28）
+    ///
+    /// 这条判据原来叫 `the_frozen_originals_round_trip_byte_for_byte`，读的是
+    /// `art/anchor/frozen/*.pxart` 六份**冻结的**老形状产物。两件事一起塌了：
+    ///
+    /// 1. **它是场景格式 v2，而今天读写 v3** ⇒ `scene_bytes` 直接拒
+    ///    （`场景描述是 v2，这份渲染器认 v3`）—— 那条判据**永久不可满足**；
+    /// 2. **它一直在静默跳过**：它读的路径是 `target/oracle/pxart-frozen`，而那个目录在
+    ///    2026-09-18 那场清理里就没了（`target/` 不入 git）。六份的永久家早已搬进 git
+    ///    （`art/anchor/frozen/`），**但没人改这里的路径** ⇒ 靶子救活了，判据瞎了一整轮。
+    ///
+    /// 详见 `docs/anchors.md` 第三节。
+    ///
+    /// ## ⚠ 这条判据**证不了**什么（别把它读强了）
+    ///
+    /// 它证的是**幂等**，不是**与某个历史字节序列相同**。原来那六份冻产物能证的
+    /// "跨版本加字段没动老字节"这一条**已经没有了**（那正是冻结靶子的全部意义，
+    /// 而它的靶子过期了）。⇒ 今天"加字段是纯加法"只在**加字段时的人眼**那一层拦。
     #[test]
-    fn the_frozen_originals_round_trip_byte_for_byte() {
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .expect("px_protocol 上面就是工作区根")
-            .join("target/oracle/pxart-frozen");
-        if !dir.is_dir() {
-            println!(
-                "⚠ 跳过：{} 不在（target/ 不入 git）—— 不是通过，是没测",
-                dir.display()
-            );
-            return;
-        }
-        // 名字 + 字节数（§125 那张表）。字节数是"输入没被换过"的那道保险：
-        // 六份互不相同，换掉任何一份都对不上。
-        let frozen = [
-            ("orbit-bare.pxart", 4126_usize),
-            ("orbit-bare-nolight.pxart", 4136),
-            ("orbit-bare-shadow.pxart", 4138),
-            ("orbit-proxy-fine-bound.pxart", 5749),
-            ("orbit-rings.pxart", 4890),
-            ("orbit-soft.pxart", 5721),
-        ];
-        // ⚠ `orbit-proxy-fine-bound` 有一处**先于本次改动**的漂移，见 `KNOWN_DRIFT` 那段。
-        let mut identical: Vec<String> = Vec::new();
-        let mut drifted: Vec<String> = Vec::new();
-        for (name, size) in frozen {
-            let path = dir.join(name);
-            if !path.exists() {
-                println!("⚠ 跳过 {name}：不在");
-                continue;
-            }
-            let original = std::fs::read(&path).expect("读冻结产物");
-            assert_eq!(
-                original.len(),
-                size,
-                "{name} 的字节数与 §125 那张表不符 —— 输入被换过了？"
-            );
-            let frames = crate::stream::read_stream(&mut original.as_slice())
-                .unwrap_or_else(|err| panic!("{name} 读不动：{err}"));
-            let spec = frames
-                .iter()
-                .find_map(|frame| match frame {
-                    crate::stream::Frame::Scene(spec) => Some(spec.clone()),
-                    _ => None,
-                })
-                .unwrap_or_else(|| panic!("{name} 里没有场景帧"));
-            let fingerprint = frames
-                .iter()
-                .find_map(|frame| match frame {
-                    crate::stream::Frame::Art(bundle) => {
-                        bundle.assets.first().map(|asset| asset.fingerprint)
-                    }
-                    _ => None,
-                })
-                .unwrap_or_else(|| panic!("{name} 里没有清单帧"));
-            let again = scene_bytes(&spec, fingerprint).expect("重新拼字节");
-            if again == original {
-                identical.push(name.to_string());
-                println!("{name}：{} 字节，读→写逐字节相同 ✓", original.len());
-                continue;
-            }
-            // 不一样就得说清**差在哪**：逐载荷比，而且差异必须落在数上、只差 1 个 ulp。
-            let before = payload_spans(&original);
-            let after = payload_spans(&again);
-            assert_eq!(
-                before.len(),
-                after.len(),
-                "{name}：帧数不同（原 {}、新 {}）",
-                before.len(),
-                after.len()
-            );
-            let mut verdicts: Vec<String> = Vec::new();
-            for (index, ((left_at, left_len), (right_at, right_len))) in
-                before.iter().zip(after.iter()).enumerate()
-            {
-                let left = &original[*left_at..*left_at + *left_len];
-                let right = &again[*right_at..*right_at + *right_len];
-                if left == right {
-                    continue;
-                }
-                let verdict = only_one_ulp_of_one_number(
-                    &String::from_utf8_lossy(left),
-                    &String::from_utf8_lossy(right),
-                )
-                .unwrap_or_else(|err| {
-                    let dump = Path::new(env!("CARGO_MANIFEST_DIR"))
-                        .parent()
-                        .expect("工作区根")
-                        .join("target/pxart-roundtrip");
-                    let _ = std::fs::create_dir_all(&dump);
-                    let _ =
-                        std::fs::write(dump.join(format!("{name}.frame{index}.original")), left);
-                    let _ =
-                        std::fs::write(dump.join(format!("{name}.frame{index}.rewritten")), right);
-                    panic!(
-                        "{name}：第 {index} 帧（{} → {} 字节）不是「只差一个 ulp 的数」：{err}\n  \
-                         两份都落在 {}，直接 diff 就能看出是哪一格",
-                        left.len(),
-                        right.len(),
-                        dump.display()
-                    )
-                });
-                verdicts.push(format!("第 {index} 帧：{verdict}"));
-            }
-            assert_eq!(
-                verdicts.len(),
-                1,
-                "{name}：有 {} 帧都不一样，判据只认「恰好一帧、一个数、1 个 ulp」",
-                verdicts.len()
-            );
-            drifted.push(format!("{name}：{}", verdicts[0]));
-            println!(
-                "{name}：{} 字节 ⇒ {} 字节（{}）",
-                original.len(),
-                again.len(),
-                verdicts[0]
-            );
-        }
-        println!("逐字节相同：{}", identical.join(" / "));
-        for line in &drifted {
-            println!("有漂移：{line}");
-        }
-        let done = identical.len() + drifted.len();
-        assert!(done == frozen.len(), "有冻结产物没跑到（缺文件？）");
-        // ⚠ 名单是**钉住**的：将来谁再漂一份，这里就红 —— 而不是被
-        // 「只差 1 个 ulp」那条宽容的判据悄悄放过（那正是最坏的一种绿灯）。
-        // 六份**全部**逐字节相同：开启 `serde_json` 的 `float_roundtrip` 之后就是这样（§126）。
+    fn what_the_writer_produces_reads_back_and_writes_again_byte_for_byte() {
+        let spec: SceneSpec = serde_json::from_str(&doc()).expect("夹具必须解析得动");
+        let fingerprint = 0x0123_4567_89AB_CDEF_u64;
+        let once = scene_bytes(&spec, fingerprint).expect("第一次写");
+        let frames = crate::stream::read_stream(&mut once.as_slice()).expect("读回来");
+        let read_back = frames
+            .iter()
+            .find_map(|frame| match frame {
+                crate::stream::Frame::Scene(spec) => Some(spec.clone()),
+                _ => None,
+            })
+            .expect("写出去的字节里应当有场景帧");
+        // 结构相等先说清：读回来的必须与写出去的那一份是同一个东西。
         assert_eq!(
-            identical,
-            vec![
-                "orbit-bare.pxart",
-                "orbit-bare-nolight.pxart",
-                "orbit-bare-shadow.pxart",
-                "orbit-proxy-fine-bound.pxart",
-                "orbit-rings.pxart",
-                "orbit-soft.pxart",
-            ],
-            "逐字节相同的名单变了"
+            read_back, spec,
+            "写出去的字节读回来与原来那份不是同一个场景（有栏丢了或被默认值顶掉了）"
         );
-        // ⚠ 这两条**由名单驱动**（而不是写死"必须为空"）：名单现在是空的，
-        // 所以结论就是"一份都不许漂"；将来真要放宽，改的是名单那一行，
-        // 而不是把这里的判据删掉 —— 判据松掉是最坏的一种绿灯。
-        assert_eq!(
-            drifted.len(),
-            KNOWN_DRIFT.len(),
-            "漂移的份数变了（名单里 {} 份）：{drifted:?}",
-            KNOWN_DRIFT.len()
+        let again = scene_bytes(&read_back, fingerprint).expect("第二次写");
+        assert!(
+            again == once,
+            "读→写不是幂等：同一份场景写两遍给出了不同的字节（{} → {}）。\
+             ⚠ 最常见的原因是某一栏**缺省时仍被落盘** —— 那正好就是「加字段不纯是加法」",
+            once.len(),
+            again.len()
         );
-        for (line, expected) in drifted.iter().zip(KNOWN_DRIFT.iter()) {
-            assert!(
-                line.starts_with(expected),
-                "漂移的不是预期那一份：{line}（预期 {expected}）"
-            );
-        }
     }
 }

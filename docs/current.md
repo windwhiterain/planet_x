@@ -6,7 +6,7 @@
 > 之前的世界，**只当历史读**。
 >
 > ⚠ **本页不手抄读数。** 键、指纹、产物清单只有一处真源：`px list`（实例）与
-> `art/anchor/hashes.txt`（锚）。手抄一份到文档里，就是制造第二份会漂开的真相 ——
+> `docs/anchors.md`（锚）。手抄一份到文档里，就是制造第二份会漂开的真相 ——
 > 2026-09-28 审计时这一页的"两条实例 key"已经与实跑不符（盘上是 **7 条**，不是 2 条）。
 
 ## 一、一句话形状
@@ -48,7 +48,7 @@ tools/px.ps1 -Task list|build|gc|run     同上；图名走 -Graph <图>（不�
 1. **R1**：改 `art/inst/*.rs`（或任何实现）⇒ **图程序不重编、图 exe 字节不变**；只该实例库重编。
 2. **`cargo build` 绝不调 cargo、不编实例**；编译实例只能由 `px build` / `px run --build` 触发。
 3. **参与算身份的 crate 只应在产品语义变化时改**：`px_fingerprint`、`px_graph_schema`、`px_*_schema`、
-   `px_*_alg`、`px_*_op`。改它们**一行注释**就会换全仓节点键 ⇒ `art/anchor/hashes.txt` §三 要重登记、J1 要重跑。
+   `px_*_alg`、`px_*_op`。改它们**一行注释**就会换全仓节点键 ⇒ `docs/anchors.md`（锚已退休） 要重登记、J1 要重跑。
    工具/编排/表（`px_cook`、`px_decls`、`px_graphs`、`art/inst`）不在圈里 ⇒ 它们的清理是免费的。
 4. **先冻源码，再量 anchor**；量 R1 前先连跑到 `Compiling=0` 且无"拒绝访问 (os error 5)"（跑过 `cargo test` 后
    第一次 `cargo build` 会因特性合并重链 exe ⇒ 假红）。**撤回探针按字节精确**（untracked 文件 git 救不了，
@@ -62,7 +62,7 @@ tools/px.ps1 -Task list|build|gc|run     同上；图名走 -Graph <图>（不�
 |---|---|
 | 实例 key 与"有 / 缺" | `px list`（或 `.\tools\px.ps1 -Task list`）；**改动前先记一份**，改完逐行比 |
 | 生成物字节 | `OUT_DIR/insts_gen.rs`（`cargo build -p px_graphs` 后从 `target/debug/build/px_graphs-*/out/` 取） |
-| `.pxart` 与 J1 六张 PNG 的读数 | `art/anchor/hashes.txt` —— 登记在案的那一份，含出处与量法 |
+| `.pxart` 与 J1 六张 PNG 的读数 | `docs/anchors.md` —— 登记在案的那一份，含出处与量法 |
 | 三张图产物（planet / desert / clouds） | 对照 `target/baseline/*.json` 记的 key；⚠ clouds 的旧键产物已不在盘上 ⇒ 用"改动前快照"法 |
 | 测试 | `.\tools\px.ps1 -Task test`（默认成员快速链）；全量是 `cargo test --workspace` |
 

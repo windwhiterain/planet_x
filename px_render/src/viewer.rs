@@ -1717,7 +1717,7 @@ impl Viewer {
                         match shot::write_png(&path, width, height, rendered.pixels) {
                             Ok(bytes) => println!(
                                 // ⚠ 两个哈希**不是一把尺子**，所以两个都报、并各自署名：
-                                //    `sha256` 那个是**文件**（PNG 编码之后，与 `art/anchor/*.png`
+                                //    `sha256` 那个是**文件**（PNG 编码之后，与 那六张已删除的判据图
                                 //    以及 J1/J2 的判据同一个东西）；`像素` 那个是**回读出来的
                                 //    原始字节**（与上面那一行"图/像素"同一个东西）。
                                 //    只报一个的时候，人会拿文件哈希去比窗口那一行 —— 那两个
