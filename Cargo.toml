@@ -1,21 +1,82 @@
-[package]
-name = "planet_x"
-version = "0.1.0"
-edition = "2024"
-
 [workspace]
-# ⚠ `px_render`（**Bevy 宿主**）已在 S8-a 删除（`f121ee3`）：判据的靶子在 `art/anchor/`。
-#   ⚠ §157（2026-09-19）：wgpu 宿主从 `px_render_wgpu` **改名叫 `px_render`** ⇒ 上面那个名字
-#   今天指它；而 S8-a 删掉的那一支**也叫这个名字**（本篇 §100–§156 及各处旧注释里的
-#   `px_render` 一律指 **Bevy 那支**，取法 `git show f121ee3^:px_render/…`）。
-#   改名不带一个字节的产物移动（判据见 §157）。删 Bevy 那支**不减少**任何判据 ——
-#   六张判据图 + 六份冻产物仍然逐字节可比（回归集复测过）。
-members = ["px_gpu", "px_volume_gpu_op", "px_nurbs_gpu_op", "px_derive", "px_fingerprint", "px_decls", "game", "px_protocol", "px_sparse", "px_graph_schema", "px_graph", "px_elem", "px_field_schema", "px_field_alg", "px_field_op", "px_volume_schema", "px_volume_alg", "px_volume_op", "px_mesh_schema", "px_mesh_op", "px_nurbs_schema", "px_nurbs_op", "px_shader", "px_pass", "px_render", "px_graphs", "px-scene", "px_verify", "px_probe"]
-default-members = ["px_gpu", "px_volume_gpu_op", "px_nurbs_gpu_op", "px_nurbs_gpu_op", "px_derive", "px_fingerprint", "px_decls", "game", "px_protocol", "px_sparse", "px_graph_schema", "px_graph", "px_elem", "px_field_schema", "px_field_alg", "px_field_op", "px_volume_schema", "px_volume_alg", "px_volume_op", "px_mesh_schema", "px_mesh_op", "px_nurbs_schema", "px_nurbs_op", "px_shader", "px_pass", "px_graphs", "px-scene", "px_verify"]
+# ⚠ `resolver` **必须显式写**：虚拟 workspace 不会从成员的 edition 推出解析器版本 ——
+#   不写就静默退回 v1（cargo 自己会 warning），而本仓全部成员都是 edition 2024。
+#   从前根上有个 `[package] planet_x`（edition 2024）时，解析器是 v3；那个 package 一删，
+#   不补这一行就会**悄悄换掉特性合并与依赖解析的规则**（实测：删完立刻出现这条 warning）。
+resolver = "3"
 
-[dependencies]
+# 这是**纯 workspace 根**：没有 `[package]`，没有 `src/`，也不产出构件。
+#
+# `members` = 全部 crate；`default-members` = 不带 `-p` / `--workspace` 时 cargo 碰的那些。
+# 两者的差集是**刻意的**，别把它们"对齐"：
+#
+#   * `game` —— 市场 / 经济模拟那条血缘，不是渲染或 PCG 流水线的一部分；
+#   * `px_render` / `px_probe` —— 宿主与探针，要 GPU、要分钟级时间。
+#
+# ⇒ `cargo test` 跑的是**快速链**（`tools/px.ps1 -Task test` 同一条）；
+#   `cargo test --workspace` 才是全量。
+#
+# ⚠ 加 crate 时**两栏都要改**，否则新 crate 要么不被门覆盖、要么悄悄拖慢默认测试链。
+members = [
+    "px_gpu",
+    "px_volume_gpu_op",
+    "px_nurbs_gpu_op",
+    "px_derive",
+    "px_fingerprint",
+    "px_decls",
+    "px_protocol",
+    "px_sparse",
+    "px_graph_schema",
+    "px_graph",
+    "px_elem",
+    "px_field_schema",
+    "px_field_alg",
+    "px_field_op",
+    "px_volume_schema",
+    "px_volume_alg",
+    "px_volume_op",
+    "px_mesh_schema",
+    "px_mesh_op",
+    "px_nurbs_schema",
+    "px_nurbs_op",
+    "px_shader",
+    "px_pass",
+    "px_graphs",
+    "px-scene",
+    "px_verify",
+    "game",
+    "px_render",
+    "px_probe",
+]
+
+default-members = [
+    "px_gpu",
+    "px_volume_gpu_op",
+    "px_nurbs_gpu_op",
+    "px_derive",
+    "px_fingerprint",
+    "px_decls",
+    "px_protocol",
+    "px_sparse",
+    "px_graph_schema",
+    "px_graph",
+    "px_elem",
+    "px_field_schema",
+    "px_field_alg",
+    "px_field_op",
+    "px_volume_schema",
+    "px_volume_alg",
+    "px_volume_op",
+    "px_mesh_schema",
+    "px_mesh_op",
+    "px_nurbs_schema",
+    "px_nurbs_op",
+    "px_shader",
+    "px_pass",
+    "px_graphs",
+    "px-scene",
+    "px_verify",
+]
 
 [profile.dev]
 debug = "line-tables-only"
-
-

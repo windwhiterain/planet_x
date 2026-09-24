@@ -16,5 +16,7 @@ toml = "0.8"
 # ⚠ 快照测试按**真类型**构造那几份形状（本 crate 自己的 + `game` 的经济世界视图）：
 # 快照逐字节钉着它们，而 `protocol_hash()` 就是那份快照的哈希 —— 抄一份"假的夹具"进测试，
 # 等于把"形状变了 ⇒ 指纹变 ⇒ 握手续拒旧对端"这条门悄悄拆掉。
-# ⚠ `game` 只依赖 serde ⇒ 一条叶子边，不可能成环。
+# ⚠ `game` 只依赖 serde ⇒ **对 `px_protocol` 是一条叶子边，不可能成环**。
+#   它自己是 workspace 成员、但**不在 `default-members`**（模拟不是渲染 / PCG 流水线的一部分）
+#   —— 这条 `dev-dependencies` 不影响那件事：dev 依赖只在测试时把 `game` 编出来。
 game = { path = "../game" }

@@ -1,9 +1,9 @@
-use planet_x::department::{DEFAULT_BARRIER, DEFAULT_CURVATURE, Rationing};
-use planet_x::local_price::{
+use game::department::{DEFAULT_BARRIER, DEFAULT_CURVATURE, Rationing};
+use game::local_price::{
     GOODS, Kind, LADDER_CAPACITY, LADDER_FAST, LADDER_THRIFTY, Lab, NAMES, SECTOR_MOTIVE, Spec,
     bloc_relations,
 };
-use planet_x::warehouse::Warehouses;
+use game::warehouse::Warehouses;
 
 const GOOD_LABELS: [&str; GOODS] = ["一产", "二产", "三产"];
 
@@ -55,9 +55,9 @@ impl Default for Args {
             polities: 3,
             rounds: 120,
             every: 10,
-            grant: planet_x::local_price::GRANT,
-            transfer: planet_x::department::Departments::DEFAULT_TRANSFER,
-            flow_scale: planet_x::market::Market::DEFAULT_FLOW_SCALE,
+            grant: game::local_price::GRANT,
+            transfer: game::department::Departments::DEFAULT_TRANSFER,
+            flow_scale: game::market::Market::DEFAULT_FLOW_SCALE,
             price_curvature: Warehouses::DEFAULT_PRICE_CURVATURE,
             price_inertia: Warehouses::DEFAULT_PRICE_INERTIA,
             target_rate: Warehouses::DEFAULT_TARGET_RATE,
@@ -165,15 +165,15 @@ fn usage() {
     println!("  --every K            每 K 轮打印一行（默认 10）");
     println!(
         "  --grant G            每个部门开局的货币，同时是货币总量目标（默认 {}）",
-        planet_x::local_price::GRANT
+        game::local_price::GRANT
     );
     println!(
         "  --transfer R         每轮把余额拉向均值的比例，0 = 不转移（默认 {}）",
-        planet_x::department::Departments::DEFAULT_TRANSFER
+        game::department::Departments::DEFAULT_TRANSFER
     );
     println!(
         "  --flow-scale S       势流的价差尺度，φ = tanh(Δln p / S)（默认 {}）",
-        planet_x::market::Market::DEFAULT_FLOW_SCALE
+        game::market::Market::DEFAULT_FLOW_SCALE
     );
     println!(
         "  --price-curvature K  挂价对库存比值的陡度（默认 {}）",
