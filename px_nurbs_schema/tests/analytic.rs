@@ -120,12 +120,7 @@ fn the_curve_payload_round_trips_bit_for_bit() {
     assert_eq!(bundle.params["count"] as usize, circle.count());
     assert_eq!(bundle.params["knots"] as usize, circle.knots.len());
     assert_eq!(bundle.params["rational"], 1.0);
-    let back = <Curve as px_graph_schema::Build>::decode(
-        &bundle,
-        px_protocol::art::Domain::Cube,
-        "circle",
-    )
-    .expect("解码");
+    let back = <Curve as px_graph_schema::Build>::decode(&bundle, "circle").expect("解码");
     assert_eq!(back.control, circle.control);
     assert_eq!(back.weights, circle.weights);
     assert_eq!(back.knots, circle.knots);

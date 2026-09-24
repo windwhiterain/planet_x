@@ -17,6 +17,6 @@ use px_volume_schema::ops::Stars;
 
 px_graph_schema::px_body! {
     Stars,
-    |p, i, _g| // ⚠ 星按**密度**撒 ⇒ 必须是单通道（发射体积喂进来会撒到乱处 —— 今晚踩过）。
+    |p, i| // ⚠ 星按**密度**撒 ⇒ 必须是单通道（发射体积喂进来会撒到乱处 —— 今晚踩过）。
         px_volume_alg::bake_stars(p, Some(i.volume.value().expect_single()))?
 }

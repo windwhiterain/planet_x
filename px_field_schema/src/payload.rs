@@ -32,11 +32,11 @@ pub fn encode(field: &Field) -> PayloadBundle {
     )
 }
 
-/// ⚠ 投影优先取**载荷里那一格**（读盘上的产物时只有它说得清）；载荷里没有（旧产物）
-///   就退回调用方给的那一个：算子给的是画布的投影，驱动给的是图规格的投影。
-pub fn decode(bundle: &PayloadBundle, projection: Domain) -> Result<Field, String> {
+/// ⚠ 投影取**载荷里那一格**（读盘上的产物时只有它说得清）；老产物没有这一栏就退回
+///   `Equirect`（那时它是从图规格补的，而图规格已经没有投影了）。
+pub fn decode(bundle: &PayloadBundle) -> Result<Field, String> {
     let mut field = Field::from_blob(bundle.one()?).map_err(|err| err.to_string())?;
-    field.projection = stored_projection(bundle).unwrap_or(projection);
+    field.projection = stored_projection(bundle).unwrap_or(crate::field::Projection::Equirect);
     Ok(field)
 }
 
@@ -51,11 +51,6 @@ pub fn stored_projection(bundle: &PayloadBundle) -> Option<Domain> {
 
 /// **场这一域**的编解码与读数 —— 契约在 `px_graph_schema::payload::Build`，话由域自己说。
 impl px_graph_schema::Build for Field {
-    /// 场的产物里带评审相机表（相机是"怎么看"，而场**能**被看）。
-    const WITH_CAMERAS: bool = true;
-    /// ⚠ 场的分辨率**就是画布** ⇒ 画布必须进键。
-    const RESOLUTION_IS_CANVAS: bool = true;
-
     fn detail(payload: &Self) -> String {
         let stats = payload.stats();
         format!(
@@ -68,8 +63,8 @@ impl px_graph_schema::Build for Field {
         Ok(crate::payload::encode(payload))
     }
 
-    fn decode(bundle: &PayloadBundle, projection: Domain, node: &str) -> Result<Self, String> {
+    fn decode(bundle: &PayloadBundle, node: &str) -> Result<Self, String> {
         let _ = node;
-        crate::payload::decode(bundle, projection)
+        crate::payload::decode(bundle)
     }
 }

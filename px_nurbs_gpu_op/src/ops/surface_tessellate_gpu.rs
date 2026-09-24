@@ -4,7 +4,7 @@ use px_nurbs_schema::params;
 
 px_graph_schema::px_body! {
     SurfaceTessellateGpu,
-    |p, i, _g| crate::ops::surface_tessellate_gpu::eval(p, i.surface.value())?
+    |p, i| crate::ops::surface_tessellate_gpu::eval(p, i.surface.value())?
 }
 
 /// **曲面细分（GPU）**：逐格求值在 WGSL，编排与装配在 `crate`。

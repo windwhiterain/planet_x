@@ -4,7 +4,7 @@ use px_nurbs_schema::point::PointData;
 
 px_graph_schema::px_body! {
     SurfaceEval,
-    |p, i, _g| crate::ops::surface_eval::eval(p, i.surface.value())?
+    |p, i| crate::ops::surface_eval::eval(p, i.surface.value())?
 }
 
 /// 在一个固定参数 `(u, v)` 上求值（来自参数文件）。

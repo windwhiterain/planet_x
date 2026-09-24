@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 
 use px_field_schema::field::Field;
-use px_graph_schema::Grid;
 use px_mesh_schema::ops::CubeSphere;
 use px_mesh_schema::params;
 use px_protocol::art::{
@@ -11,7 +10,7 @@ use px_protocol::art::{
 
 px_graph_schema::px_body! {
     CubeSphere,
-    |p, i, g| crate::cubesphere::eval(p, &[i.height.value()], g)?
+    |p, i| crate::cubesphere::eval(p, &[i.height.value()])?
 }
 
 fn normalize(vector: [f32; 3]) -> [f32; 3] {
@@ -35,11 +34,7 @@ fn vertex_of(positions: &[f32], index: u32) -> [f32; 3] {
     [positions[slot], positions[slot + 1], positions[slot + 2]]
 }
 
-pub fn eval(
-    params: &params::cubesphere::Params,
-    inputs: &[&Field],
-    grid: Grid,
-) -> Result<MeshData, String> {
+pub fn eval(params: &params::cubesphere::Params, inputs: &[&Field]) -> Result<MeshData, String> {
     let field = inputs[0];
     let stats = field.stats();
     let span = if (stats.max - stats.min).abs() <= f32::EPSILON {
@@ -47,8 +42,9 @@ pub fn eval(
     } else {
         stats.max - stats.min
     };
-    let face_size = cube_face_size(grid.width).max(2);
-    let cell = cube_cell_size(grid.width);
+    // ⚠ 面内尺寸由**上游那张场**给（形状只有一个来源）。
+    let face_size = cube_face_size(field.width).max(2);
+    let cell = cube_cell_size(field.width);
     let n = params.subdivisions.clamp(2, 512);
 
     let mut positions: Vec<f32> = Vec::new();

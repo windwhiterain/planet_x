@@ -32,7 +32,7 @@ use px_volume_schema::{PATCHES, VolumeSampler};
 
 px_graph_schema::px_body! {
     Proxy,
-    |p, i, _g| {
+    |p, i| {
         // ⚠ 与老路径同一个采样器：`VolumeGrid` 只在**同一个面内**插值，
         // 换成 `VolumeData` 直接当 sampler 会把面缝焊法换掉。
         let grid = px_volume_schema::VolumeGrid::new(i.volume.value());

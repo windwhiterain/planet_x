@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use px_protocol::art::{ArtBundle, AssetManifest, Camera};
+use px_protocol::art::{ArtBundle, AssetManifest};
 use px_protocol::stream::{self, Frame};
 use px_protocol::wire::{Blob, BlobHeader, DType, WireError};
 use px_protocol::{Handshake, HandshakeError, ProtocolId};
@@ -17,7 +17,6 @@ fn frames() -> Vec<Frame> {
                 shape: vec![3],
             }],
             fingerprint: 0xdead_beef_1234_5678,
-            cameras: vec![Camera::new([0.0, 0.0, 1.0], 3.15, "front")],
         }],
     };
     vec![

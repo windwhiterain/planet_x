@@ -1,13 +1,12 @@
 use px_field_schema::field::Field;
 use px_field_schema::ops::Stamps;
 use px_field_schema::params;
-use px_graph_schema::Grid;
 
 use crate::noise;
 
 px_graph_schema::px_body! {
     Stamps,
-    |p, i, g| crate::ops::stamps::eval(p, &[i.base.value()], g)
+    |p, i| crate::ops::stamps::eval(p, &[i.base.value()])
 }
 
 /// 一个**印章**（一次撞击）：中心（**格**为单位）、半径（格）、年龄、以及"盖不盖"的那枚硬币。
@@ -43,7 +42,7 @@ struct Stamp {
 /// ⚠ **遮罩是整枚印章的决定**（在印章中心取上游值），不是逐像素的 —— 逐像素会让坑被切掉一半。
 /// ⚠ 足迹 `R·(1+rim) ≤ 1` 格是 27 邻域够用的前提（`max_radius` 按这一条钳住）。
 /// ⚠ 算子**不钳制**输出（与 `field.craters` 同一条口径：值域是图自己的事）。
-pub fn eval(params: &params::StampsParams, inputs: &[&Field], grid: Grid) -> Field {
+pub fn eval(params: &params::StampsParams, inputs: &[&Field]) -> Field {
     let base = inputs[0];
     let mut field = base.clone();
     let jitter = params.jitter.clamp(0.0, 1.0);
@@ -61,8 +60,8 @@ pub fn eval(params: &params::StampsParams, inputs: &[&Field], grid: Grid) -> Fie
     let mut candidates: Vec<Stamp> = Vec::with_capacity(27);
     for octave in 0..params.octaves {
         let seed = params.seed ^ octave.wrapping_mul(0x9e37_79b9);
-        for y in 0..grid.height {
-            for x in 0..grid.width {
+        for y in 0..base.height {
+            for x in 0..base.width {
                 let point = grid_point(params, base, x, y, frequency);
                 let cell = [point[0].floor(), point[1].floor(), point[2].floor()];
 

@@ -4,7 +4,7 @@ use px_nurbs_schema::surface::Along;
 
 px_graph_schema::px_body! {
     SurfaceInsert,
-    |p, i, _g| crate::ops::surface_insert::eval(p, i.surface.value())?
+    |p, i| crate::ops::surface_insert::eval(p, i.surface.value())?
 }
 
 /// 插入节点（曲面）：与曲线是**同一条** Böhm 算法，只是逐行/逐列各做一遍。

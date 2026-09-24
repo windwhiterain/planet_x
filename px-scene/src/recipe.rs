@@ -704,7 +704,7 @@ pub fn compile(file: &SceneFile, baked: &mut Baked, with_graph: bool) -> Result<
 
     // ---- 相机：局部方向 → 世界系 ----
     let cameras: Vec<Camera> = match file.cameras.as_deref() {
-        Some("review") | None => px_graph::cameras::review(),
+        Some("review") | None => crate::cameras::review(),
         Some(other) => return Err(format!("不认识的相机表 '{other}'（现在只有 review）")),
     }
     .into_iter()

@@ -16,8 +16,7 @@
 //!   库按 key 在运行期 `dlopen`、符号按声明名拼 —— 三件事里任何一件错，图跑起来才炸。
 
 use px_cook::inst::BuildGraph;
-use px_cook::{Cooked, Domain, GraphSpec, begin, cached, node_params, volume};
-use px_field_schema::field::Field;
+use px_cook::{Cooked, Domain, GraphSpec, begin, cached, field_params, node_params, volume};
 use px_graph_schema::PxOp;
 use px_graphs::insts::Band;
 
@@ -58,17 +57,22 @@ fn main() {
     // ⚠ 自己的图名（`inst-op`），不碰 `art/` 下任何既有图。
     let graph = begin(GraphSpec {
         name: "inst-op".to_string(),
+    });
+
+    // ⚠ **形状是参数**（没有画布了）：这张 8×4 的形状既喂 `constant` 那一档，也用来造
+    //   下面那张占位覆盖度场 —— 一处写、两处同值。
+    let shape = field_params::Shape {
         width: 8,
         height: 4,
         projection: Domain::Cube,
-        cameras: Vec::new(),
-    });
+    };
+
     // 上游那张覆盖度场：实例复用的是 `CloudCoarse` 的**声明** ⇒ 输入形状就是它那个
     // `CloudCoarseInput { coverage }`。⚠ `Band` 自己就是覆盖度的来源，这张场**不参与计算**，
     // 但接口要它在场（`19` §179.1：体逐字套在复用的声明上）。
     let coverage = Cooked::new(
         *px_cook::blake3::hash(b"inst-op/coverage").as_bytes(),
-        Field::filled_with(8, 4, 1.0, Domain::Cube),
+        shape.filled(1.0),
         false,
         0,
         0,

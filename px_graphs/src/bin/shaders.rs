@@ -14,10 +14,6 @@ fn main() {
     // ⚠ 这张图**一个节点都不走缓存**：`begin` 只要它那一行摘要（图名 / 参数目录 / 缓存条数）。
     let _graph = px_cook::begin(px_cook::GraphSpec {
         name: "shaders".to_string(),
-        width: 0,
-        height: 0,
-        projection: px_protocol::art::Domain::Cube,
-        cameras: Vec::new(),
     });
 
     let baked = px_cook::bake_shader_graph().unwrap_or_else(|err| panic!("{err}"));

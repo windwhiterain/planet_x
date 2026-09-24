@@ -4,10 +4,9 @@
 //! （`px_cook::cached`）调的是同一个。从前有两份（`node_key` 只在测试里活着、`cached` 自己
 //! 内联算），于是"文档里的键定义"与"真正的键"可以悄悄漂开；现在漂不开。
 
-use px_field_schema::field::Field;
+use px_field_schema::field::{Field, Projection};
 use px_field_schema::params::fbm::Params;
-use px_graph::{Grid, OpId, canonical_params, node_key, shader_key};
-use px_protocol::art::Domain;
+use px_graph::{OpId, canonical_params, node_key, shader_key};
 
 const INTERFACE: u64 = 0x0123_4567_89ab_cdef;
 const SOURCE: &str = "0123456789abcdef";
@@ -20,7 +19,6 @@ fn key_of(params: &Params, inputs: &[[u8; 32]]) -> [u8; 32] {
             source_hash: SOURCE,
         },
         &canonical_params(params),
-        None,
         |hasher| {
             for key in inputs {
                 hasher.update(key);
@@ -71,7 +69,6 @@ fn a_different_interface_changes_the_key() {
             source_hash: SOURCE,
         },
         &canonical_params(&params),
-        None,
         |_| {},
     );
     assert_ne!(same, other_interface, "接口形状哈希必须进键");
@@ -91,7 +88,6 @@ fn a_different_implementation_source_changes_the_key() {
             source_hash: "fedcba9876543210",
         },
         &canonical_params(&params),
-        None,
         |_| {},
     );
     assert_ne!(before, after, "改了实现就必须换键");
@@ -108,46 +104,71 @@ fn nothing_about_the_graph_itself_is_in_the_key() {
     let twice = key_of(&params, &[]);
     assert_eq!(
         once, twice,
-        "键只由算子身份 + 参数 + 上游（+ 该域的画布）决定"
+        "键只由算子身份 + 参数 + 上游决定（形状在参数里，不在图里）"
     );
 }
 
-/// 画布**由调用点**决定给不给（域自己声明 `RESOLUTION_IS_CANVAS`）：
-/// 场给 `Some`，体积/网格给 `None` —— 一刀切两头都会错。
+/// **形状参数进键** —— 尺寸与投影是**参数**（生成类算子的 `Shape`），不是驱动给的"画布"。
+///
+/// ⚠ 这条门从前叫"画布进键"：`node_key` 多收一个 `Option<Grid>`，由调用点按域决定给不给。
+///   用户 2026-09-27 的裁定之后**没有画布这个轴了** —— 尺寸与投影进了 `field.*` 那几档
+///   生成类算子的参数表，"改形状要不要重算"因此是**结构性**的：参数里写着它 ⇒ 改它必换键。
+///   这一条钉的就是"改尺寸/投影却命中旧产物"那条病。
 #[test]
-fn the_canvas_is_a_coordinate_the_caller_opts_into() {
-    let params = Params::default();
-    let canvas = Grid {
-        width: 780,
-        height: 520,
-        projection: Domain::Cube,
-    };
-    let without = key_of(&params, &[]);
-    let with = node_key(
-        &OpId {
-            id: "field.fbm",
-            interface: INTERFACE,
-            source_hash: SOURCE,
-        },
-        &canonical_params(&params),
-        Some(canvas),
-        |_| {},
+fn the_shape_is_a_parameter_of_the_generators_so_it_is_in_the_key() {
+    let mut wider = Params::default();
+    wider.shape.width = 780;
+    wider.shape.height = 520;
+    assert_ne!(
+        key_of(&Params::default(), &[]),
+        key_of(&wider, &[]),
+        "改了形状参数（宽高）却没换键 ⇒ 会命中按旧尺寸烘出来的产物"
     );
-    assert_ne!(without, with, "给了画布就该是另一个键");
-    let same_canvas = node_key(
-        &OpId {
-            id: "field.fbm",
-            interface: INTERFACE,
-            source_hash: SOURCE,
-        },
-        &canonical_params(&params),
-        Some(Grid {
-            projection: Domain::Cube,
-            ..canvas
-        }),
-        |_| {},
+
+    // 投影是形状里的一栏：换一个域就是另一张场，必须换键。
+    let mut projected = Params::default();
+    projected.shape.projection = Projection::Equirect;
+    assert_ne!(
+        key_of(&Params::default(), &[]),
+        key_of(&projected, &[]),
+        "改了投影却没换键"
     );
-    assert_eq!(with, same_canvas, "同一份画布 ⇒ 同一个键");
+
+    // 同一份形状**怎么写**都是同一个键：省略 = 默认值，显式写出来 = 同一个值。
+    const EXPLICIT: &str = "shape = { width = 512, height = 256, projection = \"CubeMap\" }\n";
+    let explicit: Params = toml::from_str(EXPLICIT).expect("解析失败");
+    assert_eq!(
+        canonical_params(&Params::default()),
+        canonical_params(&explicit),
+        "显式写出的默认形状应当等于省略"
+    );
+    assert_eq!(
+        key_of(&Params::default(), &[]),
+        key_of(&explicit, &[]),
+        "同一份形状 ⇒ 同一个键"
+    );
+}
+
+/// **过滤类节点没有形状这一轴** —— 从前那句"体积/网格给 `None`"（域自己声明
+/// `RESOLUTION_IS_CANVAS`）在今天的等价物。
+///
+/// ⚠ 新口径下它同样是**结构性**的：过滤类算子的参数表里根本没有 `shape` 这一栏
+///   （`deny_unknown_fields` 连写都不让写）⇒ "别的节点的尺寸"没有一条路能顺着参数表
+///   进它的键；它的键照旧只由"算子身份 + 自己的参数 + 上游的键"决定。
+#[test]
+fn a_filter_node_has_no_shape_axis_to_carry_into_its_key() {
+    let parsed: Result<px_field_schema::params::remap::Params, _> =
+        toml::from_str("shape = { width = 8, height = 4, projection = \"CubeMap\" }\n");
+    assert!(
+        parsed.is_err(),
+        "过滤类节点的参数表里冒出了 `shape` ⇒ 别的节点的尺寸会顺着参数表进它的键"
+    );
+    let remap = px_field_schema::params::remap::Params::default();
+    let json = canonical_params(&remap);
+    assert!(
+        !json.contains("\"shape\""),
+        "过滤类节点的规范参数里出现了 `shape`（它就是要进键的那一份）：{json}"
+    );
 }
 
 #[test]

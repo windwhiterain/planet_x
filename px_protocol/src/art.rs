@@ -604,9 +604,6 @@ pub struct AssetManifest {
     /// diff 靠它分辨「参数一样、值不一样」—— CAS 路径能分辨，同名覆盖分辨不了。
     #[serde(default)]
     pub fingerprint: u64,
-    /// 评审相机表。空 = 这个产物没带看法，渲染器走 `--cam`。
-    #[serde(default)]
-    pub cameras: Vec<Camera>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -1020,7 +1017,6 @@ mod tests {
                 shape: shape.to_vec(),
             }],
             fingerprint,
-            cameras: Vec::new(),
         }
     }
 
@@ -1072,15 +1068,17 @@ mod tests {
         assert_eq!(report.touched().len(), 2);
     }
 
+    /// ⚠ **相机不进产物**（2026-09-27：相机是**场景脚本**的数据 ⇒ 这一条判据连同
+    ///   `AssetManifest.cameras` 一起删了）。这里改为钉住"**参数变了才算变化**"：
+    ///   参数是产物内容的一部分（`diff` 靠它分辨「同名覆盖」）。
     #[test]
-    fn a_camera_change_is_not_a_payload_change() {
-        let mut before = manifest("height", 7, 0.3, [4, 4]);
-        let mut after = before.clone();
-        before.cameras = vec![Camera::new([0.0, 0.0, 1.0], 3.15, "front")];
-        after.cameras = vec![Camera::new([1.0, 1.0, 1.0], 1.4, "corner")];
+    fn a_param_change_is_a_payload_change() {
+        let before = manifest("height", 7, 0.3, [4, 4]);
+        let mut after = manifest("height", 7, 0.3, [4, 4]);
+        after.params.insert("shift".to_string(), 1.0);
         assert!(
-            diff(&bundle(vec![before]), &bundle(vec![after])).is_identical(),
-            "相机表属于「怎么看」不属于「是什么」：值没变就不该算变化"
+            !diff(&bundle(vec![before]), &bundle(vec![after])).is_identical(),
+            "清单参数属于产物内容：改了它就该算变化（否则同名覆盖会静默留下旧内容）"
         );
     }
 
@@ -1237,14 +1235,4 @@ pub fn bundle_of(frames: &[crate::stream::Frame]) -> Option<&ArtBundle> {
         crate::stream::Frame::Art(bundle) => Some(bundle),
         _ => None,
     })
-}
-
-/// 一份清单里声明的评审相机（第一份带相机表的产物说了算）。
-pub fn cameras_of(bundle: &ArtBundle) -> &[Camera] {
-    bundle
-        .assets
-        .iter()
-        .find(|asset| !asset.cameras.is_empty())
-        .map(|asset| asset.cameras.as_slice())
-        .unwrap_or(&[])
 }

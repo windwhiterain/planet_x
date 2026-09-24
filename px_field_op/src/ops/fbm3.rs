@@ -11,19 +11,18 @@ use px_field_schema::field::Field;
 use px_field_schema::noise::FbmSettings;
 use px_field_schema::ops::Fbm3;
 use px_field_schema::params;
-use px_field_schema::volume::{VolumeShape, voxel_of};
-use px_graph_schema::Grid;
+use px_field_schema::volume::voxel_of;
 
 use crate::noise;
 
-px_graph_schema::px_body! { Fbm3, |p, _i, g| crate::ops::fbm3::eval(p, &[], g) }
+px_graph_schema::px_body! { Fbm3, |p, _i| crate::ops::fbm3::eval(p, &[]) }
 
-pub fn eval(params: &params::Fbm3Params, _inputs: &[&Field], grid: Grid) -> Field {
-    let shape = VolumeShape::of(&grid).unwrap_or_else(|| {
+pub fn eval(params: &params::Fbm3Params, _inputs: &[&Field]) -> Field {
+    let shape = params.shape.volume_shape().unwrap_or_else(|| {
         panic!(
             "field.fbm3 要一张体网格画布（域 volume、行数 = res² × layers × 6），\
              拿到的是 {:?} {}×{}",
-            grid.projection, grid.width, grid.height
+            params.shape.projection, params.shape.width, params.shape.height
         )
     });
     let settings = FbmSettings {
@@ -53,7 +52,7 @@ pub fn eval(params: &params::Fbm3Params, _inputs: &[&Field], grid: Grid) -> Fiel
             }
         }
     });
-    Field::with_projection(shape.res, shape.height(), data, grid.projection)
+    Field::with_projection(shape.res, shape.height(), data, params.shape.projection)
 }
 
 #[cfg(test)]
@@ -61,26 +60,35 @@ mod tests {
     use super::*;
     use px_field_schema::field::CUBE_FACES;
     use px_field_schema::field::Projection;
+    use px_field_schema::params::Shape;
+    use px_field_schema::volume::VolumeShape;
 
-    fn grid(res: u32, layers: u32) -> Grid {
-        Grid {
+    /// 体网格那一档的形状参数（`width = res`、`height = res × layers × 6`）。
+    fn shape_of(res: u32, layers: u32) -> Shape {
+        Shape {
             width: res,
             height: res * layers * CUBE_FACES,
             projection: Projection::Volume,
         }
     }
 
-    fn eval_default(grid: Grid) -> Field {
-        eval(&params::Fbm3Params::default(), &[], grid)
+    fn eval_default(shape: Shape) -> Field {
+        eval(
+            &params::Fbm3Params {
+                shape,
+                ..Default::default()
+            },
+            &[],
+        )
     }
 
-    /// **形状跟着画布走**，而且值落在 `[0,1]`（fbm 是归一化过的和）。
+    /// **形状跟着参数走**，而且值落在 `[0,1]`（fbm 是归一化过的和）。
     #[test]
-    fn the_field_takes_the_canvas_shape_and_stays_normalised() {
-        let grid = grid(8, 4);
-        let field = eval_default(grid);
+    fn the_field_takes_the_shape_params_and_stays_normalised() {
+        let shape = shape_of(8, 4);
+        let field = eval_default(shape);
         assert_eq!(field.width, 8);
-        assert_eq!(field.height, grid.height);
+        assert_eq!(field.height, shape.height);
         let stats = field.stats();
         assert!(stats.min >= 0.0 && stats.max <= 1.0, "{stats:?}");
         assert!(stats.max - stats.min > 0.05, "噪声得有起伏：{stats:?}");
@@ -93,7 +101,7 @@ mod tests {
     #[test]
     fn the_column_changes_with_the_layer() {
         let shape = VolumeShape { res: 8, layers: 6 };
-        let field = eval_default(grid(shape.res, shape.layers));
+        let field = eval_default(shape_of(shape.res, shape.layers));
         let mut changed = 0;
         for face in 0..CUBE_FACES {
             for x in 0..shape.res {
@@ -119,7 +127,7 @@ mod tests {
     #[test]
     fn the_six_faces_are_not_copies_of_each_other() {
         let shape = VolumeShape { res: 6, layers: 3 };
-        let field = eval_default(grid(shape.res, shape.layers));
+        let field = eval_default(shape_of(shape.res, shape.layers));
         let mut equal = 0;
         for layer in 0..shape.layers {
             for x in 0..shape.res {
@@ -137,9 +145,9 @@ mod tests {
     /// **纯函数**：同样的参数跑两遍逐点相同（缓存键与"可复现"都靠它）。
     #[test]
     fn the_same_parameters_give_the_same_field() {
-        let grid = grid(6, 3);
-        let one = eval_default(grid);
-        let two = eval_default(grid);
+        let shape = shape_of(6, 3);
+        let one = eval_default(shape);
+        let two = eval_default(shape);
         assert_eq!(one.data, two.data);
     }
 }

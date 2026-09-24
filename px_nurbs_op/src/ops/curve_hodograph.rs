@@ -4,7 +4,7 @@ use px_nurbs_schema::point::PointData;
 
 px_graph_schema::px_body! {
     CurveHodograph,
-    |p, i, _g| crate::ops::curve_hodograph::eval(p, i.curve.value())?
+    |p, i| crate::ops::curve_hodograph::eval(p, i.curve.value())?
 }
 
 /// **一阶导（hodograph）**：`t → 切向量`。

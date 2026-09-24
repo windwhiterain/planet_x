@@ -15,7 +15,6 @@
 use std::collections::BTreeMap;
 
 use px_graph_schema::PayloadBundle;
-use px_protocol::art::Domain;
 use px_protocol::wire::{Blob, BlobHeader, DType};
 
 use crate::curve::Curve;
@@ -175,10 +174,7 @@ pub fn decode_surface(bundle: &PayloadBundle) -> Result<Surface, String> {
 }
 
 impl px_graph_schema::Build for Curve {
-    /// 曲线没人直接看（要看得先细分）⇒ 不掺评审相机。
-    const WITH_CAMERAS: bool = false;
     /// 控制点由参数给 ⇒ 画布与它无关。
-    const RESOLUTION_IS_CANVAS: bool = false;
 
     fn detail(payload: &Self) -> String {
         let (low, high) = payload.domain();
@@ -199,15 +195,12 @@ impl px_graph_schema::Build for Curve {
         encode_curve(payload)
     }
 
-    fn decode(bundle: &PayloadBundle, _projection: Domain, node: &str) -> Result<Self, String> {
+    fn decode(bundle: &PayloadBundle, node: &str) -> Result<Self, String> {
         decode_curve(bundle).map_err(|err| format!("{node}：{err}"))
     }
 }
 
 impl px_graph_schema::Build for Surface {
-    const WITH_CAMERAS: bool = false;
-    const RESOLUTION_IS_CANVAS: bool = false;
-
     fn detail(payload: &Self) -> String {
         format!(
             "{}×{} 次{}曲面｜{}×{} 控制点｜节点 {} / {}",
@@ -229,15 +222,12 @@ impl px_graph_schema::Build for Surface {
         encode_surface(payload)
     }
 
-    fn decode(bundle: &PayloadBundle, _projection: Domain, node: &str) -> Result<Self, String> {
+    fn decode(bundle: &PayloadBundle, node: &str) -> Result<Self, String> {
         decode_surface(bundle).map_err(|err| format!("{node}：{err}"))
     }
 }
 
 impl px_graph_schema::Build for PointData {
-    const WITH_CAMERAS: bool = false;
-    const RESOLUTION_IS_CANVAS: bool = false;
-
     fn detail(payload: &Self) -> String {
         payload.detail()
     }
@@ -249,7 +239,7 @@ impl px_graph_schema::Build for PointData {
         ))
     }
 
-    fn decode(bundle: &PayloadBundle, _projection: Domain, node: &str) -> Result<Self, String> {
+    fn decode(bundle: &PayloadBundle, node: &str) -> Result<Self, String> {
         let values = values(bundle, 0).map_err(|err| format!("{node}：{err}"))?;
         PointData::from_values(&values).map_err(|err| format!("{node}：{err}"))
     }

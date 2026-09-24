@@ -3,7 +3,7 @@ use px_nurbs_schema::params;
 
 px_graph_schema::px_body! {
     Sphere,
-    |p, _i, _g| crate::ops::sphere::eval(p)?
+    |p, _i| crate::ops::sphere::eval(p)?
 }
 
 /// **有理二次球面**（精确球）：构造住在 schema 里（`surface::sphere`）。

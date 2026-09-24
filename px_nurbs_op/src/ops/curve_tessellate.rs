@@ -4,7 +4,7 @@ use px_protocol::art::PolylineData;
 
 px_graph_schema::px_body! {
     CurveTessellate,
-    |p, i, _g| crate::ops::curve_tessellate::eval(p, i.curve.value())?
+    |p, i| crate::ops::curve_tessellate::eval(p, i.curve.value())?
 }
 
 /// **曲线细分**：按弦误差摊成折线（算法在 `crate::tessellate`）。

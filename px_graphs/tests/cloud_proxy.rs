@@ -10,15 +10,15 @@
 use std::collections::HashMap;
 
 use px_field_schema::field::{Field, Projection};
-use px_graph_schema::{Cooked, Grid, PxOp};
+use px_graph_schema::{Cooked, PxOp};
 use px_graphs::cloud_proxy;
 use px_mesh_schema::MeshData;
 use px_mesh_schema::ops as mesh_ops;
 use px_mesh_schema::params as mesh_params;
 use px_verify::cloud_field::CloudFieldParams;
+use px_volume_schema::VolumeData;
 use px_volume_schema::ops as volume_ops;
 use px_volume_schema::params::{self as volume_params, Params};
-use px_volume_schema::{PATCHES, VolumeData};
 
 const FACE: u32 = 64;
 
@@ -47,15 +47,8 @@ fn coverage() -> Field {
     field
 }
 
-/// 测试用的画布：算子签名要一个 `Grid`（体积那一档不用它，但**不许**两处口径不同）。
-fn grid() -> Grid {
-    Grid {
-        width: FACE,
-        height: FACE * 6,
-        projection: Projection::CubeMap,
-    }
-}
-
+/// ⚠ 尺寸/投影不再是驱动递进来的画布：体积与网格那一档的**参数里没有它**
+/// （体积算子从上游覆盖场的形状推自己的体网格），算子签名也就不再收。
 fn params() -> Params {
     Params {
         res: 33,
@@ -80,7 +73,7 @@ fn bake(params: &Params, coverage: &Field) -> VolumeData {
         coverage: Cooked::new([0; 32], coverage.clone(), false, 0, 0),
     };
     volume_ops::CloudCoarse
-        .render(params, &input, grid())
+        .render(params, &input)
         .expect("烘体积失败")
 }
 
@@ -89,7 +82,7 @@ fn surface(params: &mesh_params::proxy::Params, volume: &VolumeData) -> MeshData
         volume: Cooked::new([0; 32], volume.clone(), false, 0, 0),
     };
     mesh_ops::Proxy
-        .render(params, &input, grid())
+        .render(params, &input)
         .expect("出等值面失败")
 }
 

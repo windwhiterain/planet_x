@@ -42,8 +42,11 @@
 
 use std::time::Instant;
 
-use px_cook::{Domain, GraphSpec, begin, cached, field, node_params, volume};
+use px_cook::{
+    Domain, GraphSpec, begin, cached, field, field_params, node_params, volume, volume_params,
+};
 use px_field_schema::field::Field;
+use px_field_schema::volume::VolumeShape;
 use px_volume_schema::params::stars::StarsParams;
 
 /// 图侧对错误的统一态度：**当场失败**，不静默跳过。
@@ -171,45 +174,66 @@ fn main() -> Result<(), Fault> {
     println!("形状 {shape} × {shape} × {layers} 层 ｜ 天空面 {face}");
     let shape_graph = begin(GraphSpec {
         name: "nebula".to_string(),
-        width: shape,
-        height: shape * layers * 6,
-        projection: Domain::Volume,
-        cameras: Vec::new(),
     });
+
+    // ⚠ **形状是参数**（没有画布了）：体网格场的形状由 `res × res × layers × 6` 推，
+    //   而 `cloud.density` 的 `res` 也是**绝对值** ⇒ 用**同一个** `shape` 变量喂两边，
+    //   "两处必须一致"这件事因此在脚本里看得见。
+    let volume_shape = VolumeShape { res: shape, layers };
+    let field_shape = field_params::Shape {
+        width: volume_shape.res,
+        height: volume_shape.height(),
+        projection: Domain::Volume,
+    };
 
     let blobs = cached(
         &shape_graph,
         "blobs",
         field::Fbm3,
-        node_params(&shape_graph, "blobs")?,
+        field_params::Fbm3Params {
+            shape: field_shape,
+            ..node_params(&shape_graph, "blobs")?
+        },
         (),
     )?;
     let wisps = cached(
         &shape_graph,
         "wisps",
         field::Ridged3,
-        node_params(&shape_graph, "wisps")?,
+        field_params::Ridged3Params {
+            shape: field_shape,
+            ..node_params(&shape_graph, "wisps")?
+        },
         (),
     )?;
     let flow = cached(
         &shape_graph,
         "flow",
         field::Fbm3,
-        node_params(&shape_graph, "flow")?,
+        field_params::Fbm3Params {
+            shape: field_shape,
+            ..node_params(&shape_graph, "flow")?
+        },
         (),
     )?;
     let flow_second = cached(
         &shape_graph,
         "flow_second",
         field::Fbm3,
-        node_params(&shape_graph, "flow_second")?,
+        field_params::Fbm3Params {
+            shape: field_shape,
+            ..node_params(&shape_graph, "flow_second")?
+        },
         (),
     )?;
     let flow_third = cached(
         &shape_graph,
         "flow_third",
         field::Fbm3,
-        node_params(&shape_graph, "flow_third")?,
+        field_params::Fbm3Params {
+            shape: field_shape,
+            ..node_params(&shape_graph, "flow_third")?
+        },
         (),
     )?;
 
@@ -277,7 +301,10 @@ fn main() -> Result<(), Fault> {
         &shape_graph,
         "vacuum",
         field::Constant,
-        node_params(&shape_graph, "vacuum")?,
+        field_params::constant::Params {
+            shape: field_shape,
+            ..node_params(&shape_graph, "vacuum")?
+        },
         (),
     )?;
     let shaped = cached(
@@ -304,7 +331,10 @@ fn main() -> Result<(), Fault> {
         &shape_graph,
         "envelope",
         field::Fbm3,
-        node_params(&shape_graph, "envelope")?,
+        field_params::Fbm3Params {
+            shape: field_shape,
+            ..node_params(&shape_graph, "envelope")?
+        },
         (),
     )?;
     let envelope_mask = cached(
@@ -370,7 +400,10 @@ fn main() -> Result<(), Fault> {
         &shape_graph,
         "density_volume",
         volume::Density,
-        node_params(&shape_graph, "density_volume")?,
+        volume_params::density::DensityParams {
+            res: shape,
+            ..node_params(&shape_graph, "density_volume")?
+        },
         volume::DensityInput { density: textured },
     )?;
     // ⚠⚠ **顺序在这里是有约束的**（2026-09-25 晚恢复"星光照亮气体"之后）：
@@ -403,10 +436,6 @@ fn main() -> Result<(), Fault> {
     // ── 图二：整张天空（画布是立方贴图）──────────────────────────────────
     let sky_graph = begin(GraphSpec {
         name: "nebulasky".to_string(),
-        width: face,
-        height: face * 6,
-        projection: Domain::CubeMap,
-        cameras: Vec::new(),
     });
     // ⚠ **一个节点交出一整张天空贴图**（三条通道在算子内部各积一遍）。
     //   `sky` 就是场景文档要引用的那个节点名（`nebulasky::sky`），而它是一条

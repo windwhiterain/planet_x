@@ -43,7 +43,13 @@
 - ⚠️ 一旦给 `Image` 显式设 `ImageSampler::Descriptor`，就**不再继承 `ImagePlugin` 的 `default_linear()`**，而是取 `ImageSamplerDescriptor::default()` —— 而 `ImageFilterMode::default()` 是 **`Nearest`**，画面立刻变方块；必须显式写 `mag/min/mipmap_filter: Linear`。
 - **值噪声的值长在轴对齐的立方晶格上**，高频八度会把方格暴露出来（`frequency 0.55 × 2⁵ = 17.6` ⇒ 晶格间距 `1/17.6` 单位 ≈ 球面 3.2° ≈ 屏幕 9 px）⇒ 换成 **Perlin 梯度噪声**（12 个立方体边梯度、8 角点、smoothstep 权重），`field.fbm` / `field.ridged` 升到 **v3**。
 
-### §25.2 画布尺寸必须进键
+### §25.2 尺寸必须进键（**已由"一切皆参数"取代**）
+
+> ⚠⚠ **2026-09-27 更正（最新，以此为准）**："画布"这个概念**整个删掉了**（用户裁定：
+> 「不允许添加画布这个概念，一切皆参数」）⇒ 尺寸与投影是**参数**
+> （`px_field_schema::params::Shape`），"改尺寸要不要重算"由**参数表**回答。
+> 下面那句 `canvas: (u32, u32)` 与再下面那条"按域进键"**都已过期**。见
+> `.agents/notes/art/43-params-not-canvas.md`。
 
 > ⚠ **2026 更正**：本条下面说的「`node_key` 增加 `canvas: (u32, u32)`」**已过期** ——
 > 画布改成**按域**进键（`Payload::RESOLUTION_IS_CANVAS`：场 true、体积/网格 false），
@@ -128,3 +134,4 @@
 - ⚠️ 快照 JSON 的键是**排序**的（`serde_json` 没开 `preserve_order`）⇒ 手改必错，一律用 `PX_UPDATE_SNAPSHOT=1 cargo test -p px_protocol --test snapshot`。
 - ⚠️ `review()` 的两极停在 **82°** 而不是 90°（`looking_at` 的 up 与视线共线会退化）；角度语义从「世界 yaw/pitch + 倾斜」变成「局部方向」，所以对照图构图整体转了 19.5°（`SYSTEM_TILT`），和旧的 `target/probe-*.png` **不可逐像素比**。
 - ⚠️ **`game` 目前编译不过**：`game/src/project.rs:17` 还在读 `snapshot.executions`，而 `Snapshot` 已把这个读数换成 `intake`（`game/src/lib.rs:37` 的注释）。`cargo test`（默认 members **含 `game`**）因此是红的；绿的是 `cargo test -p px_protocol -p px_ops -p px_graphs -p px_verify`。
+

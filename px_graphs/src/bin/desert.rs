@@ -3,7 +3,7 @@
 //! ⚠ 这里原来是老写法（字符串 id + `&[&Artifact]`）。见 `planet.rs` 顶上那条注释。
 
 use px_cook::{
-    Domain, GraphSpec, artifact_path_of, begin, cached, cameras, field, mesh, node_params,
+    Domain, GraphSpec, artifact_path_of, begin, cached, field, field_params, mesh, node_params,
 };
 
 type Fault = Box<dyn std::error::Error>;
@@ -11,27 +11,44 @@ type Fault = Box<dyn std::error::Error>;
 fn main() -> Result<(), Fault> {
     let graph = begin(GraphSpec {
         name: "desert".to_string(),
+    });
+
+    let shape = field_params::Shape {
         width: 780,
         height: 520,
         projection: Domain::Cube,
-        cameras: cameras::review(),
-    });
+    };
 
     let plateaus = cached(
         &graph,
         "plateaus",
         field::Fbm,
-        node_params(&graph, "plateaus")?,
+        field_params::fbm::Params {
+            shape,
+            ..node_params(&graph, "plateaus")?
+        },
         (),
     )?;
     let canyons = cached(
         &graph,
         "canyons",
         field::Ridged,
-        node_params(&graph, "canyons")?,
+        field_params::ridged::Params {
+            shape,
+            ..node_params(&graph, "canyons")?
+        },
         (),
     )?;
-    let flow = cached(&graph, "flow", field::Fbm, node_params(&graph, "flow")?, ())?;
+    let flow = cached(
+        &graph,
+        "flow",
+        field::Fbm,
+        field_params::fbm::Params {
+            shape,
+            ..node_params(&graph, "flow")?
+        },
+        (),
+    )?;
     let carved = cached(
         &graph,
         "carved",
@@ -46,7 +63,10 @@ fn main() -> Result<(), Fault> {
         &graph,
         "blend",
         field::Constant,
-        node_params(&graph, "blend")?,
+        field_params::constant::Params {
+            shape,
+            ..node_params(&graph, "blend")?
+        },
         (),
     )?;
     let terrain = cached(

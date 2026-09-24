@@ -286,16 +286,9 @@ mod tests {
         let bundle = <PolylineData as Build>::encode(&line).expect("编码");
         assert_eq!(bundle.params["vertices"] as usize, line.vertices());
         assert_eq!(bundle.params["segments"] as usize, line.segments());
-        let bytes = bundle
-            .to_bytes("nurbs.curve.tessellate", &[])
-            .expect("写流");
+        let bytes = bundle.to_bytes("nurbs.curve.tessellate").expect("写流");
         let frame = px_graph_schema::PayloadBundle::from_bytes(&bytes).expect("读回清单帧");
-        let back = <PolylineData as Build>::decode(
-            &frame,
-            px_protocol::art::Domain::Equirect,
-            "nurbs.curve.tessellate",
-        )
-        .expect("解码");
+        let back = <PolylineData as Build>::decode(&frame, "nurbs.curve.tessellate").expect("解码");
         assert_eq!(back.positions, line.positions);
         assert_eq!(back.indices, line.indices);
     }

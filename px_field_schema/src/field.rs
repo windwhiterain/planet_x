@@ -1,31 +1,14 @@
 //! 场：一张 `width × height` 的 f32 网格 + 它的投影。
 //!
-//! 画布（`Grid`）住在 `px_graph_schema`（它是「图交给算子的东西」）；这里给它补上场域
-//! 需要的那两个 helper（`GridField`）—— Rust 的孤儿规则不许给外部类型写固有 impl。
+//! ⚠ 场的**形状与投影是参数**（`params::Shape`）—— 从前它们叫"画布"、住在驱动里，
+//!   现在没有那个概念了：谁产出场，谁在自己的参数里写清产出多大、什么投影。
 
-use px_graph_schema::Grid;
 use px_protocol::wire::{Blob, DType, WireError};
 
 pub use px_protocol::art::Domain as Projection;
 pub use px_protocol::art::{
     CUBE_FACES, cube_direction, cube_face_of, cube_map_extent, direction_at as art_direction_at,
 };
-
-/// 画布 → 场：`filled` 与 `direction` 是算子写得最顺手的两个入口。
-pub trait GridField {
-    fn filled(&self, value: f32) -> Field;
-    fn direction(&self, x: u32, y: u32) -> [f32; 3];
-}
-
-impl GridField for Grid {
-    fn filled(&self, value: f32) -> Field {
-        Field::filled_with(self.width, self.height, value, self.projection)
-    }
-
-    fn direction(&self, x: u32, y: u32) -> [f32; 3] {
-        direction_at(self.width, self.height, self.projection, x, y)
-    }
-}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Field {
@@ -74,6 +57,14 @@ pub fn direction_at(width: u32, height: u32, projection: Projection, x: u32, y: 
 }
 
 impl Field {
+    /// 与 `self` **同形同投影**的一张常值场。
+    ///
+    /// ⚠ 过滤类算子（重映射 / 混合 / 扭曲 / 梯度）的输出**与上游同形** —— 从前那是靠
+    ///   调用点递一张"画布"、并要求它与上游同形来达到的；现在形状只有一个来源。
+    pub fn like(&self, value: f32) -> Field {
+        Field::filled_with(self.width, self.height, value, self.projection)
+    }
+
     pub fn new(width: u32, height: u32, data: Vec<f32>) -> Self {
         Self::with_projection(width, height, data, Projection::Equirect)
     }

@@ -4,7 +4,7 @@ use px_nurbs_schema::point::PointData;
 
 px_graph_schema::px_body! {
     CurveAt,
-    |p, i, _g| crate::ops::curve_at::eval(p, i.curve.value(), i.point.value())?
+    |p, i| crate::ops::curve_at::eval(p, i.curve.value(), i.point.value())?
 }
 
 /// **在别的节点给的参数上求值**（"在哪求值"因此可以由别的节点算出来）。

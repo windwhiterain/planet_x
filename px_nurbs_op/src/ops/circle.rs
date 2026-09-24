@@ -3,7 +3,7 @@ use px_nurbs_schema::params;
 
 px_graph_schema::px_body! {
     Circle,
-    |p, _i, _g| crate::ops::circle::eval(p)?
+    |p, _i| crate::ops::circle::eval(p)?
 }
 
 /// **有理二次整圆**（精确圆，不是拟合）：构造住在 schema 里（`curve::circle`），

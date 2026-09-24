@@ -27,6 +27,6 @@ fn px_volume_op_gpu_emission(
 
 px_graph_schema::px_body! {
     Emission,
-    |p, i, _g| // ⚠ 这一档只吃**单通道密度**（六通道的发射喂进来会读错 —— 今晚踩过）。
+    |p, i| // ⚠ 这一档只吃**单通道密度**（六通道的发射喂进来会读错 —— 今晚踩过）。
             px_volume_op_gpu_emission(i.volume.value().expect_single(), i.stars.value(), p)?
 }

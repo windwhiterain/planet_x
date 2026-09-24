@@ -16,11 +16,11 @@ use std::sync::{Mutex, OnceLock};
 
 use libloading::Library;
 
-use crate::{Grid, PxOp};
+use crate::PxOp;
 
 /// 实现库里那个函数的签名 —— 从算子的三个关联类型推，**编译期就检查得住**。
 pub type Body<O> =
-    fn(&<O as PxOp>::Params, &<O as PxOp>::Inputs, Grid) -> Result<<O as PxOp>::Payload, String>;
+    fn(&<O as PxOp>::Params, &<O as PxOp>::Inputs) -> Result<<O as PxOp>::Payload, String>;
 
 /// 取 `O` 的实现函数。装载失败当场说清楚该跑什么命令，不静默。
 pub fn body<O: PxOp>() -> Result<Body<O>, String> {

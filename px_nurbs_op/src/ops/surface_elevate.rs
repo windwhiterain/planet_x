@@ -3,7 +3,7 @@ use px_nurbs_schema::params;
 
 px_graph_schema::px_body! {
     SurfaceElevate,
-    |p, i, _g| crate::ops::surface_elevate::eval(p, i.surface.value())?
+    |p, i| crate::ops::surface_elevate::eval(p, i.surface.value())?
 }
 
 /// 升阶（曲面）：两向各按曲线那套升一次（张量积 ⇒ 两次一维升阶就够）。

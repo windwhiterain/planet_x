@@ -12,18 +12,15 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use px_graph_schema::{
-    Cache, GraphSpec, Grid, Key, ManifestEntry, PayloadBundle, Report, fnv1a, hex, hex_short,
+    Cache, GraphSpec, Key, ManifestEntry, PayloadBundle, Report, fnv1a, hex, hex_short,
 };
-use px_protocol::art::Camera;
 use px_protocol::stream::{self, Frame};
 
-/// **一张正在跑的图**：画布、参数目录、清单、以及"这一趟是不是全量重算"。
+/// **一张正在跑的图**：参数目录、清单、以及"这一趟是不是全量重算"。
 ///
 /// 它就是 `Cache` 的实现 —— 图脚本拿 `begin` 的返回值直接喂给 `cached`。
 pub struct Graph {
     spec: GraphSpec,
-    /// 画布：尺寸 + 投影。**只在这里折算一次** —— 键里那份与算子手里那份因此必然相同。
-    grid: Grid,
     param_dir: PathBuf,
     cache_root: PathBuf,
     fresh: bool,
@@ -137,14 +134,6 @@ impl Graph {
 }
 
 impl Cache for Graph {
-    fn grid(&self) -> Grid {
-        self.grid
-    }
-
-    fn cameras(&self) -> &[Camera] {
-        &self.spec.cameras
-    }
-
     fn params_text(&self, name: &str) -> Option<String> {
         load_params_text(&self.param_dir, name)
     }
@@ -187,16 +176,11 @@ impl Cache for Graph {
     }
 
     fn store(&self, report: Report<'_>, payload: &PayloadBundle) -> Result<(), String> {
-        // ⚠ `id`（节点名）与相机表**只在这里**补上：算子交出来的载荷是无名、无相机的。
+        // ⚠ `id`（节点名）**只在这里**补上：算子交出来的载荷是无名的。
         //   （从前算子先编成一份"占位字节"、驱动再拆开重编 —— 那条路上漏补名字不会报错，
-        //   只会写出"id 空、相机空"的产物。现在那种形状不可表达：这里收的就是载荷本身。）
-        let cameras: &[Camera] = if report.with_cameras {
-            &self.spec.cameras
-        } else {
-            &[]
-        };
+        //   只会写出"id 空"的产物。现在那种形状不可表达：这里收的就是载荷本身。）
         let bytes = payload
-            .to_bytes(report.node, cameras)
+            .to_bytes(report.node)
             .map_err(|err| format!("包 {} 的产物失败：{err}", report.node))?;
         let path = artifact_path(&self.cache_root, &report.key);
         if let Some(parent) = path.parent() {
@@ -301,11 +285,6 @@ pub fn begin(spec: GraphSpec) -> Graph {
     let cached = cache_root.join(&spec.name).join("manifest.json").is_file() as usize;
 
     let graph = Graph {
-        grid: Grid {
-            width: spec.width,
-            height: spec.height,
-            projection: spec.projection,
-        },
         param_dir,
         cache_root,
         fresh,
@@ -316,10 +295,8 @@ pub fn begin(spec: GraphSpec) -> Graph {
     std::fs::create_dir_all(&graph.cache_root).ok();
 
     println!(
-        "图 {}｜画布 {}×{}｜参数 {}{}｜缓存 {} 条{}",
+        "图 {}｜参数 {}{}｜缓存 {} 条{}",
         graph.spec.name,
-        graph.spec.width,
-        graph.spec.height,
         graph.param_dir.display(),
         if graph.param_dir.is_dir() {
             ""
@@ -466,7 +443,6 @@ pub fn write_shader(
             params: shader_params(text, closure, &descriptor),
             blobs: vec![wgsl_blob.header.clone(), schema_blob.header.clone()],
             fingerprint: fnv1a(text),
-            cameras: Vec::new(),
         }],
     };
     let frames = vec![

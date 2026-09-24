@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use game::sim::{DepartmentView, GoodView, Totals, WorldView};
-use px_protocol::art::{ArtBundle, AssetKind, AssetManifest, Camera};
+use px_protocol::art::{ArtBundle, AssetKind, AssetManifest};
 use px_protocol::render::{self as render, Lease, Request, Response, Scene};
 use px_protocol::wire::{Blob, BlobHeader, DType};
 use px_protocol::{Handshake, ProtocolId, SCHEMA_VERSION};
@@ -82,7 +82,6 @@ fn canonical() -> String {
             params,
             blobs: vec![header.clone()],
             fingerprint: 0x0123_4567_89ab_cdef,
-            cameras: vec![Camera::new([0.0, 0.0, 1.0], 3.15, "front")],
         }],
     };
 
@@ -252,7 +251,12 @@ fn canonical() -> String {
             )),
             skybox_brightness: 900.0,
         },
-        cameras: vec![Camera::new([0.0, 1.0, 0.0], 3.15, "review")],
+        // ⚠ 相机留在场景文档里（2026-09-27：相机是**场景脚本**的普通数据，不进图、不进产物）。
+        cameras: vec![px_protocol::art::Camera::new(
+            [0.0, 1.0, 0.0],
+            3.15,
+            "review",
+        )],
         expects: vec!["clouds".to_string()],
         resources: Vec::new(),
         passes: Vec::new(),

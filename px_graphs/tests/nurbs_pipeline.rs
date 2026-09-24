@@ -7,20 +7,10 @@
 //! 靶子是**解析**的（不依赖 CAS 里有没有烘过什么）：圆上的点到圆心距离恒为半径、
 //! 球细分成网格之后每个顶点仍在球面上、闭合网格没有开口边、同一份参数跑两次逐位一样。
 
-use px_field_schema::field::Projection;
-use px_graph_schema::{Cooked, Grid, PxOp};
+use px_graph_schema::{Cooked, PxOp};
 use px_nurbs_schema::ops as nurbs;
 use px_nurbs_schema::params as nurbs_params;
 use px_nurbs_schema::{Curve, PointData, Surface};
-
-/// 画布：签名要一个 `Grid`（NURBS 那一档与画布无关，见 `RESOLUTION_IS_CANVAS`）。
-fn grid() -> Grid {
-    Grid {
-        width: 4,
-        height: 4,
-        projection: Projection::CubeMap,
-    }
-}
 
 /// 一条假键：这里的输入不是缓存里的节点，只是把值包成"已经拿到手的节点"那个形状。
 fn cooked<P>(value: P) -> Cooked<P> {
@@ -36,7 +26,6 @@ fn circle(radius: f64) -> Curve {
                 center: [0.0; 3],
             },
             &(),
-            grid(),
         )
         .expect("造圆失败")
 }
@@ -50,7 +39,6 @@ fn sphere(radius: f64) -> Surface {
                 rings: 2,
             },
             &(),
-            grid(),
         )
         .expect("造球失败")
 }
@@ -70,7 +58,6 @@ fn a_sphere_reaches_a_watertight_mesh_through_the_loading_gate() {
             &nurbs::SurfaceInput {
                 surface: cooked(ball),
             },
-            grid(),
         )
         .expect("细分失败");
 
@@ -124,7 +111,6 @@ fn a_circle_evaluates_and_tessellates_through_the_loading_gate() {
             &nurbs::CurveInput {
                 curve: cooked(circle.clone()),
             },
-            grid(),
         )
         .expect("求值失败");
     // 四分之一圈处就是 (0, R)。
@@ -147,7 +133,6 @@ fn a_circle_evaluates_and_tessellates_through_the_loading_gate() {
             &nurbs::CurveInput {
                 curve: cooked(circle),
             },
-            grid(),
         )
         .expect("细分失败");
     for vertex in 0..line.vertices() {
@@ -181,7 +166,6 @@ fn the_tessellation_is_reproducible() {
             &nurbs::SurfaceInput {
                 surface: cooked(sphere(1.0)),
             },
-            grid(),
         )
         .expect("细分失败");
     let second = nurbs::SurfaceTessellate
@@ -190,7 +174,6 @@ fn the_tessellation_is_reproducible() {
             &nurbs::SurfaceInput {
                 surface: cooked(sphere(1.0)),
             },
-            grid(),
         )
         .expect("细分失败");
     assert_eq!(first.positions, second.positions, "顶点位置不可复现");
@@ -217,7 +200,6 @@ fn the_gpu_tessellation_reaches_a_watertight_mesh_through_the_loading_gate() {
         &nurbs::SurfaceInput {
             surface: cooked(ball),
         },
-        grid(),
     );
     let mesh = match rendered {
         Ok(mesh) => mesh,

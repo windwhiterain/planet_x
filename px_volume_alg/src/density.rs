@@ -252,7 +252,7 @@ pub fn sample_world(volume: &VolumeData, point: [f32; 3]) -> f32 {
 /// 所以这里**不许**做阈值或归一化 —— 那是下游调参的事（同 `params` 里那句：
 /// "算子不钳制输出，要钳就在下游接一个 `field.remap`"）。
 ///
-/// ⚠ **体积的分辨率与上游那张场可以不同**（`params.shape_of` 按画布的**比例**给）：
+/// ⚠ **体积的分辨率与上游那张场可以不同**（`params.shape_of` 给绝对数）：
 ///   两者相同时是纯粹的**布局搬运**（走 [`field_to_volume_slot`]，不插值）；
 ///   不同时按体素坐标**三线性读**那张场（走 [`sample_field_local`]）。
 ///
@@ -260,26 +260,17 @@ pub fn sample_world(volume: &VolumeData, point: [f32; 3]) -> f32 {
 ///   就是 `res³` —— 实测 `--face 128` 烘不完（超时）、`--face 256` **分配 50 GB 失败**。
 ///   解耦之后"角分辨率"与"径向层数"各是一个旋钮：细的角向结构（星云里的丝、星点）
 ///   不必逼着径向也一起变密。
-pub fn bake_density(
-    params: &DensityParams,
-    canvas_width: u32,
-    field: &Field,
-) -> Result<VolumeData, String> {
-    // 上游那张场自己的形状（由画布推出来）。
-    let source = VolumeShape::of(&px_graph_schema::Grid {
-        width: field.width,
-        height: field.height,
-        projection: field.projection,
-    })
-    .ok_or_else(|| {
+pub fn bake_density(params: &DensityParams, field: &Field) -> Result<VolumeData, String> {
+    // 上游那张场自己的形状（就在载荷里）。
+    let source = VolumeShape::of_field(field).ok_or_else(|| {
         format!(
             "cloud.density 的上游必须是体网格场（域 volume、行数能被 res²×6 整除），\
              拿到的是 {}×{} / {:?}",
             field.width, field.height, field.projection,
         )
     })?;
-    // 产物那一份体积的形状（按画布比例给，与场的粗细无关）。
-    let (res, layers) = params.shape_of(canvas_width);
+    // 产物那一份体积的形状（**参数**给的绝对数，与场的粗细无关）。
+    let (res, layers) = params.shape_of();
     let shape = VolumeShape { res, layers };
     let same_grid = res == source.res && layers == source.layers;
 
@@ -373,7 +364,7 @@ mod tests {
         let shape = VolumeShape { res: 4, layers: 3 };
         // 值 = 坐标的可逆编码（每一格都不一样，重排一点点都看得出来）。
         let field = grid_field(&shape, |x, y| (x as f32 + 1.0) + (y as f32 + 1.0) * 100.0);
-        let volume = bake_density(&params_for(&shape), shape.res, &field).expect("烘密度");
+        let volume = bake_density(&params_for(&shape), &field).expect("烘密度");
 
         let mut checked = 0;
         for face in 0..CUBE_FACES {
@@ -418,10 +409,10 @@ mod tests {
         });
         let params = DensityParams {
             layers: 8,
-            res_ratio: 1.0,
+            res: 64,
             ..Default::default()
         };
-        let volume = bake_density(&params, source.res, &field).expect("烘密度");
+        let volume = bake_density(&params, &field).expect("烘密度");
         assert_eq!((volume.res, volume.layers), (8, 8), "产物形状按参数走");
         // 取中段层（两壁的渐隐窗在那里是 1，值就是搬运过来的那一个）。
         for layer in [2_u32, 4, 6] {
@@ -484,12 +475,12 @@ mod tests {
             field_shape.slot_of(y).map(|(_, layer)| layer).unwrap_or(0) as f32 / 5.0
         });
         let params = DensityParams {
-            res_ratio: 0.5,
+            res: 32,
             layers: 6,
             reach: 0,
             ..Default::default()
         };
-        let volume = bake_density(&params, field_shape.res, &field).expect("烘密度");
+        let volume = bake_density(&params, &field).expect("烘密度");
         assert_eq!(volume.res, 4, "面内应当减半（8 × 0.5）");
         assert_eq!(volume.layers, 6, "层数由参数自己给，不跟着面内走");
         assert_eq!(volume.samples(), (CUBE_FACES * 6 * 4 * 4) as usize);
@@ -515,13 +506,13 @@ mod tests {
         let shape = shape();
         let field = grid_field(&shape, |_, _| 0.37);
         let params = DensityParams {
-            res_ratio: 1.0,
+            res: 64,
             layers: shape.layers,
             inner: 2.0,
             outer: 5.0,
             reach: 0,
         };
-        let volume = bake_density(&params, shape.res, &field).expect("烘密度");
+        let volume = bake_density(&params, &field).expect("烘密度");
         assert_eq!(volume.res, shape.res);
         assert_eq!(volume.layers, shape.layers);
         assert_eq!(volume.inner, 2.0);
@@ -557,7 +548,7 @@ mod tests {
             reach: 0,
             ..Default::default()
         };
-        let volume = bake_density(&params, shape.res, &field).expect("烘密度");
+        let volume = bake_density(&params, &field).expect("烘密度");
         let mut checked = 0;
         for face in 0..CUBE_FACES {
             for layer in 0..shape.layers {
@@ -601,7 +592,6 @@ mod tests {
                 reach: 0,
                 ..params_for(&shape)
             },
-            shape.res,
             &field,
         )
         .expect("不保守");
@@ -610,7 +600,6 @@ mod tests {
                 reach: 1,
                 ..params_for(&shape)
             },
-            shape.res,
             &field,
         )
         .expect("保守");
@@ -649,17 +638,17 @@ mod tests {
         let shape = shape();
         let wrong_columns = Field::filled_with(8, shape.height(), 0.0, Projection::Volume);
         assert!(
-            bake_density(&DensityParams::default(), shape.res, &wrong_columns).is_err(),
+            bake_density(&DensityParams::default(), &wrong_columns).is_err(),
             "列数不对的场必须被拒"
         );
         let wrong_rows = Field::filled_with(shape.res, shape.height() + 1, 0.0, Projection::Volume);
         assert!(
-            bake_density(&DensityParams::default(), shape.res, &wrong_rows).is_err(),
+            bake_density(&DensityParams::default(), &wrong_rows).is_err(),
             "行数不对的场必须被拒"
         );
         let flat = Field::filled_with(shape.res, shape.height(), 0.0, Projection::CubeMap);
         assert!(
-            bake_density(&DensityParams::default(), shape.res, &flat).is_err(),
+            bake_density(&DensityParams::default(), &flat).is_err(),
             "域不对的场必须被拒"
         );
     }

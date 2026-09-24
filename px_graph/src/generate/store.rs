@@ -92,7 +92,6 @@ fn write_cas(
             params,
             blobs: blobs.iter().map(|blob| blob.header.clone()).collect(),
             fingerprint,
-            cameras: Vec::new(),
         }],
     };
     let mut frames = vec![Frame::Art(bundle)];

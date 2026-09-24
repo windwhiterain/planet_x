@@ -1,14 +1,13 @@
-use px_field_schema::field::{Field, GridField};
+use px_field_schema::field::Field;
 use px_field_schema::noise::FbmSettings;
 use px_field_schema::ops::Fbm;
 use px_field_schema::params;
-use px_graph_schema::Grid;
 
 use crate::noise;
 
-px_graph_schema::px_body! { Fbm, |p, _i, g| crate::ops::fbm::eval(p, &[], g) }
+px_graph_schema::px_body! { Fbm, |p, _i| crate::ops::fbm::eval(p, &[]) }
 
-pub fn eval(params: &params::fbm::Params, _inputs: &[&Field], grid: Grid) -> Field {
+pub fn eval(params: &params::fbm::Params, _inputs: &[&Field]) -> Field {
     let settings = FbmSettings {
         frequency: params.frequency,
         octaves: params.octaves,
@@ -16,9 +15,9 @@ pub fn eval(params: &params::fbm::Params, _inputs: &[&Field], grid: Grid) -> Fie
         gain: params.gain,
         seed: params.seed,
     };
-    let mut field = grid.filled(0.0);
-    for y in 0..grid.height {
-        for x in 0..grid.width {
+    let mut field = params.shape.filled(0.0);
+    for y in 0..params.shape.height {
+        for x in 0..params.shape.width {
             let (u, v) = field.uv(x, y);
             let value = if params.spherical {
                 // ⚠ `zonal` 只动采样点的**纬度分量**：噪声在经度方向被拉长 `zonal` 倍
@@ -41,24 +40,25 @@ pub fn eval(params: &params::fbm::Params, _inputs: &[&Field], grid: Grid) -> Fie
 mod tests {
     use super::*;
     use px_field_schema::field::Projection;
+    use px_field_schema::params::Shape;
 
-    /// 在球面档上量"沿经度 vs 沿纬度"的平均 |Δ|（同一张 CubeMap 画布）。
+    /// 在球面档上量"沿经度 vs 沿纬度"的平均 |Δ|（同一份 CubeMap 形状参数）。
     fn anisotropy(zonal: f32) -> f32 {
-        let grid = Grid {
-            width: 256,
-            height: 1536,
-            projection: Projection::CubeMap,
-        };
         let params = params::fbm::Params {
             frequency: 3.0,
             octaves: 4,
             zonal,
+            shape: Shape {
+                width: 256,
+                height: 1536,
+                projection: Projection::CubeMap,
+            },
             ..Default::default()
         };
-        let field = eval(&params, &[], grid);
+        let field = eval(&params, &[]);
         let (mut along_lon, mut along_lat) = (0.0_f64, 0.0_f64);
-        for y in 1..grid.height {
-            for x in 1..grid.width {
+        for y in 1..params.shape.height {
+            for x in 1..params.shape.width {
                 let here = field.at(x, y) as f64;
                 along_lon += (here - field.at(x - 1, y) as f64).abs();
                 along_lat += (here - field.at(x, y - 1) as f64).abs();
@@ -67,7 +67,7 @@ mod tests {
         (along_lon / along_lat) as f32
     }
 
-    /// **`zonal` 让噪声沿经度拉长**：同一张画布上，沿经度的平均变化必须**明显小于**沿纬度的。
+    /// **`zonal` 让噪声沿经度拉长**：同一份形状参数上，沿经度的平均变化必须**明显小于**沿纬度的。
     ///
     /// ⚠ 判的是**方向**（比值），不是幅度 —— 幅度随频率/种子都在变，方向才是这一栏的语义。
     #[test]
@@ -87,7 +87,8 @@ mod tests {
     /// **默认不许动既有产物**：`zonal = 1.0` 时必须与"没有这一栏"逐点相同（这正是它默认值的意义）。
     #[test]
     fn zonal_one_is_the_old_behaviour_point_by_point() {
-        let grid = Grid {
+        // ⚠ 尺寸走**参数**（这一档是生成类算子，上游给不了形状）。
+        let shape = Shape {
             width: 64,
             height: 384,
             projection: Projection::CubeMap,
@@ -95,10 +96,10 @@ mod tests {
         let with_one = eval(
             &params::fbm::Params {
                 zonal: 1.0,
+                shape,
                 ..Default::default()
             },
             &[],
-            grid,
         );
         // 手算一遍"没有这一栏"的那条路（与改动前那一行等价）。
         let settings = FbmSettings {
@@ -108,15 +109,15 @@ mod tests {
             gain: params::fbm::Params::default().gain,
             seed: params::fbm::Params::default().seed,
         };
-        let mut old = grid.filled(0.0);
-        for y in 0..grid.height {
-            for x in 0..grid.width {
+        let mut old = shape.filled(0.0);
+        for y in 0..shape.height {
+            for x in 0..shape.width {
                 old.set(x, y, crate::noise::fbm_3(old.direction(x, y), &settings));
             }
         }
         let mut worst = 0.0_f32;
-        for y in 0..grid.height {
-            for x in 0..grid.width {
+        for y in 0..shape.height {
+            for x in 0..shape.width {
                 worst = worst.max((with_one.at(x, y) - old.at(x, y)).abs());
             }
         }

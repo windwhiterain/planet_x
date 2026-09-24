@@ -2023,6 +2023,7 @@ dependencies = [
  "pollster",
  "px_gpu",
  "px_graph",
+ "px_graph_schema",
  "px_protocol",
  "px_shader",
  "px_sparse",
@@ -2074,6 +2075,7 @@ dependencies = [
 name = "px_sparse"
 version = "0.1.0"
 dependencies = [
+ "px_graph_schema",
  "px_protocol",
 ]
 

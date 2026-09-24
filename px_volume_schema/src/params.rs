@@ -498,12 +498,16 @@ pub mod density {
     pub struct DensityParams {
         /// **面内分辨率占画布宽度的比例**（`1.0` = 与画布同细）。
         ///
-        /// ⚠ 这里**故意不给绝对 `res`**：上游那张三维场是照画布造的，两边差一个绝对数就
-        ///   永远对不上。给比例则可以"画布细、体积粗"（体积按体素坐标三线性读那张场）。
-        pub res_ratio: f32,
+        /// **面内分辨率**（绝对数，`res × res` 一格一面）。
+        ///
+        /// ⚠ 它从**绝对值**给（用户 2026-09-27 的裁定："不允许添加画布这个概念，一切皆参数"；
+        ///   体积的 `res` 也随之从"占画布宽度的比例"改成绝对数）。上游那张三维场的形状由
+        ///   **它自己的参数**说（`field.fbm3` 的 `Shape`）⇒ 脚本用同一个值喂两边即可，
+        ///   而"两处必须一致"这件事从此在**脚本里看得见**，不再由一个全局画布暗中保证。
+        pub res: u32,
         /// **径向层数**（**独立**于面内分辨率）。
         ///
-        /// ⚠⚠ 它与 `res_ratio` 分开是**必须**的，不是留白：格数是 `res × res × layers` 级
+        /// ⚠⚠ 它与 `res` 分开是**必须**的，不是留白：格数是 `res × res × layers` 级
         ///   ⇒ 层数一旦跟着面内分辨率走就是 `res³`。实测把两者绑死（`layers = res/2`）时
         ///   `--face 128` **烘不完**（10 分钟超时）、`--face 256` **分配 50 GB 失败**。
         ///   星云要的是"角向细节 + 适中的径向分层"：丝与星点都在角向上，径向给 64~96 层
@@ -528,7 +532,7 @@ pub mod density {
     impl Default for DensityParams {
         fn default() -> Self {
             Self {
-                res_ratio: 1.0,
+                res: 64,
                 layers: 64,
                 inner: 1.0,
                 outer: 1.6,
@@ -543,11 +547,9 @@ pub mod density {
             self.outer - self.inner
         }
 
-        /// 这份参数 + 画布宽度 ⇒ 体网格的形状 `(res, layers)`。
-        pub fn shape_of(&self, canvas_width: u32) -> (u32, u32) {
-            let res = ((canvas_width as f32 * self.res_ratio).round() as u32).max(2);
-            let layers = self.layers.max(2);
-            (res, layers)
+        /// 这份参数 ⇒ 体网格的形状 `(res, layers)`（两个都是**参数**，没有别的来源）。
+        pub fn shape_of(&self) -> (u32, u32) {
+            (self.res.max(2), self.layers.max(2))
         }
     }
 }

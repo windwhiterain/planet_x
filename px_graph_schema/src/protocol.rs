@@ -1,27 +1,19 @@
-//! 图与算子之间的**协议数据**：画布、图规格、清单条目。
+//! 图与算子之间的**协议数据**：图规格、清单条目。
 
 use serde::{Deserialize, Serialize};
 
-use px_protocol::art::{Camera, Domain};
-
+/// 一张图：**就一个名字**。
+///
+/// ⚠ **没有尺寸、没有投影**：它们从前住在这里，作为"图交给算子的那张画布"；现在
+///   它们是**参数**（`field.*` 那几个算子的 `Shape`）—— 于是"这个节点产出多大"这句话
+///   只由**参数**回答，不再有一个藏在驱动里的第二份真相。
+///   渲染那一侧的帧尺寸本来就来自请求（`px_render::serve`），不从这里取。
+///
+/// ⚠ **也没有相机表**：相机是**场景脚本**里的普通数据（`px-scene` 的 recipe 里那张表），
+///   不属于图、不属于产物、不进缓存键 —— 它管的是「怎么看」。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GraphSpec {
     pub name: String,
-    pub width: u32,
-    pub height: u32,
-    pub projection: Domain,
-    /// 评审相机表：写进每一个产物（局部方向 + 距离，见 `px_protocol::art::Camera`）。
-    /// 它属于「怎么看」不属于「是什么」，但住在产物里 ⇒ 必须进缓存键。
-    pub cameras: Vec<Camera>,
-}
-
-/// 交给算子的画布：`width × height` + 投影。场的 `filled` / `direction` 那些 helper
-/// 住在 `px_field_schema`（域自己的事），这里只留数据。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Grid {
-    pub width: u32,
-    pub height: u32,
-    pub projection: Domain,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

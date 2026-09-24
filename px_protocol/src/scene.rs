@@ -1486,7 +1486,6 @@ pub fn scene_bytes(spec: &SceneSpec, fingerprint: u64) -> Result<Vec<u8>, String
             ]),
             blobs: Vec::new(),
             fingerprint,
-            cameras: spec.cameras.clone(),
         }],
     };
     let frames = vec![

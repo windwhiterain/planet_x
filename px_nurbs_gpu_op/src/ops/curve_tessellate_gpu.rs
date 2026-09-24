@@ -4,7 +4,7 @@ use px_nurbs_schema::params;
 
 px_graph_schema::px_body! {
     CurveTessellateGpu,
-    |p, i, _g| crate::ops::curve_tessellate_gpu::eval(p, i.curve.value())?
+    |p, i| crate::ops::curve_tessellate_gpu::eval(p, i.curve.value())?
 }
 
 /// **曲线细分（GPU）**：逐点求值在 WGSL，编排与装配在 `crate`。

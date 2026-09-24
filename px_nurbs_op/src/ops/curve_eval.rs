@@ -4,7 +4,7 @@ use px_nurbs_schema::point::PointData;
 
 px_graph_schema::px_body! {
     CurveEval,
-    |p, i, _g| crate::ops::curve_eval::eval(p, i.curve.value())?
+    |p, i| crate::ops::curve_eval::eval(p, i.curve.value())?
 }
 
 /// 在一个固定参数上求值（参数来自参数文件的 `u`）。
