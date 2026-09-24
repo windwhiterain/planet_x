@@ -24,10 +24,15 @@ stage 2：图 include! 生成物 ⇒ **用的就是 stage 1 生成的类型**；
 ```
 px list                                  列实例：id / 声明 / 根 / 源 / key / 有|缺
 px build [--gc] [--deep] [--target]      编缺的；--gc 回收非活实例库（--deep 清生成目录，--target 清嵌套中间物）
-px run <图> [--build] [-- 图参数…]        两阶段：计划 →（可选编）→ 跑 target/debug/<图>.exe
+px run <图> [--build] [--store <目录>] [图自己的参数…]
+                                         两阶段：计划 →（可选编）→ 跑 target/<profile>/<图>.exe
+px_render --view --scene <S.pxart> [--edit <场景配方名>]
+                                         预览窗口 + **调参面板**（S9，见 44-viewer-gui.md）
+                                         `--edit` 不给时按 scene 清单推配方名
 tools/px.ps1 -Task list|build|gc|run     同上；图名走 -Graph <图>（不进 ValidateSet）
 ```
 ⚠ 缺实例且没给 `--build` ⇒ **非零退出并打印该跑的命令**（stage 2 绝不偷偷触发编译）。
+⚠ `--store` 换的是**参数目录**（默认 `art/`），**不进键**：键跟字节走、不跟目录走。
 
 ## 三、四条铁律（改任何东西之前先读）
 
@@ -54,6 +59,10 @@ tools/px.ps1 -Task list|build|gc|run     同上；图名走 -Graph <图>（不�
 ⚠ **anchor 与实例 key 都是"按 checkout"的量**：行尾（CRLF/LF）不同会让同一个 recipe 给出不同的值；
 换一份 checkout 要重跑一遍登记。
 
+⚠ **盘上有一处陈旧**（2026-09-28 实测，未修）：`art/nebula/density_volume.toml` 还是旧字段
+`res_ratio`，而 `DensityParams` 只认 `res` ⇒ **`px run nebula` 在今天烘不过**
+（`43-params-not-canvas.md` §2 那次改名漏了这份 toml；`origin/v2` 同样）。见 `44-viewer-gui.md` §6。
+
 ## 五、加一个泛型实例（今天的最短路径）
 
 1. 声明：`px_*_schema/src/ops.rs` 一行 `px_op!`，并在 `px_decls/src/lib.rs` 的 `decl()` 里**加一臂**（引用真类型）；
@@ -68,7 +77,8 @@ tools/px.ps1 -Task list|build|gc|run     同上；图名走 -Graph <图>（不�
 
 | 文件 | 是什么 |
 |---|---|
-| `21-codegen-types.md` | **最近一轮**：stage 1 生成类型（recipe + `px_decls` + `insts_gen.rs`）+ 读数 |
+| `44-viewer-gui.md` | **最近一轮**：预览窗口里的调参面板（改参数 → 子进程 cook → 画面重载） |
+| `21-codegen-types.md` | stage 1 生成类型（recipe + `px_decls` + `insts_gen.rs`）+ 读数 |
 | `20-build-graph.md` | build graph / 两阶段 / `px` driver / §192–§195 的清理与裁决 |
 | `19-generic-inst.md` | 泛型实例（`px_inst!` 时代）—— key 各轴 / 握手 / 装载仍然生效 |
 | `18-operator-libraries.md` | 实现库拆分与 M1/M2；那些用血换的教训仍然有效 |

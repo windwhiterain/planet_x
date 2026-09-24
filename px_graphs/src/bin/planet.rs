@@ -16,6 +16,9 @@ use px_graphs::elem;
 type Fault = Box<dyn std::error::Error>;
 
 fn main() -> Result<(), Fault> {
+    // ⚠ **第一行**：`--store <目录>` 要在任何 `begin` / `node_params` 之前落成 `PX_ART`
+    //   （参数目录不是节点键的一部分，见 `px_graph::driver` 的模块文档）。
+    px_cook::apply_store_args()?;
     let graph = begin(GraphSpec {
         name: "planet".to_string(),
     });

@@ -111,6 +111,10 @@ fn usage() -> String {
 }
 
 fn main() {
+    // ⚠ **第一行**：`--store <目录>` 要在任何 `begin` 之前落成 `PX_ART`
+    //   （参数目录不是节点键的一部分，见 `px_graph::driver` 的模块文档）。
+    //   下面那个循环不认得 `--store` ⇒ 它会把它当成位置参数，所以这一句必须在它之前跑。
+    px_cook::apply_store_args().unwrap_or_else(|err| panic!("{err}"));
     // ⚠ 这张图**一个节点都不走缓存**：`begin` 只要它那一行摘要（图名 / 参数目录 / 缓存条数）。
     let _graph = px_cook::begin(px_cook::GraphSpec {
         name: "passdoc".to_string(),
@@ -120,7 +124,11 @@ fn main() {
     let mut positional: Vec<String> = Vec::new();
     let mut frame_name = px_scene::frame::DEFAULT_FRAME.to_string();
     let mut with_graph = true;
-    let mut args = std::env::args().skip(1);
+    // ⚠ 参数走 `args_without_store()`：这个循环按**位置**读三个参数，而 `--store X`
+    //    那一对会顶到位置上 ⇒ 读成"一份叫 `--store` 的场景产物"（不是报错，是读错东西）。
+    let mut args = px_cook::args_without_store()
+        .unwrap_or_else(|err| panic!("{err}"))
+        .into_iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--no-frame-graph" => with_graph = false,

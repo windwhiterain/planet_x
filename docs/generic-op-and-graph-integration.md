@@ -661,11 +661,13 @@ px list                       # 只计划：列出每条实例的 key 与「有|
 px build                      # stage 1：编缺的那些（**不吃图名**；`px build --gc [--deep] [--target]` 回收代码缓存）
 px run planet                 # 两阶段：stage 1 计划全命中才进 stage 2（**只读**）
 px run planet --build         # stage 1 有缺就编那几条，再跑 stage 2
+px run planet --store <目录>   # 参数从那个目录读（默认 `art/`）—— 调参面板走的就是它
+px run scene orbit-bare       # 图自己的参数**直接跟在图名后面**（`scene` 的配方名）
 # 或者（包装层，task 与 driver **同名同义**）：
 #   .\tools\px.ps1 -Task list
 #   .\tools\px.ps1 -Task build              # 加 -Deep 连深层回收一起
 #   .\tools\px.ps1 -Task gc                 # = px build --gc
-#   .\tools\px.ps1 -Task run -Graph planet [--build] [-- 图自己的参数…]
+#   .\tools\px.ps1 -Task run -Graph planet [--build] [图自己的参数…]
 
 # `px` 是**薄 driver**：执行住在 `px_cook::inst::BuildGraph`
 # （`missing()` / `compile_one()` / `compile_missing()`，`20` §191）。
@@ -676,6 +678,11 @@ px run planet --build         # stage 1 有缺就编那几条，再跑 stage 2
 `20` §186 不许 stage 2 偷偷触发编译）。⚠ 从前那个 `PX_JIT=build` 环境变量兜底**已废弃、已从代码里删除**
 （今天就是 `px run <图> --build`，或先 `px build`）。
 ⚠ 读 key 直接跑 `target/debug/px.exe`，**别经过 `cargo run`** —— 特性合并不同会让它无谓重链（`19` §180 的量法坑）。
+⚠ `--store <目录>` **不进键**：产物键跟参数的**字节**走，不跟"那些字节住在哪个目录"走
+（`px_graph::driver` 的模块文档有整段；界面上的用户是调参面板，`44-viewer-gui.md`）。
+它由 `px` 原样转交给图 exe（图侧的 `px_cook::apply_store_args`）。
+包装层要转它得走 `-Rest`（`.\tools\px.ps1 -Task run -Graph planet -Rest @('--store','target/pcg/edit')`）：
+`-Graph` 只吃图名那一格。
 
 * 产物收在 `target/pcg/inst/<key>.dll`（+ `<key>.json` 那份 sidecar）：**机器本地、可删、
   不进 git** —— 与数据 CAS 同性质；`cargo build` 的中间物在 `target/jit/`。

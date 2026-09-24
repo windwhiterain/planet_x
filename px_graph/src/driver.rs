@@ -3,6 +3,27 @@
 //! ⚠ 这里是**唯一**知道「一个节点怎么走完一趟」的地方。它与 `cached` 之间只有两样东西：
 //! `Cache` 那几个方法（`px_graph_schema` 里的接缝）与序列化载荷（`PayloadBundle`）。
 //!
+//! ## 参数目录可以被**换指**（`PX_ART` / `--store`）
+//!
+//! 参数默认住在 `art/<图>/`，而「换一个目录读同一批节点」这件事有一个真实用户：
+//! **预览窗口里那块调参面板**（`px_render/src/edit.rs`）。它要的是"在盘上改一个数、
+//! 重烘、画面变"，而**不许**把工作树里的 `art/` 改脏（那是作品的源码，得留下"我到底改没改"
+//! 这个判断）。⇒ 面板把 `art/<图>/` 复制到 `target/pcg/edit/<图>/`，在副本上编辑，
+//! 再让烘图的那两个进程从副本读：
+//!
+//! ```text
+//! px_render --view …                       # 面板：写 target/pcg/edit/<图>/<节点>.toml
+//!   └─ px run nebula --store target/pcg/edit   # 烘体积与天空
+//!   └─ px run scene  nebula --store target/pcg/edit   # 烘场景文档
+//! ```
+//!
+//! ⚠⚠ **它不进键，也不许进键**：「这一趟读的是哪个目录」是一句**归档的话**
+//!   （产物落到哪一格 CAS、清单写在哪），不是"这个节点算什么"。把它塞进键就等于
+//!   让同一份内容在两个目录下算出两个键 —— 那是本仓最不该有的那种重复。
+//!   这条口径与 CAS 的键不含环境变量是**同一条**（`AGENTS.md` 里量 `PX_SKIP_OFF` 那条）。
+//! ⚠ 参数**文件在不在**照旧要进键（`node_params` 读到的是 `Some` 还是 `None`
+//!   会改变 `canonical_params` 的结果）：键跟的是**字节**，不是**路径**。
+//!
 //! ⚠ **没有全局单例**：`begin` 交回一个 `Graph` 句柄，图脚本拿着它跑 `cached`、最后 `finish`。
 //!   从前那份状态住在一个 `OnceLock` 里，于是**第二次 `begin` 被静默忽略** —— 同一个进程里
 //!   第二张图会读到第一张的画布 / 参数 / 相机，而没有任何一行代码看得见这件事。
@@ -271,13 +292,107 @@ pub fn cache_root() -> PathBuf {
     workspace_root().join("target").join("pcg")
 }
 
+/// **参数目录的根**：默认 `art/`，可用 `PX_ART` 换指（见模块文档）。
+///
+/// ⚠ 读的是**本进程的环境变量**，所以钉它的那一句话必须发生在任何 `begin` **之前**：
+///   图程序用 [`apply_store_args`] 在 `main` 的第一行就把 `--store` 落成 `PX_ART`。
+/// ⚠ 它是**路径**那一半，与键无关：换指不换键（同一批字节在哪儿都是同一批字节）。
+pub fn param_root() -> PathBuf {
+    match std::env::var("PX_ART") {
+        Ok(text) if !text.is_empty() => {
+            let path = PathBuf::from(&text);
+            if path.is_absolute() {
+                path
+            } else {
+                // 相对路径按**工作区根**解释。⚠ 不按当前目录：图程序是 `px` 起的，
+                // 而"px 从哪儿起"不归图管（§104 第 3 条：缺省值也是一处会漂的真相）。
+                workspace_root().join(path)
+            }
+        }
+        _ => workspace_root().join("art"),
+    }
+}
+
+/// **图程序的第一行**：把命令行的 `--store <目录>` 落成 `PX_ART`。
+///
+/// ```ignore
+/// fn main() -> Result<(), Fault> {
+///     px_cook::apply_store_args()?;   // ← 必须在 begin / node_params 之前
+///     let graph = px_cook::begin(GraphSpec { name: "nebula".to_string() });
+///     …
+/// ```
+///
+/// ⚠ 参数目录**不属于节点键**，所以它没有走 `GraphSpec`：进了 `GraphSpec` 就等于
+///   宣布"它是一张图的身份的一部分"，而它不是（同一张图可以从任何目录读参数）。
+///
+/// ⚠ 认两种写法（`--store D` 与 `--store=D`），而且**要把它从命令行上摘掉**：
+///   有几个图程序自己按位置读参数（`scene` 的配方名、`passes` 的三个位置参数），
+///   不摘的话它们会把 `--store` 与它那个目录当成内容 —— 那不是报错，是**读错东西**
+///   （`scene --store X orbit` 会去烘一份叫 `--store` 的配方）。
+///   ⇒ 自己还有参数要读的图程序请拿 [`args_without_store`] 的那一份，别回头去读
+///   `std::env::args()`。
+pub fn apply_store_args() -> Result<(), String> {
+    let (store, _) = split_store_args()?;
+    let Some(store) = store else {
+        return Ok(());
+    };
+    if store.is_empty() {
+        return Err("--store 的目录是空的".to_string());
+    }
+    // ⚠ SAFETY 那条纪律（Rust 2024）在这里适用得起来：`main` 的第一行是**单线程**的，
+    //   还没有第二个线程会读环境（图脚本是同步的，`std::thread` 一个都没起）。
+    unsafe { std::env::set_var("PX_ART", &store) };
+    Ok(())
+}
+
+/// `std::env::args()` **去掉 `--store` 与它那个值**的那一份（argv[0] 也去掉了）。
+///
+/// 它就是"图程序自己那几条参数"：自己读位置参数的图程序（`scene` / `passes`）
+/// 必须走这一份，理由见 [`apply_store_args`]。
+pub fn args_without_store() -> Result<Vec<String>, String> {
+    Ok(split_store_args()?.1)
+}
+
+/// **唯一那一处解析**：命令行长什么样、`--store` 怎么认，只在这里回答一次。
+/// 认两种写法（`--store D` 与 `--store=D`）；交回 `(那个目录, 剩下的参数)`。
+///
+/// ⚠ 两种写法都要，而"值"只在 `--store` 后面那一格 —— 写成 `--store=D` 时
+///   `strip_prefix` 拿到的就是值本身，别再去看下一格。
+fn split_store_args() -> Result<(Option<String>, Vec<String>), String> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut store: Option<String> = None;
+    let mut rest = Vec::with_capacity(args.len());
+    let mut index = 0;
+    while index < args.len() {
+        let arg = args[index].as_str();
+        if arg == "--store" {
+            let Some(value) = args.get(index + 1) else {
+                return Err("--store 后面要跟一个目录（--store <目录>）".to_string());
+            };
+            store = Some(value.clone());
+            index += 2;
+            continue;
+        }
+        if let Some(value) = arg.strip_prefix("--store=") {
+            store = Some(value.to_string());
+            index += 1;
+            continue;
+        }
+        rest.push(arg.to_string());
+        index += 1;
+    }
+    Ok((store, rest))
+}
+
 /// **开始一张图**：把画布、参数目录、清单都挂在一个 `Graph` 句柄上交回去。
 ///
 /// ⚠ 它交回句柄而不是往全局塞 —— 同**一个进程里可以同时跑两张图**（测试、
 ///   "一把跑全部图"那种入口），彼此不会串。
 pub fn begin(spec: GraphSpec) -> Graph {
     let root = workspace_root();
-    let param_dir = root.join("art").join(&spec.name);
+    // ⚠ 参数根走 `param_root()`（`PX_ART` 可以把它换到会话副本上，见模块文档）：
+    //   这里**只读路径**，`spec` 那一边一个字都不用知道。
+    let param_dir = param_root().join(&spec.name);
     let cache_root = root.join("target").join("pcg");
     let fresh = std::env::var("PX_PCG_FRESH")
         .map(|value| value != "0")

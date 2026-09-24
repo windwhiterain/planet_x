@@ -24,6 +24,9 @@ use px_scene::recipe;
 const DEFAULT_SCENE: &str = "orbit";
 
 fn main() {
+    // ⚠ **第一行**：`--store <目录>` 要在任何 `begin` 之前落成 `PX_ART`
+    //   （参数目录不是节点键的一部分，见 `px_graph::driver` 的模块文档）。
+    px_cook::apply_store_args().unwrap_or_else(|err| panic!("{err}"));
     // ⚠ 这张图**一个节点都不走缓存**：`begin` 只要它那一行摘要（图名 / 参数目录 / 缓存条数）。
     let _graph = px_cook::begin(px_cook::GraphSpec {
         name: "scene".to_string(),
@@ -32,9 +35,11 @@ fn main() {
     // 用法：scene [配方名] [--no-frame-graph]
     // ⚠ `--no-frame-graph` 是**兼容逃生门**（见 `px_scene::recipe::compile` 里那段注释），
     //    不是常规用法：它存在的唯一目的是证明老产物还能逐字节复现。
+    // ⚠ 参数走 `args_without_store()`：这里按**位置**读配方名，而 `--store X` 那一对
+    //    会顶到位置参数上 ⇒ 读成"一份叫 `--store` 的配方"（不是报错，是读错东西）。
     let mut name = DEFAULT_SCENE.to_string();
     let mut with_graph = true;
-    for arg in std::env::args().skip(1) {
+    for arg in px_cook::args_without_store().unwrap_or_else(|err| panic!("{err}")) {
         match arg.as_str() {
             "--no-frame-graph" => with_graph = false,
             other => name = other.to_string(),

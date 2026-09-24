@@ -4,8 +4,13 @@
 //! ```text
 //! px list                              计划：逐条打印 id / 声明 / 根 / 源 / key / 有|缺
 //! px build [--gc] [--deep] [--target]  stage 1：编缺的那些；（--gc 顺手回收非活实例库）
-//! px run <图> [--build] [-- <图参数…>]  两个 stage 顺序执行
+//! px run <图> [--build] [--store <目录>] [图自己的参数…]
+//!                                      两个 stage 顺序执行
 //! ```
+//!
+//! ⚠ `px run --store <目录>` 是**给调参面板用的**（`px_render/src/edit.rs`）：它把这一趟
+//!   读参数的目录从 `art/` 换到别处（会话副本），再原样转交给图 exe。它**不进键** ——
+//!   产物键跟参数的字节走，不跟目录走（`px_graph::driver` 的模块文档有整段）。
 //!
 //! ⚠ `list` 与 `build`（含 `--gc`）**不需要图名**：stage 1 是 **crate** 的属性，不是哪张图的
 //!   —— 这正是把两个 driver 并成一个的理由。
@@ -43,7 +48,8 @@ fn usage() -> String {
     "用法：px <list|build|run>\n  \
      list                              计划：逐条打印 id / 声明 / 根 / 源 / key / 有|缺\n  \
      build [--gc] [--deep] [--target]  stage 1：编缺的那些（--gc 顺手回收非活实例库）\n  \
-     run <图> [--build] [-- <图参数…>]  两个 stage 顺序执行（默认不编：运行只读）"
+     run <图> [--build] [--store <目录>] [图自己的参数…]\n  \
+                                     两个 stage 顺序执行（默认不编：运行只读）"
         .to_string()
 }
 
@@ -268,8 +274,12 @@ fn collect_garbage(graph: &BuildGraph, deep: bool, target: bool) -> Result<(), S
 ///   （`18` §171.5 用血换的）一并弄丢。
 /// ⚠ stage 2 **不嵌套 cargo**：图 exe 就在**本 exe 旁边**（同一个 `target/<profile>/`），
 ///   直接起它，退出码与输出原样透出去。
+///
+/// ⚠ `--store <目录>` 由**本函数**从自己的命令行摘走、再原样喂给图 exe（见
+///   `parse_run`）。它不进 stage 1，也不许进键：产物键只跟参数的**字节**有关，
+///   与"那些字节住在哪个目录"无关（`px_graph::driver` 的模块文档有整段）。
 fn run(args: &[String]) -> Result<(), String> {
-    let (graph_name, build, passthrough) = parse_run(args)?;
+    let (graph_name, build, store, passthrough) = parse_run(args)?;
 
     // ── stage 1：计划（不编译）──────────────────────────────────────────────
     let graph = graph();
@@ -294,7 +304,14 @@ fn run(args: &[String]) -> Result<(), String> {
     // ── stage 2：跑那张图（只读装载）────────────────────────────────────────
     let exe = graph_exe(&graph_name)?;
     println!("stage 2｜{}", exe.display());
-    let status = Command::new(&exe)
+    let mut command = Command::new(&exe);
+    // ⚠ `--store` 排在**最前**：图 exe 那几支自己按位置读参数（`scene` 的配方名、
+    //   `passes` 的三个位置参数），而它们都走 `px_cook::args_without_store()` 把它摘掉
+    //   —— 排在前面只是让"它属于 px，不属于图"在命令行上一眼看得见。
+    if let Some(store) = &store {
+        command.arg("--store").arg(store);
+    }
+    let status = command
         .args(&passthrough)
         .status()
         .map_err(|err| format!("起不了 {}：{err}", exe.display()))?;
@@ -302,15 +319,30 @@ fn run(args: &[String]) -> Result<(), String> {
     std::process::exit(status.code().unwrap_or(1));
 }
 
-/// `px run <图> [--build] [-- …]`。
+/// `px run <图> [--build] [--store <目录>] [-- 图参数… | 图参数…]`。
 ///
 /// ⚠ 头一个 `--`（`tools/px.ps1 -Target run -Graph <图>` 那条路径可能带进来）只是参数
 ///   **分隔符**：PowerShell 的 `-` 会被它自己的参数绑定吃掉（`-Level`），所以那一边用 `-Graph`。
-/// ⚠ 再往后的 `--` 之后一律**原样**交给图 exe（图自己的参数，这里不解释它们）。
-fn parse_run(args: &[String]) -> Result<(String, bool, Vec<String>), String> {
+/// ⚠ `--` 之后一律**原样**交给图 exe（图自己的参数，这里不解释它们）。
+///
+/// ⚠ **不带 `--` 的位置参数也算图参数**（`px run scene orbit-bare`）：`graph_exe` 旁边
+///   那几支图程序自己按位置读参数，而 `px run scene -- orbit-bare` 与
+///   `px run scene orbit-bare` 在这里是**同一件事**。收下它不放松任何一条：
+///   px 自己的开关全部以 `-` 开头，所以"不带 `-` 的东西"不可能是 px 的，只可能是图的。
+///   （从前那种写法只认 `--` 之后，症状是 `px run scene orbit-bare` 报"不认识的参数
+///   `orbit-bare`" —— 那是一句**指错方向**的话：`orbit-bare` 本来就不是给 px 的。）
+///
+/// ⚠ `--store <目录>` 是 px **自己**的开关（所以它在 `--` **之前**），用处是"这一趟从
+///   哪个目录读参数"：产物键跟字节走、不跟目录走（`px_graph::driver` 那一整段）。
+///   它由 px 原样转交给图 exe —— 图 exe 的 `px_cook::apply_store_args` 认的就是它。
+///   ⚠ `--store <目录>` 与 `--store=<目录>` **两种写法都收**：那是同一个开关的两种写法，
+///     只收一种的话，另一种会在**离病因最远的地方**报"不认识的参数"。
+fn parse_run(args: &[String]) -> Result<(String, bool, Option<String>, Vec<String>), String> {
     let usage = || {
-        "用法：px run <图> [--build] [-- <图自己的参数…>]\
-         \n  --build    stage 1 有缺时**编**它们（默认不编：运行只读）"
+        "用法：px run <图> [--build] [--store <目录>] [-- 图自己的参数…]\
+         \n  --build        stage 1 有缺时**编**它们（默认不编：运行只读）\
+         \n  --store <目录> 参数从哪个目录读（默认 art/；图侧同一个开关见 px_graph::driver）\
+         \n  图自己的参数（`scene` 的配方名、`passes` 那三个位置参数）直接跟在图名后面"
             .to_string()
     };
     // 头一个分隔符（如果有）不算参数。
@@ -322,20 +354,37 @@ fn parse_run(args: &[String]) -> Result<(String, bool, Vec<String>), String> {
         return Err(usage());
     };
     let mut build = false;
+    let mut store: Option<String> = None;
     let mut passthrough = Vec::new();
     let mut after_separator = false;
-    for arg in args.iter().skip(1) {
+    let mut index = 1;
+    while index < args.len() {
+        let arg = args[index].as_str();
         if after_separator {
-            passthrough.push(arg.clone());
+            passthrough.push(arg.to_string());
+            index += 1;
             continue;
         }
-        match arg.as_str() {
+        match arg {
             "--" => after_separator = true,
             "--build" => build = true,
-            other => return Err(format!("不认识的参数 `{other}`\n{}", usage())),
+            "--store" => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err(format!("--store 后面要跟一个目录\n{}", usage()));
+                };
+                store = Some(value.clone());
+                index += 1;
+            }
+            // 不带 `-` 的一律是图的（见上面那段）：`px run scene orbit-bare`。
+            other if !other.starts_with('-') => passthrough.push(other.to_string()),
+            other => match other.strip_prefix("--store=") {
+                Some(value) => store = Some(value.to_string()),
+                None => return Err(format!("不认识的参数 `{other}`\n{}", usage())),
+            },
         }
+        index += 1;
     }
-    Ok((name.clone(), build, passthrough))
+    Ok((name.clone(), build, store, passthrough))
 }
 
 /// 图 exe 在**本 exe 旁边**（同一个 `target/<profile>/`）—— stage 2 不嵌套 cargo。

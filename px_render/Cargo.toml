@@ -18,6 +18,13 @@ wgpu = { version = "29", default-features = false, features = ["vulkan", "wgsl"]
 # 缺省特性是一份"没人写过"的选择，这里显式点名（§104 第 3 条）。
 winit = { version = "0.30", default-features = false, features = ["rwh_06"] }
 naga = { version = "29", features = ["wgsl-in"] }
+# 调参面板那一侧要**改一行 TOML 而不动别的字节**（`src/edit.rs`）：`art/**/*.toml` 里的注释
+# 是这批作品的**说明书**（每个数为什么是这个数都写在旁边那一行上面），`toml::to_string`
+# 会把它整片抹掉 ⇒ 用保格式的编辑口。⚠ 版本对齐 `toml 0.8` 拉进来的那一份（同一个 crate
+# 的两个 minor 都在 lock 里，点名的是新那一个）。
+toml_edit = "0.25"
+# 只读参数文件的内容（判据要拿它当 oracle：编辑之后**解出来的值**必须与编辑前逐字段相同）。
+toml = "0.8"
 # PNG 必须走 image（§104 第 3 条）：哈希是被这个编码器定下来的，不是被我们。
 image = { version = "0.25", default-features = false, features = ["png"] }
 pollster = "0.4"
@@ -28,6 +35,15 @@ serde = { version = "1", features = ["derive"] }
 # 本仓库的判据是逐字节的，读不出写进去的东西就是缺陷 —— 代价是浮点解析约 2×，
 # 而文档只有几 KB。五个 crate 都写一遍：别靠特性合并的偶然。
 serde_json = { version = "1", features = ["float_roundtrip"] }
+# 调参面板（S9）：**渲染宿主里那块 GUI**。
+# ⚠ 版本是**配套**钉的，不是"最新"：`egui-wgpu 0.36` 要 `wgpu 30`，而本宿主锁死 `wgpu 29`
+#   —— 两个 major 的 `wgpu` 同时进树的话，面板拿到的 `Device` 与画面那张 `Surface`
+#   根本不是同一个类型。`0.35` 那一支要的正是 `wgpu 29` / `winit 0.30`。
+# ⚠ 三个都关掉缺省特性：那些缺省里是 wayland / x11 / 剪贴板（`arboard`）/ `webbrowser`
+#   （§104 第 3 条：缺省特性是一份"没人写过"的选择）。
+egui = { version = "0.35", default-features = false, features = ["default_fonts"] }
+egui-wgpu = { version = "0.35", default-features = false }
+egui-winit = { version = "0.35", default-features = false }
 
 [dev-dependencies]
 # ⚠ **只在判据里**用真的 glam：`mat4.rs` 是"逐位移植"，而"移植得像不像"只能拿**原件**比。
