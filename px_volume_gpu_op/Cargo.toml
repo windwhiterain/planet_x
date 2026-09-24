@@ -5,6 +5,9 @@ edition = "2024"
 
 [dependencies]
 px_volume_schema = { path = "../px_volume_schema" }
+# 几何两核（`cube_face_of` / `cube_direction`）与体网格坐标：占用索引要按**同一套取整**
+# 把世界点落到格上（`px_volume_schema` 只再导出了几何里的一小部分）。
+px_protocol = { path = "../px_protocol" }
 px_field_schema = { path = "../px_field_schema" }
 px_volume_alg = { path = "../px_volume_alg" }
 px_gpu = { path = "../px_gpu" }

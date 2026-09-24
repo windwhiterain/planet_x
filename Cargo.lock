@@ -2069,6 +2069,7 @@ version = "0.0.0"
 dependencies = [
  "px_field_schema",
  "px_gpu",
+ "px_protocol",
  "px_sparse",
  "px_volume_alg",
  "px_volume_schema",

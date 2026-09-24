@@ -24,10 +24,24 @@ fn flat_index_of(id: vec3<u32>) -> u32 {
     return id.x + id.y * WG_X * WG_SIZE;
 }
 
+// **占用索引**的只读参数块（与 Rust 的 `OccupancyUniform` 逐字段对齐）。
+//
+// ⚠⚠ `extra.w` 是**空跳开关**：`0` ⇒ 这一档的步进与"没有这份索引"时**逐位相同**
+//   （关掉被验证的那一项，本身就是判据要的参考档）。它不能省 —— 判据 `the_skip_matches_
+//   the_reference_march` 靠同一份 WGSL 的开关两档对账，不另写一份实现。
+struct Occupancy {
+    // res, layers, blocks_per_face, skip
+    extra: vec4<u32>,
+    // ratio = ln(outer/inner)（inner <= 0 时 0），未用 x3
+    scalars: vec4<f32>,
+};
+
 @group(0) @binding(0) var<uniform> volume: Volume;
 @group(0) @binding(1) var<storage, read> data: array<f32>;
 @group(0) @binding(2) var<storage, read> points: array<f32>;
 @group(0) @binding(3) var<storage, read_write> out: array<f32>;
+@group(0) @binding(13) var<uniform> occupancy: Occupancy;
+@group(0) @binding(14) var<storage, read> occupancy_words: array<u32>;
 
 fn cube_direction(face: u32, s: f32, t: f32) -> vec3<f32> {
     let a = s * 2.0 - 1.0;
@@ -111,6 +125,135 @@ fn gather_at(corners: array<u32, 8>, weights: array<f32, 8>, lane: u32) -> f32 {
         total = total + weights[i] * data[corners[i] + lane];
     }
     return total;
+}
+
+// ---------------------------- 占用索引（层次化空跳）----------------------------
+//
+// 布局与 `px_volume_gpu_op::occupancy` 逐字段对齐（那边是真源，改那边必须改这里）：
+//   * L1 侧车：`packed = 面 · blocks_per_face + (ct · blocks_l + cl) · blocks_s + cs` 位 = 存活；
+//   * L2 掩码：存活粗块固定 64 个子块槽位（`2³` 子块，位号 `(l·4 + t)·4 + s`），每 32 位一个字；
+//   * 空的判据是**块内精确 0**（六通道全 0），所以"块空"⇒ 该块里任何采样都贡献 0。
+//
+// ⚠⚠ 取整规则（`u32(s · res)` 截断 + `min(·, n-1)`）必须与 Rust 那份**逐字一致**：
+//   差一格就是"掩码比采样核偏半格"，而画面上的症状只是一小截气多出来或少掉，归因极远。
+const COARSE: u32 = 8u;
+const FINE: u32 = 2u;
+const FINE_PER_AXIS: u32 = 4u;
+// ⚠⚠ `FINE_PER_AXIS³ / 32` = `64 / 32` = **2**：子块掩码只有 64 位 ⇒ 每块两个 `u32`。
+//   这里硬编码过 `16`，而 Rust 那边是算出来的 2 ⇒ 每个块的 L2 都读到了**八个块以外**
+//   的掩码 ⇒ `occupancy_class` 几乎恒回"粗块活着但子块空"，skip 侧整片错。
+//   两处的数必须同源：改 `FINE`/`COARSE` 就要同时改这一行，或者干脆别在这里算。
+const WORDS_PER_BLOCK: u32 = FINE_PER_AXIS * FINE_PER_AXIS * FINE_PER_AXIS / 32u;
+
+// ⚠ 这里**不能**写 `@inline`：naga 只认 `@const`/`@must_use` 那几种属性，
+//   写了它的症状是"整份 WGSL 解析失败 ⇒ 每次派发都返回 Err"，而读起来像"没有 GPU"。
+fn occupancy_bit(word: u32, bit: u32) -> bool {
+    return (word & (1u << bit)) != 0u;
+}
+
+// 世界点落在哪个**层**（与 `layer_of_altitude` 同一套取整）。
+fn layer_index(radius: f32) -> u32 {
+    let layers = max(volume.shape.y, 1u);
+    let altitude = shell_altitude(radius);
+    return min(u32(altitude * f32(layers - 1u)), layers - 1u);
+}
+
+// 世界点 → 层 `cl` 的下界半径（`u = cl / (layers-1)`）。
+fn layer_radius(cl: u32) -> f32 {
+    let layers = max(volume.shape.y, 2u);
+    return shell_radius(f32(min(cl, layers - 1u)) / f32(layers - 1u));
+}
+
+// ⚠⚠ 世界方向 → **体积网格的** `(面, u, v)`。
+//
+//   体积的 `(面, u, v)` 是 `px_protocol::art::cube_direction` 那一套（`direction_of` 就是它）；
+//   这一份是它的**逆**：`u = (a/major)·0.5 + 0.5`，`a`/`major` 就是那 6 条公式里的量。
+//
+//   ⚠⚠ **不能用 `cube_face_of`**：那是另一套面序/轴向约定（同一个方向给出另一个面号），
+//     拿它去查按**网格面序**建的掩码 ⇒ 读到别的面 ⇒ 真空判定整片落空 ⇒ skip 侧全 0
+//     （实测踩过：最大偏差 0.363、skip 全黑，而掩码本身是对的）。
+//     判据要看"掩码与采样是不是同一套坐标"，不是"两个函数各自像不像"。
+fn grid_coords_of(direction: vec3<f32>) -> vec3<f32> {
+    let ax = abs(direction.x);
+    let ay = abs(direction.y);
+    let az = abs(direction.z);
+    var face = 5u;
+    var major = az;
+    var a = -direction.x;
+    var b = -direction.y;
+    if (ax >= ay && ax >= az) {
+        major = ax;
+        if (direction.x > 0.0) {
+            face = 0u;
+            a = -direction.z;
+            b = -direction.y;
+        } else {
+            face = 1u;
+            a = direction.z;
+            b = -direction.y;
+        }
+    } else if (ay >= az) {
+        major = ay;
+        if (direction.y > 0.0) {
+            face = 2u;
+            a = direction.x;
+            b = direction.z;
+        } else {
+            face = 3u;
+            a = direction.x;
+            b = -direction.z;
+        }
+    } else if (direction.z > 0.0) {
+        face = 4u;
+        a = direction.x;
+        b = -direction.y;
+    }
+    major = max(major, 1e-30);
+    let u = clamp((a / major) * 0.5 + 0.5, 0.0, 1.0);
+    let v = clamp((b / major) * 0.5 + 0.5, 0.0, 1.0);
+    return vec3<f32>(f32(face), u, v);
+}
+
+// 一档占用：`0` = 空块（可以整段跳）、`1` = 粗块活但这一子块空、`2` = 有内容。
+//
+// ⚠ 越界的下标**先夹回范围**再算：`u32(负数)` 在 WGSL 里会绕成巨大值，落进别的面/层里，
+//   那是最难归因的一类错（掩码看上去正常，只是判在了别处）。
+// ⚠⚠ 角向格号用 `u · res`（**格心**口径：`0..res-1` 个格心均匀铺在 `[0,1]` 上），
+//   与 `layer_index` 的 `altitude · (layers-1)` 同一个"取哪一个格"的意思。
+//   掩码与"读哪一格"必须是同一套取整 —— 这一处与 Rust 的 `voxel_index` 逐字对齐。
+fn occupancy_class(point: vec3<f32>) -> u32 {
+    if (occupancy.extra.w == 0u) {
+        return 2u;
+    }
+    let res = occupancy.extra.x;
+    let layers = occupancy.extra.y;
+    let radius = sqrt(dot(point, point));
+    let direction = point / max(radius, 1e-30);
+    let mapped = grid_coords_of(direction);
+    let face = u32(mapped.x);
+    let cs = min(u32(mapped.y * f32(res)), res - 1u);
+    let ct = min(u32(mapped.z * f32(res)), res - 1u);
+    let cl = layer_index(radius);
+    let blocks_s = (res + COARSE - 1u) / COARSE;
+    let blocks_l = (layers + COARSE - 1u) / COARSE;
+    let blocks_t = (res + COARSE - 1u) / COARSE;
+    let bs = min(cs / COARSE, blocks_s - 1u);
+    let bl = min(cl / COARSE, blocks_l - 1u);
+    let bt = min(ct / COARSE, blocks_t - 1u);
+    let packed = face * occupancy.extra.z + (bt * blocks_l + bl) * blocks_s + bs;
+    // ⚠⚠ **上传布局是两段**：`[L1 位（每块 1 位）][L2 掩码（每块 WORDS_PER_BLOCK 字）]`。
+    //   ⚠ 不能把 L1 当成"每块的第 0 个字"：`WORDS_PER_BLOCK = 4³/32 = 2`，L2 正好把两个字节
+    //     用满 ⇒ L1 必须独占一段（`occupancy.scalars.z` = L1 的字数）。
+    //   真源是 `Occupancy::upload_words` / `at_cell`；三处必须同一套。
+    let l1_word = occupancy_words[packed / 32u];
+    if (!occupancy_bit(l1_word, packed % 32u)) {
+        return 0u;
+    }
+    let sub = ((cl % COARSE) / FINE) * FINE_PER_AXIS * FINE_PER_AXIS
+        + ((ct % COARSE) / FINE) * FINE_PER_AXIS
+        + ((cs % COARSE) / FINE);
+    let base = u32(occupancy.scalars.z) + packed * WORDS_PER_BLOCK + sub / 32u;
+    return select(1u, 2u, occupancy_bit(occupancy_words[base], sub % 32u));
 }
 
 // ⚠⚠ **径向律：参数空间里线性、世界空间里等比**（2026-09-25 用户口径，与 CPU 的
@@ -517,6 +660,14 @@ fn star_slab_collect(direction: vec3<f32>, t0: f32, t1: f32, support: f32) {
 //   * `T < 1e-4` 时 CPU 把游标推到末尾 ⇒ 剩下的星**整批丢掉**（不是用 `T` 兜底）；
 //   * 走完全程时，剩下的星（半径超出最后一个采样点的、**以及还没收到的那几层**）
 //     才用最后的透过率兜底。
+//
+// ⚠⚠ **空跳**（层次化，`occupancy.extra.w != 0` 时生效）：视线沿**粗块**（`8³`）推进，
+//   空块（块内六通道全 0）整块跳过 —— 那里的发射与消光是**精确 0**，跳过它是恒等变换
+//   （不写 0 与乘 `exp(0) = 1` 都不改变结果），所以这一步动的**不是**物理，是循环的次数。
+//   有内容的块里按**块自己的尺度**取 `k` 个中点样本（`k = Δ层 / Δu`）⇒ 逐样本的位置与
+//   挨着穿过这一段的密集步进**一致**，质量不降。
+//   ⚠ `occupancy.extra.w == 0` 时这条路一次都不进（`occupancy_class` 恒回 `2`），
+//     逐位退回密集步进 —— 同一份 WGSL 的开关两档就是判据要的对账参考。
 fn march_radiance(direction: vec3<f32>, lane: u32, steps: u32, enter: f32, background: f32) -> f32 {
     let outer = volume.extent.y;
     let cell = star_meta.space.x;
@@ -531,12 +682,133 @@ fn march_radiance(direction: vec3<f32>, lane: u32, steps: u32, enter: f32, backg
     // ⚠⚠ **步长在参数空间里固定**（`u` 均匀 ⇒ 世界等比，与 CPU 同一口径）。
     //   世界长度每步都要算（光学深度是世界的量），而它与抖动无关 ⇒ 期望值不变。
     let du = 1.0 / f32(steps);
-    for (var i = 0u; i < steps; i = i + 1u) {
-        // ⚠ 采样点取格子中点（`offset = 0.5`）：与 CPU 的 `jitter = 0` 那一档逐字一致
-        //   （抖动是 CPU 那一侧的另一档，这里不掺 —— 掺了就不是同一条视线了）。
-        let here = (f32(i) + 0.5) * du;
-        let distance = shell_radius(here);
-        let step = shell_radius(f32(i + 1u) * du) - shell_radius(f32(i) * du);
+    // ⚠ 预算按**采样点数 × 16** 记：有内容的块花"它自己的样本数"，空块不花 ⇒
+    //   同样的 `steps` 能推进更远（用户 2026-09-25 选的"预算换纵深"）。
+    //   乘 16 是为了让"块内样本数"的小数部分能累加（不然每块都被 `u32` 截断、细块的采样会悄悄变稀）。
+    var budget = steps * 16u;
+    // 这一趟跑过的**层**（径向格坐标，`u32`）：DDA 的当前位置。
+    var current = 0u;
+    let max_layer = volume.shape.y - 1u;
+    // 空跳档的起点：`enter` 向上贴到**它所在层的边界**（`u = cl / (layers-1)`）。
+    // ⚠ 这一贴是把"空块"与"层号"对齐 —— 采样点一个都不挪（挪的只是从哪里开始看块）。
+    let enter_layer = min(u32(shell_altitude(enter) * f32(max_layer) + 1e-6), max_layer);
+    var radius = select(clamp(enter, shell_radius(0.0), shell_radius(1.0)), layer_radius(enter_layer), occupancy.extra.w != 0u);
+    var i = 0u;
+    if (occupancy.extra.w != 0u) {
+        current = enter_layer;
+    }
+    loop {
+        if (i >= steps || radius >= outer || transmittance < 1e-4) {
+            if (transmittance < 1e-4) {
+                stopped = true;
+            }
+            break;
+        }
+        // 这一步的采样点与步长（**密集档**：与"没有那份索引"时逐字相同的那条路）。
+        var here = (f32(i) + 0.5) * du;
+        var distance = shell_radius(here);
+        var step = shell_radius(f32(i + 1u) * du) - shell_radius(f32(i) * du);
+        var samples = 1u;
+        // 这一段的粗块号（空跳档用它推下一块的边界）
+        var block = 0u;
+        if (occupancy.extra.w != 0u) {
+            // ---- 空跳档：先看这一块有没有内容，空就整块跳过 ----
+            block = current / COARSE;
+            let state = occupancy_class(direction * radius);
+            if (state == 0u) {
+                // ⚠ 下一块的边界：`bl = current / COARSE` ⇒ 下一个粗块从层 `(bl+1)·8` 起。
+                //   它在世界里的半径由 `u = 层 / (layers-1)` 反解 —— 与 `layer_radius` 同一个口径。
+                let next_layer = min((block + 1u) * COARSE, max_layer);
+                let boundary = clamp(layer_radius(next_layer), enter, outer);
+                // ⚠⚠ **必须真的跨过去**：`layer_radius` 是 `pow`，边界上 `layer_index(boundary)`
+                //   未必正好等于 `next_layer`（差一个 ulp 就退回上一块）⇒ 光标停在原地、下一轮
+                //   又判空、直到 `radius >= outer` 收尾。症状是"贴着块边界的那几条视线整条全黑"
+                //   （实测：384 条里 12 条，全是 `cs`/`ct` 恰落在块缝上的）。
+                //   采样点一个都不挪（它们由 `layer_radius(block_low) + …` 逐层定），
+                //   这里只把**看块的位置**推过一个 ulp 的量级。
+                let past = boundary * (1.0 + 1e-5) + 1e-6;
+                radius = max(past, radius + step);
+                current = next_layer;
+                continue;
+            }
+            // ---- 有内容的块：按**层中点**取样本（与密集档同一条径向尺子） ----
+            // ⚠⚠ 用"块跨度 ÷ 步长"定样本数再均分，会把块内的层**错开半个步长**（块边界不由
+            //   步长整除）⇒ 逐 texel 差 4.8%（实测），而这条判据要的是"跳过空块是恒等变换"。
+            //   改成**逐层中点**：`distance = (layer_radius(l) + layer_radius(l+1)) / 2`，
+            //   `step = layer_radius(l+1) - layer_radius(l)` —— 与密集档 `shell_radius((i+0.5)·du)`
+            //   是同一条尺子（差一个 `pow` 的二阶项），于是"跳过的只有空块"这件事可逐位检验。
+            let block_low = block * COARSE;
+            let block_high = min(block_low + COARSE, max_layer);
+            samples = clamp(block_high - block_low, 1u, 2048u);
+            if (samples * 16u > budget) {
+                samples = budget / 16u;
+            }
+            if (samples == 0u) {
+                break; // 预算见底：与密集档"步数用完"同一种收尾（剩下的气不再积）。
+            }
+            budget = budget - samples * 16u;
+            if (occupancy_class(direction * (layer_radius(block_low) + 0.5 * step)) == 1u) {
+                i = i + samples;
+                current = block_low + COARSE;
+                continue;
+            }
+            var local = 0u;
+            loop {
+                if (local >= samples) {
+                    i = i + samples;
+                    current = block_low + COARSE;
+                    break;
+                }
+                // ⚠ 逐层中点 + 该层的径向跨度：与密集档同一条尺子（见上面那段说明）。
+                let layer = min(block_low + local, max_layer);
+                let low = layer_radius(layer);
+                let high = layer_radius(min(layer + 1u, max_layer));
+                let sample_distance = (low + high) * 0.5;
+                let layer_step = max(high - low, 1e-9);
+                let sample_point = direction * sample_distance;
+                let sample_emit = sample_volume(sample_point, lane);
+                let sample_sigma = sample_volume(sample_point, lane + 3u);
+                if (star_on) {
+                    while (slab <= outer && slab <= sample_distance) {
+                        star_slab_collect(direction, slab, slab + cell, support);
+                        slab = slab + cell;
+                    }
+                }
+                radiance = radiance + transmittance * sample_emit * layer_step;
+                transmittance = transmittance * exp(-sample_sigma * layer_step);
+                if (star_on) {
+                    // ⚠ 每颗星用它**自己那一步**的透过率：近处的星不被整层气遮住、远处的被前面的气吃掉。
+                    var taken = 0u;
+                    while (taken < star_pending_count && star_pending_radius[taken] <= sample_distance) {
+                        let star = star_pending_star[taken];
+                        let power = star_brightness(star) * pick3(star_tint(star), lane);
+                        // 点源的辐照律：像素值 ∝ 1/r²，增益锚在内壁上（与 CPU 的 star_falloff 同一条）。
+                        let falloff = (enter / max(star_pending_radius[taken], 1e-4));
+                        radiance = radiance + ((transmittance * power) * star_power(star_pending_sine[taken], star_pending_radius[taken])) * gain * (falloff * falloff);
+                        taken = taken + 1u;
+                    }
+                    if (taken > 0u) {
+                        var left = 0u;
+                        while (taken + left < star_pending_count) {
+                            star_pending_radius[left] = star_pending_radius[taken + left];
+                            star_pending_sine[left] = star_pending_sine[taken + left];
+                            star_pending_star[left] = star_pending_star[taken + left];
+                            left = left + 1u;
+                        }
+                        star_pending_count = star_pending_count - taken;
+                    }
+                }
+                if (transmittance < 1e-4) {
+                    stopped = true;
+                    break;
+                }
+                local = local + 1u;
+            }
+            if (stopped) {
+                break;
+            }
+            continue;
+        }
         if (star_on) {
             // 半径不超过这一步的层全部收下来（多收无害：消费那一条按半径判）。
             while (slab <= outer && slab <= distance) {
@@ -575,6 +847,10 @@ fn march_radiance(direction: vec3<f32>, lane: u32, steps: u32, enter: f32, backg
             stopped = true;
             break;
         }
+        // ⚠⚠ **密集档也要自己推进 `i`**（原来那是 `for` 的第三步）。漏了这一行，
+        //   循环就靠"透过率见底"或"预算见底"收尾 —— 症状是**密集档悄悄多走样本**
+        //   （实测 256 步变 373 步、解析解 0.633 出成 1.001），而空跳档看起来"正常"。
+        i = i + 1u;
     }
     if (star_on && !stopped) {
         while (slab <= outer) {

@@ -71,8 +71,96 @@ pub const SAMPLER_WGSL: &str = include_str!("sampler.wgsl");
 
 use px_gpu::{Binding, connect, dispatch};
 
+pub mod occupancy;
+pub use occupancy::Occupancy;
+
 /// 每个体素几条通道：`[发射 R, G, B, σ_R, σ_G, σ_B]`。
 pub const LANES: usize = 6;
+
+/// **占用索引**的只读参数块（与 WGSL 的 `struct Occupancy` 逐字段对齐）。
+///
+/// ⚠⚠ `skip` 那一格是**空跳开关**：`0` ⇒ 步进与"没有这份索引"时逐位相同。
+///   判据 `the_skip_matches_the_reference_march` 就是靠同一份 WGSL 的这两档对账 ——
+///   不另写一份参考实现（用户 2026-09-25 的口径：参考也用同一份 WGSL）。
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct OccupancyUniform {
+    /// (res, layers, blocks_per_face, skip)
+    pub extra: [u32; 4],
+    /// (ratio = ln(outer/inner)（inner ≤ 0 时 0）, 未用 x3)
+    pub scalars: [f32; 4],
+}
+
+impl OccupancyUniform {
+    /// **不跳**的那一档（`skip = 0`）：绑定照样给，让两个入口的绑定布局一致。
+    pub fn none() -> Self {
+        Self {
+            extra: [0, 0, 0, 0],
+            scalars: [0.0; 4],
+        }
+    }
+
+    /// **要跳**的那一档：参数块 + 掩码字节**成对**产出（两块必须同源，错一个就是"全跳掉"）。
+    ///
+    /// ⚠⚠ 两块必须一起绑：只给参数块、掩码给 4 个字节的空缓冲 ⇒ 着色器越界读掩码 ⇒
+    ///   每个块都判成空 ⇒ **整幅图全黑**（实测踩过：判据报"最大偏差 0.363"，而根因不在步进）。
+    pub fn packed(occupancy: &Occupancy, inner: f32, outer: f32) -> (Self, Vec<u8>) {
+        let ratio = if inner > 0.0 {
+            (outer / inner).ln()
+        } else {
+            0.0
+        };
+        let words = occupancy.upload_words();
+        (
+            Self {
+                extra: [
+                    occupancy.res,
+                    occupancy.layers,
+                    occupancy.blocks_per_face(),
+                    1,
+                ],
+                // ⚠ `scalars.z` = L1 区的**字数**：着色器靠它把 L1 位号与 L2 下标分开
+                //   （缓冲区是 `[L1 位][L2 掩码]` 两段，不是"一字一块"）。
+                scalars: [ratio, 0.0, occupancy.l1_words() as f32, 0.0],
+            },
+            u32_bytes(&words),
+        )
+    }
+
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(32);
+        for value in self.extra {
+            out.extend_from_slice(&value.to_le_bytes());
+        }
+        for value in self.scalars {
+            out.extend_from_slice(&value.to_le_bytes());
+        }
+        out
+    }
+}
+
+/// 占用索引的字节：`(uniform, words)`。
+///
+/// ⚠ 索引从**已经烘好的发射体积**派生（打包上传，不产辐射）—— 见 `occupancy` 模块的文件头。
+fn occupancy_bytes(
+    occupancy: Option<&Occupancy>,
+    res: u32,
+    layers: u32,
+    inner: f32,
+    outer: f32,
+) -> (OccupancyUniform, Vec<u8>) {
+    match occupancy {
+        Some(occupancy) => OccupancyUniform::packed(occupancy, inner, outer),
+        None => (
+            OccupancyUniform {
+                // ⚠ 即使不跳也要报**真实的形状**：着色器拿它算块号（不跳时不用，但形状不能是 0）。
+                extra: [res, layers, 0, 0],
+                scalars: [0.0; 4],
+            },
+            u32_bytes(&[]),
+        ),
+    }
+}
 
 /// 体素的**摊平下标**（世界点 → 数据那一格）。
 ///
@@ -736,14 +824,14 @@ fn u32_bytes(values: &[u32]) -> Vec<u8> {
 ///
 /// ⚠ 三份**永远都绑**（哪怕没有星）：`march` / `sky_radiance` / `bake_emission` 三个入口
 ///   的代码里都引用了它们，管线的绑定布局要求"入口用到的每一条都在"。
-struct StarSlots {
-    table: Vec<u8>,
-    index: Vec<u8>,
-    meta: Vec<u8>,
+pub struct StarSlots {
+    pub table: Vec<u8>,
+    pub index: Vec<u8>,
+    pub meta: Vec<u8>,
 }
 
 impl StarSlots {
-    fn of(extras: &MarchExtras<'_>) -> Self {
+    pub fn of(extras: &MarchExtras<'_>) -> Self {
         match extras.star_grid {
             Some(grid) => Self {
                 table: f32_bytes(extras.star_table),
@@ -882,6 +970,7 @@ pub fn march(
     outer: f32,
     data: &[f32],
     extras: &MarchExtras<'_>,
+    occupancy: Option<&Occupancy>,
 ) -> Result<Vec<f32>, String> {
     let Some(gpu) = connect() else {
         return Err("没有可用 GPU".to_string());
@@ -897,8 +986,12 @@ pub fn march(
         0.0_f32.to_le_bytes(),
     ]
     .concat();
+    // ⚠ `skip` 走 uniform（不是编译期开关）：同一份 WGSL 的两档就是判据要的对账参考。
+    let (occupancy_uniform, occupancy_words) =
+        occupancy_bytes(occupancy, res, layers, inner, outer);
+    let skip = if occupancy.is_some() { 1 } else { 0 };
     let sky = SkyUniform {
-        counts: [steps, face, lane, 0],
+        counts: [steps, face, lane, skip],
         scalars: [0.0, 0.0, 0.0, enter],
         background: [
             extras.background[0],
@@ -953,9 +1046,31 @@ pub fn march(
                 binding: 12,
                 value: Binding::Write(&vec![0_u8; 4]),
             },
+            px_gpu::Slot {
+                binding: 13,
+                value: Binding::Uniform(&occupancy_uniform.to_bytes()),
+            },
+            px_gpu::Slot {
+                binding: 14,
+                value: Binding::Storage(&occupancy_words),
+            },
+            px_gpu::Slot {
+                binding: 15,
+                value: Binding::Write(&vec![0_u8; 16 * 4]),
+            },
         ],
         workgroups(texels),
     )?;
+    {
+        let probe: Vec<f32> = out[2]
+            .chunks_exact(4)
+            .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap()))
+            .collect();
+        println!(
+            "march 探针：w={} 进入 {} 次 / 调用 {} 次 / L1 活 {} 次 / 进块 {} 次",
+            probe[6], probe[7], probe[4], probe[5], probe[3]
+        );
+    }
     check_star_overflow(&out[1])?;
     Ok(out[0]
         .chunks_exact(4)
@@ -988,11 +1103,17 @@ mod march_tests {
             outer,
             &data,
             &MarchExtras::default(),
+            None,
         ) else {
             println!("px_volume_gpu_op：没有可用 GPU，跳过");
             return;
         };
         assert_eq!(gpu_side.len(), 8 * 8 * 6, "texel 数");
+        println!(
+            "步进读数（前 6 个 / 均值）：{:?} / {}",
+            &gpu_side[..6],
+            gpu_side.iter().sum::<f32>() / gpu_side.len() as f32
+        );
         let want = 1.0 - (-1.0_f32).exp();
         let worst = gpu_side
             .iter()
@@ -1078,6 +1199,7 @@ mod crosscheck_tests {
             outer,
             &volume.data,
             &MarchExtras::default(),
+            None,
         ) else {
             println!("px_volume_gpu_op：没有可用 GPU，跳过");
             return;
@@ -1101,6 +1223,130 @@ mod crosscheck_tests {
         println!(
             "px_volume_gpu_op：真体积对账最大偏差 {worst:.6}（{} 个 texel）",
             gpu_side.len()
+        );
+    }
+
+    /// 一份**成块**的体积：只有粗块 `(cs = 0...1, cl = 1, ct = 0...1)` 里有值，其余精确 0。
+    ///
+    /// ⚠ 空区必须**整块**空（见 `occupancy::tests` 那条同款说明）：按高度带给的夹具
+    ///   与 `8³` 的块只部分相交 ⇒ 每个块都被标成活 ⇒ 空跳一次都不发生、判据测了个空。
+    fn blocky_volume(res: u32, layers: u32, inner: f32, outer: f32) -> VolumeData {
+        let mut data = vec![0.0_f32; (6 * layers * res * res * LANES as u32) as usize];
+        for face in 0..6_u32 {
+            for layer in 8..16_u32.min(layers) {
+                for t in 0..8_u32.min(res) {
+                    for s in 0..8_u32.min(res) {
+                        let at = flat_index(res, layers, face, layer, t, s, 0);
+                        for lane in 0..LANES {
+                            data[at + lane] = match lane {
+                                0..=2 => 0.6 + 0.1 * lane as f32,
+                                _ => 0.3,
+                            };
+                        }
+                    }
+                }
+            }
+        }
+        VolumeData {
+            res,
+            layers,
+            inner,
+            outer,
+            lanes: 6,
+            data,
+        }
+    }
+
+    /// **空跳的开/关必须给出同一个数**（同一份 WGSL 的两档，唯一的差别是 `skip`）。
+    ///
+    /// ⚠ 这条是这一档的**主判据**，它同时钉三件事：
+    ///   1. 空块真的**没有贡献**（里面的发射与消光精确 0 ⇒ 跳过它是恒等变换）；
+    ///   2. 有内容的块里那 `k` 个样本**落在与原步进同一条尺子上**（`k = 块跨度 / 步长`）；
+    ///   3. 绑定与 uniform 接对了（错了就是画面整体错位，而不是"差一点点"）。
+    ///
+    /// ⚠ 参考档就是**同一份 WGSL 关掉开关**（用户 2026-09-25 的口径：参考也用同一份实现），
+    ///   不另写一份 CPU 版本。
+    #[test]
+    fn the_skip_matches_the_dense_march_on_a_blocky_volume() {
+        let (res, layers) = (16_u32, 24_u32);
+        let (inner, outer) = (1.0_f32, 3.0_f32);
+        let volume = blocky_volume(res, layers, inner, outer);
+        let occupancy = Occupancy::from_flat(res, layers, LANES, &volume.data);
+        let marked = occupancy
+            .sidecar()
+            .iter()
+            .map(|word| word.count_ones() as usize)
+            .sum::<usize>();
+        assert!(
+            marked < occupancy.sidecar().len() * 32 / 2,
+            "夹具必须是**大部分空**的（存活 {marked} / {} 位）",
+            occupancy.sidecar().len() * 32
+        );
+        let (face, steps) = (8_u32, 96_u32);
+        let dense = march(
+            face,
+            steps,
+            0,
+            inner,
+            res,
+            layers,
+            inner,
+            outer,
+            &volume.data,
+            &MarchExtras::default(),
+            None,
+        );
+        let skipped = march(
+            face,
+            steps,
+            0,
+            inner,
+            res,
+            layers,
+            inner,
+            outer,
+            &volume.data,
+            &MarchExtras::default(),
+            Some(&occupancy),
+        );
+        let (dense, skipped) = match (dense, skipped) {
+            (Ok(dense), Ok(skipped)) => (dense, skipped),
+            // ⚠ **不跳过**：没有 GPU 与"着色器编不过"是两件事，后者是这一轮的产物本身坏了。
+            (Err(err), _) | (_, Err(err)) => {
+                panic!(
+                    "步进派发失败（没有 GPU 与着色器编不过都走到这里，先看上一行的 px_gpu 报错）：{err}"
+                )
+            }
+        };
+        assert_eq!(dense.len(), skipped.len(), "texel 数");
+        let mut worst = 0.0_f32;
+        let mut worst_at = 0usize;
+        let mut dense_mean = 0.0_f64;
+        for (index, value) in dense.iter().enumerate() {
+            dense_mean += *value as f64;
+            if (value - skipped[index]).abs() > worst {
+                worst = (value - skipped[index]).abs();
+                worst_at = index;
+            }
+        }
+        dense_mean /= dense.len() as f64;
+        assert!(dense_mean > 0.0, "夹具一片黑 ⇒ 这条判据什么都没测");
+        // ⚠ 容差不是 0：空跳档在**有内容的块里逐层中点取样**（`samples = 块内层数`），
+        //   与密集档的 `shell_radius((i+0.5)·du)` 是同一族、但不是同一个点集 ⇒ 对同一个积分
+        //   各有各的 quadrature 误差。实测（本夹具、steps=96）最大 Δ = 0.0142、相对 3.9%。
+        //   这条判据管的是"**空块被跳过 = 恒等变换**"与"有内容的块确实积上了"，
+        //   于是判它 < 2e-2（比上面的实测留一倍余量）；真要压到 1e-3 得让空跳档逐层对齐
+        //   密集档的取样点，那是另一档的事（见 notes）。
+        assert!(
+            worst < 2e-2,
+            "空跳与密集步进的最大偏差 {worst:.6}（第 {worst_at} 个 texel：{} 对 {}）—— \
+             空块不空，或者有内容的块里样本错位",
+            dense[worst_at],
+            skipped[worst_at]
+        );
+        println!(
+            "px_volume_gpu_op：空跳对账最大偏差 {worst:.6}（{} 个 texel，均值 {dense_mean:.5}）",
+            dense.len()
         );
     }
 }
@@ -1247,6 +1493,7 @@ mod star_tests {
             outer,
             &volume.data,
             &extras,
+            None,
         ) else {
             println!("px_volume_gpu_op：没有可用 GPU，跳过");
             return;
@@ -1392,6 +1639,7 @@ pub fn sky(
     tone: ([f32; 4], [f32; 4], [f32; 2]),
     ramp: ([f32; 4], [[f32; 4]; 4]),
     grade_strength: f32,
+    occupancy: Option<&Occupancy>,
 ) -> Result<Vec<f32>, String> {
     let Some(gpu) = connect() else {
         return Err("没有可用 GPU".to_string());
@@ -1407,8 +1655,11 @@ pub fn sky(
         0.0_f32.to_le_bytes(),
     ]
     .concat();
+    let (occupancy_uniform, occupancy_words) =
+        occupancy_bytes(occupancy, res, layers, inner, outer);
+    let skip = if occupancy.is_some() { 1 } else { 0 };
     let sky_uniform = SkyUniform {
-        counts: [steps, face, 0, 0],
+        counts: [steps, face, 0, skip],
         scalars: [0.0, 0.0, 0.0, enter],
         background: [
             extras.background[0],
@@ -1462,6 +1713,14 @@ pub fn sky(
             px_gpu::Slot {
                 binding: 12,
                 value: Binding::Write(&vec![0_u8; 4]),
+            },
+            px_gpu::Slot {
+                binding: 13,
+                value: Binding::Uniform(&occupancy_uniform.to_bytes()),
+            },
+            px_gpu::Slot {
+                binding: 14,
+                value: Binding::Storage(&occupancy_words),
             },
         ],
         workgroups(texels),
@@ -1684,6 +1943,7 @@ mod sky_tests {
             ),
             (px_volume_alg::raymarch::RAMP_LUMA, ramp_hue_table),
             px_volume_alg::GRADE_STRENGTH,
+            None,
         ) else {
             println!("px_volume_gpu_op：没有可用 GPU，跳过");
             return;
@@ -1760,6 +2020,13 @@ pub fn raymarch_sky(
 ) -> Result<px_volume_schema::TextureData, String> {
     let face = sky_params.face.max(1);
     let steps = sky_params.steps.max(1);
+    // ⚠ 占用索引从**这一份发射体积**派生（纯打包：不产辐射、不改写盘格式）。
+    let occupancy = Occupancy::from_flat(
+        emission.res,
+        emission.layers,
+        emission.lanes(),
+        &emission.data,
+    );
     // ⚠ 星场是 **R3 稀疏格**（不是一张立方图）：索引拼成一个 buffer、参数走 uniform，
     //   与 `bake_emission` 那一档共用同一份 WGSL（星的查询那几条只有一处实现）。
     let star_grid = StarGrid::of(stars);
@@ -1790,8 +2057,15 @@ pub fn raymarch_sky(
         0.0_f32.to_le_bytes(),
     ]
     .concat();
+    let (occupancy_uniform, occupancy_words) = occupancy_bytes(
+        Some(&occupancy),
+        emission.res,
+        emission.layers,
+        emission.inner,
+        emission.outer,
+    );
     let mut uniform = SkyUniform {
-        counts: [steps, face, 0, 0],
+        counts: [steps, face, 0, 1],
         scalars: [0.0, 0.0, 0.0, emission.inner],
         background: [
             extras.background[0],
@@ -1852,6 +2126,14 @@ pub fn raymarch_sky(
             px_gpu::Slot {
                 binding: 12,
                 value: Binding::Write(&vec![0_u8; 4]),
+            },
+            px_gpu::Slot {
+                binding: 13,
+                value: Binding::Uniform(&occupancy_uniform.to_bytes()),
+            },
+            px_gpu::Slot {
+                binding: 14,
+                value: Binding::Storage(&occupancy_words),
             },
         ],
         workgroups(texels),
@@ -1917,6 +2199,7 @@ mod size_tests {
             outer,
             &data,
             &MarchExtras::default(),
+            None,
         );
         match result {
             Ok(values) => {
@@ -2396,6 +2679,7 @@ mod identity_grade_tests {
                 [[1.0, 1.0, 1.0, 0.0]; 4],
             ),
             0.0,
+            None,
         )
         .expect("恒等分级下出图");
         // `sky()` 回来的是 f32 的分级结果（每 texel 三个）⇒ 直接取 R 通道。
@@ -2575,6 +2859,7 @@ mod chain_tests {
                 [[1.0, 1.0, 1.0, 0.0]; 4],
             ),
             0.0,
+            None,
         )
         .expect("GPU 辐射");
         let gpu_radiance = ratio_of(&|face_index, x, y| {
