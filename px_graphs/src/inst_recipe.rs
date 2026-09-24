@@ -110,4 +110,3 @@ pub const INSTANCES: &[InstRecipe] = &[
         body: "px_field_alg::remap_with(&px_field_alg::identity(), p, 1.0, i.input.value(), ARG)",
     },
 ];
-

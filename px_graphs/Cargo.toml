@@ -25,7 +25,7 @@ px_verify = { path = "../px_verify" }
 #   「改一行实现不重编图程序」立刻没了（见 tests/crate_graph.rs 那道门）。
 px_cook = { path = "../px_cook" }
 # ⚠ **element 那一档的规格表**（`px_elem::ELEM_SPECS`）：`insts::build` / `insts::codegen`
-#   要照它登记节点与 catalogue 条目 —— 这一档**没有生成物**（内容键在运行期算），
+#   要照它登记节点与 catalogue 条目 —— 这一档**图侧没有生成物**（内容键在运行期算），
 #   所以表得由图程序自己带着（`px_elem` 也把 `Elementwise<F>` 交给图脚本写节点用）。
 #   ⚠ 它不是算子实现库：`px_elem` 只放**声明面**（`ElementFn` / `Elementwise` / 规格），
 #   算法在 `px_elem/body/*.rs` 里、由 `px build` 编进实例库（那几份文件不在 `src/` 下 ⇒

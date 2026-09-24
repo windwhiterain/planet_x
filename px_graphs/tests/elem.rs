@@ -10,8 +10,8 @@
 //! 4. **符号名口径**：`<Constant as ElementFn>::SYMBOL == inst::symbol(spec.ty)`
 //!    —— 生成物那句 `px_body!` 定的符号与装载器拼的必须是同一个字符串。
 //!
-//! ⚠ 第 1、2 条要**真的编一次库**（约 2 秒）：走 `missing()`/`compile_missing()`（与
-//!   `px build` 同一对函数）⇒ `px build` 编过就一条都不编，缺才编。
+//! ⚠ 第 1、2 条要**真的编一次库**（实测从零编一份约 3 秒）：走 `missing()`/`compile_missing()`
+//!   （与 `px build` 同一对函数）⇒ `px build` 编过就一条都不编，缺才编。
 //! ⚠ 这个二进制里所有**碰图**的断言合在**一个**测试里：多个测试是并行的，而它们会各自写
 //!   `target/pcg/<图名>/manifest.json`（本仓那条老规矩：并行写同一份清单就是一场竞态）。
 //! ⚠ 判据**不许依赖缓存是空的**（CAS 是持久的、测试会重跑）：所以判"键稳定 ⇒ 第二次必命中"，
@@ -53,17 +53,22 @@ fn a_generic_element_op_runs_and_is_shared_by_two_graphs() {
     println!(
         "element 实例：key {key}｜库 {}（{} 字节）",
         library.display(),
-        std::fs::metadata(&library).map(|meta| meta.len()).unwrap_or(0),
+        std::fs::metadata(&library)
+            .map(|meta| meta.len())
+            .unwrap_or(0),
     );
 
     // ② 端到端：真装载那份库、真算出一张场。
+    //    ⚠ 写法是 `Elementwise::<Constant>::new()`（`PxOp::new()`）而**不是**裸的
+    //    `Elementwise::<Constant>`：后者是个带 `PhantomData` 字段的元组结构体、字段私有
+    //    ⇒ 图脚本**写不出**一个值来（这条手感差别记在 `px_elem` 的模块文档里）。
     let one = begin(GraphSpec {
         name: "elem-one".to_string(),
     });
     let cooked = cached(
         &one,
         "constant",
-        Elementwise::<Constant>,
+        Elementwise::<Constant>::new(),
         params(),
         (),
     )
@@ -102,8 +107,14 @@ fn a_generic_element_op_runs_and_is_shared_by_two_graphs() {
     let two = begin(GraphSpec {
         name: "elem-two".to_string(),
     });
-    let again = cached(&two, "constant", Elementwise::<Constant>, params(), ())
-        .expect("第二个图里的同一份内容");
+    let again = cached(
+        &two,
+        "constant",
+        Elementwise::<Constant>::new(),
+        params(),
+        (),
+    )
+    .expect("第二个图里的同一份内容");
     assert_eq!(
         again.key, cooked.key,
         "两个图名算出了两个节点键 ⇒ 图名（或图程序自己的源码指纹）还在实例身份里"
@@ -182,7 +193,7 @@ fn the_key_is_the_body_bytes_and_the_symbol_is_the_same_string() {
     );
 
     let mut edited = bytes.clone();
-    edited.extend_from_slice(b"\n// target/ 下的副本：多这一行就该换键\n");
+    edited.extend_from_slice("\n// target/ 下的副本：多这一行就该换键\n".as_bytes());
     let changed = probe.join("constant_edited.rs");
     std::fs::write(&changed, &edited).unwrap_or_else(|err| panic!("写不了副本：{err}"));
     assert_ne!(

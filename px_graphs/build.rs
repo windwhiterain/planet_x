@@ -457,7 +457,7 @@ fn catalogue_text(plan: &[Planned]) -> String {
          // 与端到端测试。⚠ 它**不参与任何 key**、也不进图程序。\n\
          //\n\
          // ⚠ 形状是**条目切片**：`px_graphs::insts::codegen()` 把这一串拷成可增长的表，\n\
-         //   再把 `px_elem::ELEM_SPECS` 那几条（这一档没有生成物）插进去。\n\
+         //   再把 `px_elem::ELEM_SPECS` 那几条（图侧没有生成物）插进去。\n\
          \n\
          pub static INST_CODEGEN: &[::px_cook::inst::InstCodegen] = &[\n",
     );

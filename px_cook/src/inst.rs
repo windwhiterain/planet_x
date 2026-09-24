@@ -493,9 +493,11 @@ pub fn key_of_info(info: &InstInfo) -> String {
 /// * [`InstKind::Element`]：引进 `px_elem` 里那个**泛型算子的一次单态化**
 ///   （`type <ty> = px_elem::Elementwise<px_elem::specs::<ty>>;`）—— element 那一档。
 ///
-/// ⚠ **element 这一档没有生成物**：它的内容键在运行期算（`px_elem::key_of` 走同一份
-///   [`key_of_facts`]）⇒ 它只在"生成的 crate 怎么写"这一步与声明那一档分家，
-///   连"缺哪些库"都不需要生成器参与。
+/// ⚠ **element 这一档没有图侧的生成物**（`OUT_DIR/insts_gen.rs` 那份类型 + 事实表）：它的内容键
+///   在运行期算（`px_elem::key_of` 走同一份 [`key_of_facts`]）⇒ 它只在"生成的 crate 怎么写"
+///   这一步与声明那一档分家，catalogue 那几条也由 `px_graphs::insts::codegen()` 运行期填。
+///   ⚠ **生成的 crate 本身照样有**（`target/jit/<key>/`）：单态化就发生在编它的时候
+///   （Rust 的泛型只在编译期单态化，dylib 里装不下泛型函数）—— 省掉的只是图侧那一份。
 #[derive(Debug, Clone)]
 pub enum InstKind {
     /// 复用某个**声明**（`px_decls` 表里那一条）。
@@ -582,7 +584,8 @@ pub struct InstCodegen {
 /// catalogue（`for_op` 按 op id 取一条）。
 ///
 /// ⚠ **它是可增长的**：声明那一档的条目来自生成物（一串编译期字面量，见
-///   [`Self::from_generated`]），element 那一档**没有生成物**（规格住在 `px_elem` 里）⇒
+///   [`Self::from_generated`]），element 那一档的条目**不是 build script 生成的**
+///   （规格住在 `px_elem` 里，是一张编译期常量表）⇒
 ///   由 `px_graphs::insts::codegen()` 在运行期读表插进来（[`Self::insert`]）。
 ///   ⚠ 两档合在一张表里的理由是"`px build` 只有一条路"：`compile_missing` / `compile_one`
 ///   只认这张表，不认识"这一条是从哪来的"。
@@ -1045,5 +1048,3 @@ fn field(hasher: &mut blake3::Hasher, text: &str) {
     hasher.update(&(text.len() as u64).to_le_bytes());
     hasher.update(text.as_bytes());
 }
-
-

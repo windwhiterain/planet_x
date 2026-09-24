@@ -148,7 +148,9 @@ impl<F: ElementFn> PxOp for Elementwise<F> {
   type Constant = px_elem::Elementwise<px_elem::specs::Constant>;
   include!("<体文件绝对路径>");                     // 作者的算法原样进来
   px_graph_schema::px_body! { Constant, |p, i|
-      px_elem::fill::<Constant>(p, i, |uv, direction| value(p, i, uv, direction)) }
+      // ⚠ `fill` 的实参写**全路径**：裸名 `Constant` 被 `px_body!` 占着（那个要 `PxOp`），
+      //   而 `fill` 要的是 `ElementFn` —— 同一个名字不可能同时是这两种类型（§9 第 3 条）。
+      px_elem::fill::<px_elem::specs::Constant>(p, i, |uv, direction| value(p, i, uv, direction)) }
   px_graph_schema::px_impl_lib!();
   ```
 
@@ -163,8 +165,53 @@ impl<F: ElementFn> PxOp for Elementwise<F> {
   `inst_recipe.rs` 的体模板还在传 `g` ⇒ **实例那一档本来编不过**（老 dylib 还在盘上，
   所以判据没红）。今天两处都改成两参。
 
-未到位（正在做）：让 `Elementwise::<Constant>` 端到端跑起来 —— `px_cook::inst` 的
-编译路径要认识"element 这一档"（生成的 crate 里是
-`type Constant = px_elem::Elementwise<px_elem::specs::Constant>;` 而不是 `pub use <声明>;`），
-`px_graphs/insts.rs` 要把 `ELEM_SPECS` 登记进 build graph 与 catalogue，
-外加三条判据（端到端 / 跨图共享 / 符号名口径）。
+未到位（当天就补上了，见 §9）：让 `Elementwise::<Constant>` 端到端跑起来。
+
+## §9 端到端接线（同一天，同一分支的后一段）
+
+已到位：
+
+* `px_cook::inst` 认识**两档**（`InstKind::Decl { schema / module / decl }` 与
+  `InstKind::Element { ty }`）：`lib_text` 按档分叉（element 那一档写
+  `type <ty> = px_elem::Elementwise<px_elem::specs::<ty>>;` + `include!(体文件绝对路径)` +
+  `px_body! { <ty>, |p, i| … }` + `px_impl_lib!()`），`manifest_text` 按档给
+  `[dependencies]`（element 的 `px_elem` 由规格的 `roots` 那一栏给，不需要额外 schema 行）。
+* `InstCatalogue` 变成**运行期可增长**的（`Vec<InstCodegen>` + `insert` + `from_generated`；
+  生成物里落的是一串条目切片，不是表本身）—— element 那几条**不是 build script 生成的**
+  （**图侧**没有生成物）：由 `px_graphs::insts::codegen()` 从 `ELEM_SPECS` 现读、
+  用 `key_of_facts("", …)` 现算键插进来，整张表 `OnceLock` 缓存一次。
+* `px_graphs::insts::build()` 除 recipe 那 3 条外，再遍历 `ELEM_SPECS` 登记节点
+  （两条路走**同一个** `BuildGraph::facts`）。
+* `px_graphs` 加 `px_elem` 依赖。⚠ 它不是实现库：算法仍住在 `px_elem/body/*.rs`、由
+  `px build` 编进实例库，而那几个文件**不在 `src/` 下** ⇒ 加这个依赖不动 R1。
+* 判据 `px_graphs/tests/elem.rs`：端到端（缺才编库、真装载、逐格等于参数）＋跨图共享
+  （两个图名 ⇒ **同一个节点键**，且第二张图**必命中**）＋内容身份（键 == `key_of_facts` 的
+  返回值；同一份体字节换个路径**不**换键、改一行就换键、模板多一个真 token 就换键）＋
+  符号名口径（`<Constant as ElementFn>::SYMBOL == px_cook::inst::symbol(ty)`）。
+  ⚠ "改体文件"那一条**不碰工作树**：副本写在 `target/elem_key_probe/` 下。
+* `tests/inst_gate.rs` 的"图不漏"改成数**两张表**（recipe + `ELEM_SPECS`），等式仍是等式。
+
+⚠ 顺手修掉三处"其实编不过"（第一次真跑 `px build` 才暴露；此前判据看不见，因为老 dylib 还在盘上）：
+
+1. `px_elem/body/constant.rs` 的 `//!` 内层文档注释：它被 `include!` 在生成物的**第二段**
+   ⇒ `error[E0753]: expected outer doc comment`（同一个坑 `inst_recipe.rs` 头上已记过一次）。
+   改成 `//`。
+2. `px_elem::ConstantParams` **不存在**（只有 `px_elem::constant::ConstantParams`）⇒ 体文件的
+   签名编不过。`px_elem/src/lib.rs` 里加一行 re-export（作者面本来就该是这个短路径）。
+3. 体模板里的 `px_elem::fill::<Constant>` 用的是**裸名**，而生成物里裸名被 `px_body!` 占着、
+   必须是 `Elementwise<…>`（它只有 `PxOp`）⇒ `E0277: ElementFn is not satisfied`。
+   模板改成全路径 `px_elem::fill::<px_elem::specs::<ty>>`（与"生成物里的 `use` 一律全路径"
+   同一条规矩）。⚠ 模板是键的一轴 ⇒ element 实例的键跟着换；这一档此前**一份库都没编出来过**，
+   没有陈旧库可命中。
+
+⚠ 记在明面上、本轮**没改**的两处：
+
+* **element 实例库会把 `px_cook` / `px_graph` 链进去**：实例库的 `roots` 是 `px_elem`，而
+  `px_elem` 为了 `Elementwise<F>: PxOp`（`source_hash` / `library_path` / `load_at`）依赖
+  `px_cook`，`px_cook` 又 re-export 驱动 `px_graph` ⇒ 生成的 dylib 里带一份驱动。
+  `tests/crate_graph.rs` 第 2 条（"实现库不许依赖 `px_graph` / `px_cook`"）挡的是五份
+  `px_*_op`，管不到生成的实例库。修法是**拆 `px_elem`**（作者面/算法面 vs op 包装面），
+  **不是**改依赖方向（用户裁定：撞到依赖方向就停下报告）。
+* **`Elementwise::<Constant>` 不是一个值**（`PhantomData` 字段私有）⇒ 图脚本只能写
+  `Elementwise::<Constant>::new()`；预置那一档（`field::Fbm` 是单元结构体）能裸写类型名。
+  要对齐手感得改那个结构体的形状（或给每条规格发一个 const）。

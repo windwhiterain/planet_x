@@ -5,7 +5,7 @@
 //! 泛型是对脚本编写者的**手感**要求"。这一份就是那句话的落点：
 //!
 //! ```text
-//! 脚本作者写：  cached(&graph, "constant", Elementwise::<Constant>, params, ())
+//! 脚本作者写：  cached(&graph, "constant", Elementwise::<Constant>::new(), params, ())
 //! 手感来自：    `params` 是 **ConstantParams**（每个函数自己的类型）—— 字段名错、少给一个
 //!               上游、形状类型不对，全是**编译错**；不再是"三个 float 撑所有函数"的口袋。
 //! 实现住在哪：  体文件（`px_elem/body/*.rs`）编成**内容寻址的 dylib**（`px build`）——
@@ -14,15 +14,25 @@
 //!               函数就共享同一份库与同一份产物。
 //! ```
 //!
+//! ⚠ 上面那个写法里的 `::new()` **不是可省的**：`Elementwise<F>` 带着一个 `PhantomData` 字段
+//!   （类型参数要在字段里出现），而那个字段是私有的 ⇒ 图脚本**写不出** `Elementwise::<Constant>`
+//!   这样一个值（那是"类型"不是"值"），只能走 `PxOp::new()`。预置那一档（`field::Fbm`）是单元
+//!   结构体，所以它们能裸写 —— 两档在这点上手感不同，改起来要动这个结构体的形状。
+//!
 //! ⚠ **它为什么不自己算**：`Elementwise<F>::render` 只是"按内容键把那一份库装进来、调它的
 //!   符号" —— 算法一个字都不在本 crate 里（否则改算法就要重编它，而它是**每个图程序都依赖**
 //!   的 crate）。这条与 `px_op!` 那一档（预置库）同构，只是"哪个库"从常量变成了内容键。
 //!
-//! ⚠ **它为什么不需要代码生成**：内容键可以在**运行期**算（`px_cook::inst::key_of_facts`
-//!   读体文件字节 + 数各根的源码名册）—— 与 `px build` 判断"缺哪些库"走的是**同一个函数**。
-//!   于是"泛型算子"这一档没有生成物、没有 `insts_gen` 里的事实、也没有孤儿规则那道墙
+//! ⚠ **它省掉的是"图侧"那一份代码生成**（不是"这一档不代码生成" —— 那句说法 2026-09-27 当场
+//!   被问住、已纠正，见 `44` §8）：`px build` 那一侧**照样**写一个极小的具体 crate
+//!   （`target/jit/<内容键>/src/lib.rs`：类型别名 + `include!(体文件)` + `px_body!` +
+//!   `px_impl_lib!()`）再编成 dylib —— **单态化就发生在编它的时候**（Rust 的泛型只在编译期
+//!   单态化，dylib 里装不下泛型函数，这正是"实例必须要 dylib"那条硬约束）。
+//!   省掉的是图侧那份类型 + 事实表（`OUT_DIR/insts_gen.rs`）：内容键可以在**运行期**算
+//!   （`px_cook::inst::key_of_facts` 读体文件字节 + 数各根的源码名册）—— 与 `px build` 判断
+//!   "缺哪些库"走的是**同一个函数**。⇒ 没有"把事实烘成 const"这一步，也就没有孤儿规则那道墙
 //!   （`impl Facts for <px_elem 的类型>` 写在图程序里是非法的）。代价：每个节点算一次键
-//!   （几毫秒的文件读取与哈希），与既有实例那一档同量级。
+//!   （一次名册读取 + 哈希，与既有实例那一档同一量级；见 `px_graphs/src/insts.rs` 的缓存）。
 //!
 //! ⚠ **融合就是"一个函数一次拿到全部上游"**：`F::Inputs` 自己声明几个上游（`()/FieldInput/
 //!   FieldPairInput/…`），整条链在一个循环里算完 ⇒ 一个节点、一个产物、上游只读一次。
@@ -31,8 +41,8 @@ use std::marker::PhantomData;
 
 pub use px_field_schema::params::Shape;
 use px_graph_schema::{PxInputs, PxKeyed, PxOp};
-use serde::de::DeserializeOwned;
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 
 pub mod constant;
 
@@ -291,4 +301,3 @@ macro_rules! px_elem_specs {
         ];
     };
 }
-
