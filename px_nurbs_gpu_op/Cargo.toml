@@ -1,0 +1,10 @@
+[package]
+name = "px_nurbs_gpu_op"
+version = "0.0.0"
+edition = "2024"
+
+[dependencies]
+# 声明与数据（曲线 / 曲面 / 装配）：GPU 这一侧只求值，不看参数长什么样。
+px_nurbs_schema = { path = "../px_nurbs_schema" }
+# **无窗口 GPU 计算的最小宿主**（起设备 / 派发 / 回读）：与体积那一档同一个宿主。
+px_gpu = { path = "../px_gpu" }

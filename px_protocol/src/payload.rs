@@ -12,8 +12,8 @@
 use std::collections::BTreeMap;
 
 use crate::art::{
-    ArtBundle, AssetManifest, CUBE_FACES, Camera, Domain, MeshData, TextureData, TextureFormat,
-    VolumeData,
+    ArtBundle, AssetManifest, CUBE_FACES, Camera, Domain, MeshData, PolylineData, TextureData,
+    TextureFormat, VolumeData,
 };
 use crate::fnv::fnv1a;
 use crate::stream::{self, Frame};
@@ -403,5 +403,37 @@ impl Build for MeshData {
         let _ = node;
         let blobs: Vec<&Blob> = bundle.blobs.iter().collect();
         MeshData::from_blobs(&blobs).map_err(|err| err.to_string())
+    }
+}
+
+/// **折线**这一域：两块 blob（位置 / 线段下标）+ 清单里的顶点与线段数。
+///
+/// ⚠ 它**不掺评审相机**（与网格不同）：一条折线没有"从哪个方向看"这回事。
+impl Build for PolylineData {
+    const WITH_CAMERAS: bool = false;
+    const RESOLUTION_IS_CANVAS: bool = false;
+
+    fn detail(payload: &Self) -> String {
+        format!(
+            "{} 顶点 / {} 段折线",
+            payload.vertices(),
+            payload.segments()
+        )
+    }
+
+    fn encode(payload: &Self) -> Result<PayloadBundle, String> {
+        Ok(PayloadBundle::new(
+            BTreeMap::from([
+                ("vertices".to_string(), payload.vertices() as f64),
+                ("segments".to_string(), payload.segments() as f64),
+            ]),
+            payload.blobs(),
+        ))
+    }
+
+    fn decode(bundle: &PayloadBundle, _projection: Domain, node: &str) -> Result<Self, String> {
+        let _ = node;
+        let blobs: Vec<&Blob> = bundle.blobs.iter().collect();
+        PolylineData::from_blobs(&blobs).map_err(|err| err.to_string())
     }
 }

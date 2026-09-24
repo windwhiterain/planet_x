@@ -1,6 +1,6 @@
 use px_nurbs_schema::ops::CurveTessellate;
 use px_nurbs_schema::params;
-use px_protocol::art::MeshData;
+use px_protocol::art::PolylineData;
 
 px_graph_schema::px_body! {
     CurveTessellate,
@@ -11,6 +11,6 @@ px_graph_schema::px_body! {
 pub fn eval(
     params: &params::tessellate::TessellateParams,
     source: &px_nurbs_schema::Curve,
-) -> Result<MeshData, String> {
+) -> Result<PolylineData, String> {
     crate::tessellate::curve(source, params.tolerance, params.depth, params.segments)
 }

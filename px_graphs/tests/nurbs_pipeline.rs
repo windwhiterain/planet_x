@@ -137,7 +137,7 @@ fn a_circle_evaluates_and_tessellates_through_the_loading_gate() {
     let dot = point.normal[0] * point.tangent[0] + point.normal[1] * point.tangent[1];
     assert!(dot.abs() < 1e-12, "切向量与平面法线的点积是 {dot}");
 
-    let mesh = nurbs::CurveTessellate
+    let line = nurbs::CurveTessellate
         .render(
             &nurbs_params::tessellate::TessellateParams {
                 tolerance: 1e-3,
@@ -150,14 +150,21 @@ fn a_circle_evaluates_and_tessellates_through_the_loading_gate() {
             grid(),
         )
         .expect("细分失败");
-    for vertex in 0..mesh.vertices() {
-        let point = &mesh.positions[vertex * 3..vertex * 3 + 3];
+    for vertex in 0..line.vertices() {
+        let point = &line.positions[vertex * 3..vertex * 3 + 3];
         let radius = (point[0] * point[0] + point[1] * point[1]).sqrt();
         assert!(
             (radius - 2.0).abs() < 1e-5,
             "第 {vertex} 个顶点离圆心 {radius}（应当是 2）"
         );
     }
+    // 折线的读数：段数 = 顶点数（闭合），最后一段接回第 0 个顶点。
+    assert_eq!(line.segments(), line.vertices(), "闭合折线的段数 = 顶点数");
+    assert_eq!(
+        &line.indices[line.indices.len() - 2..],
+        &[line.vertices() as u32 - 1, 0],
+        "最后一段没有接回第 0 个顶点"
+    );
 }
 
 /// **可复现**：同一份参数跑两次逐位一样（缓存是「键 = 内容」，位置与法线都不许有随机性）。

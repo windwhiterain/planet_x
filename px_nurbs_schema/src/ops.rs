@@ -8,7 +8,7 @@
 //!   **是接口的一部分**，所以它住在声明旁边。
 
 use px_graph_schema::{Cooked, px_op};
-use px_protocol::art::MeshData;
+use px_protocol::art::{MeshData, PolylineData};
 
 use crate::curve::Curve;
 use crate::params;
@@ -72,8 +72,11 @@ px_op! {
 }
 
 px_op! {
-    /// **曲线细分**：按弦误差摊成一条折线（`MeshData`，落在它自己那张平面里）。
-    CurveTessellate, "nurbs.curve.tessellate", "px_nurbs_op", params::tessellate::TessellateParams, CurveInput, MeshData
+    /// **曲线细分**：按弦误差摊成一条**折线**（`PolylineData`，线段下标）。
+    ///
+    /// ⚠ 产物是折线而**不是** `MeshData`：曲线不是曲面（没法线、没面积），
+    ///   硬塞进网格只能靠零面积三角形假装。
+    CurveTessellate, "nurbs.curve.tessellate", "px_nurbs_op", params::tessellate::TessellateParams, CurveInput, PolylineData
 }
 
 px_op! {

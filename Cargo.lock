@@ -1973,6 +1973,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "px_nurbs_gpu_op"
+version = "0.0.0"
+dependencies = [
+ "px_gpu",
+ "px_nurbs_schema",
+]
+
+[[package]]
 name = "px_nurbs_op"
 version = "0.1.0"
 dependencies = [

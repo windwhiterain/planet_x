@@ -298,6 +298,57 @@ pub fn octahedral_uv_y_up(direction: [f32; 3]) -> [f32; 2] {
     octahedral_uv([direction[0], -direction[2], direction[1]])
 }
 
+/// **折线**（曲线算子的产物）：一串顶点 + **线段**（两个下标一段）。
+///
+/// ⚠ 为什么它不借 `MeshData` 的壳：折线**不是**一张曲面 —— 它没有法线、没有面积，
+///   而 `MeshData` 说的三件事（"每个顶点一个法线""索引三个一组是三角形""三角形数"
+///   这个读数）都不成立。硬塞进去只能靠零面积三角形假装，于是三角形那一侧读出来的
+///   是一堆退化面、`triangles()` 这个读数在说谎。
+///
+/// ⚠ 与 `MeshData` 同一条口径：形状（顶点数 / 下标个数）走清单参数或 blob 头，
+///   数据一律 `f32` / `u32` 原样，一个都不重排。
+pub const POLYLINE_ATTRIBUTES: [&str; 2] = ["positions", "indices"];
+pub const POLYLINE_POSITION: usize = 0;
+pub const POLYLINE_INDEX: usize = 1;
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct PolylineData {
+    pub positions: Vec<f32>,
+    /// 线段：`[a0, b0, a1, b1, …]`（闭合折线的最后一段接回第一个顶点）。
+    pub indices: Vec<u32>,
+}
+
+impl PolylineData {
+    pub fn vertices(&self) -> usize {
+        self.positions.len() / 3
+    }
+
+    pub fn segments(&self) -> usize {
+        self.indices.len() / 2
+    }
+
+    pub fn blobs(&self) -> Vec<Blob> {
+        vec![
+            Blob::from_f32(vec![self.vertices() as u32, 3], &self.positions),
+            Blob::from_u32(vec![self.indices.len() as u32], &self.indices),
+        ]
+    }
+
+    pub fn from_blobs(blobs: &[&Blob]) -> Result<Self, WireError> {
+        if blobs.len() < POLYLINE_ATTRIBUTES.len() {
+            return Err(WireError::TruncatedFrame);
+        }
+        let line = Self {
+            positions: blobs[POLYLINE_POSITION].f32s()?,
+            indices: blobs[POLYLINE_INDEX].u32s()?,
+        };
+        if line.positions.len() % 3 != 0 || line.indices.len() % 2 != 0 {
+            return Err(WireError::TruncatedFrame);
+        }
+        Ok(line)
+    }
+}
+
 pub const MESH_ATTRIBUTES: [&str; 4] = ["positions", "normals", "uvs", "indices"];
 pub const MESH_POSITION: usize = 0;
 pub const MESH_NORMAL: usize = 1;
