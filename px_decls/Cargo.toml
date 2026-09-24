@@ -3,7 +3,7 @@ name = "px_decls"
 version = "0.1.0"
 edition = "2024"
 
-# ⚠ **它只被 `px_graphs/build.rs`（`[build-dependencies]`）用**（`21-codegen-types.md`）：
+# ⚠ **它只被 `px_graphs/build.rs`（`[build-dependencies]`）用**（`docs/system/codegen-types.md`）：
 #   它是"声明名 → 类型级事实"那张表 —— 生成器编译不了算子类型，只能问一个**编译过**它们的
 #   小 rlib。于是它**不进任何算子实现库的名册**（那些库的 manifest 由 `px_cook::inst` 按
 #   边一条一条写出来，里面没有它）⇒ `px_*_schema` 一个字节不用动、两条实例 key 逐位不变。

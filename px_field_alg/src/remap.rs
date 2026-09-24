@@ -1,7 +1,7 @@
 //! **格点遍历 + 值域映射/钳制**：场域算子共用那一条计算路径。
 //!
 //! 从 `px_field_op/src/ops/remap.rs` 搬进来的 —— 搬的理由不是"文件太长"，而是
-//! **泛型实例要能只靠这一份 rlib 就把体算出来**（`19-generic-inst.md` §177）：
+//! **泛型实例要能只靠这一份 rlib 就把体算出来**（`docs/system/generic-instances.md` §177）：
 //! 各档之间必须走**同一条**路径，否则同一份参数会算出两种结果，而两者共用的缓存键
 //! 分不出这个差别。
 //!
@@ -27,7 +27,7 @@
 //!   `params::remap::Params` 搭成一个 [`Scale`] 再交给同一个 [`map_grid`]；那一档 2026-09-27
 //!   收进了 element，而 element 的体文件**搭的是同一个 [`Scale`]、走的是同一个 [`map_grid`]**
 //!   —— 于是 `moon` / `desert` 那些图迁移前后的产物逐字节相同（planet 系列图另有一条：
-//!   那三档的**默认值**原本就不是一套，见 `44-elem-generic-op.md`）。
+//!   那三档的**默认值**原本就不是一套，见 `docs/system/elementwise.md`）。
 
 use px_field_schema::field::{Field, Projection};
 use px_field_schema::params::RemapParams;

@@ -8,7 +8,7 @@
 //! ⚠ **算法里可复用的那一半住在 `px_field_alg`（rlib）**：格点遍历 + 值域映射/钳制
 //!   （`map_grid` / `remap_with`）。这一份只是**薄壳**：把那些入口接到声明上。
 //!   为什么算法要搬出去：泛型实例（今天的 `art/inst/*.rs`）的 key 必须覆盖 alg crate
-//!   的源码名册（`.agents/notes/art/19-generic-inst.md` §177），而名册要的是一个能被
+//!   的源码名册（`docs/system/generic-instances.md` §177），而名册要的是一个能被
 //!   **从盘上**收的目录 ⇒ 算法得有一个自己的 rlib crate（与体积域的 `px_volume_alg` 同一形状）。
 //!   这份预置库与实例库（element 那一档 + `art/inst/*.rs`）链的是**同一份** `px_field_alg`
 //!   —— "同一份参数不会算出两种结果"就靠这一条。

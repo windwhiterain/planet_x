@@ -1,4 +1,4 @@
-// **图侧的实例 recipe**：一张**数据表**（`21-codegen-types.md` 的"四件新东西 ①"）。
+// **图侧的实例 recipe**：一张**数据表**（`docs/system/codegen-types.md` 的"四件新东西 ①"）。
 //
 // 图侧今天**一个字面量宏调用都没有**（"图侧零宏"）：要编哪些代码单元、它们复用哪个声明、
 // 泛型参数住哪、体是什么 —— 全在这张表里。`src/insts.rs` 把 build script 按它生成出来的
@@ -11,15 +11,15 @@
 //   `use` 之后 ⇒ 只能是**普通注释**。
 // ⚠ `body` 那一栏是**体表达式原文**，用**前一份实现**（图侧那个宏）当年的口径：泛型参数
 //   那一位写**占位符 `ARG`**（今天仍是同一个词 —— 它是 **key 的一轴**，写别的就换 key，见
-//   `19-generic-inst.md` §179.1）。
+//   `docs/system/generic-instances.md` §179.1）。
 //   生成物 `include!` 了 `source`，所以把 `ARG` 换成**真类型名**（`&Waves`）之后那个名字就在
 //   作用域里 ⇒ **不需要跨 crate 的宏管线**，只需要一次**整词替换**（[`InstRecipe::generated_body`]）。
 //   为什么不让 recipe 直接写 `&Waves`：那样 key 就变了（实测 `96d4feb75ec4` → `8fcd505c8000`）
-//   —— key 的算法一个字都不许改（`21-codegen-types.md` 的铁律 3）。
+//   —— key 的算法一个字都不许改（`docs/system/codegen-types.md` 的铁律 3）。
 // ⚠ `decl` 是**声明名**（不是路径）：由 `px_decls`（声明表）解析成类型级事实
 //   （三个类型路径 / `interface()` / `decl_hash()`）。
 // ⚠ 改 `source` 指向的文件 ⇒ 那一条实例的 key 换、只有它要重编，**这张表与生成物一个字节
-//   不变** ⇒ 七个图 exe 不重编（R1，见 `20-build-graph.md` §186 的读数）。
+//   不变** ⇒ 七个图 exe 不重编（R1，见 `docs/system/build-graph.md` §186 的读数）。
 
 /// 一条实例：**op id + 声明 + 图侧类型名 + 根 + 源文件 + 体**。
 pub struct InstRecipe {
@@ -32,7 +32,7 @@ pub struct InstRecipe {
     /// （`PxOp` impl 与体里的 `&<它>`），而 `include!` 进来的那个类型是唯一的来源。
     pub type_name: &'static str,
     /// 这条实例**编译时链的 crate**（目录名，相对 workspace 根）—— build graph 里的**边**
-    /// （`20-build-graph.md` §183）：每一个都会进生成物的 `[dependencies]`，且它的源码名册进 key。
+    /// （`docs/system/build-graph.md` §183）：每一个都会进生成物的 `[dependencies]`，且它的源码名册进 key。
     pub roots: &'static [&'static str],
     /// 泛型参数住哪个源文件（相对 workspace 根）。**内容**进 key，路径不进。
     pub source: &'static str,

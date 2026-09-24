@@ -1,6 +1,6 @@
 //! 图侧的**实例类型** —— 今天它们**是生成出来的**（不再是宏调用）。
 //!
-//! 分工（`.agents/notes/art/21-codegen-types.md`）：
+//! 分工（`docs/system/codegen-types.md`）：
 //!
 //! ```text
 //! src/inst_recipe.rs   数据表（op id / 声明 / 图侧类型名 / 根 / 源文件 / 体）—— 图侧零宏
@@ -11,13 +11,13 @@
 //! ```
 //!
 //! ⚠ **为什么生成物能进这一侧**：`PxOp` 的 `interface()` / `decl_hash()` / 三个关联类型
-//!   只有**编译过类型**的那一侧算得出（`19-generic-inst.md` §179.5）。从前这是"图侧写一行宏、
+//!   只有**编译过类型**的那一侧算得出（`docs/system/generic-instances.md` §179.5）。从前这是"图侧写一行宏、
 //!   工具问类型"；今天改成"**build script 用 `px_decls` 那张声明表**在编译图程序之前就把
 //!   事实拿齐、写成 const" —— 于是图侧一个字面量都不用写，而 stage 2 拿到的仍是**类型**。
 //!
 //! ⚠ **改 `art/inst/*.rs` 不会让这个生成物变**（它的每一栏都不含源文件字节）：key 是运行期用
 //!   `key_of_facts` 算的（要读那些字节）⇒ **图程序不重编、七个 exe 一位不动**，
-//!   只有那一条实例库要重编（`20-build-graph.md` §186 的 R1）。
+//!   只有那一条实例库要重编（`docs/system/build-graph.md` §186 的 R1）。
 //!
 //! ⚠ **上面这条只描述"声明那一档"**：element 那一档（`px_elem` 的规格表，`Elementwise::<F>`）
 //!   **图侧没有生成物**，它的规格是普通 Rust 代码（`ELEM_SPECS`）⇒ 本模块多出"照表登记节点与
@@ -48,7 +48,7 @@ pub mod generated {
 //   图程序与测试都从这一路径取它，别多一层 `generated::` 的噪音。
 pub use generated::{Band, LatBands, Waves};
 
-/// **stage 1 的声明**（`20-build-graph.md` §184/§189）：这里点名"要编哪些代码单元"。
+/// **stage 1 的声明**（`docs/system/build-graph.md` §184/§189）：这里点名"要编哪些代码单元"。
 ///
 /// ⚠ 事实（op id / 根 / 源文件 / 体）**只在 `inst_recipe.rs` 那一张表里**；两个只有编译过类型的
 ///   那一侧算得出的事实（`interface` / `decl_hash`）按 `type_name` 从**生成物**取 ——
@@ -112,6 +112,6 @@ pub fn codegen() -> &'static px_cook::inst::InstCatalogue {
     ALL.get_or_init(|| px_cook::inst::InstCatalogue::from_generated(catalogue::INST_CODEGEN))
 }
 
-// ⚠ **图侧的 `px_inst` 宏调用没有了**（`21-codegen-types.md`）：类型由 build.rs 生成，
+// ⚠ **图侧的 `px_inst` 宏调用没有了**（`docs/system/codegen-types.md`）：类型由 build.rs 生成，
 //   体由 `inst_recipe.rs` 给。那条旧路径（"扫文本找宏调用、抠模板、替换占位符"）连同
 //   `inst::claim` / `inst::check_template` 一起删掉了 —— 一处声明只有一个来源。

@@ -1,7 +1,7 @@
 //! `px_cook` 这一份构建的**工具链四原料** —— 生成实例库时要原样转给那份 cargo。
 //!
 //! ⚠ 为什么 `px_cook` 也要一个 `build.rs`：**生成本身住在这一层**（`inst::BuildGraph` 的
-//!   `compile_missing`，`20-build-graph.md` §187 的 B2 后半）。实例库要导出 `__toolchain_hash`，
+//!   `compile_missing`，`docs/system/build-graph.md` §187 的 B2 后半）。实例库要导出 `__toolchain_hash`，
 //!   而那个哈希是「`rustc -vV` + target + `RUSTFLAGS` + profile」算的 ⇒ 生成它的那一侧必须
 //!   知道**当前这份构建**的这四样，才能把同一份转给嵌套的那次 `cargo build`。
 //!   ⚠ `cargo:rustc-env` **不跨 crate 传播**（`px_fingerprint` 的文件头记过这条实测），

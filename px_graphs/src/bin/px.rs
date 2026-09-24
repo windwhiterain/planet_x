@@ -1,5 +1,5 @@
 //! **`px`**：stage 1（build graph）与 stage 2（数据图）的**唯一 driver**
-//! （`20-build-graph.md` §182 里那两个词，终于有对应的 bin 了）。
+//! （`docs/system/build-graph.md` §182 里那两个词，终于有对应的 bin 了）。
 //!
 //! ```text
 //! px list                              计划：逐条打印 id / 声明 / 根 / 源 / key / 有|缺
@@ -18,7 +18,7 @@
 //! ⚠ 节点从哪儿来：跑一遍 `px_graphs::insts::build()` 建图（`20` §184/§190 的 stage 1 声明）。
 //!   而**图里那些事实**（op id / 根 / 源 / 体）今天来自 `inst_recipe.rs` 那张数据表：
 //!   生成器（`px_graphs/build.rs`）把它翻成 `OUT_DIR/insts_gen.rs` 的类型 + 一张
-//!   `insts_gen_catalogue.rs` 的事实表（`21-codegen-types.md`）。**文本扫描不再参与执行**。
+//!   `insts_gen_catalogue.rs` 的事实表（`docs/system/codegen-types.md`）。**文本扫描不再参与执行**。
 //!
 //! ⚠ 这里**没有一行"怎么编"**：都在 `px_cook::inst::BuildGraph` 上（`missing()` /
 //!   `compile_missing()` / `compile_one()`）—— 这一层只管"取节点、打印、拼汇总行、删垃圾、

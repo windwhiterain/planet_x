@@ -4,7 +4,7 @@
 //! 不是同一份契约编出来的（类型布局可能已经不一样了）⇒ **当场拒**，绝不拿错的布局去调。
 //!
 //! 实现在 `px_fingerprint`（**rlib**：build.rs 与运行期代码共用同一份算法 —— 见
-//! `.agents/notes/art/19-generic-inst.md` §177）。
+//! `docs/system/generic-instances.md` §177）。
 
 fn main() {
     px_fingerprint::cargo_fingerprint_for_crate(&[]);

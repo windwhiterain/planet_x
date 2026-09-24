@@ -1,0 +1,144 @@
+# 几何与贴图
+
+球面网格怎么造（以及为什么最终由 PCG 生成）、位移与法线、mip、接缝与极点，以及为什么必须离开球面/八面体域。
+
+## §26 mipmap：让各向异性过滤不再空转
+
+**问题**：运行时生成的贴图**没有 mip**（Bevy 只给压缩格式 / DDS / KTX2 生成）⇒ `anisotropy_clamp` 一直是空转，而且一旦缩小就闪。
+
+**做法**：CPU 侧建整条 mip 链，2×2 盒式滤波，两处按球面语义处理 —— **经度方向环绕平均**（列 `W-1` 与列 `0` 其实是邻居）、**纬度方向夹紧**。一次覆盖四张贴图：星球表面色带 / 熔岩自发光 / 环带 / 星空。`anisotropy_clamp` 提到 **8**（有了 mip 才有效）。
+
+数据排布：整条链按级顺序拼进 `Image::data`，并把 `texture_descriptor.mip_level_count` 设为级数 —— Bevy 的上传走 `RenderDevice::create_texture_with_data`，**会按级数自己切**。
+
+**验证**：诊断行报 **`mip 10 级（约 1.6 MB）`**（768×384 ⇒ `floor(log2 768) + 1 = 10`）；管线 41/41 就绪、无校验错误（`anisotropy_clamp: 8` 被接受）；480×320 的缩小渲染干净、星点均匀 —— 这才是 mip 真正起作用的情形。
+
+**诚实记账**：主视角下星球是**放大**采样 ⇒ mip 目前主要帮到**星空**、更小的星球构图，以及将来自转动画时的闪烁，不要以为它让主图变好看了；代价是数据 **+33%**（768×384 全链 1.6 MB），表面贴图每个请求重建一次链（几 ms，实测渲染耗时仍是 ~330 ms，没变）；星空那张是一次性建好的（启动时），环带与表面贴图每请求建。
+
+## §27 接缝与极点
+
+### §27.3 那条「赤道」接缝其实是经线：`Repeat` 治不了它
+
+`icosphere` 的 UV 在 **±180° 经线**上不连续（Bevy issue #4987：「There is no trivial way to uv map an icosphere」），跨接缝的三角形 UV 在贴图空间里**横跨整张图** ⇒ 一条锯齿带。`AddressMode::Repeat` **治不了它**，因为问题出在**顶点插值**，不在采样器。
+
+⇒ 自己生成球面网格，三条必须：**接缝处复制一列顶点**（u=0 与 u=1 各一份）、**极点每个扇区一个顶点**（UV 取该扇区中点，否则极冠三角形又在整张贴图上横扫）、按位置**焊接法线**（`compute_smooth_normals` 是按顶点索引累加的，接缝两列会各算各的）。
+
+### §27.4 极点不是「预期的效果」：极轴约定要重新推导
+
+自建球面的极轴是 **±Y**，而子实体上还留着 `Quat::from_rotation_x(-FRAC_PI_2)` —— 那是给 **Bevy UV 球（极轴 ±Z）**用的 ⇒ 南极几乎正对相机：看到的「星芒」就是**正对极轴俯视时的极地冰盖 + 极点三角扇**，并且**环系也落在了错误的平面上**（不再是赤道面）。
+
+⚠️ **换图元时必须重新推导约定** —— 同一个坑第三次（UV 球的 ±Z、icosphere 的 ±Y、这里遗留的 `-90°`）。**判据：气态色板的条带方向**立刻告诉你极轴在哪，这是最快的极轴检查法。
+
+### §27.5 极点滤波：正确的值就是那一圈的平均
+
+极点那一行纹素**覆盖的是整整一圈**（整圈经度塌到一个点）⇒ 放大极点时看到的是**一整行纹素的径向拉伸**，而**正确的值就是那一圈的平均** —— 这不是遮丑，是退化映射的正确滤波。所以：贴图顶部/底部各 `height/32` 行朝该行均值混合（权重 1→0），位移也同样处理（`Field::sample_capped`）；修完之后极点是一块干净的白盖。
+
+## §29 几何改由 PCG 生成 —— 四条黑缝的真正修法
+
+缝合问题出在「用什么拓扑构造球面」，那属于**几何生成**，本来就该在 PCG 里。
+
+### §29.1 形状
+
+- **线格式不动**：`Blob { dtype, shape }` 已支持 `U32` ⇒ 一个 Mesh 产物 = **4 个数据块**（positions / normals / uvs / indices），顺序与 `px_protocol::art::MESH_*` 常量一致，`MeshData::{blobs, from_blobs}` 由**协议自己**读写。
+- `px_ops` 的产物从「一个场」变成 `Payload::{Field, Mesh}`，缓存/索引/清单对两者通用；新增 `MeshOp` trait 与 `mesh_node::<Op>()`（`MeshOp::eval` 收 `&[&Field]`，所以网格算子能吃场）。
+- 算子 **`mesh.octasphere`**：把**八面体的八个面各自**细分成三角网格。相邻面共享边的顶点**位置与 UV 完全一致**（UV 由 `octahedral_uv_y_up(方向)` 给出，是方向的函数 ⇒ 两侧必然相同）⇒ **天然闭合，四条缝消失**；极点（世界 ±Y）成为四个面共享的顶点，周围是正常的三角伞。
+- 渲染器不再造几何：`--mesh <产物>` 直接加载；`Scene::Planet` 增加 `mesh` 字段（SCHEMA 5）；没给 `--mesh` 时仍走自带球面。
+- `Field::sample_direction(方向)`（投影无关：八面体走 `octahedral_uv_y_up`，经纬度走 acos/atan2）⇒ 网格算子与投影解耦。
+
+### §29.2 三条接线规则（都是「球为什么黑」的成因）
+
+- **每个面用面心方向做一次定向检查**，反了就交换两个角 —— 否则 `(−X,+Y,+Z)` 这类组合的手性与 `(+X,+Y,+Z)` 相反，**半个球被背面剔除**。
+- **法线用六邻域环形累加**（`cross(p_k-here, p_{k+1}-here)` 求和，越界就 `continue` 跳过）—— 用 `(i+1).min(n-j)` 式索引会在最后一行把邻居替换成第一排的远处顶点，差分横跨整个面 ⇒ 法线全废（审计 `最小点积 0.000`）。
+- **抽 `spawn_lights()`，两条路都调用**：`DirectionalLight` / `AmbientLight` 是在场景构造函数**末尾**才 spawn 的，PCG 网格分支提前 `return` 就会静默跳过 ⇒ 只剩环境光（最强的线索是「改了法线之后图像字节完全不变」）。
+- 三个「最小点积」审计（PCG 算子内、渲染器加载后）都保留：它们是定性仪器。
+
+## §30 为什么必须离开球面域：折叠破坏过滤
+
+**这是八面体图的固有性质**：折叠线两侧的相邻纹素在球面上是**镜像的不相邻方向**，双线性/各向异性过滤跨过折叠线时会把无关纹素混进来；mip 链同理（x 环绕、y 夹取对八面体布局本来就是错的）。octahedral map 是**为法线编码设计的**，那种用途不看过滤质量。
+
+**要贴图的球面应该用 cubemap**：六个正方形面彼此独立、没有折叠，跨面边缘两侧的纹素对应几乎相同的方向 ⇒ 过滤几乎正确，再加一圈邻面 gutter 就完全正确 —— 这正是天空盒用 cubemap 的原因。
+
+同一条线上另外两条硬结论：
+
+- **网格拓扑必须全局共用顶点索引。** 边审计：`309120 条边，3840 条只属于一个三角形` —— `3840 = 8 面 × 3 边 × 160 段`，即八个 patch 各自独立、只是顶点在空间里碰巧重合；改成**按方向量化去重、全局共用一套顶点索引**后：`102402 顶点，开口边 0` ✓。
+- **八面体面内 UV 不是仿射的**（是 L1 归一化的投影）⇒ 重心插值必然错位（测试 `the_affine_table_agrees_with_the_decoding` 报**最大误差 1.91**，表现是整块面被镜像采样）。UV 必须**按方向精确编码**（`octahedral_uv_y_up(方向)`），并配一条不变量测试（`every_vertex_uv_points_back_at_its_direction` ✓）。
+
+cube 方案（3×2 图集 + gutter，`docs/system/assets.md` §31）就是这两条的直接结果；`Projection` 从 `Octahedral` 换成 `Cube` 时，烘焙路径、网格 UV、mip 规则一起换。
+
+## §32 立方体棱上那条细线 + 环境光其实一直是死的
+
+### §32.1 细线的真因：棱上顶点被两个面共用，却只有一个 UV
+
+cube 域里每个面在图集里有自己的位置，**棱上的顶点需要两个不同的 UV**（各面一份）。按「方向」焊接 ⇒ 棱上顶点被共用 ⇒ 其中一个面的三角形被拉到另一面的图集区域 ⇒ 沿线细带。
+
+⇒ 焊接键改成 **(面, 方向)**：棱上复制顶点、各带本面 UV，**位置仍然严格重合**（方向相同 ⇒ 位移相同）⇒ 没有几何缝；法线再在算子内**按位置焊接**一次（`法线焊接 1916 组`）⇒ 跨面平滑。结果：`155526 顶点 / 307200 三角形、开口边 3840`（cubemap 的标准状态：棱上顶点成对、位置重合）、`最小点积 0.769`；特写扫描里最强整行只有 2.6%、整列 6.7% 跳变（真直缝应是几十个百分点）。
+
+⚠️ 方向量化容差用 **2^18**（`quantize`：`round(方向 × 262_144)`）；放到 `2^20` 时立方体的棱上还有 **48 条开口边**（两个面算出的同一方向在浮点末位不一致）。
+
+### §32.2 探针重心跟着搬
+
+cube 域里**奇异点从两极搬到了立方体的十二棱与八角**，所以 12 个视角 = 赤道四向 + ±45° + 南北极 + **立方体角点×2 / 棱中点 / 面心**（后四个是 1.40 倍距离的特写）。`SYSTEM_TILT` 会让「按 yaw/pitch 直瞄」打偏，所以把局部方向 `(1,1,1)` / `(1,-1,1)` / `(1,1,0)` / `(0,0,1)` 过一遍 `Rx(tilt)` 再换算成 yaw/pitch。
+
+### §32.3 `AmbientLight` 在 0.19 是**相机组件**
+
+`AmbientLight { brightness }` 挂在场景实体上（`commands.spawn((ScenePart, AmbientLight {...}))`）**完全无效** —— 它只是「可以挂在相机上覆盖 `GlobalAmbientLight` 的组件」。所以 `--ambient` 从头到尾没用、探针其实一直在默认亮度下拍。判据很干脆：`--ambient 4` 与 `--ambient 400` 出图**字节完全相同**。修法：挂到相机实体上（`accept_jobs` 用请求里的值、预览窗口用默认值），复核两者出图不同 ✓。
+
+### §32.4 一个看起来该修、其实不用修的地方
+
+gutter 只有 2 纹素、mip 2 之后就只剩 0.5 纹素，够不够全图 mip 链跨面混合？够 —— gutter 里装的本来就是**邻面的方向**，逐面 mip 与整图 mip 出图**字节不变**（差异 < 1/255）；逐面 mip 留着（语义更清楚、换更大 gutter 也不会退化），放大看到的那条「柔和带」其实是**北极冰盖的纬度边界**，不是接缝。
+
+## §33 `field.warp` 三维化，沙漠图迁 cube
+
+### §33.1 扭曲改成方向空间的矢量位移（v3）
+
+旧版在**图空间**做偏移（经纬度下有 `1/sinθ` 的极区换算，八面体/cube 下会跨折叠、跨面 ✗；v2 用 `ring = sqrt(sin²θ + 0.16)` 的平滑下限，硬下限 `sin.max(0.25)` 会把极区经度位移放大到近 100° 并造出一条锯齿边界）。新版只做三件事，**全部投影无关**：
+
+1. `方向 = grid.direction(x, y)`；
+2. 在该方向建**切框架** `(east, north)`（`tangent_frame`：极点附近换个 up 轴，避免退化）；
+3. 两个扭曲分量来自**同一个扭曲场**在两个方向上的采样（原方向、以及沿 east 探出 `probe` 的方向 —— 这样两个分量去相关，且不需要第二个输入）；位移后归一化，再用 `input.sample_direction(新方向)` 重采样。
+
+参数只剩 `strength`（弧长，弧度）/ `lateral` / `probe`，`spherical` 开关删掉（不再需要）。**测试**：`a_constant_warp_field_leaves_the_input_alone_in_every_projection` —— 常量扭曲场下，三种投影（经纬度/八面体/cube）都必须「不动」，最大偏差 < 0.02 ✓；这条测试同时覆盖了 `direction_at` 的三个分支。
+
+方向与切框架抽成 `px_ops::field::{direction_at, tangent_frame, normalize, cross}` 与 `Grid::direction`，`Field::direction` 改为调用共用实现（渲染器里还有一份自己的 `Projection::direction` ✗，将来也应收敛）。
+
+### §33.2 沙漠图迁 cube
+
+`desert` 图：画布 780×520、投影 `Cube`、末尾加 `mesh.cubesphere` 节点（`art/desert/surface.toml`），`GRAPH_VERSION` 升到 2。烘出来 8 个节点 2.0 s（网格 789 ms、155526 顶点 / 307200 三角形）。12 视角对照图（`target/probe-desert.png`）**无接缝**，含棱/角特写 ✓。
+
+### §33.3 一个待办：两张图共用一个 manifest
+
+`planet` 与 `desert` 都写 `target/pcg/manifest.json`，取产物只能「取最后一个同名节点」✗ 有点脆 ⇒ 应改成**按图分文件**（`target/pcg/<图名>/manifest.json`），顺带让渲染命令能按图名找产物。
+
+## §54 程序化几何库：选型结论（2026-09 调研）
+
+一条贯穿的约束：生态里"能用"的几何 crate 有一大半把 glam / nalgebra 的**非 0.32 版本**放进公开 API，而 Bevy 0.19 锁 glam 0.32 ⇒ 类型层面炸（`fidget-mesh` nalgebra 0.35、`fast-surface-nets` glam 0.29、`csgrs` nalgebra 0.33、`smesh` 默认拉 bevy 0.17、`mesh-graph` 一边声称支持 bevy 0.19 一边 pin glam 0.33 —— 组合内部不自洽）。**所以每类都优先选"公开 API 里没有数学库"的那一支**，这不是巧合。
+
+| 用途 | 结论 |
+|---|---|
+| 等值面 | 现有 `isosurface`；只在要 LOD 缝合时加 `transvoxel 2.0.0`（零依赖、输出形状与 `MeshData` 同构） |
+| SDF / 布尔 | hero 走 **SDF 组合 + 网格化**；精确布尔用 `manifold-csg`（Apache-2.0，代价是 cmake 一次性编 manifold3d+Clipper2+TBB，不进运行时） |
+| LOD / 简化 | **`meshopt 0.6.2`** —— 默认**只拉 `cc`**（见下"教训"），一次解决简化+顶点缓存+meshlet 聚类+索引编码；`bevy_pbr` 的 meshlet_processor 自己就 dep 它 |
+| 网格校验 | `isomesh::validate` 当**独立第二意见**（见下） |
+| 半边 / 编辑 | **继续手写**（现在不需要半边结构）；真要引入用 `alum`（BSD-3、依赖仅 tobj） |
+| UV 展开 | **继续手写**（立方球天然自带 UV）；`xatlas-rs-v2` 的 `bindgen ^0.68.1` 是**非可选** build-dep ⇒ 可能违反"只接受 cc 编纯 C"，到时候再验 |
+| 凸包 / Delaunay | `spade`（2D，零冲突）+ `parry3d`（3D 凸包，**稳定版里只认 0.27.0**，它是唯一共用 glam 0.32 的）；碎块用 Voronoi 对偶/凸包+切割更省 |
+| 扫掠 / 放样 / bevel | Bevy 自带 `Extrusion`；要轮廓 DSL 才上 `procedural_modelling` + `bevy_procedural_meshes 0.19.0`；**只要管子手写 100~150 行** |
+| GPU / meshlet | **手写，而且现在不开工** —— Bevy 0.19 的 meshlet **官方只支持 Vulkan/Metal（我们是 DX12）**、须关 MSAA、材质必须不透明，官方原文 "**not suitable for dynamically generated geometry**" |
+| 格式导入 | **什么都不用加**：`bevy_gltf`（自带）+ `tobj`（OBJ） |
+
+**两条硬排除（容易踩）**：
+
+- **`truck 1.0.0` 是同名无关 crate**（"generates a cargo toml for you"，2020 年发布）—— 那个 CAD 内核只能经 `truck-modeling/-meshalgo/-geometry/-polymesh/-topology/-base/-shapeops` 成员引入，**绝不要 `cargo add truck`**。
+- **OpenCascade 绑定是 LGPL-2.1**（`opencascade` / `opencascade-sys` / `occt-sys`，会静态编 C++ OCCT）⇒ 白名单外，不依赖。
+
+**判据从哪来**：crates.io 全文搜 `euler characteristic`（85 条命中）**没有任何网格拓扑 crate**；也没查到专门的 3D 三角网格自交检测 crate ⇒ χ / genus / 边界环 / 非流形 / 朝向一致性这一整套，生态里能一次给全的只有 **`isomesh::validate`**（零依赖、无数学库、吃**裸切片** `&[[f32;3]]` + `&[u32]`，25 个字段含 `euler_characteristic` / `genus` / `boundary_edges` **+ `boundary_loops`** / `non_manifold_edges|vertices` / **`inconsistently_oriented_edges`** / `satisfies(SurfaceGate)` / `mesh_hash()` 可直接对上内容寻址）。但它是 0.0.10 / 785 下载 / 0 star / 单作者 / 自述 AI 未审 ⇒ **先过四个已知答案测试**（闭合球 χ=2、g=0；环面 χ=0、g=1；带一洞平面 χ=0、`boundary_loops=1`；内外翻球面 `inconsistently_oriented_edges>0` 而其余计数不变）**才允许进判据**；有一个错，就只把它的**定义当规格、自己实现一份对照**。
+摩擦：它吃 `&[[f32;3]]`，我们的 `MeshData` 是扁平 `Vec<f32>` ⇒ 一次 `chunks_exact(3)` 转换（廉价，不需要 bytemuck）。
+
+**`isosurface` 是冻结依赖**（2021 年的 alpha、仓库 2023-07 后未动）⇒ 把我们在用的那部分（稠密 MC 表 + 提取器；**自适应八叉树已实测用不了**，见 `docs/art/clouds.md` §51.10.1）**vendor 进 `px_ops`**，否则它是几何栈里最大的单点风险。
+
+**教训（选型方法论）**：从 build-dep 列表里看到 `bindgen` 就断言"需要 libclang"是**错的** —— Cargo 里 build-dep 存在 ≠ build.rs 一定调用它。判据是 **`optional` 标志 + feature 表**：`meshopt 0.6.2` 的 `bindgen ^0.72` 是 `optional=True`，只有 feature `generate_bindings` 会开它，且**没有 `default` feature** ⇒ 默认只拉 `cc`。（真正非可选的是 `xatlas-rs-v2` 与 `meshoptimizer-sys`，别混。）
+
+**三个还没解的（查清前不要当成可用）**：
+
+1. `parry3d::math::Vec3` 是 glam 的 **re-export** 还是 **newtype** —— 若是前者，`parry3d 0.30.2` 与 Bevy 0.19 之间传 `Vec3` 是硬编译错误，必须降到 **0.27.0**（而 0.27.0 在 docs.rs 上 build 失败、无在线文档）。这是头号不确定点，两个独立调研源都独立撞上它。
+2. `xatlas-rs-v2` 到底要不要 libclang（build-dep 有 bindgen 非可选，但 build.rs 是否真调 `generate()` 未查）。
+3. `isomesh::validate` 的数算得对不对（见上，四个已知答案测试即验）。

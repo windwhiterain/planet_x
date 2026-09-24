@@ -37,7 +37,7 @@ pub const PARAMS_BINDING: u32 = 0;
 /// **2026-09-16 加宽（§74.4 裁决 (a)）**：4 格 → **12 格（8×2D + 4×cube）**，参数上限
 /// 1024 → 4096 字节。原来那四格 `1 / 3 / 5 / 7` **一个都没动** —— 加宽只许往后**追加**：
 /// 挪老格就等于把每一份既有 shader 的贴图悄悄换到别的格上（`material.rs` 的单测钉着这一条）。
-/// 判据：产物键逐字节不变（表不进键）＋出图哈希不变（空格的代价见 `12-step0.md`）。
+/// 判据：产物键逐字节不变（表不进键）＋出图哈希不变（空格的代价见 `docs/render/schema-limits.md`）。
 /// 量到的代价：`app p50 37.07 ms / gpu p50 10.43 ms`（960×640、`orbit`、Vulkan、4 格）
 /// → 12 格见 `target/step1/` 的 A/B 两份报告。
 pub const TEXTURE_SLOTS: [(u32, TextureDimension); 12] = [

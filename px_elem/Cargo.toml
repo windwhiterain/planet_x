@@ -13,6 +13,6 @@ serde = { version = "1", features = ["derive"] }
 
 [build-dependencies]
 # `decl_hash()` = **本 crate**（element 函数的家）的源码指纹：参数 struct 加一栏就换实例键
-# （`19-generic-inst.md` §177 那条老账）。
+# （`docs/system/generic-instances.md` §177 那条老账）。
 px_fingerprint = { path = "../px_fingerprint" }
 

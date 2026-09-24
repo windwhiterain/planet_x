@@ -1,4 +1,4 @@
-//! **泛型实例**：内容寻址的**代码**缓存 + 运行期装载（设计见 `.agents/notes/art/19-generic-inst.md`）。
+//! **泛型实例**：内容寻址的**代码**缓存 + 运行期装载（设计见 `docs/system/generic-instances.md`）。
 //!
 //! 一条实例 = 「复用一个算子的**声明** + 一段 agent 现写的**泛型参数**」编译出来的实现库。
 //! 它的**文件名就是它的构建指纹** ⇒ 编译期写不进 `const LIB`，装载器必须运行期拿到它
@@ -20,7 +20,7 @@ pub const PACKAGE: &str = "px_inst";
 
 /// **图的计划**要住哪：`px_graphs/src/inst_recipe.rs`（相对 workspace 根）。
 ///
-/// ⚠ 它是**数据表**（`20-build-graph.md` 那之后这一轮：`21-codegen-types.md`）：图侧一个字面量都不写，
+/// ⚠ 它是**数据表**（`docs/system/build-graph.md` 那之后这一轮：`docs/system/codegen-types.md`）：图侧一个字面量都不写，
 ///   事实（op id / 声明名 / 根 / 源文件 / 体）全在这里。
 pub const RECIPE: &str = "px_graphs/src/inst_recipe.rs";
 
@@ -113,7 +113,7 @@ pub fn key_of<O: PxOp>(
 /// ⚠ 它存在的理由：`px_graphs/build.rs` **编译不了**算子类型（它只被 `[build-dependencies]`
 ///   看见），而 key 的输入里有两样只有编译过类型的那一侧算得出（`interface()` / `decl_hash()`）
 ///   ⇒ 由 `px_decls`（一个小 rlib，**不进任何实现库的名册**）把这两样交出来，
-///   这一层只负责"照同一套输入算同一个 key"。见 `.agents/notes/art/21-codegen-types.md`。
+///   这一层只负责"照同一套输入算同一个 key"。见 `docs/system/codegen-types.md`。
 ///
 /// ⚠ **算法一个字都不在这儿**：它转手就构造 [`Inst`] 走 [`key`] —— 生成器与图程序
 ///   （生成的 `InstNode::info()`）拿到的是**同一个函数**算出来的 key，不可能对不上。
@@ -246,7 +246,7 @@ pub fn symbol(decl: &str) -> String {
 /// **一个实例的类型化把手**：生成物（`OUT_DIR/insts_gen.rs`）给每个实例实现它。
 ///
 /// ⚠ 名字叫 `InstNode` 而不是 `Inst`：`Inst` 已经是 key 的输入结构（上面那个），
-///   而这一位是"build graph 里的一个**节点**"（`20-build-graph.md` §183）。
+///   而这一位是"build graph 里的一个**节点**"（`docs/system/build-graph.md` §183）。
 ///
 /// ⚠ 存在的理由是"**描述只在一处**"（`20` §184）：op id / 根 / 源文件 / 体
 ///   都只写在 `px_graphs/src/inst_recipe.rs` 那一行里，任何需要这些事实的地方
@@ -257,7 +257,7 @@ pub trait InstNode {
 
 /// **stage 1（build graph）的图**：节点 = 代码单元，边 = "它编译时链了谁"。
 ///
-/// ⚠ 它是 `20-build-graph.md` §187 的 B2 后半那一层：`missing()` 说"缺哪些"、
+/// ⚠ 它是 `docs/system/build-graph.md` §187 的 B2 后半那一层：`missing()` 说"缺哪些"、
 ///   `compile_missing()` **真的编**（生成 → cargo → 收库 + sidecar）。工具（`px`）
 ///   与两阶段入口（`px run`）都只调这两件事，不再各写一遍。
 ///
@@ -361,7 +361,7 @@ impl BuildGraph {
     /// ⚠ **只有这一件事会写盘**（`20` §186）：`Crate` / `Toolchain` / `Contract` 是只读指纹
     ///   节点，它们在 key 里而不在盘上。
     /// ⚠ `catalogue` 是**先生成好的那份生成物事实**（模板原文与它住哪）—— 从
-    ///   `px_graphs/src/inst_recipe.rs` 来（`21-codegen-types.md`）：它不认识任何具体图程序，
+    ///   `px_graphs/src/inst_recipe.rs` 来（`docs/system/codegen-types.md`）：它不认识任何具体图程序，
     ///   这一层不依赖 `px_graphs`。
     /// ⚠ cargo 的 stdout/stderr **原样透出**，失败**不写库**、不静默（`19` §176 第 3 条）。
     ///
@@ -411,7 +411,7 @@ impl Plan {
     /// 缺实例时那句"该跑什么命令"（`19` §176 第 3 条：报错必须带命令）。
     ///
     /// ⚠ 命令里的**图名由调用方给**：`px run <图> …` 的第一个参数就是图名 —— 两种都写出来，
-    ///   抄一条就能跑。⚠ 这两个词就是 bin `px` 的子命令（`20-build-graph.md` §182）。
+    ///   抄一条就能跑。⚠ 这两个词就是 bin `px` 的子命令（`docs/system/build-graph.md` §182）。
     /// ⚠ 命令前缀走 [`driver_command()`]：**直接跑 driver exe**，不绕 `cargo run`
     ///   （理由在那一条的文档里）。
     pub fn hint(&self, graph: &str) -> String {
@@ -649,7 +649,7 @@ impl InstCatalogue {
 
 /// **编一条**：生成 → cargo → 收库 + sidecar（`19` §179.4 的第 1–5 步）。
 ///
-/// ⚠ 失败时把**这条编译错是哪一段代码的**说清楚（`21-codegen-types.md` 的"错误映射"）：
+/// ⚠ 失败时把**这条编译错是哪一段代码的**说清楚（`docs/system/codegen-types.md` 的"错误映射"）：
 ///   体来自 recipe 第几行、参数文件是谁、生成物在哪。生成物**留着不删**。
 pub fn compile_one(info: &InstInfo, key: &str, codegen: &InstCodegen) -> Result<(), String> {
     match compile_generated(info, key, codegen) {
@@ -747,7 +747,7 @@ pub fn manifest_text(root: &Path, roots: &[String], kind: &InstKind) -> Result<S
     if roots.is_empty() {
         return Err(
             "这条实例没登记任何根（`inst::InstInfo::alg_roots` 是空的）—— 泛型体住哪个 crate？\
-             （那就是 `20-build-graph.md` §183 里的**边**）"
+             （那就是 `docs/system/build-graph.md` §183 里的**边**）"
                 .to_string(),
         );
     }
@@ -805,7 +805,7 @@ pub fn manifest_text(root: &Path, roots: &[String], kind: &InstKind) -> Result<S
 ///   生成物因此先把要复用的东西**按裸名引进作用域**，再写裸名 —— 两档引进的方式不同（见下）。
 /// ⚠ 体（`|p, i| …` 那一段）**逐字**取自 `codegen.body`：声明那一档里写的是**真类型名**
 ///   （`&Waves`），因为生成物 `include!` 了 `source` ⇒ `Waves` 就在作用域里
-///   （`21-codegen-types.md`：占位符与文本替换都没了）；element 那一档写的是
+///   （`docs/system/codegen-types.md`：占位符与文本替换都没了）；element 那一档写的是
 ///   `px_elem::fill::<px_elem::specs::<ty>>(...)` —— **全路径**，理由见下面那一段。
 pub fn lib_text(root: &Path, codegen: &InstCodegen) -> Result<String, String> {
     let source = root.join(codegen.source);
@@ -940,7 +940,7 @@ pub fn inst_env(name: &str) -> &'static str {
 ///   主构建一旦带 `RUSTFLAGS`，实例库与图程序就**必然对不上**，装载层会（正确地）把每条实例
 ///   都拒掉 —— 拒绝没错，但得让人有办法改对，所以这里把 profile / target / RUSTFLAGS 一起传下去。
 ///
-/// ⚠ **它只在 stage 1 被调**（`20-build-graph.md` §182）：stage 2（`cached` 那条路）**只读装载**，
+/// ⚠ **它只在 stage 1 被调**（`docs/system/build-graph.md` §182）：stage 2（`cached` 那条路）**只读装载**，
 ///   永远走不到这里 ⇒ 图程序里这一段是**死代码**（它随 `px_cook` 链进图 exe，但一个字节都不会跑）。
 ///   把"会跑 rustc"这件事放进一个 stage 2 也链着的 crate，代价就是这一份死代码 —— 换来的是
 ///   "执行住在 `BuildGraph` 上"（B2 后半那一条），而 R1（改 art/inst ⇒ 七个 exe 一位不动）

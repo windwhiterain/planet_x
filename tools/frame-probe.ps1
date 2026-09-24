@@ -4,7 +4,7 @@
 
 .DESCRIPTION
   内容全部从产物来：脚本只给图名与节点名，路径由 `target/pcg/<图>/manifest.json` 解析，
-  渲染器只收 `--scene <路径>`。协议（`09-instruments.md` §57）把活分成几路，
+  渲染器只收 `--scene <路径>`。协议（`docs/render/instruments.md` §57）把活分成几路，
   **每一路都回一份结构化 JSON 报告**（`--report <路径>` 落盘，同一份也回给调用方）：
 
     · **性能主路径**（`--perf`，默认）：⚠ **已随锚退休（S8-a）** —— 见下面那条横幅。
@@ -24,9 +24,9 @@
      `target/debug/px_render.exe` 是一支**还能跑的 Bevy 宿主**（六份冻产物出图与
      `art/anchor/*.png` 逐字节全中，仪器 `target/pre-rename/bevy-six.ps1`）；**裁决是不留**，
      改名又覆盖那个路径 ⇒ **从 §157 起这句成立**。全文与"拿回来的路"见 `art/anchor/README.md`
-     与 `15-render-wgpu.md` §157。
+     与 `docs/archive/render-wgpu.md` §157。
      ⇒ 这两路由 `Stop-RetiredPhase` **当场拒并说清**（不是等 180 s 超时、也不是等服务端
-     回一句"这一路不在这一版"）。量法与全部读数留在 git 历史与 `15-render-wgpu.md` §147/§153。
+     回一句"这一路不在这一版"）。量法与全部读数留在 git 历史与 `docs/archive/render-wgpu.md` §147/§153。
      本宿主**有的**计时仪器是 `px_render --spans 预热,测量`（§153 的 J4 仪器，量**逐条
      pass** 的编码器级时间戳）—— ⚠ 它**不是** `--perf` 的替代品，名字与口径都不同。
 
@@ -263,7 +263,7 @@ function Stop-RetiredPhase {
   ⚠ 而能给出可比 `gpu_ms` / `pair` 的那支宿主（bevy 锚 exe）**已经不在了，且不可重建**
     —— 它是冻结的构建产物，重建出来的不是同一个字节序列（art/anchor/README.md）。
   ⇒ 这两路**退休，不再修**。它们的量法与全部读数留在 git 历史与
-     .agents/notes/art/15-render-wgpu.md §147 / §153 里。
+     docs/archive/render-wgpu.md §147 / §153 里。
   本宿主**有的**那件计时仪器是 `px_render --spans 预热,测量`（§153 的 J4 仪器）：
     它量的是**逐条 pass** 的编码器级时间戳 —— ⚠ 它**不是** `--perf` 的替代品，
     名字与口径都不同（那个数不叫 gpu_ms）。

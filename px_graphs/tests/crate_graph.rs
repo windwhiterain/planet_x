@@ -135,7 +135,7 @@ fn operator_libraries_do_not_link_the_driver() {
 /// ⚠ 图程序**也不许**依赖 alg crate（`px_*_alg`）。
 ///
 /// 那是"实现体"那一半：依赖了就等于把「改泛型算法 ⇒ 重编图程序」请回来 ——
-/// 而内容寻址的泛型实例（`21-codegen-types.md`：`inst_recipe.rs` 那张表 + 生成物）的全部意义
+/// 而内容寻址的泛型实例（`docs/system/codegen-types.md`：`inst_recipe.rs` 那张表 + 生成物）的全部意义
 /// 正是不让它发生。图程序只在表里声明实例，算法由 `px build` 在**另一个 workspace** 里编成实例库。
 #[test]
 fn the_graph_scripts_do_not_link_algorithm_libraries() {

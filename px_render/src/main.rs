@@ -1,4 +1,4 @@
-//! px_render：**不依赖 bevy** 的渲染宿主（`art/15-render-wgpu.md`）。
+//! px_render：**不依赖 bevy** 的渲染宿主（`art/docs/archive/render-wgpu.md`）。
 //!
 //! ⚠ **本 crate 在 §157（2026-09-19）之前叫 `px_render_wgpu`**，那之后它接管了 `px_render`
 //! 这个名字（旧的 `px_render` 是 Bevy 宿主，§154 已删）。⇒ 本 crate 源码里凡是

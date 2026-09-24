@@ -52,7 +52,7 @@ pub fn workspace_root() -> &'static Path {
 
 /// 材质绑定组 = **契约表里的那个数**（= Bevy 的 `MATERIAL_BIND_GROUP_INDEX`）。
 /// 探针原来自己写死 2（那是老组装器替出来的数），而运行期是 3 —— 同一个 `#{MATERIAL_BIND_GROUP}`
-/// 在两边组的不是同一份东西（`art/12-step0.md` §79 的「2/3 那颗雷」）。
+/// 在两边组的不是同一份东西（`art/docs/render/schema-limits.md` §79 的「2/3 那颗雷」）。
 pub use px_protocol::material::MATERIAL_BIND_GROUP;
 
 /// 探针自己的 job/out 放在**哪一格**。**不是**材质组 + 1：材质组按契约是 **3**，
@@ -71,7 +71,7 @@ pub const JOB_BIND_GROUP_TOKEN: &str = "#{JOB_BIND_GROUP}";
 /// ⚠ 这两个数**不许在探针里再抄一遍**：探针原来自己写「贴图 1 / 采样器 2」，
 /// 而 `76be114`（通用渲染 S0–S4）把材质贴图挪到了奇数格 ⇒ 探针的布局与 shader 声明对不上，
 /// `gradient` 那一族 check 从此全红（实测：`group 2, binding 5 is not available in the pipeline layout`，
-/// 见 `08-renderer.md` §81.6）。绑定的真源只有一处：`px_protocol::material`。
+/// 见 `docs/render/renderer.md` §81.6）。绑定的真源只有一处：`px_protocol::material`。
 pub const COVERAGE_BINDING: u32 = 5;
 pub const COVERAGE_SAMPLER_BINDING: u32 = COVERAGE_BINDING + 1;
 

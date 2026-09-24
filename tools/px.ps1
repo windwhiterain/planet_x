@@ -4,7 +4,7 @@
 
 .DESCRIPTION
   探针不是测试：它们要 GPU、要几分钟，所以从 cargo test 里搬出来了
-  （见 .agents/notes/art/09-instruments.md §47）。**退出码才是判据**。
+  （见 docs/render/instruments.md §47）。**退出码才是判据**。
 
   「优化程度」由 -Level 选：
     dev      默认。编译最快（bevy 保持 -O0），跑得最慢。
@@ -12,7 +12,7 @@
     release  全量 O3：跑得最快，第一次编译最贵。
 
   ⚠ 面向 driver（bin `px`）的那四个 target **就是动词**：`list` / `build` / `gc` / `run`
-  （`20-build-graph.md` §182 那两个词）。它们**不带** `-Level` 的逐包 opt-level 覆盖：
+  （`docs/system/build-graph.md` §182 那两个词）。它们**不带** `-Level` 的逐包 opt-level 覆盖：
   实例库自成 workspace 根（`target/jit/<key>/`），那套 `--config` 是给主 workspace 的。
 
 .EXAMPLE

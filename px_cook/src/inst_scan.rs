@@ -1,6 +1,6 @@
 //! **按文本读源码的工具**（扫宏调用 / 收 `.rs` / 读 workspace 成员）——**一份词法口径**。
 //!
-//! ⚠ **它在图侧不再被任何执行路径用了**（`21-codegen-types.md`）：体从图侧源码搬进了
+//! ⚠ **它在图侧不再被任何执行路径用了**（`docs/system/codegen-types.md`）：体从图侧源码搬进了
 //!   `px_graphs/src/inst_recipe.rs` 那张数据表，`px build` 读生成器落下的
 //!   `OUT_DIR/insts_gen_catalogue.rs`，两个扫描点（`claim` / `check_template`）都删掉了。
 //!   今天真正在用它的只有两处：

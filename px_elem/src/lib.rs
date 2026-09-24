@@ -122,7 +122,7 @@ pub struct ElemSpec {
 /// `px_elem` 那一份源码指纹（element 函数的家）—— 实例键的一轴（`decl_hash`）。
 ///
 /// ⚠ `env!` 在**本 crate** 展开 ⇒ 图侧那一边（`px_graphs::elem` 的生成物）读到的就是它：
-///   往参数 struct 里加一栏、或改规格表 ⇒ 换 `decl_hash` ⇒ 换实例键（`19-generic-inst.md` §177）。
+///   往参数 struct 里加一栏、或改规格表 ⇒ 换 `decl_hash` ⇒ 换实例键（`docs/system/generic-instances.md` §177）。
 pub const DECL_HASH: &str = env!("PX_SOURCE_HASH");
 
 /// 一个 element 函数**对脚本作者的那一面**：他的参数类型、他的上游、他的名字、他要多大。

@@ -839,7 +839,7 @@ mod tests {
         let mut data = vec![0.0_f32; (CUBE_FACES * layers * res * res * 6) as usize];
         let mut slot = 0_usize;
         for face in 0..CUBE_FACES {
-            for layer in 0..layers {
+            for _layer in 0..layers {
                 for t in 0..res {
                     for s in 0..res {
                         let direction = px_volume_schema::direction_of(

@@ -118,7 +118,7 @@ pub trait PxOp: Sized {
     ///
     /// ⚠ 泛型实例（`px_cook::px_inst!`）的键必须覆盖它：接口哈希只哈希三个**类型名**，
     ///   不含字段布局 —— 往 `CloudCoarseInput` 加一个字段时，图程序会重编而实例库的键不变，
-    ///   复用一份按**旧布局**编出来的 DLL 就是越界读写。见 `19-generic-inst.md` §177。
+    ///   复用一份按**旧布局**编出来的 DLL 就是越界读写。见 `docs/system/generic-instances.md` §177。
     ///
     /// 图侧现写的算子（`px_local_op!`）与不吃泛型参数的算子不用管它（默认空串）。
     fn decl_hash() -> &'static str {

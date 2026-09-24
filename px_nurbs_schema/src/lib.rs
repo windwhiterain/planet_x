@@ -10,7 +10,7 @@
 
 /// **这个 crate 编译进去的全部源码**的指纹（`build.rs` 给的十六进制）。
 /// 声明里那句 `const DECL_HASH: &'static str = env!("PX_SOURCE_HASH")` 用的就是它 ——
-/// 泛型实例的键必须覆盖"声明所在的这一份源码"（见 `.agents/notes/art/19-generic-inst.md` §177）。
+/// 泛型实例的键必须覆盖"声明所在的这一份源码"（见 `docs/system/generic-instances.md` §177）。
 pub const SOURCE_HASH: &str = env!("PX_SOURCE_HASH");
 
 pub mod curve;

@@ -1,9 +1,9 @@
-//! **声明表**：声明名 → 类型级事实（`21-codegen-types.md` 的"四件新东西 ②"）。
+//! **声明表**：声明名 → 类型级事实（`docs/system/codegen-types.md` 的"四件新东西 ②"）。
 //!
 //! 它为什么存在：stage 1 的**生成器**是 `px_graphs/build.rs`，而 build script **编译不了算子类型**
 //! （它只看得见 `[build-dependencies]`）。可生成物里那三句
 //! `type Params = <路径>;` 与 key 的两轴（`interface()` / `decl_hash()`）**只有编译过类型的那一侧**
-//! 才算得出（`19-generic-inst.md` §179.5）。⇒ 把"编译过类型"这件事放进一个**小 rlib**，
+//! 才算得出（`docs/system/generic-instances.md` §179.5）。⇒ 把"编译过类型"这件事放进一个**小 rlib**，
 //! 由它把事实交出来。
 //!
 //! ⚠ **它为什么不是 `px_*_schema` 里的一个函数**（那是第一版设计）：`decl_hash()` 取的是

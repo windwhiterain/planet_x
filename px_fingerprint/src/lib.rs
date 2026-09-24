@@ -3,7 +3,7 @@
 //! 它从前是 `build/fingerprint.rs`（被各 crate 的 `build.rs` 用 `include!` 进来的一段源码），
 //! 现在抽成 **`px_fingerprint` 这个 crate**，因为**运行期**也要算同一个东西：泛型实例的 key
 //! 必须覆盖**声明所在 crate + alg crate 的源码指纹**，而图程序不能 cargo 依赖 alg crate
-//! （那会弄丢 R1）⇒ 只能**从盘上**算它的 `src/` 名册（`.agents/notes/art/19-generic-inst.md`
+//! （那会弄丢 R1）⇒ 只能**从盘上**算它的 `src/` 名册（`docs/system/generic-instances.md`
 //! §177 / §179.2）。于是：
 //!
 //! * `build.rs` 走 [`cargo_fingerprint_for_crate`]（`[build-dependencies]`）；
@@ -89,7 +89,7 @@ pub fn hash(files: &Roster) -> String {
 ///
 /// ⚠ 两个**哈希**变量都发：`PX_SOURCE_HASH` 是 `PxOp::decl_hash` 与实现库身份用的那一份，
 ///   `PX_TOOLCHAIN_HASH` 是装载时握的**工具链**那一份（`px_impl_lib!` 导出的符号要用它，
-///   见 `19-generic-inst.md` §179.3）。少发一个就是 `env!` 编译错。
+///   见 `docs/system/generic-instances.md` §179.3）。少发一个就是 `env!` 编译错。
 ///
 /// ⚠ 四个**原料**变量是给 `px_jit` 用的：它要把它们原样转给嵌套的
 ///   `cargo build`（`--target` / `--profile` / `RUSTFLAGS`）—— 否则生成的实例库与主
@@ -161,13 +161,13 @@ fn rustc_version() -> String {
 /// 根因一句话：**`TARGET` 与 `PROFILE` 是 cargo 只给 build script 设的环境变量**
 /// ⇒ 同一个函数在两处拿到的输入不同、值当然不同。
 ///
-/// ⇒ 握手的两个操作数因此**都取编译期嵌进各自构件的常量**（`19-generic-inst.md` §179.3）：
+/// ⇒ 握手的两个操作数因此**都取编译期嵌进各自构件的常量**（`docs/system/generic-instances.md` §179.3）：
 ///   图程序那一侧用 `px_graph_schema::TOOLCHAIN_HASH`，库那一侧用它自己 `build.rs` 发的
 ///   `…__toolchain_hash` —— 一条运行期算哈希的路径都没有。
 ///
 /// ⚠ **刻意不含** `DEBUG` / `OPT_LEVEL`（不动布局；进了只会让两个 workspace 必须逐字对齐）。
 ///   它要回答的问题是"两份 dylib 的 `extern "Rust"` ABI 是不是同一个编译器给的"，
-///   而 `debug` / `opt-level` 不动布局（见 `19-generic-inst.md` §176 第 2 条）。
+///   而 `debug` / `opt-level` 不动布局（见 `docs/system/generic-instances.md` §176 第 2 条）。
 ///
 /// ⚠ `px_jit` 要复现这一份值，就用同一个函数、但先把四个原料摆回环境（本 crate 发的
 ///   `PX_RUSTC_VERSION` / `PX_TARGET` / `PX_PROFILE` / `PX_RUSTFLAGS`）。
@@ -248,7 +248,7 @@ fn collect_sources(crate_dir: &Path, files: &mut Roster) {
 /// ⚠ 收的是 **`.rs` + `.wgsl`**：着色器不是"资源"，是 `include_str!` **编进二进制**的
 ///   那一半实现（`px_nurbs_gpu_op` / `px_volume_gpu_op` 的核都在 `src/` 里）。
 ///   只收 `.rs` 会让"改一行着色器"**不换身份、不换键** —— 那是这个 crate 存在的理由
-///   被绕过（`19-generic-inst.md` §179.3 同一条）。
+///   被绕过（`docs/system/generic-instances.md` §179.3 同一条）。
 ///
 /// ⚠ 它同时给 crate 自己的 `src/`（前缀 = crate 目录名）与额外的根用。
 fn collect_tree(dir: &Path, root: &Path, prefix: &str, files: &mut Roster) {

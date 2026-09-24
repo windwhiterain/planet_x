@@ -1,4 +1,4 @@
-//! **stage 1 的「计划」段** —— 图程序这一侧**代码生成**（`21-codegen-types.md`）。
+//! **stage 1 的「计划」段** —— 图程序这一侧**代码生成**（`docs/system/codegen-types.md`）。
 //!
 //! 这个 build script 干两件事，**都不调 cargo、都不编任何东西**（硬边界）：
 //!
@@ -287,7 +287,7 @@ fn insts_gen_text(plan: &[Planned]) -> Result<String, String> {
          //\n\
          // 每条实例一个「生成出来的类型」：它复用某个**声明**的接口，体来自 recipe，\n\
          // 身份（`source_hash`）= 实例 key。stage 2 用的类型就是这里这一份\n\
-         // （`.agents/notes/art/21-codegen-types.md`）。\n\
+         // （`docs/system/codegen-types.md`）。\n\
          //\n\
          // ⚠ key 与源文件字节有关 ⇒ 它只能在**运行期**算；生成物里只有不随源码字节变的\n\
          // 那几样是 const（op id / 声明指纹 / 三个类型 / 根 / 源路径 / 体）。\n\

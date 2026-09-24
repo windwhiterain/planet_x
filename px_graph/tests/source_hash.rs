@@ -11,7 +11,7 @@
 //! "这个 crate 编译进去的全部源码"——自己 `src/` + 可达的 path 依赖的 `src/`（**传递闭包**）+ 本文件。
 //!
 //! ⚠ 从"一段被 `include!` 的源码"变成一个 crate，是两个原因叠出来的：
-//!   ① 运行期也要算同一套名册（泛型实例的 key 要覆盖 alg crate，见 `19-generic-inst.md` §177）；
+//!   ① 运行期也要算同一套名册（泛型实例的 key 要覆盖 alg crate，见 `docs/system/generic-instances.md` §177）；
 //!   ② 一段被抄进各处 build.rs 的源码，改它要改 N 处 —— 那本身就是可漏的清单。
 //!
 //! 所以这道门守三件事：

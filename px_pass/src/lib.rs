@@ -2426,7 +2426,7 @@ impl Executor {
     fn geometry_params_group(
         &self,
         device: &Device,
-        group: u32,
+        _group: u32,
         binding: u32,
         params: &[u8],
     ) -> BindGroup {

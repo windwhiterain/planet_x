@@ -165,7 +165,7 @@ fn main() {
     //    失败（`SceneSpec::check` 那条"但没有一条写 'view'：画面不会被改动"）—— 因为配方
     //    不再点名目标了，而老形状要的正是"内容 pass 自己写 `view`"。
     //
-    //    为什么会这样（实测，`15-render-wgpu.md` §146.6）：老形状产物**根本没有帧图那几节**
+    //    为什么会这样（实测，`docs/archive/render-wgpu.md` §146.6）：老形状产物**根本没有帧图那几节**
     //    （`scene_depth` / `scene_color_*` / blit 都不在），而 wgpu 宿主必须把 `scene_depth`
     //    seed 成自己建的那张深度图 ⇒ 它在**渲染**那一侧先响，与 `view`/`writes` 无关。
     //    ⇒ 这条逃生门对内容 pass 是死的，所以这里**画一条明确的边界**，而不是让它半路撞上

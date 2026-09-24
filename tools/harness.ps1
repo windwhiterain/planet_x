@@ -6,7 +6,7 @@
   它只做两件事：
 
     1) **按图名 + 节点名**解析产物路径。渲染器吃的是内容，内容由产物决定
-       （`.agents/notes/art-framework.md` §18：「产物格式 = ArtBundle，与渲染器之间唯一的接口」）。
+       （`docs/invariants.md` §18：「产物格式 = ArtBundle，与渲染器之间唯一的接口」）。
        命令行里出现手拼的哈希路径，就是把「同一张图的成员」这件事交给人手维护：
        哈希一改路径就静默过期，成员配错而宽高恰好相同则形状校验照样通过。
        这里改成从 `target/pcg/<图>/manifest.json` 按节点名取 `key`，再拼 CAS 路径。
@@ -19,7 +19,7 @@
        走的是这条闸的第一句。那两句留着也不会再匹配 —— 写在 `$HarnessFailPattern` 的注释里。
 
   3) **断言整批场景钉的是同一份 shader**（`Assert-ShaderMembersAgree`）。
-        场景把 WGSL 钉在内容键上（`08-renderer.md` §52.3）。只要有一档钉的是**旧** WGSL，
+        场景把 WGSL 钉在内容键上（`docs/render/renderer.md` §52.3）。只要有一档钉的是**旧** WGSL，
      换到那一档就会往槽里装新 shader ⇒ `asset_server.reload` ⇒ 靠它的管线全打回重编
      ⇒ 出图/计时的头几个窗口里云壳根本没管线（图里没云、帧时间还偏高）。
      协议的前提是「整轮扫描只起一个服务、档间不重启」，所以这条必须在开跑前被断言，
@@ -55,7 +55,7 @@
      而**裁决是不留**，改名又覆盖那个路径 ⇒ **从 §157 那一笔起这句话成立**。
      被钉住的那支锚（`D7ED54FDB8323EDD…`）确实找不回来 —— 这两件事不矛盾，全文见
      `art/anchor/README.md` 与 §157。要拿回这条路：源码在 `f121ee3^`，命令见 §157。
-     它们的量法留在 git 历史与 `.agents/notes/art/15-render-wgpu.md` §147/§153 里。
+     它们的量法留在 git 历史与 `docs/archive/render-wgpu.md` §147/§153 里。
      本宿主**有的**那件计时仪器是 `px_render --spans 预热,测量`（§153 的 J4 仪器，
      量的是**逐条 pass** 的编码器级时间戳），它不是 `--perf` 的替代品 —— 名字与口径都不同。
 #>
@@ -172,7 +172,7 @@ function Get-FramePayloads {
 
 # 这份场景产物里每个「物体/角色」钉的 shader 成员（角色一般是 shader，键 = 那一份 WGSL 的内容键）。
 #
-# ⚠ 读的是**通用渲染文档**（`px_protocol::scene` v2，`08-renderer.md` §65）：
+# ⚠ 读的是**通用渲染文档**（`px_protocol::scene` v2，`docs/render/renderer.md` §65）：
 # 每个物体的 `material.shader` 是它自己那一份 WGSL。v1 的 `parts[]` 已经没有这个形状了 ——
 # 按老形状读会得到一张**空表**，而空表在这里等于"没有不一致"⇒ 闸门静默失效（比报错更坏）。
 # 所以下面这种"什么都没读到"要当场抛错，不能返回空表。

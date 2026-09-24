@@ -15,7 +15,7 @@ px_graph_schema = { path = "../px_graph_schema" }
 px_field_schema = { path = "../px_field_schema" }
 # ⚠ **算法在这里**（rlib）：这一份壳只把它接到声明上（格点遍历 + 值域映射/钳制）。
 #   搬出去的理由见 `src/lib.rs` 顶上那条：泛型实例（`px_inst!`）的 key 要覆盖 alg crate 的
-#   源码名册（`19-generic-inst.md` §177），而名册要的是一个能被从盘上收的目录。
+#   源码名册（`docs/system/generic-instances.md` §177），而名册要的是一个能被从盘上收的目录。
 px_field_alg = { path = "../px_field_alg" }
 
 [build-dependencies]

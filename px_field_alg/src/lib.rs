@@ -7,7 +7,7 @@
 //!   （element 那一档在体文件里现搭 [`Scale`]、逐格自己算；实例由 `art/inst/*.rs` 现写）。
 //!
 //! ⚠ 为什么算法要单独一个 crate（而不是留在 `px_field_op` 里）：泛型实例的键必须覆盖
-//!   **alg crate 的源码名册**（`19-generic-inst.md` §177），而名册要的是一个能被**从盘上**
+//!   **alg crate 的源码名册**（`docs/system/generic-instances.md` §177），而名册要的是一个能被**从盘上**
 //!   收的目录；算法住在 dylib crate 里就没有那个目录可收。element 那一档的体文件也正是
 //!   靠 `ROOTS` 里那一栏 `px_field_alg` 才拿得到同一把尺子（`px_elem::specs` 那几行）。
 //!

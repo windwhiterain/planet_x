@@ -12,7 +12,7 @@ const PROTOCOL_WHITELIST: [&str; 2] = ["serde", "serde_json"];
 //      `[dependencies]` 里没有 `px_sim`；
 //   ② 红（负对照）：把这条边临时改成 `("px_render", "px_pass")`（宿主真有的依赖）⇒ 断言当场响，
 //      报的是 `px_render 在 [dependencies] 里依赖了 px_pass` ⇒ **证明那个包名确实进了扫描**
-//      （没有主体的边是不会响的）。负对照跑完即恢复，读数记在 `15-render-wgpu.md` §157。
+//      （没有主体的边是不会响的）。负对照跑完即恢复，读数记在 `docs/archive/render-wgpu.md` §157。
 // ⚠ 剩下的空档：第二条边 `px_web` 今天**也没有主体**（那个包还不存在）—— 本表是
 // "现在 + 将来"两种边混装。
 //

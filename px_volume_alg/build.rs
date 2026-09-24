@@ -4,7 +4,7 @@
 //! 于是**加一个新文件不用改任何清单**，改任何一行实现都自动变键。
 //!
 //! 实现在 `px_fingerprint`（**rlib**：build.rs 与运行期代码共用同一份算法 —— 见
-//! `.agents/notes/art/19-generic-inst.md` §177）。
+//! `docs/system/generic-instances.md` §177）。
 
 fn main() {
     px_fingerprint::cargo_fingerprint_for_crate(&[]);

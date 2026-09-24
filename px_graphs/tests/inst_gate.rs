@@ -1,4 +1,4 @@
-//! **生成物那两道门 + 一条端到端**（`21-codegen-types.md`）。
+//! **生成物那两道门 + 一条端到端**（`docs/system/codegen-types.md`）。
 //!
 //! 1. **图不漏**：`inst_recipe.rs` 那张表（+ `px_elem::ELEM_SPECS` 那张表）里的条数 ==
 //!    图（`insts::build`）里声明的节点数 —— 从前这是"数 `px_inst!` 宏调用"，今天宏调用没有了，
@@ -25,7 +25,7 @@ use px_cook::inst::BuildGraph;
 use px_graph_schema::PxOp;
 use px_graphs::insts::{Band, LatBands, Waves, build};
 
-/// 图从 **build graph** 来（`20-build-graph.md` §190）：跑一遍 `build()`，不读任何手写清单。
+/// 图从 **build graph** 来（`docs/system/build-graph.md` §190）：跑一遍 `build()`，不读任何手写清单。
 fn graph() -> BuildGraph {
     let mut graph = BuildGraph::new();
     build(&mut graph);

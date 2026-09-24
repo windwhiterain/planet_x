@@ -43,7 +43,7 @@
 pub mod inst;
 /// **按文本读源码的工具**（扫宏调用 / 收 `.rs` / 读 workspace 成员）。
 ///
-/// ⚠ **图侧的执行路径不再用它**（`21-codegen-types.md`）：体从图侧源码搬进了
+/// ⚠ **图侧的执行路径不再用它**（`docs/system/codegen-types.md`）：体从图侧源码搬进了
 ///   `px_graphs/src/inst_recipe.rs` 那张数据表，`px build` 读生成器落下的
 ///   `inst_out/insts_gen_catalogue.rs` —— 两个扫描点（`claim` / `check_template`）都删掉了。
 ///   今天用它的是**门**（`px_decls/tests/inst_gate.rs`：数 `px_op!` 的处数）与
@@ -214,7 +214,7 @@ where
     Ok(parsed)
 }
 
-// ⚠ **`px_inst!` 宏已删除**（2026-09-20，`.agents/notes/art/21-codegen-types.md`）：
+// ⚠ **`px_inst!` 宏已删除**（2026-09-20，`docs/system/codegen-types.md`）：
 //   图侧今天**零宏** —— 它写一张**数据表**（`px_graphs/src/inst_recipe.rs`），
 //   `px_graphs/build.rs` 按它**生成类型**（`OUT_DIR/insts_gen.rs`，形状就是这里从前展开出来的
 //   那一份：`PxOp` / `InstNode` impl + 几个 const）。⇒ 这条宏路径一个调用都没有了。

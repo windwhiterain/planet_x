@@ -1,4 +1,4 @@
-//! 渲染路：**文档 → GPU → 回读 → PNG**（`art/15-render-wgpu.md` 的 S2 后半）。
+//! 渲染路：**文档 → GPU → 回读 → PNG**（`art/docs/archive/render-wgpu.md` 的 S2 后半）。
 //!
 //! 这一档画出来的是"**背景（星空）+ 行星 + 大气**"，六条 pass **一条都不跳**：
 //!

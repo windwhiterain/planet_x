@@ -1,6 +1,6 @@
 //! **场域的泛型实例图**（`field.remap/waves`）：`field.fbm` → 图侧现写的 `Waves` → 一张场。
 //!
-//! 这张图的用处是**给"泛型实例"一条能跑的判据**（`19-generic-inst.md` / `20-build-graph.md`）：
+//! 这张图的用处是**给"泛型实例"一条能跑的判据**（`docs/system/generic-instances.md` / `docs/system/build-graph.md`）：
 //!
 //! * `px run field_remap` —— 两个 stage 一条命令：全命中 ⇒ 只读装载、直接算；缺就报命令。
 //! * `px run field_remap --build` —— 缺实例库时先跑 stage 1（真的起 cargo 编那一条）。

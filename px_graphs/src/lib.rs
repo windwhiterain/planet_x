@@ -30,7 +30,7 @@ pub mod elem;
 /// bin `px`（`list` / `build` / `run`）与 `tests/inst_gate.rs` 都看它。
 pub mod insts;
 // ⚠ 按文本找 `px_inst` 调用的那个扫描器住在 **`px_cook::inst_scan`**（生成与执行都在那一层，
-//   `20-build-graph.md` §187 B2 后半）：要用它就走那条全路径，**这里不留 re-export**
+//   `docs/system/build-graph.md` §187 B2 后半）：要用它就走那条全路径，**这里不留 re-export**
 //   —— 搬了家就搬干净，留一行旧路径就是下一个过期物。
 
 /// **本图程序**这一份源码的指纹（`build.rs` 算的十六进制）。

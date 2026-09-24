@@ -8,7 +8,7 @@ edition = "2024"
 #   泛型实例（`px_inst!`）链的是**同一份** rlib。
 #
 # ⚠ 为什么算法要单独一个 crate：泛型实例的 key 必须覆盖 alg crate 的源码名册
-#   （`.agents/notes/art/19-generic-inst.md` §177），而名册要的是"这些文件"而不是"编译产物"；
+#   （`docs/system/generic-instances.md` §177），而名册要的是"这些文件"而不是"编译产物"；
 #   算法如果住在 dylib crate 里，图侧就没有一个稳定的目录名册可收。
 
 [dependencies]

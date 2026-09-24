@@ -33,7 +33,7 @@ pub fn shader_parts_of(member: &Member, root: &Path) -> Result<(String, Material
     Ok((source, layout))
 }
 
-/// 一份 shader 成员的**契约**：从它的产物里读 schema descriptor（第二个 blob，`08-renderer.md` §80.2）。
+/// 一份 shader 成员的**契约**：从它的产物里读 schema descriptor（第二个 blob，`docs/render/renderer.md` §80.2）。
 ///
 /// 为什么不现反射：产物里那份就是**装载时会被拿来对账的那一份** —— 烘图侧要校验的是
 /// 「这份产物说它要什么」，不是「现在这份 WGSL 会反射出什么」。两者不一致时装载会拒，
