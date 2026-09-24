@@ -61,9 +61,7 @@
 | 实例 key 变化 | `cloud.coarse/band` `d1c8fd369338` → `b59da0494ac6`；`field.remap/waves` `caa8318cda1b` → `eb126be744bf`（另 3 条 element 档同规格同键）；**7 条全部重编成功** |
 | **产品零影响的对照实验** | `orbit-bare` 在**两个状态**（改动全 stash 掉的 `5b2826f` 原状 ／ 本轮改动生效）烘出**同一个内容键 `c223c17220ea`**、**同一个 `.pxart` 文件字节 `DC456C0E32D3A803`（3160 B）** ⇒ 改的确实只是注释文本，**内容没漂** |
 
-## §4 顺带量到的两处陈旧（**按裁决只记录不改**）
-
-1. **`art/anchor/hashes.txt` §三 那六格已确认陈旧。** 登记 `orbit-bare = 1E1C3A5AA2DBE56D`
+## §4 顺带量到的两处陈旧（**按裁决只记录不改**）1. **`art/anchor/hashes.txt` §三 那六格已确认陈旧。** 登记 `orbit-bare = 1E1C3A5AA2DBE56D`
    （4125 B），而**两个状态都给出 `DC456C0E32D3A803`（3160 B）**，少 965 B（≈23%）。
    行尾（几 B 到几十 B）与本轮改动（上面那张表）两个解释**都被排除** ⇒ 自 2026-09-20
    第七次重登记之后就走过的 `40`–`44` 那几轮里，至少有一轮改了场景文档的形状，而 §三
@@ -74,7 +72,48 @@
    ⇒ `px run nebula` 烘不过。这是 `43-params-not-canvas`（现 `docs/system/params.md`）那次
    "一切皆参数"改名漏掉的一份 toml。进 backlog **S10**。
 
-## §5 这一轮踩到的坑（留给下一次改注释的人）
+## §5 ⚠ 提交之后才现形的两件事（同一个根因：默认成员变了 ⇒ 第一次真的跑到）
+
+把 `px_volume_alg` 与 `px_nurbs_gpu_op` 补进 `default-members` 之后，默认 `cargo test`
+**第一次**真的跑了这两个包里那些判据 —— 于是冒出两处**与重构无关、但一直被捂着**的红：
+
+**① `default-features = false` 之后必须点名 `std`。**
+
+`px_nurbs_gpu_op` 的 6 条判据在多线程下随机红：
+`Mismatched pop_error_scope call: error scopes must be popped in reverse order`，
+而且**同一份二进制每次失败的条数都不一样**（1/3/4/5 条都出现过）—— 看着像竞态。
+二分实测（每个变异跑 3–5 次）：
+
+| `px_gpu` 的 wgpu 特性 | 缺省后端 | 结果 |
+|---|---|---|
+| 裸 `wgpu = "29"`（完整缺省特性） | DX12 | 6/6 绿 ×3 |
+| 完整缺省特性 | **Vulkan** | 6/6 绿 ×3 |
+| `false` + `vulkan` + `wgsl` | Vulkan | **红 3–5 条** |
+| `false` + `vulkan` + `wgsl` + `parking_lot` | Vulkan | 仍然红 |
+| `false` + `vulkan` + `dx12` + `wgsl` + `parking_lot` | Vulkan | 仍然红 |
+| `false` + **`std`** + `vulkan` + `wgsl` | Vulkan | **6/6 绿 ×5** |
+
+⇒ 根因是**缺 `std`**：wgpu-core 走了 no-std 那一套同步实现。**不是竞态、不是 Vulkan 的锅**。
+⚠ 而 `px_render` / `px_pass` **一直有同样的漏洞** —— 它们的 `std` 是靠 `egui-wgpu`
+顺带合并进来的（偶然，不是声明）。三处一并补上，并进 `docs/invariants.md`。
+
+**② `px_volume_alg` 的 5 条判据是"一切皆参数"改名时漏改的。**
+
+`DensityParams.res` 从"**占画布宽度的比例**"改成"**绝对数**"（`43-params-not-canvas`，
+现 `docs/system/params.md`），判据里的字面量没跟着改：`res: 32` 当"8 的 0.5 倍"、
+`res: 64` 当"取满"，而默认值正是 `64` ⇒ 五条一起红（`left: 32 / right: 4`、
+`left: (64, 8) / right: (8, 8)`）。
+
+修法是**逐条判据自己把 `res` 写明白**（同一份参数在不同判据里有不同意图）：
+`params_for` 那个助手回到只填公共栏，纯搬运那一档显式 `res = 上游.res`（走不插值那条路）、
+重采样那一档显式给比上游粗的值。⚠ 路上我先把助手改成 `res = shape.res`，结果
+`every_voxel_lands_at_its_own_coordinate` 报"得 501、期望 502" —— 因为那一改把 4 条判据
+从"重采样"推到了"纯搬运"，而它们**本来就该在重采样那一侧**。
+
+⇒ 这两件都记成一条纪律：**"某个 crate 不在 default-members 里"等于它的判据长期没被跑过；
+把它补进去的那一刻要准备好接红**。
+
+## §6 这一轮踩到的坑（留给下一次改注释的人）
 
 - **文档路径写在参与指纹的源码里**，所以"整理文档"在这种仓库里**不是零成本动作** ——
   先数一遍影响面（本轮 37 份源文件 / 67 处），再决定改不改。

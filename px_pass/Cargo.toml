@@ -4,11 +4,14 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-wgpu = { version = "29", default-features = false, features = ["wgsl"] }
+# ⚠ `std` 必须点名（2026-09-28）：`default-features = false` 之后省掉它，wgpu-core 会走
+#   no-std 那套同步实现 ⇒ 多线程下错误域栈会串（`Mismatched pop_error_scope call`）。
+#   从前这里是靠 `egui-wgpu`（只在 `px_render` 那一侧）顺带把 `std` 合并进来的 —— 偶然，不是声明。
+wgpu = { version = "29", default-features = false, features = ["std", "wgsl"] }
 
 [dev-dependencies]
 # 几何判据要**真设备**（§121 第 2 件：一条 geometry pass 画进离屏纹理再读回来）。
 # 库本身不建设备（那是宿主的策略，见 `px_render/src/gpu.rs`），但判据得自己有一台，
 # 所以后端只在这里开、且只有 Vulkan —— 与产品同一条约束（§104 第 9 条：后端不是可选项）。
-wgpu = { version = "29", default-features = false, features = ["vulkan", "wgsl"] }
+wgpu = { version = "29", default-features = false, features = ["std", "vulkan", "wgsl"] }
 pollster = "0.4"

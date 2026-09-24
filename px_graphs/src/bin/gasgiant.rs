@@ -124,7 +124,7 @@ fn main() -> Result<(), Fault> {
         },
         (),
     )?;
-    let filaments = cached(
+    let _filaments = cached(
         &graph,
         "filaments",
         field::Warp,

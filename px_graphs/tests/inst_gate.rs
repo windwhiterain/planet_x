@@ -18,8 +18,6 @@
 //!    ⚠ element 那一档留在 `tests/elem.rs` 里的理由是**它自己会编**（`missing()` +
 //!    `compile_missing()`，缺才编、一次约 2 秒）—— 声明那一档编一次要几十秒，所以只在探针里。
 
-use std::path::Path;
-
 use px_cook::inst;
 use px_cook::inst::BuildGraph;
 use px_graph_schema::PxOp;
@@ -143,7 +141,7 @@ fn every_instance_library_path_is_the_key_the_generator_planned() {
             node.op_id
         );
         let expected = match &entry.kind {
-            px_cook::inst::InstKind::Decl { decl, .. } => px_graphs::insts::recipe::INSTANCES
+            px_cook::inst::InstKind::Decl { decl: _, .. } => px_graphs::insts::recipe::INSTANCES
                 .iter()
                 .find(|each| each.op_id == node.op_id)
                 .unwrap_or_else(|| panic!("recipe 里没有 `{}` 这一条", node.op_id))

@@ -334,10 +334,14 @@ mod tests {
         VolumeShape { res: 4, layers: 3 }
     }
 
-    /// 让 `DensityParams` 正好落在这个形状上（`res` 从画布取 ⇒ 只调比值）。
+    /// 让 `DensityParams` 落在这个形状上（**逐字对齐**）。
     ///
-    /// ⚠ 判据都按具体的 `(res, layers)` 写，而参数里只有比值 ⇒ 这个助手是"两者之间那一根
-    ///   线"，它错了会让**每一条**判据都在测别的东西。
+    /// ⚠ **`res` 是绝对数、不是比例**（2026-09-27 "一切皆参数"那次改名的口径；
+    ///   见 `docs/system/params.md`）。这里从前只传 `layers`、指望 `res` 从"画布"推出来 ——
+    ///   画布删掉之后那个指望不成立，参数默认的 `res: 64` 会与判据里写的 `(res, layers)` 打架。
+    ///   ⚠ 现在**逐条判据自己把 `res` 写明白**（同一份参数在不同判据里有不同意图：
+    ///   纯搬运那一档要 `res == 上游`，重采样那一档要 `res != 上游`），所以这个助手
+    ///   只填公共的那几栏，`res` 由调用方给。
     fn params_for(shape: &VolumeShape) -> DensityParams {
         DensityParams {
             layers: shape.layers,
@@ -364,7 +368,13 @@ mod tests {
         let shape = VolumeShape { res: 4, layers: 3 };
         // 值 = 坐标的可逆编码（每一格都不一样，重排一点点都看得出来）。
         let field = grid_field(&shape, |x, y| (x as f32 + 1.0) + (y as f32 + 1.0) * 100.0);
-        let volume = bake_density(&params_for(&shape), &field).expect("烘密度");
+        // ⚠ 这一档判的是**纯搬运**（`checked == volume.samples()`）⇒ 产物必须与上游**同网格**
+        //   （`res == 上游.res` 才会走 `field_to_volume_slot` 那条不插值的路）。
+        let params = DensityParams {
+            res: shape.res,
+            ..params_for(&shape)
+        };
+        let volume = bake_density(&params, &field).expect("烘密度");
 
         let mut checked = 0;
         for face in 0..CUBE_FACES {
@@ -409,7 +419,7 @@ mod tests {
         });
         let params = DensityParams {
             layers: 8,
-            res: 64,
+            res: source.res,
             ..Default::default()
         };
         let volume = bake_density(&params, &field).expect("烘密度");
@@ -475,13 +485,13 @@ mod tests {
             field_shape.slot_of(y).map(|(_, layer)| layer).unwrap_or(0) as f32 / 5.0
         });
         let params = DensityParams {
-            res: 32,
+            res: 4,
             layers: 6,
             reach: 0,
             ..Default::default()
         };
         let volume = bake_density(&params, &field).expect("烘密度");
-        assert_eq!(volume.res, 4, "面内应当减半（8 × 0.5）");
+        assert_eq!(volume.res, 4, "面内取参数给的绝对数（上游场是 8 ⇒ 粗一半）");
         assert_eq!(volume.layers, 6, "层数由参数自己给，不跟着面内走");
         assert_eq!(volume.samples(), (CUBE_FACES * 6 * 4 * 4) as usize);
         // 只跟高度有关 ⇒ 同一层上处处相等，且六面一致。
@@ -506,7 +516,7 @@ mod tests {
         let shape = shape();
         let field = grid_field(&shape, |_, _| 0.37);
         let params = DensityParams {
-            res: 64,
+            res: shape.res,
             layers: shape.layers,
             inner: 2.0,
             outer: 5.0,
@@ -544,6 +554,7 @@ mod tests {
         // 值 = 坐标的可逆编码（每一格都不一样）。
         let field = grid_field(&shape, |x, y| (x as f32 + 1.0) + (y as f32 + 1.0) * 100.0);
         let params = DensityParams {
+            res: shape.res,
             layers: shape.layers,
             reach: 0,
             ..Default::default()

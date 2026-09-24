@@ -20,7 +20,8 @@ px_protocol = { path = "../px_protocol" }
 # 探针那份 `CloudParams` 只剩「值」（原来它是一份手抄的字节镜像，§69 S2）。
 # ⚠ 与 `px_gpu` / `px_render` / `px_pass` 逐字同一档：**只有 Vulkan**
 #   （缺省特性会把 dx12 / metal / gles / webgpu 全拉回来，而那是已经否决过的后端）。
-wgpu = { version = "29", default-features = false, features = ["vulkan", "wgsl"] }
+#   `std` 也要点名（理由见 `px_gpu/Cargo.toml` 那一栏）。
+wgpu = { version = "29", default-features = false, features = ["std", "vulkan", "wgsl"] }
 bytemuck = { version = "1", features = ["derive"] }
 pollster = "0.4"
 # ⚠ `seam_probe` 用：读一份烘好的体网格 `.pxart`（`px_protocol::stream`），

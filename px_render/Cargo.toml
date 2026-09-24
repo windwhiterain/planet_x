@@ -10,9 +10,11 @@ px_protocol = { path = "../px_protocol" }
 px_shader = { path = "../px_shader" }
 px_pass = { path = "../px_pass" }
 
-# 后端**锁死 Vulkan**（§104 第 9 条）。`default-features = false` 之后必须显式点名后端，
+# 后端**锁死 Vulkan**（§104 第 9 条）。`default-features = false` 之后必须显式点名特性，
 # 否则拿到的实例一个后端都没有 —— 那不是"默认"，那是空。
-wgpu = { version = "29", default-features = false, features = ["vulkan", "wgsl"] }
+# ⚠ `std` 也在这一串里（2026-09-28）：从前它不在，靠 `egui-wgpu` 顺带合并进来 ——
+#   偶然，不是声明；省掉它 wgpu-core 会走 no-std 那套同步实现，症状是多线程下错误域栈串了。
+wgpu = { version = "29", default-features = false, features = ["std", "vulkan", "wgsl"] }
 # 预览窗口（S7 前半）。**只开 `rwh_06`**：那是 wgpu 29 认的 raw-window-handle 版本，
 # 而 winit 的缺省特性里另外那几项（x11 / wayland*）在本机（Windows）一个都用不上 ——
 # 缺省特性是一份"没人写过"的选择，这里显式点名（§104 第 3 条）。

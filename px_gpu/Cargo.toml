@@ -4,12 +4,18 @@ version = "0.0.0"
 edition = "2024"
 
 [dependencies]
-# ⚠ **必须 `default-features = false` 并显式点名后端**：wgpu 29 的缺省特性是
+# ⚠ **必须 `default-features = false` 并显式点名特性**：wgpu 29 的缺省特性是
 #   `std + parking_lot + dx12 + metal + gles + vulkan + wgsl + webgpu`
 #   —— 那等于把本仓已经否决过的后端（metal / gles / webgpu；§104 第 9 条）全部拉回来。
 #   与 `px_render` / `px_pass` 逐字同一档：**只有 Vulkan**（外加编译 WGSL 要的 `wgsl`）。
 #   ⚠ 从前这里是裸 `wgpu = "29"`，而且 `backends()` 的缺省是 DX12 ⇒ **烘图（算子 dylib 走
 #   `px_gpu::connect`）与出图（`px_render` 编译期锁 Vulkan）跑在两个后端上**，正是本仓
 #   最忌的"量的不是被测物"。现在两处都归到 Vulkan。
-wgpu = { version = "29", default-features = false, features = ["vulkan", "wgsl"] }
+#   ⚠⚠ **`std` 不能省**（2026-09-28 实测踩到）：`default-features = false` 之后只点名
+#   `vulkan` + `wgsl` 会让 wgpu-core 走 no-std 那一套同步实现，症状是
+#   `px_nurbs_gpu_op` 的 6 条测试在**多线程**下随机红（`Mismatched pop_error_scope call:
+#   error scopes must be popped in reverse order`，同一份二进制每次失败条数还不一样）。
+#   ⚠ **`px_render` / `px_pass` 两处一直有同样的漏洞**，只是它们的 `std` 一直是靠
+#   `egui-wgpu` 顺带合并进来的（偶然，不是声明）—— 已一并补上。
+wgpu = { version = "29", default-features = false, features = ["std", "vulkan", "wgsl"] }
 pollster = "0.4"

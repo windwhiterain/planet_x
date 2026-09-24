@@ -84,8 +84,15 @@
 - **能动态的就动态，减少类型检查与单态化的时间。** 渲染侧的编译成本几乎全在 **LLVM 为泛型产码**
   ⇒ 新写的渲染侧代码**枚举 + `match` 优先于泛型 trait、`Box<dyn Trait>` / 函数指针优先于泛型参数、
   数据表 + 循环优先于每类一份代码**（§92.3、§96）。
-- **后端不是可选项**（§104 第 9 条）：`wgpu` 一律 `default-features = false` 并显式点名 `vulkan`
-  + `wgsl`。缺省特性会把 `dx12` / `metal` / `gles` / `webgpu` 一并拉回来。
+- **后端不是可选项**（§104 第 9 条）：`wgpu` 一律 `default-features = false` 并显式点名
+  `std` + `vulkan` + `wgsl`。缺省特性会把 `dx12` / `metal` / `gles` / `webgpu` 一并拉回来。
+  ⚠⚠ **`std` 必须点名，不能省**（2026-09-28 实测）：省掉它 wgpu-core 会走 no-std 那套同步实现，
+  症状是**多线程下的错误域栈会串**（`Mismatched pop_error_scope call: error scopes must be
+  popped in reverse order`），而且**同一份二进制每次失败的条数都不一样** —— 看起来像竞态，
+  实际是 cfg 差异。⚠ 本仓 `px_render` / `px_pass` 两处的 `std` 从前一直是靠 `egui-wgpu`
+  顺带合并进来的（偶然，不是声明）⇒ 改特性表时别以为"它们一直是对的"。
+- **特性表是产品语义的一部分，不是构建细节**：`default-features = false` 之后**逐项点名**，
+  并且**声明的东西要能自己站住**（别依赖别的 crate 碰巧把缺的那一项合并进来）。
 - **只有 `.wgsl` 改动不要重启**（约 1 秒热重载）。**uniform 结构也不用**：装载时现反射，
   加一格 / 换布局都在同一个 pid 里出图；**要改 Rust 的是「让产物给得出那个新值」**。
 

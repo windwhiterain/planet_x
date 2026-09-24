@@ -1139,7 +1139,7 @@ mod crosscheck_tests {
         for face in 0..6_u32 {
             for layer in 0..layers {
                 let altitude = layer as f32 / (layers - 1).max(1) as f32;
-                let radius = inner + (outer - inner) * altitude;
+                let _radius = inner + (outer - inner) * altitude;
                 for t in 0..res {
                     for s in 0..res {
                         let d = px_volume_schema::direction_of(
@@ -1861,7 +1861,7 @@ mod sky_tests {
         for face in 0..6_u32 {
             for layer in 0..layers {
                 let altitude = layer as f32 / (layers - 1).max(1) as f32;
-                let radius = inner + (outer - inner) * altitude;
+                let _radius = inner + (outer - inner) * altitude;
                 for t in 0..res {
                     for s in 0..res {
                         let d = px_volume_schema::direction_of(
@@ -2330,7 +2330,7 @@ mod seam_tests {
         // 面内基准：同一面里左右相邻 texel 的平均差。
         let mut interior = 0.0_f32;
         let mut interior_count = 0.0_f32;
-        for face_index in 0..6_u32 {
+        for _face_index in 0..6_u32 {
             for y in 0..face {
                 for x in 0..face - 1 {
                     interior += (lum(x + 1, y) - lum(x, y)).abs();
@@ -2582,7 +2582,7 @@ mod march_seam_tests {
         };
         let mut interior = 0.0_f32;
         let mut interior_count = 0.0_f32;
-        for face_index in 0..6_u32 {
+        for _face_index in 0..6_u32 {
             for row in 0..face {
                 for x in 0..face - 1 {
                     interior += (lum(x + 1, row) - lum(x, row)).abs();
@@ -2719,7 +2719,7 @@ mod identity_grade_tests {
         };
         let mut interior = 0.0_f32;
         let mut interior_count = 0.0_f32;
-        for face_index in 0..6_u32 {
+        for _face_index in 0..6_u32 {
             for row in 0..face {
                 for x in 0..face - 1 {
                     interior += (lum(x + 1, row) - lum(x, row)).abs();
