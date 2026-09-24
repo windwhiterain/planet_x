@@ -131,13 +131,34 @@ fn every_instance_library_path_is_the_key_the_generator_planned() {
         let entry = catalogue
             .for_op(&node.op_id)
             .unwrap_or_else(|err| panic!("{err}"));
+        // ⚠ 判的是**内容**，不是键：生成物里**不许**有内容键（2026-09-27 从 `InstCodegen`
+        //   里拿掉了 `key`/`generated` 两栏）。理由是 R1：键要读体文件字节，而 build script
+        //   不会因为 `art/inst/*.rs` 或 `px_elem/body/*.rs` 改了而重跑（那些不在它的
+        //   `rerun-if-changed` 里）⇒ 写进生成物的键会**过期**，随后这条 gate 就会拿一个
+        //   过期的快照去比（实测踩到过一次）。今天运行期现算（`InstInfo` 那一侧），
+        //   这一层只判"**工具编的东西与图脚本键的东西是同一份**"。
         assert_eq!(
-            Path::new(&node.library)
-                .file_stem()
-                .and_then(|stem| stem.to_str()),
-            Some(entry.key),
-            "实例 `{}` 的库路径不是生成器算出来的那个 key（计划的两半分家了）",
-            node.op_id,
+            entry.source, node.source,
+            "实例 `{}`：工具编的源文件与图脚本键里的不是同一个",
+            node.op_id
+        );
+        let expected = match &entry.kind {
+            px_cook::inst::InstKind::Decl { decl, .. } => px_graphs::insts::recipe::INSTANCES
+                .iter()
+                .find(|each| each.op_id == node.op_id)
+                .unwrap_or_else(|| panic!("recipe 里没有 `{}` 这一条", node.op_id))
+                .generated_body(),
+            px_cook::inst::InstKind::Element { ty, .. } => px_elem::ELEM_SPECS
+                .iter()
+                .find(|each| each.ty == *ty)
+                .unwrap_or_else(|| panic!("ELEM_SPECS 里没有 `{ty}` 这一条"))
+                .body
+                .to_string(),
+        };
+        assert_eq!(
+            entry.body, expected,
+            "实例 `{}`：工具编的体与声明那一份对不上（`px build` 会编出别的东西）",
+            node.op_id
         );
     }
     assert_eq!(
@@ -153,13 +174,32 @@ fn every_instance_library_path_is_the_key_the_generator_planned() {
         ("field.remap/waves", Waves::source_hash()),
         ("field.remap/latbands", LatBands::source_hash()),
     ] {
+        let hash = hash.unwrap_or_else(|err| panic!("{op_id} 算不出身份：{err}"));
+        assert_eq!(hash.len(), 64, "`{op_id}` 的身份不是 64 位十六进制：{hash}");
+        assert!(
+            hash.chars().all(|c| c.is_ascii_hexdigit()),
+            "`{op_id}` 的身份不是十六进制：{hash}"
+        );
+        // ⚠ 生成物里没有键可比了 ⇒ 这里改成"**库路径的前一半就是它**"（运行期口径）：
+        //   路径 = `target/pcg/inst/<键>.dll`，那条口径只在 `inst::library_path` 一处。
         let entry = catalogue
             .for_op(op_id)
             .unwrap_or_else(|err| panic!("{err}"));
+        let node = nodes
+            .iter()
+            .find(|node| node.op_id == op_id)
+            .unwrap_or_else(|| panic!("build graph 里没有 `{op_id}`"));
+        let expected = px_cook::inst::library_path(&hash);
         assert_eq!(
-            hash.as_deref(),
-            Ok(entry.key),
-            "`{op_id}` 的类型自报身份与生成器算的不是同一个"
+            std::path::Path::new(&node.library),
+            expected,
+            "`{op_id}` 的库路径不是按它的身份算出来的那一个"
+        );
+        assert_eq!(
+            entry.source, node.source,
+            "`{op_id}`：工具编的源与图脚本键的源不是同一份"
         );
     }
 }
+
+

@@ -89,18 +89,17 @@ struct Planned {
     template: String,
     /// 抄进生成物的体（`ARG` 已换成 `&<类型名>`，见 [`InstRecipe::generated_body`]）。
     body: String,
-    key: String,
     schema: String,
     module: String,
     params: String,
     inputs: String,
     payload: String,
-    /// key 的一轴，也是生成物里那句 `{interface},` 的字面量。
+    /// 生成物里那句 `{interface},` 的字面量（也是键的一轴 —— 但**这一层不烘键**，
+    /// 见 `px_cook::inst::InstCodegen` 的文档：内容键一律运行期现算）。
     interface: u64,
-    /// key 的一轴，也是生成物里 `decl_hash()` 的字面量。
+    /// 生成物里 `decl_hash()` 的字面量。
     decl_hash: String,
     recipe_line: u32,
-    generated: String,
 }
 
 /// **stage 1 的计划段**：读 recipe → 校验 → 用声明表算 key。
@@ -171,25 +170,11 @@ fn plan_instances(root: &Path) -> Result<Vec<Planned>, String> {
                 item.type_name
             ));
         }
-        // ⑤ 算 key —— 走 `px_cook::inst` 那一套**同一个**输入、**同一个**函数。
-        //    ⚠ 进 key 的是 recipe 那一栏**原文**（`…, ARG`）：key 的算法一个字都不许改
-        //      （`21-codegen-types.md` 铁律 3）。`&<类型名>` 那一份只进生成物（下一步）。
-        let roots: Vec<&str> = item.roots.to_vec();
-        let key = inst::key_of_facts(
-            item.op_id,
-            facts.interface,
-            facts.decl_hash,
-            &roots,
-            item.source,
-            item.body,
-        )
-        .map_err(|err| format!("{}：{err}", at()))?;
+        // ⑤ 校验体与源对得上（`defines` 那一步已经做过），并抄一份**能编**的体。
+        //    ⚠ **这一层不算 key**（2026-09-27）：内容键一律运行期现算
+        //      （`px_cook::inst::info_of_facts` / `key_of_facts`）—— 生成物里写键快照会过期
+        //      （改 `art/inst/*.rs` 不会重跑 build script），而且那正是 R1 会破的那条路。
         let body = item.generated_body();
-        // ⚠ 这个路径的口径只在 `px_cook::inst` 一处（[`inst::generated_dir`]）：element 那几条
-        //   由 `px_graphs::insts::codegen()` 在运行期现造 `InstCodegen`，两处必须给同一个字符串
-        //   —— 而且两边都从 `px_cook` 的 `workspace_root()` 出发（`root` 这一格是 build script
-        //   自己按 `CARGO_MANIFEST_DIR` 算的，同一个目录）。
-        let generated = inst::generated_dir(&key);
         planned.push(Planned {
             op_id: item.op_id.to_string(),
             type_name: item.type_name.to_string(),
@@ -198,7 +183,6 @@ fn plan_instances(root: &Path) -> Result<Vec<Planned>, String> {
             source: item.source.to_string(),
             template: item.body.to_string(),
             body,
-            key,
             schema: facts.schema.to_string(),
             module: facts.module.to_string(),
             params: facts.params.to_string(),
@@ -211,7 +195,6 @@ fn plan_instances(root: &Path) -> Result<Vec<Planned>, String> {
                 .position(|line| line.contains(item.body))
                 .map(|at| at as u32 + 1)
                 .unwrap_or(0),
-            generated,
         });
     }
     Ok(planned)
@@ -469,43 +452,24 @@ struct ElemPlanned {
     params: String,
     inputs: String,
     payload: String,
-    roots: Vec<String>,
     source: String,
     /// `px_body_raw!` 的体表达式（宏拼的那一条：唯一那条循环 + 体文件里的 `value`）。
     body: String,
-    key: String,
-    interface: u64,
     decl_hash: String,
-    generated: String,
     /// 规格表里那一行（错误映射用：element 的体是宏拼的，报错要指到**那一行规格**）。
     spec_line: u32,
 }
 
 /// **element 函数那一张表**（`px_elem::ELEM_SPECS`）+ 每条的生成期事实。
 ///
-/// ⚠ element **不需要代码生成去算事实**（内容键在运行期也算得出），这里生成的是**算子类型**：
-///   脚本要写 `elem::Constant`（一个**单元结构体值**，与预置那一档 `field::Fbm` 同形），
-///   而那个类型必须住在**图侧**（住作者面就会把驱动链进每一份实例库）。
+/// ⚠ 这里生成的是**算子类型**（脚本写 `elem::Constant`），**不是键**：内容键一律运行期现算。
+///   理由与 `Planned` 那一侧同一条（生成物里写键快照会过期 + R1）。
 fn plan_elems(root: &Path) -> Result<Vec<ElemPlanned>, String> {
     let spec_text = std::fs::read_to_string(root.join(ELEM_SPECS))
         .map_err(|err| format!("读不了 {ELEM_SPECS}：{err}"))?;
     let mut planned = Vec::new();
     for spec in px_elem::ELEM_SPECS {
         let facts = (spec.facts)();
-        // ⚠ 根 = 作者声明的那些 ∪ **两个固定的**（`px_elem` 与 `px_field_schema`）：
-        //   参数/上游那些类型住在那儿，它们的源码变了也该换键。
-        let roots = px_elem::all_roots(spec);
-        let root_refs: Vec<&str> = roots.iter().copied().collect();
-        let key = inst::key_of_facts(
-            // ⚠ **空 op id**：手写名不进身份（用户裁定"实例身份 = 内容"）。
-            "",
-            facts.interface,
-            facts.decl_hash,
-            &root_refs,
-            spec.source,
-            spec.body,
-        )
-        .map_err(|err| format!("element {}：{err}", spec.ty))?;
         let spec_line = spec_text
             .lines()
             .position(|line| line.contains(spec.name))
@@ -517,12 +481,8 @@ fn plan_elems(root: &Path) -> Result<Vec<ElemPlanned>, String> {
             params: facts.params.to_string(),
             inputs: facts.inputs.to_string(),
             payload: facts.payload.to_string(),
-            roots: roots.iter().map(|each| each.to_string()).collect(),
             source: spec.source.to_string(),
             body: spec.body.to_string(),
-            generated: inst::generated_dir(&key),
-            key,
-            interface: facts.interface,
             decl_hash: facts.decl_hash.to_string(),
             spec_line,
         });
@@ -546,7 +506,8 @@ fn elem_gen_text(plan: &[ElemPlanned]) -> Result<String, String> {
     );
     for item in plan {
         out.push_str(&format!(
-            "/// `{name}` —— element 函数（实现在 `{source}`，编成 `{generated}` 那一份内容寻址的库）。\n\
+            "/// `{name}` —— element 函数（实现在 `{source}`，编成一份**内容寻址**的实例库；\n\
+             /// 库名是运行期算出来的键，见 `crate::elem`）。\n\
              pub struct {ty};\n\
              \n\
              impl ::px_graph_schema::PxOp for {ty} {{\n\
@@ -579,7 +540,6 @@ fn elem_gen_text(plan: &[ElemPlanned]) -> Result<String, String> {
             inputs = item.inputs,
             payload = item.payload,
             source = item.source,
-            generated = item.generated,
             decl_hash = item.decl_hash,
         ));
     }
@@ -608,7 +568,6 @@ fn catalogue_text(plan: &[Planned], elems: &[ElemPlanned]) -> String {
         out.push_str(&format!(
             "        ::px_cook::inst::InstCodegen {{\n\
              \x20           op_id: \"{op_id}\",\n\
-             \x20           key: \"{key}\",\n\
              \x20           kind: ::px_cook::inst::InstKind::Decl {{\n\
              \x20               schema: \"{schema}\",\n\
              \x20               module: \"{module}\",\n\
@@ -618,10 +577,8 @@ fn catalogue_text(plan: &[Planned], elems: &[ElemPlanned]) -> String {
              \x20           body: \"{body}\",\n\
              \x20           recipe_line: {recipe_line},\n\
              \x20           recipe: \"{recipe}\",\n\
-             \x20           generated: \"{generated}\",\n\
              \x20       }},\n",
             op_id = item.op_id,
-            key = item.key,
             schema = item.schema,
             module = item.module,
             decl = item.decl,
@@ -631,14 +588,12 @@ fn catalogue_text(plan: &[Planned], elems: &[ElemPlanned]) -> String {
             body = item.body,
             recipe_line = item.recipe_line,
             recipe = RECIPE,
-            generated = item.generated,
         ));
     }
     for item in elems {
         out.push_str(&format!(
             "        ::px_cook::inst::InstCodegen {{\n\
              \x20           op_id: \"{op_id}\",\n\
-             \x20           key: \"{key}\",\n\
              \x20           kind: ::px_cook::inst::InstKind::Element {{\n\
              \x20               ty: \"{ty}\",\n\
              \x20               params: \"{params}\",\n\
@@ -649,10 +604,8 @@ fn catalogue_text(plan: &[Planned], elems: &[ElemPlanned]) -> String {
              \x20           body: \"{body}\",\n\
              \x20           recipe_line: {spec_line},\n\
              \x20           recipe: \"{recipe}\",\n\
-             \x20           generated: \"{generated}\",\n\
              \x20       }},\n",
             op_id = item.name,
-            key = item.key,
             ty = item.ty,
             params = item.params,
             inputs = item.inputs,
@@ -663,9 +616,14 @@ fn catalogue_text(plan: &[Planned], elems: &[ElemPlanned]) -> String {
             // ⚠ element 的体是**宏拼的**（规格表那一行说了"哪个文件"，模板由 `BODY` 给）
             //   ⇒ 报错指向**规格表那一行**，不指 `:0`。
             recipe = ELEM_SPECS,
-            generated = item.generated,
         ));
     }
     out.push_str("];\n");
     out
 }
+
+
+
+
+
+

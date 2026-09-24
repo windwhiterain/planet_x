@@ -572,7 +572,6 @@ impl InstKind {
 pub struct InstCodegen {
     /// 这条实例的 op id（认领源码里的记录、报错时点名）。
     pub op_id: &'static str,
-    pub key: &'static str,
     /// 复用什么（声明还是 element 的单态化）—— 生成物头两行与 `[dependencies]` 按它分叉。
     pub kind: InstKind,
     /// 泛型参数源文件（相对 workspace 根）。
@@ -581,21 +580,26 @@ pub struct InstCodegen {
     pub body: &'static str,
     /// `body` 在 recipe 文件里的行号（**错误映射**用：编不过时报它）。
     ///
-    /// ⚠ element 那一档是 `0`：它的体模板由宏（`px_elem/src/lib.rs` 的 `px_elem_specs!`）
-    ///   拼出来，规格表那一行里**没有**那段原文 ⇒ 报不出行号（报错仍有 `source` 与 `generated`）。
+    /// ⚠ element 那一档是规格表里那一行（体模板由宏拼出来，表里没有那段原文）。
     pub recipe_line: u32,
     /// recipe 文件（相对 workspace 根）。
     pub recipe: &'static str,
-    /// 生成物 `target/jit/<key>/`（**留着不删** —— 报错带它）。
-    pub generated: &'static str,
 }
 
 /// catalogue（`for_op` 按 op id 取一条）。
 ///
-/// ⚠ **它是可增长的**：声明那一档的条目来自生成物（一串编译期字面量，见
-///   [`Self::from_generated`]），element 那一档的条目**不是 build script 生成的**
-///   （规格住在 `px_elem` 里，是一张编译期常量表）⇒
-///   由 `px_graphs::insts::codegen()` 在运行期读表插进来（[`Self::insert`]）。
+/// ⚠⚠ **它里面没有内容键**（2026-09-27 改）：从前 `InstCodegen` 有两栏 `key` / `generated`，
+///   是 build script 算出来的**快照**。而键要读体文件字节 —— build script 不会因为
+///   `art/inst/*.rs` 或 `px_elem/body/*.rs` 改了而重跑（那些不在它的 `rerun-if-changed` 里）
+///   ⇒ 快照会**过期**：`px build` 报的键、错误里的 `target/jit/<键>` 都指着一份已经不存在的
+///   生成物，而 gate `every_instance_library_path_is_the_key_the_generator_planned` 正是
+///   拿它跟运行期算的键比 ⇒ 那条 gate 会红（实测踩到过一次）。
+///   ⇒ 今天**运行期现算**（[`info_of_facts`] 与 `key_of_facts` 都是运行期函数），
+///   这一层只留"**编什么**"（复用什么 / 源 / 体 / 报错行）—— 那是**不随源字节变**的东西。
+/// ⚠ 顺带保住 R1：生成物里一旦有内容键，"改一行算法 ⇒ 生成物变 ⇒ 图程序重编"就成立了。
+///
+/// ⚠ **它是可增长的**：两档的条目都在生成物里（一串编译期字面量，见 [`Self::from_generated`]），
+///   而 `px_graphs::insts::codegen()` 也允许在运行期插（[`Self::insert`]）。
 ///   ⚠ 两档合在一张表里的理由是"`px build` 只有一条路"：`compile_missing` / `compile_one`
 ///   只认这张表，不认识"这一条是从哪来的"。
 #[derive(Debug, Clone)]
@@ -607,8 +611,8 @@ impl InstCatalogue {
     /// 生成物那一侧用：把 `static INST_CODEGEN` 里那一串**拷成**可增长的表。
     ///
     /// ⚠ 为什么要拷而不用那份切片当表：生成物里是 `&'static [InstCodegen]`（编译期字面量，
-    ///   正好能住在一个 `static` 里），而 element 那几条只有运行期才知道 ⇒ 表必须是可增长的
-    ///   `Vec`。代价是每条实例一份几十字节的拷贝 —— 进程一次。
+    ///   正好能住在一个 `static` 里），而这张表是可增长的（`insert`）⇒ 必须拷成 `Vec`。
+    ///   代价是每条实例一份几十字节的拷贝 —— 进程一次。
     pub fn from_generated(entries: &[InstCodegen]) -> Self {
         Self {
             entries: entries.to_vec(),
@@ -657,7 +661,11 @@ pub fn compile_one(info: &InstInfo, key: &str, codegen: &InstCodegen) -> Result<
              target/jit/{key}/src/lib.rs:<行> 对应它）\
              \n  · 生成物：{}（留着，不删）\
              \n{err}",
-            codegen.op_id, codegen.recipe, codegen.recipe_line, codegen.source, codegen.generated,
+            codegen.op_id,
+            codegen.recipe,
+            codegen.recipe_line,
+            codegen.source,
+            generated_dir(key),
         )),
     }
 }
@@ -1074,3 +1082,4 @@ fn field(hasher: &mut blake3::Hasher, text: &str) {
     hasher.update(&(text.len() as u64).to_le_bytes());
     hasher.update(text.as_bytes());
 }
+

@@ -11,6 +11,8 @@
 pub fn value(
     params: &px_elem::ConstantParams,
     _inputs: &(),
+    _x: u32,
+    _y: u32,
     _uv: [f32; 2],
     _direction: [f32; 3],
 ) -> f32 {

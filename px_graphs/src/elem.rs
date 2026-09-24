@@ -22,6 +22,12 @@ mod generated {
 /// 每条 element 函数一个算子类型（`elem::Constant`）—— 脚本里**当值用**。
 pub use generated::*;
 
+/// 参数与上游那几个类型也从这儿拿（脚本写 `elem::RemapParams` / `elem::MixInput`）——
+/// 它们是**作者面**的东西（`px_elem`），在这儿再导一次只是省得脚本两边各 `use` 一行。
+pub use px_elem::{
+    ConstantParams, FuseInput, FuseParams, MixInput, MixParams, RemapInput, RemapParams,
+};
+
 /// **这一条实例的内容键**（= `target/pcg/inst/<键>.dll` 的名字，也是它进节点键的那一轴）。
 ///
 /// ⚠ 与生成器（`px_graphs/build.rs`）算的是**同一个函数、同一组输入**：两处各写一份算法
@@ -103,3 +109,4 @@ impl<F: ElementFn> px_graph_schema::PxOp for ElemOp<F> {
         px_elem::DECL_HASH
     }
 }
+

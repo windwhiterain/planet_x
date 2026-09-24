@@ -43,6 +43,9 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 pub mod constant;
+pub mod fuse;
+pub mod mix;
+pub mod remap;
 
 pub mod specs;
 
@@ -54,9 +57,24 @@ pub mod specs;
 ///   ⚠ 加一个 element 函数 = 这里再 re-export 它那一个参数 struct：`px_elem_specs!` 那一行
 ///   给的是**类型**（不是路径），宏没法替任意类型发一句 `use`。
 pub use constant::ConstantParams;
+pub use fuse::{FuseInput, FuseParams};
+pub use mix::{MixInput, MixParams};
+pub use remap::{RemapInput, RemapParams};
 pub use px_field_schema::field::Field;
 pub use px_graph_schema::interface_hash;
 pub use specs::ELEM_SPECS;
+
+/// 一张场**自己的形状**（"输出与上游同形"那条口径的落点）。
+///
+/// ⚠ 过滤类的 `shape` 一律走它：形状只有一个来源（上游那张场），于是"输入与输出形状不一致"
+///   这类缺陷在 element 这一档**不可表达**（从前那是调用点的纪律）。
+pub fn like(field: &Field) -> Shape {
+    Shape {
+        width: field.width,
+        height: field.height,
+        projection: field.projection,
+    }
+}
 
 /// 一条 element 函数的**全部根**：作者声明的那些 ∪ **两个固定的**。
 ///
@@ -156,14 +174,16 @@ pub fn facts_of<F: ElementFn>() -> ElemFacts {
 pub fn fill<F: ElementFn>(
     params: &F::Params,
     inputs: &F::Inputs,
-    cell: impl Fn([f32; 2], [f32; 3]) -> f32,
+    cell: impl Fn(u32, u32, [f32; 2], [f32; 3]) -> f32,
 ) -> Field {
     let mut out = F::shape(params, inputs).filled(0.0);
     for y in 0..out.height {
         for x in 0..out.width {
             let uv = out.uv(x, y);
             let direction = out.direction(x, y);
-            out.set(x, y, cell([uv.0, uv.1], direction));
+            // ⚠ 这一格的四样东西一起给：坐标（读上游）、纹素中心（径向条带那种）、球面方向
+            //   （纬向条带那种）。函数按需取，不用的写 `_`。
+            out.set(x, y, cell(x, y, [uv.0, uv.1], direction));
         }
     }
     out
@@ -211,19 +231,17 @@ macro_rules! px_elem_specs {
                 const SYMBOL: &'static str =
                     ::core::concat!("px_inst__", ::core::stringify!($ty));
                 // ⚠ 体模板由宏推出来（人只写"哪个文件"）：逐格那条循环只有 `px_elem::fill` 一条。
-                //   ⚠ 那个泛型实参写的是**全路径**（`px_elem::specs::<ty>`，那个标记类型），
-                //   **不是**裸名 `<ty>`：生成物里裸名被 `px_body!` 占着，指向
-                //   `Elementwise<<ty>>`（它只有 `PxOp`；`$name` 要 `PxOp` 才写得出 `Params`/符号名），
-                //   而 `fill` 要的是 `ElementFn`。同一个名字不可能同时是这两种类型 ⇒
-                //   体里走全路径（与"生成物里的 `use` 一律全路径"同一条规矩）。
+                //   ⚠ 那个泛型实参写的是**全路径**（`px_elem::specs::<ty>`，那个标记类型）：
+                //   生成物里那个裸名（`<ty>`）是**图侧那个算子类型**（`px_body_raw!` 的符号名，
+                //   与 `fill` 要的 `ElementFn` 不是一回事）⇒ 体里走全路径，
+                //   与"生成物里的 `use` 一律全路径"同一条规矩。
                 const BODY: &'static str = ::core::concat!(
                     "px_elem::fill::<px_elem::specs::",
                     ::core::stringify!($ty),
-                    ">(p, i, |uv, direction| value(p, i, uv, direction))"
+                    ">(p, i, |x, y, uv, direction| value(p, i, x, y, uv, direction))"
                 );
                 fn shape(params: &Self::Params, inputs: &Self::Inputs) -> $crate::Shape {
-                    let _ = inputs;
-                    ($shape)(params)
+                    ($shape)(params, inputs)
                 }
             }
         )*
@@ -243,3 +261,7 @@ macro_rules! px_elem_specs {
         ];
     };
 }
+
+
+
+
