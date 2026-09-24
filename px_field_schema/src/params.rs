@@ -73,12 +73,13 @@ impl Shape {
 
 /// **泛型实例那一档的参数**（`FieldRemap` 的 `Params`）。
 ///
-/// ⚠ 它与 [`remap::Params`] **不是**同一个类型，也**不该**合并：`remap` 是"把 `[in_min, in_max]`
-///   线性映到 `[out_min, out_max]`"那一档（七个预置算子之一）；这一档是"**上游 + 图侧函数**"
-///   （`px_inst!` 复用的声明）——`in_*` / `out_*` / `smooth` 是**共享路径**自己那一把尺子
-///   （活在 `px_field_alg::remap::normalize_value`，按 `[0,1] → [0,1]` 恒等档跑），
-///   而这里的三栏是**给图侧函数调的**（对比度 / 偏移 / 条带数）。
-///   两者共用的只有"归一化 + 钳制 + 映到输出值域"那一段，那一段住在 `px_field_alg` 里（**一份**）。
+/// ⚠ 它与 element 那一档的 `px_elem::RemapParams` **不是**同一个类型，也**不该**合并：
+///   这一档是"**上游 + 图侧函数**"（`px_inst!` 复用的声明）——`in_*` / `out_*` / `smooth` 是
+///   **共享路径**自己那一把尺子（活在 `px_field_alg::remap::normalize_value`，按
+///   `[0,1] → [0,1]` 恒等档跑），而这里的三栏是**给图侧函数调的**（对比度 / 偏移 / 条带数）。
+///   element 那一档的 `RemapParams` 是**预置 `Remap` 搬过去的那份参数表**
+///   （`in_min` / `in_max` / `out_min` / `out_max` / `smooth` / `gamma`，七个字段全不一样）
+///   —— 两者共用的只有"归一化 + 钳制 + 映到输出值域"那一段，那一段住在 `px_field_alg`（**一份**）。
 ///
 /// ⚠ 三栏都**进键**（`PxParams` 按字段名 + 字段值写哈希）：只改对比度必换键、必重算 ——
 ///   而图程序 exe **一个字节不动**（泛型参数与参数都由命令行走）。
@@ -199,27 +200,6 @@ impl Default for Warp3Params {
     }
 }
 
-pub mod constant {
-    use crate::params::Shape;
-    use serde::{Deserialize, Serialize};
-
-    #[derive(Debug, Clone, Serialize, Deserialize, px_derive::PxParams)]
-    #[serde(default, deny_unknown_fields)]
-    pub struct Params {
-        pub shape: Shape,
-        pub value: f32,
-    }
-
-    impl Default for Params {
-        fn default() -> Self {
-            Self {
-                shape: Shape::default(),
-                value: 0.5,
-            }
-        }
-    }
-}
-
 pub mod fbm {
     use crate::params::Shape;
     use serde::{Deserialize, Serialize};
@@ -286,65 +266,13 @@ pub mod gradient {
     }
 }
 
-pub mod mix {
-    use serde::{Deserialize, Serialize};
-
-    #[derive(Debug, Clone, Serialize, Deserialize, px_derive::PxParams)]
-    #[serde(default, deny_unknown_fields)]
-    pub struct Params {
-        pub bias: f32,
-    }
-
-    impl Default for Params {
-        fn default() -> Self {
-            Self { bias: 0.0 }
-        }
-    }
-}
-
-pub mod remap {
-    use serde::{Deserialize, Serialize};
-
-    #[derive(Debug, Clone, Serialize, Deserialize, px_derive::PxParams)]
-    #[serde(default, deny_unknown_fields)]
-    pub struct Params {
-        pub in_min: f32,
-        pub in_max: f32,
-        pub out_min: f32,
-        pub out_max: f32,
-        pub smooth: bool,
-        /// **强度非线性**（`1.0` = 不弯）。
-        ///
-        /// ⚠ 为什么这一栏是**必须**的（而不是靠把 `in_min`/`in_max` 收窄来凑）：
-        ///   收窄窗口是**线性**拉伸，它只能把"中灰"搬成"中灰的另一个值"；而星云要的是
-        ///   **大片接近 0 + 少数尖峰**（参考图的线性均值/最亮 1% 只有 0.112）。
-        ///   这个形状只能靠非线性拿到。实测 fbm 的均值挤在 0.51 附近（这一档的上游
-        ///   实到 0.4085）⇒ 收窄窗口之后仍是一片中灰，画面上是"均匀的雾"。
-        ///
-        /// ⚠ 作用位置在 `out_*` **之后**（把在 `[out_min, out_max]` 上的值取 `gamma` 次幂）
-        ///   —— 于是 `out_*` 依旧管"值域"、`gamma` 只管"形状"，两者各是一件事。
-        ///   负数会取幂到 `NaN` ⇒ 非正数一律不弯（`NaN` 顺着管线传下去极难归因）。
-        pub gamma: f32,
-    }
-
-    impl Default for Params {
-        fn default() -> Self {
-            Self {
-                in_min: 0.0,
-                in_max: 1.0,
-                out_min: 0.0,
-                out_max: 1.0,
-                smooth: true,
-                gamma: 1.0,
-            }
-        }
-    }
-}
-
 /// **强度非线性**：`value^gamma`（`gamma` 非正 ⇒ 原样返回）。
 ///
-/// ⚠ 独立成一个函数是为了让"两条入口（预置 `Remap` 与 `px_inst!` 实例）**同一把尺子**"
-///   这件事仍然是唯一一条路径 —— 弯折写在循环里、只有一处。
+/// ⚠ 独立成一个函数是为了让"**共享路径**里那一处弯折"只有一条路 —— 弯折写在循环里、
+///   只有一处（`px_field_alg::map_grid` 调它；element 那一档的 `Remap` / `Fuse` 体文件
+///   沿用同一个口径）。⚠ 从前那句话写的是"预置 `Remap` 与 `px_inst!` 实例同一把尺子"——
+///   预置 `Remap` 2026-09-27 收进了 element，**这条函数本身没搬**（它住 schema，实例那一档
+///   与 `px_field_alg` 都在链它）。
 pub fn bend(value: f32, gamma: f32) -> f32 {
     if !(gamma > 0.0) || (gamma - 1.0).abs() < f32::EPSILON {
         return value;
@@ -424,7 +352,8 @@ pub mod warp {
 ///   —— 两者在 `d = radius` 处**都是 0**，所以剖面连续、不会在坑边留下一条硬台阶。
 /// ⚠ `depth` / `height` 是**值域单位**（不是格）：一层最多把值往下压 `depth / 2`、往上抬
 ///   `height / 2`，多层按 `gain` 加权后**用总权归一** ⇒ 叠多少层都不会把值顶出多少。
-///   算子**不钳制**输出（"算出来的值域"是图自己的事：要钳就在下游接一个 `field.remap`）。
+///   算子**不钳制**输出（"算出来的值域"是图自己的事：要钳就在下游接一个值域映射，
+///   今天那是 element 那一档的 `elem::Remap`）。
 #[derive(Debug, Clone, Serialize, Deserialize, px_derive::PxParams)]
 #[serde(default, deny_unknown_fields)]
 pub struct CratersParams {

@@ -7,7 +7,7 @@
 //! ⚠ 末尾那条 [`FieldRemap`] 是**泛型实例的声明**（实例复用它）：它甚至没有预置实现，
 //!   "这一格的值怎么算"由 `art/inst/*.rs` 里那段图侧现写的函数决定。
 //!
-//! ⚠ 图参数的形状（`MixInput { a, b, mask }`）**是接口的一部分**，所以它住在声明旁边：
+//! ⚠ 图参数的形状（`FieldPairInput { field, offset }`）**是接口的一部分**，所以它住在声明旁边：
 //!   它是"这个算子被接的那个 struct"，不是实现细节。
 
 use px_graph_schema::{Cooked, px_op};
@@ -15,7 +15,7 @@ use px_graph_schema::{Cooked, px_op};
 use crate::field::Field;
 use crate::params;
 
-/// 一张场（`Remap` / `Gradient` 吃它）。
+/// 一张场（`Gradient` 吃它）。
 #[derive(px_derive::PxInputs)]
 pub struct FieldInput {
     pub field: Cooked<Field>,
@@ -26,14 +26,6 @@ pub struct FieldInput {
 pub struct FieldPairInput {
     pub field: Cooked<Field>,
     pub offset: Cooked<Field>,
-}
-
-/// 三张场（`Mix` 吃它：两张待混 + 一张权重）。
-#[derive(px_derive::PxInputs)]
-pub struct MixInput {
-    pub a: Cooked<Field>,
-    pub b: Cooked<Field>,
-    pub mask: Cooked<Field>,
 }
 
 /// **泛型实例**的图参数：上游那一张场。
@@ -68,12 +60,14 @@ pub struct Warp3Input {
     pub offset_c: Cooked<Field>,
 }
 
-// ⚠ 不吃上游的那四个 ⇒ 形状是 `()`（它没有名字问题，住在契约里）。
-px_op! {
-    /// 处处同一个值的场（当权重/常量用）。
-    Constant, "field.constant", "px_field_op", params::constant::Params, (), Field
-}
-
+// ⚠ 不吃上游的那几个 ⇒ 形状是 `()`（它没有名字问题，住在契约里）。
+//
+// ⚠ **`field.constant` / `field.mix` / `field.remap` 这三处 `px_op!` 已删**（2026-09-27）：
+//   用户裁定 A —— 只收**纯 pointwise** 的那三档，它们今天是 element 函数
+//   （`px_elem` 的规格表：`elem::Constant` / `elem::Mix` / `elem::Remap`），实现编成
+//   **内容寻址的实例库**、由 `px_graphs::elem` 装载。噪声源（`fbm` 等）、空间核
+//   （`craters` / `stamps`）与要**再采样上游**的（`gradient` / `warp` / `warp3`）留在这一档。
+//   ⇒ 那三档的**参数类型**也跟着搬到了 `px_elem`（"这个节点吃什么"由函数自己说了算）。
 px_op! {
     /// 分形布朗噪声。
     Fbm, "field.fbm", "px_field_op", params::fbm::Params, (), Field
@@ -85,18 +79,8 @@ px_op! {
 }
 
 px_op! {
-    /// 值域重映射（可平滑）。
-    Remap, "field.remap", "px_field_op", params::remap::Params, FieldInput, Field
-}
-
-px_op! {
     /// 切向梯度的一个分量（法线/坡度用）。
     Gradient, "field.gradient", "px_field_op", params::gradient::Params, FieldInput, Field
-}
-
-px_op! {
-    /// 按权重混两张场。
-    Mix, "field.mix", "px_field_op", params::mix::Params, MixInput, Field
 }
 
 px_op! {
@@ -112,8 +96,8 @@ px_op! {
     ///   图侧那些实例当**声明**用 —— 实例库由 `px build` 按 key 生成并编译，`LIB` 是空串
     ///   （`px_inst!` 给的），装载的是 `target/pcg/inst/<key>.dll`。
     ///
-    /// ⚠ 参数是 [`params::RemapParams`] —— 与预置的 [`Remap`]（`params::remap::Params`）
-    ///   **不是**同一个东西：见那一份的文档注释。
+    /// ⚠ 参数是 [`params::RemapParams`] —— 与 element 那一档的 `px_elem::RemapParams`
+    ///   **不是**同一个东西（名字像，含义不同）：见那一份的文档注释。
     /// ⚠ 那三栏**真的到得了图侧函数**（`px_field_alg::field_fn::FieldFn::value` 的第一栏）：
     ///   2026-09-20 之前它们只进键、不进计算，见那一条的文档。
     FieldRemap, "field.remap", "px_field_op", params::RemapParams, FieldRemapInput, Field
@@ -124,7 +108,7 @@ px_op! {
     ///
     /// ⚠ 它**吃上游**（`CratersInput { base }`）而输出是"输入 + 坑的剖面"：地形艺术里
     ///   "基底 + 叠一层细节"是**加法**，而值域里的加法在这个词汇表里只有这一条路
-    ///   （`field.mix` 是插值，插不出"坑缘高过基底"）。要叠几层就接几个 `Craters` 节点，
+    ///   （`elem::Mix` 是插值，插不出"坑缘高过基底"）。要叠几层就接几个 `Craters` 节点，
     ///   每个节点自己那份 TOML 给频率与深度。
     /// ⚠ 球面档按 `direction` 取格点 ⇒ 没有接缝（`uv` 不是球面坐标，见
     ///   `px_field_alg::field_fn::FieldFn` 那一条）。

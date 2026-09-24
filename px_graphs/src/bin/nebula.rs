@@ -45,8 +45,12 @@ use std::time::Instant;
 use px_cook::{
     Domain, GraphSpec, begin, cached, field, field_params, node_params, volume, volume_params,
 };
+// ⚠ element 那一档（`elem::Constant` / `elem::Mix` / `elem::Remap`）**不从 `px_cook` 那一扇门
+//   出去**：那一档的算子类型由图侧的生成物给（`px_graphs/build.rs` 写 `OUT_DIR/elem_gen.rs`），
+//   而 `px_cook` 是"各域算子表 + 缓存路径"那一扇门，两者不是一回事。
 use px_field_schema::field::Field;
 use px_field_schema::volume::VolumeShape;
+use px_graphs::elem;
 use px_volume_schema::params::stars::StarsParams;
 
 /// 图侧对错误的统一态度：**当场失败**，不静默跳过。
@@ -268,27 +272,27 @@ fn main() -> Result<(), Fault> {
     let extent = cached(
         &shape_graph,
         "extent",
-        field::Remap,
+        elem::Remap,
         node_params(&shape_graph, "extent")?,
-        field::FieldInput {
+        elem::RemapInput {
             field: warped.clone(),
         },
     )?;
     let weight = cached(
         &shape_graph,
         "weight",
-        field::Remap,
+        elem::Remap,
         node_params(&shape_graph, "weight")?,
-        field::FieldInput {
+        elem::RemapInput {
             field: warped.clone(),
         },
     )?;
     let density = cached(
         &shape_graph,
         "density",
-        field::Mix,
+        elem::Mix,
         node_params(&shape_graph, "density")?,
-        field::MixInput {
+        elem::MixInput {
             a: warped,
             b: wisps.clone(),
             mask: weight,
@@ -296,12 +300,12 @@ fn main() -> Result<(), Fault> {
     )?;
     // ⚠ 密度 × 包络 ⇒ 包络为 0 的地方**连消光都是 0**（那才是真空），
     //   不只是"暗一点" —— 这一条决定了暗部能不能真的压到 0 附近。
-    //   常数 0 走 `vacuum.toml`（`field.constant` 的参数只有 `value`）。
+    //   常数 0 走 `vacuum.toml`（`elem::ConstantParams` 的参数只有 `shape` 与 `value`）。
     let vacuum = cached(
         &shape_graph,
         "vacuum",
-        field::Constant,
-        field_params::constant::Params {
+        elem::Constant,
+        elem::ConstantParams {
             shape: field_shape,
             ..node_params(&shape_graph, "vacuum")?
         },
@@ -310,9 +314,9 @@ fn main() -> Result<(), Fault> {
     let shaped = cached(
         &shape_graph,
         "shaped",
-        field::Mix,
+        elem::Mix,
         node_params(&shape_graph, "shaped")?,
-        field::MixInput {
+        elem::MixInput {
             a: vacuum.clone(),
             b: density,
             mask: extent,
@@ -340,16 +344,16 @@ fn main() -> Result<(), Fault> {
     let envelope_mask = cached(
         &shape_graph,
         "envelope_mask",
-        field::Remap,
+        elem::Remap,
         node_params(&shape_graph, "envelope_mask")?,
-        field::FieldInput { field: envelope },
+        elem::RemapInput { field: envelope },
     )?;
     let shaped2 = cached(
         &shape_graph,
         "shaped2",
-        field::Mix,
+        elem::Mix,
         node_params(&shape_graph, "shaped2")?,
-        field::MixInput {
+        elem::MixInput {
             a: vacuum.clone(),
             b: shaped,
             mask: envelope_mask,
@@ -376,9 +380,9 @@ fn main() -> Result<(), Fault> {
     let carved = cached(
         &shape_graph,
         "carved",
-        field::Remap,
+        elem::Remap,
         node_params(&shape_graph, "carved")?,
-        field::FieldInput { field: wisps },
+        elem::RemapInput { field: wisps },
     )?;
     // ⚠ `mix(a, b, mask) = a×(1−mask) + b×mask` ⇒ `mix(shaped, 真空, 脊)`
     //   就是"沿脊线把密度雕低"。`carved.toml` 的 `out_max = 0.8` ⇒ 缝里留 20% 的气
@@ -386,9 +390,9 @@ fn main() -> Result<(), Fault> {
     let textured = cached(
         &shape_graph,
         "textured",
-        field::Mix,
+        elem::Mix,
         node_params(&shape_graph, "textured")?,
-        field::MixInput {
+        elem::MixInput {
             a: shaped2,
             b: vacuum,
             mask: carved,

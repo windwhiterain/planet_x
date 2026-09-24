@@ -1082,4 +1082,3 @@ fn field(hasher: &mut blake3::Hasher, text: &str) {
     hasher.update(&(text.len() as u64).to_le_bytes());
     hasher.update(text.as_bytes());
 }
-

@@ -155,15 +155,18 @@ fn the_shape_is_a_parameter_of_the_generators_so_it_is_in_the_key() {
 /// ⚠ 新口径下它同样是**结构性**的：过滤类算子的参数表里根本没有 `shape` 这一栏
 ///   （`deny_unknown_fields` 连写都不让写）⇒ "别的节点的尺寸"没有一条路能顺着参数表
 ///   进它的键；它的键照旧只由"算子身份 + 自己的参数 + 上游的键"决定。
+/// ⚠ 拿 `gradient` 当样本：`remap` 那一档 2026-09-27 收进了 element（`px_elem::RemapParams`），
+///   而 element 那一档的参数类型住 `px_elem`（不是本 crate 依赖的 schema），
+///   判据就在这里换一个**还活着的**过滤类预置 —— 它守的东西一位没变。
 #[test]
 fn a_filter_node_has_no_shape_axis_to_carry_into_its_key() {
-    let parsed: Result<px_field_schema::params::remap::Params, _> =
+    let parsed: Result<px_field_schema::params::gradient::Params, _> =
         toml::from_str("shape = { width = 8, height = 4, projection = \"CubeMap\" }\n");
     assert!(
         parsed.is_err(),
         "过滤类节点的参数表里冒出了 `shape` ⇒ 别的节点的尺寸会顺着参数表进它的键"
     );
-    let remap = px_field_schema::params::remap::Params::default();
+    let remap = px_field_schema::params::gradient::Params::default();
     let json = canonical_params(&remap);
     assert!(
         !json.contains("\"shape\""),

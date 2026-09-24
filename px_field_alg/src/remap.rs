@@ -2,35 +2,37 @@
 //!
 //! 从 `px_field_op/src/ops/remap.rs` 搬进来的 —— 搬的理由不是"文件太长"，而是
 //! **泛型实例要能只靠这一份 rlib 就把体算出来**（`19-generic-inst.md` §177）：
-//! 预设那一档（`px_field_op` 的 `Remap`）与图侧现写的那一档（`px_inst!` 的实例）
-//! 必须走**同一条**路径，否则同一份参数会算出两种结果，而两者共用的缓存键分不出这个差别。
+//! 各档之间必须走**同一条**路径，否则同一份参数会算出两种结果，而两者共用的缓存键
+//! 分不出这个差别。
 //!
 //! ⚠ 这一份的算术**逐字**沿自搬出前的那一份（`Remap` 的读数就是靠这一条逐位不变的）：
 //!   钳到 `[0,1]` → 平滑（可选）→ 映到 `[out_min, out_max]`。改这里的任何一行，
-//!   预设算子与全部场侧实例的键**一起**变（它们链的是同一个文件）。
+//!   场侧全部实例的键**一起**变（它们链的是同一个文件）。
 //!
-//! ## 两条入口、两套参数、**一份**尺子
+//! ## 一处尺子、四个用户
 //!
-//! | 入口 | 参数类型（住 schema） | 谁提供"这一格的值" |
+//! | 用户 | 参数类型（住哪） | 谁提供"这一格的值" |
 //! |---|---|---|
-//! | [`remap_sampled`]（预置 `Remap`） | `params::remap::Params` | 上游那张场，照抄 |
-//! | [`remap_with`]（`px_inst!` 的实例） | `params::RemapParams` | 图侧现写的 [`FieldFn`] |
+//! | element 那一档（`elem::Remap` / `elem::Fuse` 的体文件） | `px_elem::RemapParams` / `FuseParams` | 上游那张场，照抄 |
+//! | 泛型实例（`art/inst/waves.rs` / `latbands.rs`） | `px_field_schema::params::RemapParams` | 图侧现写的 [`FieldFn`] |
 //!
 //! 两者共用的那一段是 [`Scale`]（`[in_min, in_max]` → `[0,1]` → `[out_min, out_max]`，带可选平滑）
-//! 与**唯一那条循环** [`map_grid`]。⚠ 两套参数类型**不该合并**：预置那一档的尺子由它自己的
-//! `art/<图>/<节点>.toml` 给（`in_*` / `out_*` / `smooth`），而泛型那一档的 `gain` / `bias` /
-//! `bands` 是**给图侧函数调的**（见 `px_field_schema::params::RemapParams` 为什么单独存在）。
+//! 与**唯一那条循环** [`map_grid`]。⚠ 两套参数类型**不该合并**：element 那一档的尺子由它自己的
+//! `art/<图>/<节点>.toml` 给（`in_*` / `out_*` / `smooth` / `gamma`），而泛型那一档的 `gain` /
+//! `bias` / `bands` 是**给图侧函数调的**（见 `px_field_schema::params::RemapParams` 为什么单独存在）。
 //! 泛型那一档的尺子因此固定为 [`identity`]（`[0,1] → [0,1]`）—— 改 TOML 里的对比度不会
 //! 顺手改掉值域口径。
 //!
-//! ⚠ **搬出去之后预置算法的算术逐位不变**：`remap::eval` 只是把 `params::remap::Params`
-//!   搭成一个 [`Scale`] 再交给同一个 [`map_grid`]。planet/desert 那 14 份产物与搬出去之前
-//!   **逐字节相同**，就是这条的判据。
+//! ⚠ **搬出去之后预置算法的算术逐位不变**：从前的 `remap::eval` 只是把
+//!   `params::remap::Params` 搭成一个 [`Scale`] 再交给同一个 [`map_grid`]；那一档 2026-09-27
+//!   收进了 element，而 element 的体文件**搭的是同一个 [`Scale`]、走的是同一个 [`map_grid`]**
+//!   —— 于是 `moon` / `desert` 那些图迁移前后的产物逐字节相同（planet 系列图另有一条：
+//!   那三档的**默认值**原本就不是一套，见 `44-elem-generic-op.md`）。
 
 use px_field_schema::field::{Field, Projection};
 use px_field_schema::params::RemapParams;
 
-use crate::field_fn::{FieldFn, Sampled};
+use crate::field_fn::FieldFn;
 
 /// **这一格的值怎么算**：给"这个节点的参数"、"已经归一化过的上游值"、"这一格的纹素中心坐标"
 /// 与"这一格的球面方向"，回这一格的值。
@@ -72,9 +74,9 @@ impl<F: FieldFn> Cell for F {
 /// ⚠ 它正是 [`crate::remap_with`]（泛型实例那一档）用的那一把：`RemapParams` 那三栏
 ///   （`gain` / `bias` / `bands`）没有值域的意思，"归一化 + 钳制"这一段由恒等尺子跑
 ///   —— 于是图侧函数只管"这一格的值怎么算"，改 TOML 里的对比度不会顺手改掉值域口径。
-///   ⚠ **预置 `Remap` 不用它**：预置那一档的尺子由 `params::remap::Params` 给
-///   （`px_field_op::ops::remap::eval` 现搭一个 [`Scale`]）——两者走的是**同一个** `Scale`
-///   类型与**同一个** [`map_grid`]，只是值域参数不同。
+///   ⚠ **element 那一档不用它**：`elem::Remap` / `elem::Fuse` 的尺子由函数自己的
+///   `RemapParams` / `FuseParams` 给（体文件里现搭一个 [`Scale`]）——两者走的是**同一个**
+///   `Scale` 类型与**同一个** [`map_grid`]，只是值域参数不同。
 pub fn identity() -> Scale {
     Scale {
         in_min: 0.0,
@@ -177,38 +179,20 @@ pub fn map_grid<C: Cell>(
     field
 }
 
-/// **预设那一档的入口**：上游那张场照抄、只过尺子。
-///
-/// ⚠ 它就是 [`remap_with`] 在"恒等场函数"上的实例 —— `px_field_op` 的 `Remap` 调的就是它
-///   （**没有第二条计算路径**）。
-///
-/// ⚠ 它收 [`Scale`] 而**不收** `RemapParams`：预置那一档的尺子是它自己那份
-///   `params::remap::Params` 给的，`RemapParams`（`gain` / `bias` / `bands`）是**给图侧函数
-///   读的** —— 预置这一档没有图侧函数，所以递进去的是 `RemapParams::default()`（`Sampled`
-///   本来也不看它）。
-pub fn remap_sampled(scale: &Scale, gamma: f32, input: &Field) -> Field {
-    remap_with(
-        scale,
-        &RemapParams::default(),
-        gamma,
-        input,
-        &Sampled { field: input },
-    )
-}
-
 /// **实例库入口**：用一个**图侧给的**场函数重映射上游那张场
 /// （实例的体模板里这样用：
 /// `px_field_alg::remap_with(&px_field_alg::identity(), p, 1.0, i.input.value(), g, $arg)`）。
 ///
 /// ⚠ 第三栏 `gamma` 实例那一档固定给 `1.0`（= 不弯，见 [`px_field_schema::params::bend`]）
-///   —— 实例的参数结构（`RemapParams`：`gain` / `bias` / `bands`）里**没有**非线性那一栏，
-///   而弯曲是**预置 `Remap`** 那一档的参数（`params::remap::Params::gamma`）。
+///   —— 实例的参数结构（`RemapParams`：`gain` / `bias` / `bands`）里**没有**非线性那一栏
+///   （那个弯曲是 element 那一档 `elem::RemapParams::gamma` 的事，
+///   `px_elem/body/remap.rs` 里自己取幂）。
 ///   要实例也弯，就在 `RemapParams` 里加一栏、并把这个 `1.0` 换成 `p.gamma`
 ///   —— 两处必须一起改（否则键变了而算法没变，或反过来）。
 ///
-/// ⚠ 它必须与 [`remap_sampled`] 走**同一条**路径（都是 [`map_grid`]），否则同一份参数会算出
-///   两种结果 —— 预设实现那一档与泛型实例那一档就再也对不上，而两者共用的缓存键分不出这个
-///   差别（体积域 `coarse_with` / `eval_sampled` 是同一条规矩）。
+/// ⚠ 它与 element 那一档的体文件走**同一条**路径（都是 [`map_grid`] 与同一个 [`Scale`]），
+///   否则同一份参数会算出两种结果 —— 两条路共用的缓存键分不出这个差别
+///   （体积域 `coarse_with` / `eval_sampled` 是同一条规矩）。
 ///
 /// ⚠ `upstream`（上游那张场）**参与计算**：它就是场函数收到的 `upstream` 那一栏
 ///   （由 [`Sampled`] 采样，与图函数自己再采一次是同一个值）。
@@ -238,6 +222,9 @@ pub fn remap_with<F: Cell>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    // ⚠ `Sampled`（"上游照抄"那一档的场函数）在**非测试**代码里已经没有发送者了（element 那一档
+    //   在体文件里自己逐格算），判据这一侧才用它当"恒等图侧函数" ⇒ 只在测试模块里引它。
+    use crate::field_fn::Sampled;
     use px_field_schema::field::Projection;
 
     /// 一张 37×23 的对照场（形状就是判据里那一档 —— 画布没了，形状跟着场走）。
@@ -259,6 +246,7 @@ mod tests {
                 input.set(x, y, (x as f32 + y as f32) / 10.0);
             }
         }
+        // 上游照抄那一档（`Sampled`）：`gamma` 那一段的对照就只差非线性这一轴。
         let scale = Scale {
             in_min: 0.0,
             in_max: 1.0,
@@ -266,9 +254,18 @@ mod tests {
             out_max: 1.0,
             smooth: false,
         };
+        let remap = |input: &Field, gamma: f32| {
+            remap_with(
+                &scale,
+                &RemapParams::default(),
+                gamma,
+                input,
+                &Sampled { field: input },
+            )
+        };
         // ⚠ 输出与输入**同形**（形状只有一个来源：上游那张场）。
-        let plain = remap_sampled(&scale, 1.0, &input);
-        let bent = remap_sampled(&scale, 3.0, &input);
+        let plain = remap(&input, 1.0);
+        let bent = remap(&input, 3.0);
         let mut worst_low = f32::INFINITY;
         let mut worst_high = 0.0_f32;
         for index in 0..plain.data.len() {
@@ -299,18 +296,59 @@ mod tests {
         field
     }
 
-    /// 恒等的图侧函数（`(upstream, uv) ↦ upstream`）与预设入口必须**逐个 f32 相同** ——
-    /// 那是"同一条计算路径"的判据（两条入口共用 `map_grid`）。
+    /// 这条共享路径**不该碰不该碰的东西** —— 逐位钉两档。
+    ///
+    /// ⚠ 从前这一条叫 `an_identity_field_function_is_the_preset_entry_bit_for_bit`：那时对照的
+    ///   另一半是预置 `Remap` 的入口 `remap_sampled`（"照抄上游"）。那一档 2026-09-27 收进了
+    ///   element（`px_elem/body/remap.rs`）⇒ 对照的靶子没了，但这一条钉的东西一个字没变：
+    ///   **这条共享路径把输入搬到输出上，除了尺子与 `gamma` 之外一个 ulp 都不许动**。
+    ///   两档各钉一半：
+    ///
+    ///   1. `smooth = false` 的恒等尺子 + `gamma = 1` ⇒ 输出**逐位等于**上游（连值域边界
+    ///      `[0,1]` 之外的取样点一起：钳制在两端是幂等的，`0 → 0`、`1 → 1` 逐位成立）；
+    ///   2. `identity()`（**带平滑**）+ 照抄上游 ⇒ 输出逐位等于 `map_grid` 里的闭式
+    ///      （`3t² − 2t³`）—— 这一半钉的是"平滑确实在共享路径里、且只有这一处"。
+    ///
+    ///   ⚠ element 那一档的逐格数值由 `px_graphs/tests/elem.rs` 真编库、真装载地钉。
     #[test]
-    fn an_identity_field_function_is_the_preset_entry_bit_for_bit() {
+    fn the_shared_path_moves_the_input_without_touching_it() {
         let grid = sample_field();
-        let scale = identity();
         let params = RemapParams::default();
         let input = input(&grid);
 
-        let preset = remap_sampled(&scale, 1.0, &input);
-        let generic = remap_with(&scale, &params, 1.0, &input, &Sampled { field: &input });
-        assert_eq!(preset, generic, "同一条路径上两种入口算出了不同的场");
+        // ① 不平滑的恒等尺子：输出就是上游，逐位。
+        let plain = Scale {
+            in_min: 0.0,
+            in_max: 1.0,
+            out_min: 0.0,
+            out_max: 1.0,
+            smooth: false,
+        };
+        let copied = remap_with(&plain, &params, 1.0, &input, &Sampled { field: &input });
+        assert_eq!(
+            copied, input,
+            "恒等尺子（不平滑）+ 照抄上游，却没算出上游那张场"
+        );
+
+        // ② 带平滑的恒等尺子：输出逐位等于"尺子那条闭式"（`map` ∘ `normalize`），并且
+        //    **确实与上游不同** —— 否则这一条就退化成"什么也没测"（`identity()` 的 `smooth`
+        //    是 `true`，它对绝大多数格子都会真的弯一下）。
+        let smooth = identity();
+        let bent = remap_with(&smooth, &params, 1.0, &input, &Sampled { field: &input });
+        let mut field = input.like(0.0);
+        for y in 0..field.height {
+            for x in 0..field.width {
+                field.set(x, y, smooth.map(smooth.normalize(input.at(x, y))));
+            }
+        }
+        assert_eq!(
+            bent, field,
+            "平滑那一档与 `Scale::map ∘ Scale::normalize` 那条闭式不是逐位相同"
+        );
+        assert_ne!(
+            bent, input,
+            "`identity()` 是 `smooth = true` 的尺子 ⇒ 输出不该与上游逐位相同（尺子没生效？）"
+        );
     }
 
     /// 场函数拿到的那三栏就是**上游归一化后的值**、**这一格的纹素中心坐标**与

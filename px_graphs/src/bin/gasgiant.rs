@@ -10,7 +10,9 @@
 //!
 //! 两条不同的装载路在这张图里并存（与 `field_remap` 一样，但这里是**真管线**而不是最小例子）：
 //!
-//! * `field.fbm` / `field.craters` / `field.remap` 走**预置实现库**（`px_field_op`，按身份装载）；
+//! * `field.fbm` / `field.craters` 走**预置实现库**（`px_field_op`，按身份装载）；
+//! * `mixed`（收口那次值域映射）走 **element 那一档**（`elem::Remap`：一条内容寻址的实例库
+//!   `target/pcg/inst/<key>.dll`，与下面 `bands` 那条装载路同形）；
 //! * `bands` 走**泛型实例库**（`target/pcg/inst/<key>.dll`，`art/inst/latbands.rs` 里那段图侧函数）。
 //!
 //! ⚠ **纬度只能从 `direction` 取**：这张图的画布是 `CubeMap`（六张面沿 `y` 叠成一条），
@@ -22,6 +24,7 @@
 use px_cook::{Domain, GraphSpec, begin, cached, field, field_params, node_params};
 use px_field_schema::field::cube_map_extent;
 
+use px_graphs::elem;
 use px_graphs::insts::LatBands;
 
 const FACE: u32 = 256;
@@ -139,9 +142,9 @@ fn main() -> Result<(), Fault> {
     let mixed = cached(
         &graph,
         "mixed",
-        field::Remap,
+        elem::Remap,
         node_params(&graph, "mixed")?,
-        field::FieldInput {
+        elem::RemapInput {
             field: eddied.clone(),
         },
     )?;

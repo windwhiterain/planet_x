@@ -26,8 +26,9 @@
 //! let clusters = cached(&graph, "clusters", field::Fbm, p, ())?;
 //! // 不缓存：直接调那个普通函数（同一个参数、同一个上游），拿到的裸值 `Cooked::of` 一下就能进图
 //! let preview = field::Fbm.render(&p2, &())?;
-//! let mixed = cached(&graph, "mixed", field::Mix, p3,
-//!                    field::MixInput { a: clusters, b: carved, mask: Cooked::of(preview)? })?;
+//! // ⚠ element 那一档（`elem::Constant` / `elem::Mix` / `elem::Remap` / `elem::Fuse`）**不长在
+//! //   这一扇门后面**：它的算子类型由图侧的生成物给（`px_graphs/build.rs`），所以脚本从
+//! //   `px_graphs::elem` 取它；其余手感一模一样（`px_graphs/src/bin/nebula.rs` 那种就是样本）。
 //! ```
 //!
 //! ⚠ **参数是 `Cooked<T>` 就表示"这个参数可以被缓存"**（`HashField for Cooked<T>` 写的是它的键）

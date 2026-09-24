@@ -239,3 +239,49 @@ impl<F: ElementFn> PxOp for Elementwise<F> {
 * 仍记着的两条小账：element 条目的报错行号指向**规格表那一行**（体模板是宏拼的，表里没有
   那段原文，指到那一行是诚实的近似）；`InstCatalogue::insert` 的唯一性仍是**断言**
   （与 `BuildGraph::facts` 一致）。
+
+## §11 收口落地 + 判据搬家（2026-09-27，同一分支第四段）
+
+§5 说的"删掉三档预置"真的删了，图脚本那 20 处调用全搬了 `elem::*`：
+
+| 落点 | 改了什么 |
+|---|---|
+| `px_graphs/src/bin/{clouds,desert,planet,gasgiant,moon,nebula}.rs` | **20 处** `field::{Constant,Mix,Remap}` → `elem::*`；上游 `field::FieldInput` → `elem::RemapInput`、`field::MixInput` → `elem::MixInput`；显式写了类型的那几处 `field_params::{constant,mix,remap}::Params` → `elem::{Constant,Mix,Remap}Params`。⚠ 逐字同字段名 ⇒ `art/<图>/<节点>.toml` **一位没动** |
+| `px_field_schema/src/ops.rs` | 删三处 `px_op!`（`Constant` / `Remap` / `Mix`）＋ **`MixInput`**（删完只剩它自己用；element 那一档有 `px_elem::MixInput`，是另一个类型）。⚠ `FieldInput`（`Gradient` 用）、`FieldPairInput`、`FieldRemapInput`、`CratersInput`、`Warp3Input` 全留着 |
+| `px_field_schema/src/params.rs` | 删 `pub mod constant` / `mix` / `remap`。⚠ `RemapParams`（大写、泛型实例用）与 `bend` **留着**（`px_field_alg::map_grid` 链它） |
+| `px_field_op/src/ops/{constant,mix,remap}.rs` + `mod.rs` | 三个文件与三行 `mod` 删掉（九个实现 → 六个） |
+| `px_decls/src/lib.rs` | `TABLE` 里 `"Constant"` / `"Remap"` / `"Mix"` 三行删掉（`inst_gate` 数的是 `px_op!` 处数，两边同时减 3 ⇒ 等式仍成立） |
+| `px_field_alg`（rlib） | **`remap_sampled` 删掉**（唯一调用者就是被删的预置 `Remap`）。⚠ `Scale` / `map_grid` / `remap_with` / `identity` / `Sampled` **全留** —— 它们是 element 体文件与 `art/inst/*.rs` 共用的那把尺子。同名那条判据改成"共享路径逐位不碰输入"（不平滑档 = 上游；平滑档 = `Scale::map ∘ Scale::normalize` 那条闭式） |
+| `px_graph/tests/keys.rs` | `a_filter_node_has_no_shape_axis_to_carry_into_its_key` 的样本类型从 `params::remap::Params` 换成 `params::gradient::Params`（**还活着的**过滤类预置）—— 守的东西一个字没变 |
+| `px_graphs/tests/{bare_value,ops_load}.rs` | 顶上 `elem::*` / `elem::RemapParams`；`ops_load` 那条表里删掉三个"预置实现"（它们现在 `LIB` 是空串，改由 `tests/elem.rs` 真编库地钉） |
+| `px_graphs/tests/elem.rs` | **判据搬家**：`Constant` 逐格等于 `value`、`Mix` 三档 `bias`（含 `clamp` 两端）、`Remap` 两档 `gamma`（手算那一侧用**同一个** `px_field_alg::Scale` + `params::bend` ⇒ `assert_eq!` 是逐位的）、**融合**（`elem::Fuse` 一个节点 vs `elem::Remap`+`elem::Mix` 两个节点 **逐格逐位相同**）。全在**一个**测试里（并行写同一份 manifest 是竞态） |
+| `px_graphs/Cargo.toml` | `px_field_alg` 进 **`[dev-dependencies]`**：判据的期望值要用**同一把尺子**算。⚠ `tests/crate_graph.rs` 那条"图程序不许依赖 alg crate"的门因此把 `dev-dependencies` 里**这一个名字**放行，`[dependencies]` 一位不让（R1 只看前者） |
+
+⚠ 人读名还有一个**记在明面上**的重合：`elem::Remap` 与泛型实例 `FieldRemap` 的
+`op_id` 都是 `"field.remap"`（有意——"值域重映射"只有一个名字），而两者的
+`interface()` 也相同（`params::RemapParams` / `FieldRemapInput` / `Field`）。
+今天**没有**实际撞键：节点的 `source_hash` 一个是 `px_elem` 的内容键、一个是实例键，值不同。
+但它俩只要"参数也相同"就会落进同一个节点键 —— 真要合流，得让 `op_id` 或 `interface` 分开。
+
+### 顺带修掉一个真缺陷：`powf` 的负底数
+
+两个体文件（`px_elem/body/remap.rs` / `fuse.rs`）里"非正数不弯"**只判了指数、没判底数**：
+
+```rust
+// 从前
+if params.gamma > 0.0 && params.gamma != 1.0 { mapped.powf(params.gamma) } else { mapped }
+```
+
+`mapped = out_min + t·(out_max − out_min)`，`out_min < 0` 时它是负的 ⇒ `(-1.0).powf(2.5) = NaN`。
+实测：`elem::Remap { out_min: -1.0, gamma: 2.5 }` 那份 8×4 场值域是 `inf..-inf`、均值 `NaN`。
+**被删掉的预置 `Remap` 不会**：它走 `px_field_alg::map_grid`，那儿调 `params::bend`
+（`!(gamma > 0.0) || (gamma − 1.0).abs() < f32::EPSILON` 才算恒等，`value <= 0.0` 直接回 `0.0`）。
+⇒ 两个体文件改成调**共享的那一个** `px_field_schema::params::bend`（口径一处；注释里那句
+"非正数不弯"从此与代码一致）。存量图**一位没变**（`art/**/*.toml` 里全部节点的
+`out_min >= 0`，那条路径逐位相同）；`moon` 的 `height` 迁移前后读数逐位相同：
+`780×520｜0.0113..0.9660｜均值 0.4859`（节点键 `f87905bf74f9`、`@028f211d`，这一趟 height 重算 30 ms；
+冷启那一趟 6.6 s / 全命中的这一趟 1.64 s）。
+
+⚠ 这也是"判据用同一把尺子"的价值：`assert_eq!` 到 f32 位的那条判据**当场**把这个 NaN 抓了出来
+（`NaN != NaN` 让断言红，而不是"两条路都算出 NaN、看起来一致"）。
+

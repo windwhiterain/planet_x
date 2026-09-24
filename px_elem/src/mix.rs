@@ -28,4 +28,3 @@ impl Default for MixParams {
         Self { bias: 0.0 }
     }
 }
-

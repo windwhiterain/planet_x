@@ -25,12 +25,11 @@ pub fn value(
         smooth: params.smooth,
     };
     let mapped = scale.map(scale.normalize(inputs.a.value().at(x, y)));
-    // ⚠ 与 `field.remap` 同一个口径：非正数不弯。
-    let mapped = if params.gamma > 0.0 && params.gamma != 1.0 {
-        mapped.powf(params.gamma)
-    } else {
-        mapped
-    };
+    // ⚠ `gamma` 那一步与 `elem::Remap` 的体文件是**同一句话**（同一个
+    //   `px_field_schema::params::bend`）：非正数不弯、负底数回 0、`gamma ≈ 1` 当恒等。
+    //   ⚠ 2026-09-27 修：这里从前也自己写 `if gamma > 0.0 && gamma != 1.0 { powf }`，
+    //   于是 `out_min < 0` + `gamma > 1` 会算出 `NaN`（与 `remap` 那个文件同一个坑）。
+    let mapped = px_field_schema::params::bend(mapped, params.gamma);
     let weight = (inputs.mask.value().at(x, y) + params.bias).clamp(0.0, 1.0);
     mapped * (1.0 - weight) + inputs.b.value().at(x, y) * weight
 }

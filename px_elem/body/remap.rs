@@ -3,7 +3,8 @@
 // ⚠ 这一份会被生成的那一份实例库**原样 `include!`**：`use` 一律写全路径。
 // ⚠ 注释一律 `//`（**不是 `//!`**）：`include!` 排在生成物第一段之后。
 // ⚠ 逐格那条循环**不在这里**：它在 `px_elem::fill`。这里用的 `Scale` 是共享的那一把尺子
-//   （与从前 `field.remap` 走的是**同一份** `px_field_alg::Scale` ⇒ 同一份参数不会算出两种结果）。
+//   （与前作预置档 `field.remap` 走的是**同一份** `px_field_alg::Scale` ⇒ 同一份参数不会算出
+//   两种结果），`gamma` 那一步走的也是**共享的那一个** `px_field_schema::params::bend`。
 
 /// 钳到 `[in_min, in_max]` → 归一化（可选平滑）→ 映到 `[out_min, out_max]` → 按 `gamma` 弯。
 pub fn value(
@@ -22,11 +23,13 @@ pub fn value(
         smooth: params.smooth,
     };
     let mapped = scale.map(scale.normalize(inputs.field.value().at(x, y)));
-    // ⚠ 非正数不弯（`NaN` 顺着管线传下去极难归因）。
-    if params.gamma > 0.0 && params.gamma != 1.0 {
-        mapped.powf(params.gamma)
-    } else {
-        mapped
-    }
+    // ⚠ `gamma` 那一步走**共享的那一个函数**（`px_field_schema::params::bend`）：
+    //   "非正数不弯 + 负底数回 0 + `gamma ≈ 1` 当恒等"这三条口径只写在一处。
+    //   ⚠ 2026-09-27 修：本文件从前自己写 `if gamma > 0.0 && gamma != 1.0 { powf }` ——
+    //   那个判断只管**指数**、不管**底数**，于是 `out_min < 0` 而 `gamma > 1` 时
+    //   `(-1.0).powf(2.5) = NaN` 顺着管线传下去（实测：`elem::Remap` 那张 8×4 的场
+    //   值域变成 `inf..-inf`、均值 `NaN`）。被删掉的预置 `Remap` 走的是 `map_grid` 里
+    //   那同一个 `bend` ⇒ **不弯**、照直给负值；今天两档又是同一句话了。
+    px_field_schema::params::bend(mapped, params.gamma)
 }
 

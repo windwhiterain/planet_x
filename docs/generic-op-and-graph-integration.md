@@ -240,12 +240,17 @@ px_op! {
     Fbm, "field.fbm", "px_field_op", params::fbm::Params, (), Field
 }
 
-// 吃三张场：形状是下面那个 `MixInput`（§3.3b）。
+// 吃一张场：形状是 `FieldInput`（§3.3b）。
 px_op! {
-    /// 按权重混两张场。
-    Mix, "field.mix", "px_field_op", params::mix::Params, MixInput, Field
+    /// 用偏移场扭曲采样方向（域扭曲）—— 名字是 `Warp`，吃的却是**两张**场。
+    Warp, "field.warp", "px_field_op", params::warp::Params, FieldPairInput, Field
 }
 ```
+
+⚠ 这里从前举的是 `Mix`（`field.mix` / `params::mix::Params` / `MixInput`）：那一档 2026-09-27
+收进了 element（`px_elem` 的规格表 + `px_graphs::elem`），`px_op!` 与 `params::mix` 都不在了 ——
+纯 pointwise 的 `constant` / `mix` / `remap` 三档今天走 element，不再各占一个预置算子
+（见 `44-elem-generic-op.md`）。
 
 参数顺序：`类型名, "op.id", "px_库名", 超参数类型, 输入类型, 输出类型`。
 宏展开出的就是：`pub struct 类型名;` + `impl PxOp for 类型名`（`ID` / `LIB` /
@@ -718,7 +723,7 @@ InstRecipe {
 | 1 | **声明** `px_field_schema::ops` | `px_op! { FieldRemap, "field.remap", "px_field_op", params::RemapParams, FieldRemapInput, Field }` —— ⚠ 它**自己的 `Inputs`**（`FieldRemapInput`），而且**没有预置实现**（`px_field_op` 里没有它的 `px_body!`）：它存在的意义就是给实例当声明。⚠ 加了新声明还要在 `px_decls::TABLE` 里加**一行**（那道门数 `px_op!` 处数与表里条数；2026-09-20 之前这里是两份会漂开的清单，见 `px_decls/src/lib.rs` 的注释） |
 | 2 | **参数** `px_field_schema::params::RemapParams` | `#[derive(…, px_derive::PxParams)]` ⇒ 每栏进键（`gain` / `bias` / `bands`） |
 | 3 | **图侧函数** `art/inst/waves.rs` | `impl px_field_alg::field_fn::FieldFn for Waves`：纯函数、只认识 `px_field_alg`、自己保证落在 `[0,1]`。⚠ 它拿得到**节点参数**与**球面方向**（见下） |
-| 4 | **算法** `px_field_alg`（rlib） | `remap_with` 与预置 `remap_sampled` 走**同一条** `map_grid`（只有那一份循环） |
+| 4 | **算法** `px_field_alg`（rlib） | `remap_with` 走**唯一那条** `map_grid`；element 那一档的体文件链的是**同一份** `px_field_alg`（`px_elem::specs` 的 `roots` 那一栏），所以三条路只有一份循环 |
 
 三条口径（照体积域抄）：① 声明与 `type_name` 都**不带路径**（符号名按声明名拼、类型名要在
 `include!` 的作用域里解得到）；② 实例源文件里 `use` **写全路径**、不放 `#[cfg(test)]`
@@ -751,15 +756,21 @@ px run field_remap --build    # 缺实例库时先把 stage 1 跑了再跑图
 | `uv: [f32; 2]` | 这一格的**纹素中心**坐标（`[0,1]²`，与 `Field::uv` 同口径） | 平面图案用它（径向波纹就是 `uv`） |
 | `direction: [f32; 3]` | 这一格的**球面单位方向**（与 `Field::direction` 同口径） | ⚠ **球面函数只能用它**：`uv` 是图像坐标，`CubeMap` 投影下 `v` 跨的是「六张面叠起来的那一条」（`height = 6 × face`）而不是纬度 —— 拿 `uv[1]` 当纬度会在面与面之间跳变。`latbands` 那条实例就靠它取纬度 |
 
-⚠ **两条预置/泛型的差别，别记混**（同一个 op id `field.remap`，两个不同的 op）：
+⚠ **同一个人读名 `field.remap` 底下今天有两个不同的 op，别记混**：
 
-| | 预置 `field.remap`（`Remap`，dylib） | 泛型 `field.remap/waves`（实例库） |
+| | element 那一档 `elem::Remap`（内容寻址的实例库） | 泛型实例 `field.remap/waves`（实例库） |
 |---|---|---|
-| 参数 | `params::remap::Params` | `RemapParams`（`gain` / `bias` / `bands`，**给图侧函数读**） |
-| 尺子 | `in` / `out` / `smooth`（由本节点的 TOML 给） | `identity()`（固定 `[0,1] → [0,1]`） |
-| 这一格的值 | 照抄上游 | 由图侧函数算 |
+| 参数 | `px_elem::RemapParams`（`in_*` / `out_*` / `smooth` / `gamma`） | `px_field_schema::params::RemapParams`（`gain` / `bias` / `bands`，**给图侧函数读**） |
+| 尺子 | 由**本节点的参数**现搭（`in` / `out` / `smooth`） | `identity()`（固定 `[0,1] → [0,1]`） |
+| 这一格的值 | 照抄上游、再过 `gamma` | 由图侧函数算 |
+| 谁提供实现 | `px_elem/body/remap.rs`（`px build` 编成 `target/pcg/inst/<内容键>.dll`） | `art/inst/waves.rs`（recipe 那条实例） |
+| 身份 | `px_elem` 的 `decl_hash` + 体文件字节（不含图名） | `px_field_schema` 的 `decl_hash` + 体模板 + 体文件字节 |
 
-两者共享的只有 `map_grid` 那一份循环（`px_field_alg/src/remap.rs`）—— 这是"同一条路径"
+⚠ 从前的第三列是**预置** `Remap`（`px_field_op` 的 dylib），2026-09-27 收进了 element
+（`44-elem-generic-op.md`）—— 两者的**人读名相同**是有意的（"值域重映射"这件事只有一个名字），
+而身份与装载路各是各的（`LIB` 空串 / 内容键）。
+
+两条路共享的只有 `map_grid` 那一份循环（`px_field_alg/src/remap.rs`）—— 这是"同一条路径"
 那条纪律的落点，也是"改 TOML 里的对比度不会顺手改掉值域口径"的原因。
 
 ⚠ 走包装层时**图名不进 `ValidateSet`**（枚举图名就是又一份手维护清单）：`-Graph` 是自由参数，

@@ -10,6 +10,10 @@ use px_cook::{
     Domain, Graph, GraphSpec, begin, cached, field, field_params, mesh, node_params, volume,
 };
 use px_field_schema::field::cube_map_extent;
+// ⚠ element 那一档（`elem::Constant` / `elem::Mix` / `elem::Remap`）**不从 `px_cook` 那一扇门
+//   出去**：那一档的算子类型由图侧的生成物给（`px_graphs/build.rs` 写 `OUT_DIR/elem_gen.rs`），
+//   而 `px_cook` 是"各域算子表 + 缓存路径"那一扇门，两者不是一回事。
+use px_graphs::elem;
 use px_volume_schema::PATCHES;
 
 const FACE: u32 = 256;
@@ -76,8 +80,8 @@ fn main() -> Result<(), Fault> {
     let weight = cached(
         &graph,
         "weight",
-        field::Constant,
-        field_params::constant::Params {
+        elem::Constant,
+        elem::ConstantParams {
             shape,
             ..node_params(&graph, "weight")?
         },
@@ -86,9 +90,9 @@ fn main() -> Result<(), Fault> {
     let mixed = cached(
         &graph,
         "mixed",
-        field::Mix,
+        elem::Mix,
         node_params(&graph, "mixed")?,
-        field::MixInput {
+        elem::MixInput {
             a: clusters,
             b: carved,
             mask: weight,
@@ -98,9 +102,9 @@ fn main() -> Result<(), Fault> {
     let coverage = cached(
         &graph,
         "coverage",
-        field::Remap,
+        elem::Remap,
         node_params(&graph, "coverage")?,
-        field::FieldInput {
+        elem::RemapInput {
             field: mixed.clone(),
         },
     )?;

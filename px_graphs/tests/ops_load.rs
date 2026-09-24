@@ -20,12 +20,13 @@ use px_graph_schema::ops;
 #[test]
 fn every_declared_operator_loads_from_its_library() {
     // ⚠ 一个都不能漏：漏掉的那个正是"改了名字没人发现"的候选。
-    px_graph_schema::ops::body::<px_field_schema::ops::Constant>().expect("field.constant");
+    //    ⚠ `field.constant` / `field.mix` / `field.remap` **不在这里**：2026-09-27 起它们是
+    //    element 那一档（`elem::Constant` / `elem::Mix` / `elem::Remap`），实现**不在预置库**
+    //    （`LIB` 是空串、按内容键装载）⇒ 逐个进下面那张表没有意义，它们由
+    //    `tests/elem.rs` 那条端到端判据真的编库 + 真的装载。
     px_graph_schema::ops::body::<px_field_schema::ops::Fbm>().expect("field.fbm");
     px_graph_schema::ops::body::<px_field_schema::ops::Ridged>().expect("field.ridged");
-    px_graph_schema::ops::body::<px_field_schema::ops::Remap>().expect("field.remap");
     px_graph_schema::ops::body::<px_field_schema::ops::Gradient>().expect("field.gradient");
-    px_graph_schema::ops::body::<px_field_schema::ops::Mix>().expect("field.mix");
     px_graph_schema::ops::body::<px_field_schema::ops::Warp>().expect("field.warp");
     px_graph_schema::ops::body::<px_volume_schema::ops::CloudCoarse>().expect("cloud.coarse");
     px_graph_schema::ops::body::<px_mesh_schema::ops::CubeSphere>().expect("mesh.cubesphere");

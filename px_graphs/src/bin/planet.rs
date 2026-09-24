@@ -8,6 +8,10 @@
 use px_cook::{
     Domain, GraphSpec, artifact_path_of, begin, cached, field, field_params, mesh, node_params,
 };
+// ⚠ element 那一档（`elem::Constant` / `elem::Mix` / `elem::Remap`）**不从 `px_cook` 那一扇门
+//   出去**：那一档的算子类型由图侧的生成物给（`px_graphs/build.rs` 写 `OUT_DIR/elem_gen.rs`），
+//   而 `px_cook` 是"各域算子表 + 缓存路径"那一扇门，两者不是一回事。
+use px_graphs::elem;
 
 type Fault = Box<dyn std::error::Error>;
 
@@ -48,8 +52,8 @@ fn main() -> Result<(), Fault> {
     let weight = cached(
         &graph,
         "weight",
-        field::Constant,
-        field_params::constant::Params {
+        elem::Constant,
+        elem::ConstantParams {
             shape,
             ..node_params(&graph, "weight")?
         },
@@ -58,9 +62,9 @@ fn main() -> Result<(), Fault> {
     let terrain = cached(
         &graph,
         "terrain",
-        field::Mix,
+        elem::Mix,
         node_params(&graph, "terrain")?,
-        field::MixInput {
+        elem::MixInput {
             a: continents,
             b: mountains,
             mask: weight,
@@ -69,9 +73,9 @@ fn main() -> Result<(), Fault> {
     let height = cached(
         &graph,
         "height",
-        field::Remap,
+        elem::Remap,
         node_params(&graph, "height")?,
-        field::FieldInput {
+        elem::RemapInput {
             field: terrain.clone(),
         },
     )?;

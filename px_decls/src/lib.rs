@@ -63,12 +63,13 @@ pub struct DeclFacts {
 ///   [`decl`] / [`names`] / [`entries`] 全从它派生，**没有第二处可以写名字**。
 ///   ⚠ 加一个声明就是**加一行**（`px_op!` 那处 + 这一行，门数条数）。
 pub const TABLE: &[(&str, fn() -> DeclFacts)] = &[
-    ("Constant", || facts::<px_field_schema::ops::Constant>()),
+    // ⚠ `Constant` / `Remap` / `Mix` 三行已删（2026-09-27）：那三处 `px_op!` 收进了 element
+    //   那一档（`px_elem` 的规格表 + `px_graphs::elem`）—— 它们**不是 `px_op!` 声明**，
+    //   所以既不该、也不能进这张表（这道门数的是"各 schema 里 `px_op!` 的处数"）。
+    //   那三条实例由 `px_graphs::insts::build` 照 `ELEM_SPECS` 登记（`InstKind::Element`）。
     ("Fbm", || facts::<px_field_schema::ops::Fbm>()),
     ("Ridged", || facts::<px_field_schema::ops::Ridged>()),
-    ("Remap", || facts::<px_field_schema::ops::Remap>()),
     ("Gradient", || facts::<px_field_schema::ops::Gradient>()),
-    ("Mix", || facts::<px_field_schema::ops::Mix>()),
     ("Warp", || facts::<px_field_schema::ops::Warp>()),
     ("Craters", || facts::<px_field_schema::ops::Craters>()),
     ("Stamps", || facts::<px_field_schema::ops::Stamps>()),

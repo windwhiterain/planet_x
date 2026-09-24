@@ -621,9 +621,3 @@ fn catalogue_text(plan: &[Planned], elems: &[ElemPlanned]) -> String {
     out.push_str("];\n");
     out
 }
-
-
-
-
-
-

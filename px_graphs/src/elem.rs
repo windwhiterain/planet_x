@@ -109,4 +109,3 @@ impl<F: ElementFn> px_graph_schema::PxOp for ElemOp<F> {
         px_elem::DECL_HASH
     }
 }
-

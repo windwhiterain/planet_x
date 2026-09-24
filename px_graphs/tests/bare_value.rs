@@ -9,9 +9,12 @@
 //! ⚠ 它**不碰** `art/` 下任何既有图：自己的图名（`bare-value`），缓存落在
 //! `target/pcg/bare-value/`。⚠ 形状参数取 8×4：这一篇判的是机制，不是数值。
 
-use px_cook::{Cooked, Domain, Graph, GraphSpec, begin, cached, field, field_params, node_params};
+use px_cook::{Cooked, Domain, Graph, GraphSpec, begin, cached, field_params, node_params};
 use px_field_schema::field::Field;
+// ⚠ 生成那一档的算子（`field::Constant` 从前那一档）2026-09-27 收成了 element 函数
+//   （`elem::Constant`）—— 类型在图侧（生成物），所以从 `px_graphs::elem` 取。
 use px_graph_schema::{PxKeyed, PxOp};
+use px_graphs::elem;
 
 fn graph() -> Graph {
     begin(GraphSpec {
@@ -23,7 +26,7 @@ fn graph() -> Graph {
 ///
 /// ⚠ 尺寸/投影从前由 `graph.grid()` 递进来，现在是**参数**（生成类算子的 `Shape`）。
 fn bare(value: f32) -> Cooked<Field> {
-    let params = field_params::constant::Params {
+    let params = elem::ConstantParams {
         shape: field_params::Shape {
             width: 8,
             height: 4,
@@ -31,7 +34,7 @@ fn bare(value: f32) -> Cooked<Field> {
         },
         value,
     };
-    let raw = field::Constant
+    let raw = elem::Constant
         .render(&params, &())
         .expect("直接调算子（不缓存）应当算得出来");
     Cooked::of(raw).expect("裸值应当能包成可进图的包装对象")
@@ -55,15 +58,14 @@ fn a_bare_value_is_a_content_keyed_input() {
         "内容变了，裸值包装出来的键必须跟着变"
     );
 
-    // 2) 它真的能当上游（`FieldInput` 那一栏收的就是 `Cooked<Field>`）。
-    let params =
-        || node_params::<px_field_schema::params::remap::Params>(&graph, "shade").expect("参数");
+    // 2) 它真的能当上游（`elem::RemapInput` 那一栏收的就是 `Cooked<Field>`）。
+    let params = || node_params::<elem::RemapParams>(&graph, "shade").expect("参数");
     let first = cached(
         &graph,
         "shade",
-        field::Remap,
+        elem::Remap,
         params(),
-        field::FieldInput { field: bare(0.25) },
+        elem::RemapInput { field: bare(0.25) },
     )
     .expect("裸值当上游应当算得出来");
     assert_eq!((first.value().width, first.value().height), (8, 4));
@@ -72,9 +74,9 @@ fn a_bare_value_is_a_content_keyed_input() {
     let again = cached(
         &graph,
         "shade",
-        field::Remap,
+        elem::Remap,
         params(),
-        field::FieldInput { field: bare(0.25) },
+        elem::RemapInput { field: bare(0.25) },
     )
     .expect("第二次");
     assert!(again.hit, "同一份内容的裸值 ⇒ 下游必须命中");
@@ -84,9 +86,9 @@ fn a_bare_value_is_a_content_keyed_input() {
     let other = cached(
         &graph,
         "shade_other",
-        field::Remap,
+        elem::Remap,
         params(),
-        field::FieldInput { field: bare(0.5) },
+        elem::RemapInput { field: bare(0.5) },
     )
     .expect("换一份上游");
     assert_ne!(

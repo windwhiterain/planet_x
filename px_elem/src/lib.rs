@@ -59,9 +59,9 @@ pub mod specs;
 pub use constant::ConstantParams;
 pub use fuse::{FuseInput, FuseParams};
 pub use mix::{MixInput, MixParams};
-pub use remap::{RemapInput, RemapParams};
 pub use px_field_schema::field::Field;
 pub use px_graph_schema::interface_hash;
+pub use remap::{RemapInput, RemapParams};
 pub use specs::ELEM_SPECS;
 
 /// 一张场**自己的形状**（"输出与上游同形"那条口径的落点）。
@@ -261,7 +261,3 @@ macro_rules! px_elem_specs {
         ];
     };
 }
-
-
-
-

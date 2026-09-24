@@ -36,5 +36,3 @@ crate::px_elem_specs! {
         source: "px_elem/body/fuse.rs", roots: &["px_field_alg"],
         shape: |_params: &FuseParams, inputs: &FuseInput| crate::like(inputs.a.value());
 }
-
-
