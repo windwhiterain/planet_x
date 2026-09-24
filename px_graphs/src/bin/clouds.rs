@@ -23,6 +23,8 @@ const FACE: u32 = 256;
 type Fault = Box<dyn std::error::Error>;
 
 fn main() -> Result<(), Fault> {
+    // ⚠ **第一行**：`--store <目录>` 要在任何 `begin` / `node_params` 之前落成 `PX_ART`。
+    px_cook::apply_store_args()?;
     let (width, height) = cube_map_extent(FACE);
     let graph = begin(GraphSpec {
         name: "clouds".to_string(),

@@ -57,10 +57,14 @@ use px_volume_schema::params::stars::StarsParams;
 type Fault = Box<dyn std::error::Error>;
 
 /// 命令行给的面分辨率（`--face <n>`）。
+///
+/// ⚠ 参数读的是 [`px_cook::args_without_store`]（不是 `std::env::args()`）：那两份
+///   只差 `--store <目录>` 那一对，而三个 `*_from_args` 都从这里取 —— 一处读错，
+///   三个旋钮一起错。索引从 **0** 起（那一份已经把 argv[0] 摘掉了）。
 fn face_from_args() -> u32 {
-    let args: Vec<String> = std::env::args().collect();
+    let args: Vec<String> = px_cook::args_without_store().unwrap_or_default();
     let mut face = 64_u32;
-    let mut index = 1;
+    let mut index = 0;
     while index < args.len() {
         if args[index] == "--face" {
             if let Some(value) = args.get(index + 1).and_then(|text| text.parse().ok()) {
@@ -83,9 +87,9 @@ fn face_from_args() -> u32 {
 ///   形状的分辨率决定"云和丝有多细"。把它们绑在一起，就只能用"云更细"来换"星更锐"
 ///   —— 而星的锐度根本不需要更细的场（星是**点**，不是场的结构）。
 fn shape_from_args() -> u32 {
-    let args: Vec<String> = std::env::args().collect();
+    let args: Vec<String> = px_cook::args_without_store().unwrap_or_default();
     let mut shape = 64_u32;
-    let mut index = 1;
+    let mut index = 0;
     while index < args.len() {
         if args[index] == "--shape" {
             if let Some(value) = args.get(index + 1).and_then(|text| text.parse().ok()) {
@@ -104,8 +108,8 @@ fn shape_from_args() -> u32 {
 ///   ⇒ 径向的细节被三线性平均得最狠。而它比 `--shape` **便宜**：
 ///   格数是 `res² × layers`，径向翻倍只让格数翻倍（面内翻倍是四倍）。
 fn layers_from_args() -> Option<u32> {
-    let args: Vec<String> = std::env::args().collect();
-    let mut index = 1;
+    let args: Vec<String> = px_cook::args_without_store().unwrap_or_default();
+    let mut index = 0;
     while index < args.len() {
         if args[index] == "--layers" {
             if let Some(value) = args
@@ -162,6 +166,11 @@ fn report(name: &str, field: &Field) {
 }
 
 fn main() -> Result<(), Fault> {
+    // ⚠ **第一行**：`--store <目录>` 要在任何 `begin` / `node_params` 之前落成 `PX_ART`
+    //   （参数目录不是节点键的一部分，见 `px_graph::driver` 的模块文档）。
+    //   本程序另外那几个手写开关（`--face` / `--shape` / `--layers`）的循环会把
+    //   不认识的参数原样跳过，所以 `--store` 与它们共存不会打架。
+    px_cook::apply_store_args()?;
     let face = face_from_args();
     let shape = shape_from_args();
     let started = Instant::now();

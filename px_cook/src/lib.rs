@@ -64,9 +64,10 @@ pub use px_field_schema::ops as field;
 pub use px_field_schema::params as field_params;
 /// 驱动那一半（图的生命周期 + 清单 + 键）。图脚本只从这里拿机制，别处不用再开一扇门。
 pub use px_graph::{
-    BakedShader, Graph, GraphSpec, ManifestEntry, SHADER_VERSION, artifact_path_of,
-    bake_shader_graph, begin, cache_root, graph_manifest, hex, hex_short, manifest_key_of,
-    scene_key, shader_key, workspace_root, write_graph_manifest, write_shader,
+    BakedShader, Graph, GraphSpec, ManifestEntry, SHADER_VERSION, apply_store_args,
+    args_without_store, artifact_path_of, bake_shader_graph, begin, cache_root, graph_manifest,
+    hex, hex_short, manifest_key_of, param_root, scene_key, shader_key, workspace_root,
+    write_graph_manifest, write_shader,
 };
 pub use px_mesh_schema::ops as mesh;
 /// NURBS 域的算子表（曲线 / 曲面）。

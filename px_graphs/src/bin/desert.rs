@@ -13,6 +13,8 @@ use px_graphs::elem;
 type Fault = Box<dyn std::error::Error>;
 
 fn main() -> Result<(), Fault> {
+    // ⚠ **第一行**：`--store <目录>` 要在任何 `begin` / `node_params` 之前落成 `PX_ART`。
+    px_cook::apply_store_args()?;
     let graph = begin(GraphSpec {
         name: "desert".to_string(),
     });
