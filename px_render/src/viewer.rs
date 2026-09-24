@@ -794,10 +794,18 @@ fn fs_main(in: PxPresentOut) -> @location(0) vec4<f32> {
 ///   **256 的整数倍**）：按对齐后的行距读回来，再逐行剪成紧凑的 RGBA8
 ///   —— 少了这一步，宽度不是 64 的倍数的窗口会**当场校验错**（而宽度正好是 64 的
 ///   倍数时它一声不响地对，于是这个错会在别人换一个窗口尺寸时才出现）。
+///
+/// ⚠⚠ **通道次序要按交换链的格式转**（第二次修这里，第一次只对了行距）：
+///   交换链在这台机器上是 `Bgra8UnormSrgb`，而 `shot::write_png` 收的是 **RGBA8**
+///   ⇒ 直接照抄读回来的字节，写出去的图**红蓝互换**。而互换之后它"看着还是一张行星图"
+///   （只是颜色不对），于是**用这张图当证据去查别的缺陷时，量到的是自己的色偏**：
+///   实测把它与离线那张逐像素比，整片 3D 区都有 |Δ|≈70 的差，我还据此去追了一条
+///   根本不存在的"竖线"。⇒ 按格式转，别猜。
 fn read_back_ui(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     texture: &wgpu::Texture,
+    format: wgpu::TextureFormat,
     path: &Path,
 ) -> Result<(), String> {
     let width = texture.width();
@@ -845,17 +853,48 @@ fn read_back_ui(
         submission_index: None,
         timeout: None,
     });
+    // 交换链上那个通道次序（`Bgra*` 系列才有这一档；`Rgba*` 原样）。
+    let swap_red_blue = matches!(
+        format,
+        wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
+    );
+    if format == wgpu::TextureFormat::Bgra8Unorm {
+        // ⚠ 非 sRGB 的 BGRA 交换链**内部存的是线性值**（呈现那一段写的就是线性），
+        //   而 PNG 要 sRGB 编码的字节 ⇒ 少了这一步，图会整片偏暗。
+        //   今天没有后端会走到这里（`open` 挑的是 sRGB 格式），说出来而不是静默照抄。
+        eprintln!(
+            "⚠ 交换链格式是 {format:?}（非 sRGB 的 BGRA）⇒ --ui-shot 没做线性→sRGB 编码，图会偏暗"
+        );
+    }
     let bytes = {
         let view = slice.get_mapped_range();
         let mut out = Vec::with_capacity((unpadded as usize) * (height as usize));
         for row in 0..height as usize {
             let start = row * padded as usize;
-            out.extend_from_slice(&view[start..start + unpadded as usize]);
+            let src = &view[start..start + unpadded as usize];
+            if swap_red_blue {
+                swizzle_bgra_to_rgba(src, &mut out);
+            } else {
+                out.extend_from_slice(src);
+            }
         }
         out
     };
     buffer.unmap();
     shot::write_png(path, width, height, bytes).map(|_bytes| ())
+}
+
+/// `BGRA8` → `RGBA8`（那个换序单独拆出来，是为了判据能逐字节验它）。
+///
+/// ⚠⚠ 这一条是**证据链上的一个环**，不是格式细节：写出去的图是人/模型**用来判断
+///   "屏幕上是什么样"的唯一凭据**。红蓝换了之后它**看着还是一张正常的行星图**
+///   （只是颜色偏），于是拿它去查别的缺陷时量到的是自己的色偏 —— 实测：
+///   把它与离线那张逐像素比，整片 3D 区都有 |Δ|≈70 的差，我还据此追了一条
+///   **根本不存在的"竖线"**（把本来正确的像素当成了缺陷）。
+fn swizzle_bgra_to_rgba(source: &[u8], out: &mut Vec<u8>) {
+    for pixel in source.chunks_exact(4) {
+        out.extend_from_slice(&[pixel[2], pixel[1], pixel[0], pixel[3]]);
+    }
 }
 
 /// 窗口的全部状态。事件循环里**只有**它。
@@ -1854,7 +1893,7 @@ impl Viewer {
         // ⚠ 位置是判据的一部分：它在两个 pass **都画完之后**、`frame.present()` **之前**
         //   ⇒ 读到的正是人眼看到的那张（含面板），而 `--shot` 那条路一个字节都不动。
         if let Some(path) = self.ui_shot.take() {
-            match read_back_ui(device, queue, &frame.texture, &path) {
+            match read_back_ui(device, queue, &frame.texture, config.format, &path) {
                 Ok(()) => {
                     let bytes = std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
                     println!(
@@ -2301,5 +2340,23 @@ mod tests {
             Views::Single(Some([0.0, 0.0, 3.15]))
         );
         assert_ne!(Views::Single(None), Views::Single(Some([0.0, 0.0, 3.15])));
+    }
+
+    /// `--ui-shot` 读回来的字节**红蓝不能换**：交换链在这台机器上是 `Bgra8UnormSrgb`，
+    /// 而 `shot::write_png` 收的是 RGBA8。
+    ///
+    /// ⚠ 判据小，但它挡的是**一整类**错：换过之后那张图看着仍是"一张行星图"，
+    ///   于是"屏幕上是什么样"这件事就被自己的色偏污染了（实测追了一条不存在的竖线）。
+    #[test]
+    fn the_ui_capture_reads_back_in_rgba_order() {
+        let source = [10u8, 20, 30, 255, 40, 50, 60, 128];
+        let mut out = Vec::new();
+        swizzle_bgra_to_rgba(&source, &mut out);
+        assert_eq!(out, [30, 20, 10, 255, 60, 50, 40, 128]);
+        // alpha 与绿不动：换的只有 R 与 B 两格。
+        assert_eq!(out[1], source[1]);
+        assert_eq!(out[3], source[3]);
+        assert_eq!(out[5], source[5]);
+        assert_eq!(out[7], source[7]);
     }
 }
