@@ -100,7 +100,13 @@ px_op! {
     ///   **不是**同一个东西（名字像，含义不同）：见那一份的文档注释。
     /// ⚠ 那三栏**真的到得了图侧函数**（`px_field_alg::field_fn::FieldFn::value` 的第一栏）：
     ///   2026-09-20 之前它们只进键、不进计算，见那一条的文档。
-    FieldRemap, "field.remap", "px_field_op", params::RemapParams, FieldRemapInput, Field
+    /// ⚠ 人读名是 `field.remap/inst`（2026-09-27 从 `field.remap` 改的）：`"field.remap"` 那个名字
+///   现在归 **element 算子** `elem::Remap`（它才是图脚本里写的那一个）。两条不是同一个东西
+///   —— 参数类型也不同（这边是 [`params::RemapParams`]，那边是 `px_elem::RemapParams`）——
+///   重名会让读数里两个不同的算子看着像一个。
+///   ⚠ 这两条实例在图里显示的名字是 recipe 给的 `op_id`（`field.remap/waves` 等），
+///   不是这一栏；这一栏只在这条**声明**自己被当成算子用时才出现。
+FieldRemap, "field.remap/inst", "px_field_op", params::RemapParams, FieldRemapInput, Field
 }
 
 px_op! {
