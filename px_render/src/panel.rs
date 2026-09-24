@@ -78,6 +78,7 @@ impl Panel {
         let ctx = egui::Context::default();
         // 深色底：面板压着的画面还要看得见（这块面板的用处就是"看着画面调参"）。
         ctx.set_visuals(egui::Visuals::dark());
+        install_cjk_font(&ctx);
         let state = egui_winit::State::new(
             ctx.clone(),
             egui::ViewportId::ROOT,
@@ -285,16 +286,23 @@ impl Render<'_> {
     ///      顶栏/底栏合成同一个类型，方向由 `Panel::left` / `::right` 那一族给）。
     fn ui(&mut self, ui: &mut egui::Ui, root: &std::path::Path) {
         let mut actions: Vec<Action> = Vec::new();
+        // ⚠ **宽度要有上限**：面板是"看着画面调参"的那只手，压掉大半画面就没意义了。
+        //   实测踩到过：960×640 的窗口配 360 pt 的缺省宽（本机缩放 1.75 ⇒ 630 物理像素）
+        //   ⇒ 画面只剩 330 px，看着像"这窗口只有一块面板"。
+        //   上限取可用宽度的 **35%**（够放控件与日志，画面始终占大头），并且**不许超过**
+        //   520 pt；窗口一窄，缺省宽也跟着收（`size_range` 会把 `default_size` 夹进去）。
+        let available = ui.available_width();
+        let cap = (available * 0.35).clamp(200.0, 520.0);
+        let default = (available * 0.30).clamp(180.0, 360.0);
         egui::Panel::left("px_edit")
             .resizable(true)
-            // ⚠ egui 0.35 的统一 `Panel` 用的是**尺寸**那一族名字（`default_size` /
-            //   `size_range`），不是旧的 `default_width` / `width_range` —— 因为同一个
-            //   类型现在也管顶栏/底栏，那一对名字在竖直方向上说不通。
-            .default_size(360.0)
-            .size_range(280.0..=760.0)
-            .show_inside(ui, |ui| {
+            .default_size(default)
+            .size_range(160.0..=cap)
+            // ⚠ `show_inside` 在 0.35 里已经**改名成 `show`**（签名的第二格就是 `&mut Ui`）
+            //   —— 用旧名字编译得过，但会带一条 `deprecated` 警告。
+            .show(ui, |ui| {
                 self.header(ui);
-                self.toolbar(ui, &mut actions, root);
+                self.toolbar(ui, &mut actions);
                 ui.separator();
                 egui::ScrollArea::vertical()
                     .id_salt("px_edit_nodes")
@@ -334,20 +342,20 @@ impl Render<'_> {
         }
     }
 
-    fn toolbar(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>, root: &std::path::Path) {
+    fn toolbar(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
         let busy = self.cook.busy();
         let has_editor = self.editor.is_some();
         let dirty = self.editor.as_ref().is_some_and(ParamStore::dirty);
         ui.horizontal_wrapped(|ui| {
             if ui
-                .add_enabled(has_editor && !busy, egui::Button::new("Cook（烘）"))
+                .add_enabled(has_editor && !busy, egui::Button::new("Cook 烘"))
                 .on_hover_text("把会话副本里的参数按顺序烘成新的场景产物，窗口随即重载")
                 .clicked()
             {
                 actions.push(Action::Cook);
             }
             if ui
-                .add_enabled(dirty && !busy, egui::Button::new("Save → art/"))
+                .add_enabled(dirty && !busy, egui::Button::new("Save art/"))
                 .on_hover_text("把改过的节点写回工作树里的 art/（作品的源码）")
                 .clicked()
             {
@@ -359,16 +367,6 @@ impl Render<'_> {
                 .clicked()
             {
                 actions.push(Action::Reload);
-            }
-            if ui
-                .add_enabled(has_editor && !busy, egui::Button::new("art/ 在哪"))
-                .on_hover_text(format!("{}", root.join("art").display()))
-                .clicked()
-            {
-                *self.notice = format!(
-                    "art/ 在 {}（面板不替你开资源管理器：把路径抄过去更稳）",
-                    root.join("art").display()
-                );
             }
         });
     }
@@ -619,4 +617,100 @@ fn step_of(min: f64, max: f64) -> f64 {
     }
     let step = span / 1000.0;
     if step <= 0.0 { 0.0 } else { step }
+}
+
+// ---------------------------------------------------------------------------
+// 汉字显示：**默认字体里一个汉字都没有**
+// ---------------------------------------------------------------------------
+
+/// 面板的标签是中文（这个仓的文档与传统都是），而 `egui` 自带的那几份字体
+/// （Ubuntu-Light / Hack / 两份图标字体）**没有汉字** ⇒ 不挂一份中文字体的话，
+/// 面板上每一个汉字都渲成一个空方框（实测：整块面板全是 □，看着像"界面坏了"，
+/// 而控件其实是好的）。
+///
+/// ⚠ **从系统里取，不往仓库里塞**：一份中日韩字体 10–20 MB，而它只给这一块面板用。
+///   仓库里现有最大的东西也没有这个量级，而 `art/` 那一批作品的字节是要逐字节复现的
+///   ⇒ 十几 MB 的字体进 git 是把一件工具的事变成所有 checkout 的事。
+/// ⚠ 挂法是**追加**（不是替换）：拉丁字母仍走 egui 自带那两份（形状与 hinting 都更配），
+///   汉字落到这一份上。缺了它面板照旧能用（只是汉字变方框），所以找不到**不是**致命错误。
+fn install_cjk_font(ctx: &egui::Context) {
+    let Some((path, bytes)) = load_a_cjk_font() else {
+        eprintln!(
+            "⚠ 找不到一份带汉字的系统字体 ⇒ 面板里的汉字会渲染成空方框。\
+             看一眼这几条路径在不在（任一即可）：{}",
+            CJK_FONT_CANDIDATES.join(" ｜ ")
+        );
+        return;
+    };
+    let mut fonts = egui::FontDefinitions::default();
+    fonts.font_data.insert(
+        "px-cjk".to_string(),
+        std::sync::Arc::new(egui::FontData::from_owned(bytes)),
+    );
+    for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+        // ⚠ **追加到尾巴上**（不是插到最前）：字体是一串后备，先到先得 ⇒ 放在后面
+        //   只影响"前面那几份里没有的字形"，拉丁字母的观感一个字都不变。
+        fonts
+            .families
+            .entry(family)
+            .or_default()
+            .push("px-cjk".to_string());
+    }
+    ctx.set_fonts(fonts);
+    println!(
+        "调参面板字体：{}（汉字用它，拉丁字母仍走 egui 自带那两份）",
+        path
+    );
+}
+
+/// 常见的系统字体落点（Windows 在前，其次 macOS / Linux）。
+///
+/// ⚠ 顺序是**按"这份字体长得像不像界面字"**排的，不是按大小：雅黑是界面字，
+///   黑体/宋体在屏幕上偏重、偏细。
+const CJK_FONT_CANDIDATES: &[&str] = &[
+    "C:/Windows/Fonts/msyh.ttc", // 微软雅黑（Windows 中文默认界面字）
+    "C:/Windows/Fonts/msyh.ttf",
+    "C:/Windows/Fonts/simhei.ttf",        // 黑体（老系统上通常也有）
+    "C:/Windows/Fonts/simsun.ttc",        // 宋体
+    "C:/Windows/Fonts/YuGothM.ttc",       // 日文（汉字覆盖够用）
+    "/System/Library/Fonts/PingFang.ttc", // macOS
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+];
+
+/// 从候选里挑**第一份真的能当字体用**的读进来。
+///
+/// ⚠ "存在"不等于"是字体"：`C:\Windows\Fonts` 下有人会放 0 字节的占位文件
+///   （本机实测有一份这样的 `msyh.ttf`），而 `FontData` 拿到垃圾字节是**后面某一次
+///   排版时才炸**（那时离病因已经很远）。⇒ 先看魔数，坏的就跳过、说一句，换下一份。
+fn load_a_cjk_font() -> Option<(String, Vec<u8>)> {
+    for candidate in CJK_FONT_CANDIDATES {
+        let path = std::path::Path::new(candidate);
+        if !path.is_file() {
+            continue;
+        }
+        let Ok(bytes) = std::fs::read(path) else {
+            continue;
+        };
+        if !looks_like_a_font(&bytes) {
+            eprintln!(
+                "⚠ {candidate} 在盘上但不是字体（{} 字节）⇒ 跳过它",
+                bytes.len()
+            );
+            continue;
+        }
+        return Some((candidate.to_string(), bytes));
+    }
+    None
+}
+
+/// 一份字节流像不像矢量字体：TrueType/OpenType 的**魔数**。
+///
+/// ⚠ `ttcf` 那一支是**字体集合**（`.ttc`，雅黑就是）：它里面装着好几个面，
+///   `FontData::index` 选第几个 —— 缺省 0，对雅黑就是"微软雅黑 Regular"。
+fn looks_like_a_font(bytes: &[u8]) -> bool {
+    matches!(
+        bytes.get(..4),
+        Some([0x00, 0x01, 0x00, 0x00]) | Some(b"true") | Some(b"OTTO") | Some(b"ttcf")
+    )
 }

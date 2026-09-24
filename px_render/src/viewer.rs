@@ -413,6 +413,8 @@ pub fn view(options: &crate::Options) -> Result<(), String> {
         request_at: request.at,
         orbit,
         pending_shot: initial_shot(&request),
+        ui_shot: options.ui_shot.clone(),
+        ui_shot_ok: false,
         sheet: request.sheet,
         size: (options.width, options.height),
         pcg_root: options.pcg_root.clone(),
@@ -778,6 +780,84 @@ fn fs_main(in: PxPresentOut) -> @location(0) vec4<f32> {
 }
 "#;
 
+/// **屏幕上那一张**（画面 + 面板）读回来存成 PNG —— `--ui-shot`。
+///
+/// ⚠ 它与 `--shot` **不是一回事**，两个都要有：
+///
+/// * `--shot` 写的是**回读出来的那批字节**（`shot::Target`，判据那张图）——
+///   S7 那条"窗口 `--shot` 与离线逐字节相同"靠的就是它**不含面板**；
+/// * `--ui-shot` 写的是**交换链上那一张**（画面 + 面板，人眼看到的东西）。
+///   它是给"面板长什么样"这件事当证据用的（本会话没有可靠的桌面截图：
+///   `CopyFromScreen` 在这台机器上抓到的是别的窗口）。
+///
+/// ⚠ 两处的行距规矩是硬的（`copy_texture_to_buffer` 要求 `bytes_per_row` 是
+///   **256 的整数倍**）：按对齐后的行距读回来，再逐行剪成紧凑的 RGBA8
+///   —— 少了这一步，宽度不是 64 的倍数的窗口会**当场校验错**（而宽度正好是 64 的
+///   倍数时它一声不响地对，于是这个错会在别人换一个窗口尺寸时才出现）。
+fn read_back_ui(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    texture: &wgpu::Texture,
+    path: &Path,
+) -> Result<(), String> {
+    let width = texture.width();
+    let height = texture.height();
+    let unpadded = width * 4;
+    let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+    let padded = unpadded.div_ceil(align) * align;
+    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("px_render --ui-shot 回读"),
+        size: (padded as u64) * (height as u64),
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("px_render --ui-shot"),
+    });
+    encoder.copy_texture_to_buffer(
+        wgpu::TexelCopyTextureInfo {
+            texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::TexelCopyBufferInfo {
+            buffer: &buffer,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(padded),
+                rows_per_image: Some(height),
+            },
+        },
+        wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+    );
+    queue.submit(Some(encoder.finish()));
+
+    let slice = buffer.slice(..);
+    slice.map_async(wgpu::MapMode::Read, |_| {});
+    // ⚠ 必须等这一份映射真的到：`map_async` 的回调是**设备走完队列之后**才调的，
+    //   不等就 `get_mapped_range` 会拿到空的一段（而那是"读出来一片黑"的症状）。
+    let _ = device.poll(wgpu::PollType::Wait {
+        submission_index: None,
+        timeout: None,
+    });
+    let bytes = {
+        let view = slice.get_mapped_range();
+        let mut out = Vec::with_capacity((unpadded as usize) * (height as usize));
+        for row in 0..height as usize {
+            let start = row * padded as usize;
+            out.extend_from_slice(&view[start..start + unpadded as usize]);
+        }
+        out
+    };
+    buffer.unmap();
+    shot::write_png(path, width, height, bytes).map(|_bytes| ())
+}
+
 /// 窗口的全部状态。事件循环里**只有**它。
 struct Viewer {
     /// 现在显示的是哪一份产物（请求文件里那一栏的真本就在窗口手里）。
@@ -789,9 +869,18 @@ struct Viewer {
     orbit: Option<[f32; 3]>,
     /// 还要存一张图（存完就清）。
     pending_shot: Option<PathBuf>,
+    /// `--ui-shot P`：还要不要存一张**屏幕上那一张**（画面 + 面板）。
+    ///
+    /// ⚠ 它与 `pending_shot` 分开、而且**不自动清**：面板的内容是"这一帧画完才知道"的，
+    ///   而人总想改一个控件之后再存一张看看 ⇒ 留着一个路径，按 `u` 再存一次。
+    ui_shot: Option<PathBuf>,
+    /// 交换链那一张能不能读回来（`COPY_SRC` 在不在 —— `open` 那一刻定下，改不了）。
+    ui_shot_ok: bool,
     /// 这一份产物声明了对照图（只用来打一行说明：窗口不出多视口）。
     sheet: bool,
-    /// 窗口的初始尺寸（逻辑像素；`--width/--height`）。
+    /// **那张图的像素尺寸**（`--width/--height`；窗口起来之后跟着交换链走）。
+    ///
+    /// ⚠ 它与离线那条路同名同义：窗口画的与离线画的要能逐字节比。
     size: (u32, u32),
     pcg_root: PathBuf,
     novsync: bool,
@@ -977,18 +1066,24 @@ impl Viewer {
     /// 再把它连同 surface 一起交给 `gpu::connect_with`。少了这一步，适配器/设备来自
     /// 另一个实例 —— 那是"窗口开了但画不出来"那一族里最难查的一种。
     fn open(&mut self, event_loop: &ActiveEventLoop) -> Result<(), String> {
+        // ⚠ **`--width/--height` 是物理像素**（给没给都一样）—— 与离线那条路同一个意思：
+        //   窗口画的那张图就是这么大，而判据是"与离线那张同尺寸逐字节相同"。
+        //
+        // ⚠⚠ **这里第一次修错了地方，记下来**：面板在 960×640 的窗口上显得吃掉半个画面时，
+        //   我的第一反应是"把窗口按逻辑点开大"（960×640 pt ⇒ 1680×1120 px，本机缩放 1.75）。
+        //   那修错了层：`Viewer::size` 在 `open`/`resize` 里被设成**窗口的物理像素**
+        //   ⇒ 屏幕与 `--shot` 那张图都变成 1680×1120，而它再也**不等于**同一份文档
+        //   960×640 的离线图 —— **S7 那条判据当场就没了**（实测：窗口 `--shot` 变成
+        //   743644 B 的 1680×1120 图，而登记值是 300012 B / 960×640）。
+        //   而它看起来只是"窗口更大了、更舒服"。
+        //   ⇒ 真正的病因是**面板按物理窗口宽度算宽**（`panel.rs` 的 `ui`）：修在那儿。
+        let physical = PhysicalSize::new(self.size.0, self.size.1);
         let window = Arc::new(
             event_loop
                 .create_window(
                     Window::default_attributes()
                         .with_title(self.title())
-                        // ⚠ **物理**像素，不是逻辑像素。`--width/--height` 在这个命令行上
-                        // 只有一个意思：**那张图的像素尺寸**（离线那条路就是它）。
-                        // 拿逻辑尺寸去开窗，"窗口画的到底是多大一张图"就多出一个
-                        // **没人写过的输入** —— 显示器的缩放因子（本机 175% ⇒ 960×640
-                        // 会变成 1680×1120）。那样一来"与离线那张逐字节相同"就变成
-                        // "在你还得知道 DPI 的前提下相同"，而判据里不许有这种格子。
-                        .with_inner_size(PhysicalSize::new(self.size.0, self.size.1)),
+                        .with_inner_size(physical),
                 )
                 .map_err(|err| format!("建窗口失败：{err}"))?,
         );
@@ -1013,8 +1108,29 @@ impl Viewer {
                     capabilities.formats
                 )
             })?;
+        // ⚠ `COPY_SRC` 是 `--ui-shot` 要的（把**屏幕上那一张**读回来）：
+        //   `wgpu` 的缺省交换链用法**只有** `RENDER_ATTACHMENT`，少了这一位
+        //   `copy_texture_to_buffer` 会**当场校验错并 panic**（实测踩到：
+        //   "Usage flags RENDER_ATTACHMENT of Texture '<Surface Texture>' do not contain
+        //   required usage flags COPY_SRC"）。⇒ 先问能力，再决定加不加。
+        let capability = capabilities.usages;
+        let copy_src = capability.contains(wgpu::TextureUsages::COPY_SRC);
+        if self.ui_shot.is_some() && !copy_src {
+            // ⚠ **当场清掉它并说清为什么**，不留一个"要截图"的意图在这里：
+            //   留着它会让第一帧就炸，而"炸"与"这张卡不支持"是两件事。
+            eprintln!(
+                "⚠ 这块 surface 不支持 COPY_SRC（{:?}）⇒ --ui-shot 这一档用不了：\
+                 界面截图要能把交换链那一张读回来。窗口照常开，画面照常画",
+                capability
+            );
+            self.ui_shot = None;
+        }
         let config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            usage: if self.ui_shot.is_some() {
+                wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC
+            } else {
+                wgpu::TextureUsages::RENDER_ATTACHMENT
+            },
             format,
             width: size.width.max(1),
             height: size.height.max(1),
@@ -1044,6 +1160,9 @@ impl Viewer {
 
         self.present = Some(Present::new(&gpu.device, format.remove_srgb_suffix()));
         self.size = (config.width, config.height);
+        // 这一位记下来：运行时按 `u` 也要能知道能不能读回交换链那张
+        // （交换链的用法在 `open` 那一刻定下，改不了 —— `u` 不能反过来要求它重配）。
+        self.ui_shot_ok = copy_src;
 
         // ---- 调参面板（S9）：与窗口同时建 ----
         //
@@ -1730,6 +1849,26 @@ impl Viewer {
             }
         }
 
+        // ---- `--ui-shot` / `u`：把**屏幕上这一张**（画面 + 面板）读回来 --------------
+        //
+        // ⚠ 位置是判据的一部分：它在两个 pass **都画完之后**、`frame.present()` **之前**
+        //   ⇒ 读到的正是人眼看到的那张（含面板），而 `--shot` 那条路一个字节都不动。
+        if let Some(path) = self.ui_shot.take() {
+            match read_back_ui(device, queue, &frame.texture, &path) {
+                Ok(()) => {
+                    let bytes = std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
+                    println!(
+                        "界面截图（画面 + 面板）→ {}（{}×{}，{} 字节）",
+                        path.display(),
+                        config.width,
+                        config.height,
+                        bytes,
+                    );
+                }
+                Err(message) => eprintln!("界面截图失败：{message}"),
+            }
+        }
+
         frame.present();
         if let Some(note) = note {
             println!("{note}｜呈现 {} ms", present_started.elapsed().as_millis());
@@ -1907,6 +2046,24 @@ impl ApplicationHandler for Viewer {
                     Key::Named(NamedKey::Escape) => event_loop.exit(),
                     Key::Character(ref text) if text.eq_ignore_ascii_case("q") => event_loop.exit(),
                     Key::Character(ref text) if text.eq_ignore_ascii_case("s") => self.shot_now(),
+                    // `u`：存一张**屏幕上那一张**（画面 + 面板）—— 面板长什么样的证据。
+                    Key::Character(ref text) if text.eq_ignore_ascii_case("u") => {
+                        if !self.ui_shot_ok {
+                            eprintln!(
+                                "⚠ 这块 surface 不支持 COPY_SRC ⇒ 读不回交换链那一张，\
+                                 界面截图用不了（`--shot` 那条路不受影响）"
+                            );
+                            return;
+                        }
+                        let path = self
+                            .ui_shot
+                            .clone()
+                            .unwrap_or_else(|| PathBuf::from("target/viewer-ui.png"));
+                        println!("界面截图将落到 {}", path.display());
+                        self.ui_shot = Some(path);
+                        self.dirty = true;
+                        self.request_redraw();
+                    }
                     _ => {}
                 }
             }

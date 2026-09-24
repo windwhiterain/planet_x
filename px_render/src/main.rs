@@ -102,6 +102,12 @@ fn usage() -> String {
         "        只说「给 --edit 哪个名」。改的是参数，烘图走 `px run`（子进程），画面随即重载；",
         "        编辑落在会话副本 `target/pcg/edit/` 上，`art/` 要按面板里的 Save 才动。",
         "        Tab / F1 收起·展开面板。⚠ 只有 `--view` 有它（面板住在窗口里）。",
+        "      --ui-shot PNG：把**屏幕上那一张**（画面 + 面板）读回来存成 PNG（窗口里按 `u` 也行）。",
+        "        ⚠ 它与 `--shot` 是**两件事**：`--shot` 写的是判据那张图（**不含**面板），",
+        "          这一格写的是人眼看到的东西 —— 它是「面板长什么样」的证据。",
+        "        ⚠ 没给 `--width/--height` 时窗口按**逻辑尺寸**开（960×640 pt ⇒ 本机 1680×1120 px，",
+        "          缩放因子 1.75）：egui 量的都是逻辑点，拿 960 当物理像素的话面板会显得吃掉半个窗口。",
+        "          给了 `--width/--height` 就照旧是**那张图的像素**（判据那条路要的意思）。",
         "  px_render --show --scene 文档.pxart [--shot PNG]",
         "      把一份场景**推给**在跑的窗口（写 target/viewer-scene.json）；它自己不渲染。",
         "  px_render --where ｜ px_render --place YAW,PITCH,DIST",
@@ -221,14 +227,20 @@ struct Options {
     /// ⚠ 这三个数与 `--cam` 是**同一套数**（都进 `camera::probe_camera`），
     /// 不是 Bevy 窗口那一套（那边的 pitch 正方向与它自己的 `--cam` 相反）。
     place: Option<[f32; 3]>,
-    /// `--edit <场景配方名>`：窗口里那块**调参面板**编辑的是哪份场景配方引用到的图（S9）。
-    ///
+    /// `--edit <场景配方名>`：窗口里那块**调参面板**编辑的是哪份场景配方引用到的图（S9）。    ///
     /// ⚠ 它**只对 `--view` 有效**（面板住在窗口里）：`--show` 那一路连设备都不建。
     ///   与 `--view` 一起给是正常的组合；单独给会在 `check_viewer` 那里当场拒
     ///   （那条拒词说的是"这条路不适用"，不是"不认识的参数"）。
     /// ⚠ **不给也能用**：面板按窗口正在显示的那份产物名推配方名（今天 41 份配方逐份核过：
     ///   文件名与产物名一致）。推不出来时面板给一句话说清该给什么，**不猜**。
     edit: Option<String>,
+    /// `--ui-shot PNG`：把**屏幕上那一张**（画面 + 面板）读回来存成 PNG。
+    ///
+    /// ⚠ 与 `--shot` 是两件事，两个都要有：`--shot` 写的是**判据那张图**
+    ///   （回读出来的那批字节，**不含面板**，S7 的"与离线逐字节相同"靠它）；
+    ///   这一格写的是**人眼看到的东西**（交换链上那一张，含面板）——
+    ///   它服务的是"面板长什么样"这件事（窗口里按 `u` 也能再存一次）。
+    ui_shot: Option<PathBuf>,
     /// 性能那一路要收的**干净**窗口数（老路）。
     windows: u32,
     /// 调用方**显式**给了 `--windows`（决定走老路还是新主路径）。
@@ -276,6 +288,7 @@ impl Default for Options {
             ask_where: false,
             place: None,
             edit: None,
+            ui_shot: None,
             windows: 4,
             windows_given: false,
             drop_windows: 1,
@@ -401,12 +414,12 @@ impl Options {
                 "--width" => {
                     options.width = next("--width")?
                         .parse()
-                        .map_err(|_| "--width 需要一个整数".to_string())?
+                        .map_err(|_| "--width 需要一个整数".to_string())?;
                 }
                 "--height" => {
                     options.height = next("--height")?
                         .parse()
-                        .map_err(|_| "--height 需要一个整数".to_string())?
+                        .map_err(|_| "--height 需要一个整数".to_string())?;
                 }
                 "--columns" => {
                     options.columns = next("--columns")?
@@ -453,6 +466,7 @@ impl Options {
                     }
                     options.edit = Some(recipe);
                 }
+                "--ui-shot" => options.ui_shot = Some(PathBuf::from(next("--ui-shot")?)),
                 "--help" | "-h" => {
                     println!("{}", usage());
                     std::process::exit(0);
