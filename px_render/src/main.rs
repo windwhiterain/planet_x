@@ -23,14 +23,17 @@
 mod art;
 mod camera;
 mod client;
+mod cook;
 mod diff;
 mod digest;
+mod edit;
 mod gpu;
 mod group0;
 mod icosphere;
 mod mat4;
 mod material;
 mod mesh;
+mod panel;
 mod plan;
 mod render;
 mod report;
@@ -88,12 +91,17 @@ fn usage() -> String {
         "  px_render --shaders",
         "      把四份内容 shader 用**本宿主的桩表**组装出来并 naga 校验（不要 GPU）。",
         "  px_render --view [--scene 文档.pxart] [--cam YAW,PITCH,DIST] [--shot PNG]",
-        "                   [--width W] [--height H] [--novsync]",
+        "                   [--width W] [--height H] [--novsync] [--edit <场景配方名>]",
         "      **常驻预览窗口**（S7）：1 台轨道相机（左键拖 = 转、滚轮 = 缩放），",
         "      相机一变、场景一换、窗口一改大小才重画一帧（本宿主是同步建管线，按需渲染）。",
         "      --shot：**开窗之后的第一帧**顺手存一张 PNG（与 `--offline` 同一行代码）。",
         "      --cam：窗口的起始方位；不给就是**不给 --cam 那一档**（探针机位，与 J1 那张图同一台）。",
         "      --width/--height：窗口的初始尺寸（离线那条路是图的尺寸，同一个口径）。",
+        "      --edit：窗口里那块**调参面板**（S9）编辑的是**哪份场景配方**引用到的图。",
+        "        不给就按**窗口正在显示的那份产物名**推（产物名 = 配方名）；推不出来时面板",
+        "        只说「给 --edit 哪个名」。改的是参数，烘图走 `px run`（子进程），画面随即重载；",
+        "        编辑落在会话副本 `target/pcg/edit/` 上，`art/` 要按面板里的 Save 才动。",
+        "        Tab / F1 收起·展开面板。⚠ 只有 `--view` 有它（面板住在窗口里）。",
         "  px_render --show --scene 文档.pxart [--shot PNG]",
         "      把一份场景**推给**在跑的窗口（写 target/viewer-scene.json）；它自己不渲染。",
         "  px_render --where ｜ px_render --place YAW,PITCH,DIST",
@@ -213,6 +221,14 @@ struct Options {
     /// ⚠ 这三个数与 `--cam` 是**同一套数**（都进 `camera::probe_camera`），
     /// 不是 Bevy 窗口那一套（那边的 pitch 正方向与它自己的 `--cam` 相反）。
     place: Option<[f32; 3]>,
+    /// `--edit <场景配方名>`：窗口里那块**调参面板**编辑的是哪份场景配方引用到的图（S9）。
+    ///
+    /// ⚠ 它**只对 `--view` 有效**（面板住在窗口里）：`--show` 那一路连设备都不建。
+    ///   与 `--view` 一起给是正常的组合；单独给会在 `check_viewer` 那里当场拒
+    ///   （那条拒词说的是"这条路不适用"，不是"不认识的参数"）。
+    /// ⚠ **不给也能用**：面板按窗口正在显示的那份产物名推配方名（今天 41 份配方逐份核过：
+    ///   文件名与产物名一致）。推不出来时面板给一句话说清该给什么，**不猜**。
+    edit: Option<String>,
     /// 性能那一路要收的**干净**窗口数（老路）。
     windows: u32,
     /// 调用方**显式**给了 `--windows`（决定走老路还是新主路径）。
@@ -259,6 +275,7 @@ impl Default for Options {
             show: false,
             ask_where: false,
             place: None,
+            edit: None,
             windows: 4,
             windows_given: false,
             drop_windows: 1,
@@ -428,6 +445,14 @@ impl Options {
                 "--show" => options.show = true,
                 "--where" => options.ask_where = true,
                 "--place" => options.place = Some(parse_cam("--place", &next("--place")?)?),
+                // ---- 调参面板（S9）：窗口里那块 GUI ----
+                "--edit" => {
+                    let recipe = next("--edit")?;
+                    if recipe.is_empty() {
+                        return Err("--edit 要一个场景配方名（--edit orbit-bare）".to_string());
+                    }
+                    options.edit = Some(recipe);
+                }
                 "--help" | "-h" => {
                     println!("{}", usage());
                     std::process::exit(0);
@@ -497,6 +522,15 @@ impl Options {
                 "--where/--place 只跟常驻窗口的相机说话，不渲染任何东西：--out 在这儿没有意义"
                     .to_string(),
             );
+        }
+        // ⚠ `--edit` 是**面板**（`px_render/src/panel.rs`）：面板住在窗口里，所以只有
+        //   `--view` 那条路有它。收下不给会被当成"我给了它却不生效" —— 那正是本条
+        //   要拒的那种静默（它的用处还多了两样：`--show` 连设备都不建，`--where`/`--place`
+        //   只是跟相机说话）。
+        if self.edit.is_some() && !self.view {
+            return Err("--edit（调参面板）住在预览窗口里，得与 --view 一起给：\
+                 px_render --view --edit <场景配方名>"
+                .to_string());
         }
         Ok(())
     }

@@ -440,6 +440,9 @@ pub fn view(options: &crate::Options) -> Result<(), String> {
         },
         shader_changes: Vec::new(),
         image_hash: options.image_hash,
+        panel: None,
+        edit_recipe: options.edit.clone(),
+        panel_recipe: None,
         dirty: true,
         last: None,
         scene_modified: std::fs::metadata(&request.scene)
@@ -819,6 +822,24 @@ struct Viewer {
     ///    默认开着就把"每帧多少钱"这个数改了。判据（1 秒内画面变）量的是**图**，
     ///    所以量的时候把它打开，量完关掉。
     image_hash: bool,
+    /// **调参面板**（S9）。`None` = 还没建（`open` 里与窗口一起建）。
+    ///
+    /// ⚠ 它画在**交换链上**（`Viewer::draw` 里 `frame.present()` 之前的那一个 pass），
+    ///   所以 `--shot` 那张图与 `--image-hash` 那把尺子**一个字节都不动** ——
+    ///   S7 那条判据（"窗口 `--shot` 与离线同文档同机位逐字节相同"）因此照旧成立。
+    panel: Option<crate::panel::Panel>,
+    /// `--edit <场景配方名>`：面板要编辑哪份配方（`None` = 问清单推，推不出来就问人）。
+    ///
+    /// ⚠ 推的是"窗口正在显示的那份产物**是哪份配方烘的**"，靠的是 `scene` 图的清单
+    ///   （键 → CAS 路径 → 配方名）—— **不是**产物路径的文件名（那是一串内容键）。
+    ///   推出来的名字在日志与面板上都要看得见（"我编辑的是哪个"不能靠猜）。
+    edit_recipe: Option<String>,
+    /// 面板**实际**开在哪份配方上（`--edit` 给的，或者按产物名推出来的）。
+    ///
+    /// ⚠ 它与 `edit_recipe` 分开存：推出来的那一份要能显示给人看（"我编辑的是哪个"），
+    ///   而窗口的场景**换过**之后这一格**不跟着换** —— 面板开的是哪一份就是哪一份，
+    ///   直到有人重开窗口（那正是"会话"）。
+    panel_recipe: Option<String>,
     /// 画面脏了：下一次 `RedrawRequested` 要重画一帧。
     dirty: bool,
     /// 上一次画出来的尺寸（`--shot` 与"重呈一次"都要用它）。
@@ -932,6 +953,13 @@ fn content_hash_of(path: &Path) -> Option<String> {
 }
 
 impl Viewer {
+    /// 指针**归面板**吗（相机的拖拽按这个让路）。
+    fn panel_wants_pointer(&self) -> bool {
+        self.panel
+            .as_ref()
+            .is_some_and(crate::panel::Panel::wants_pointer)
+    }
+
     /// 当前这台的"怎么看"：`Views::Single` 那一档（与离线那条路**同一个**入口）。
     fn views(&self) -> Views {
         Views::Single(self.orbit)
@@ -1016,6 +1044,47 @@ impl Viewer {
 
         self.present = Some(Present::new(&gpu.device, format.remove_srgb_suffix()));
         self.size = (config.width, config.height);
+
+        // ---- 调参面板（S9）：与窗口同时建 ----
+        //
+        // ⚠ **无条件建**（不看 `--edit`）：面板本身就是"怎么开它"的说明书，而 `Tab`
+        //   收起/展开是窗口的通用操作 —— 把"有没有面板"绑在开关上，人按了 Tab 什么都
+        //   不发生，那就分不清"没有面板"与"面板坏了"。
+        // ⚠ 编辑面**不写死**：`--edit` 没给就问**清单**"窗口正在显示的那份产物是哪份配方
+        //   烘的"（产物路径是 CAS 的内容键，与配方名一个字符都不相干 —— 拿文件名推会推出
+        //   一串十六进制，见 `edit::derive_recipe`）。推不出来就让面板说清该给什么，**不猜**。
+        // ⚠ 编辑那一半**开不起来不算致命**：起不来的理由（配方不在、图不在）要写在
+        //   面板上给人看，而不是让窗口开不出来（§146.3 ③ 那一族：拦住了不等于说对了）。
+        let recipe = self.edit_recipe.clone().or_else(|| {
+            crate::edit::derive_recipe(shader::workspace(), &self.pcg_root, Path::new(&self.scene))
+        });
+        let store = recipe.as_deref().and_then(|recipe| {
+            match crate::edit::ParamStore::open(shader::workspace(), recipe) {
+                Ok(store) => Some(store),
+                Err(err) => {
+                    eprintln!("⚠ 调参面板的编辑面 `{recipe}` 开不起来：{err}");
+                    None
+                }
+            }
+        });
+        let mut panel = crate::panel::Panel::new(&window, recipe.clone(), store);
+        panel.ready(&gpu.device, config.format);
+        println!(
+            "调参面板：Tab 收起/展开｜编辑面 {}｜会话副本 {}",
+            match self.edit_recipe.as_deref() {
+                Some(recipe) => format!("场景配方 `{recipe}`（--edit 给的）"),
+                None => match &recipe {
+                    Some(recipe) => {
+                        format!("场景配方 `{recipe}`（按产物名推的；可用 --edit 指明）")
+                    }
+                    None => "（没开：给 --edit <场景配方名>）".to_string(),
+                },
+            },
+            crate::edit::store_root(shader::workspace()).display(),
+        );
+        self.panel_recipe = recipe;
+        self.panel = Some(panel);
+
         self.gpu = Some(gpu);
         self.surface = Some(surface);
         self.config = Some(config);
@@ -1303,6 +1372,59 @@ impl Viewer {
         //    人改好了 = 盘上又变了一次 = 新的事件，那一条自然会重新走一遍。
     }
 
+    /// 周期活之四：**面板烘图**（S9）走到了哪一步。
+    ///
+    /// 它做三件事，缺一不可：
+    /// 1. 把子进程那几行输出收进面板的日志区（**原样**：判据与"我该看哪一行"都在里面）；
+    /// 2. 烘完之后**换画面** —— 而且是**走 `poll_scene_file` 那条老路换**（见下）；
+    /// 3. 烘着的时候**要帧**：状态行上那个计时器、日志区那些行都要跟着走
+    ///    （本窗口是按需渲染的，不主动要帧的话面板会停在"开始烘"那一刻）。
+    ///
+    /// ⚠ **为什么换画面要借 `poll_scene_file` 的判据，而不是在这里直接换**：
+    ///   窗口显示的那一份产物**可能不是刚烘的那一份**（`scene` 那张图里住着
+    ///   `orbit` / `orbit-bare` / `nebula` … 好几份场景，而面板烘的是它自己那份配方）。
+    ///   直接换就会在"面板烘 A、窗口看 B"时**把 B 换成 A** —— 那不是任何人要的。
+    ///   借那条判据之后，规矩变成一句能说清的话：
+    ///   **烘完的产物就是窗口正在看的这一份 ⇒ 重载它；否则只说一句、画面不动。**
+    fn poll_cook(&mut self) {
+        let Some(panel) = self.panel.as_mut() else {
+            return;
+        };
+        let Some(update) = panel.poll() else {
+            if panel.is_open() && panel.busy() {
+                self.dirty = true;
+            }
+            return;
+        };
+        let Some((path, fingerprint)) = update.scene else {
+            // 清单读不到：理由已经在面板那几行输出里，这里不再编一句。
+            self.dirty = true;
+            return;
+        };
+        if path.display().to_string() != self.scene {
+            println!(
+                "烘好的是 {}，而窗口正看着 {}：画面不动（要换过去用 --show）",
+                path.display(),
+                self.scene
+            );
+            self.dirty = true;
+            return;
+        }
+        if fingerprint == self.key {
+            println!("烘好的还是同一份内容（键 {fingerprint:016x}）⇒ 不重画");
+            self.dirty = true;
+            return;
+        }
+        self.scene_modified = std::fs::metadata(&path)
+            .and_then(|meta| meta.modified())
+            .ok();
+        self.key = fingerprint;
+        self.first_frame = true;
+        self.dirty = true;
+        self.update_title();
+        println!("面板烘完，重载：{}（键 {fingerprint:016x}）", self.scene);
+    }
+
     fn poll_scene_file(&mut self) {
         let Ok(meta) = std::fs::metadata(&self.scene) else {
             return;
@@ -1568,6 +1690,46 @@ impl Viewer {
             present.draw(&mut encoder, &view);
         }
         queue.submit(Some(encoder.finish()));
+
+        // ---- 面板：**交换链上的第二个 pass**（S9）--------------------------------
+        //
+        // ⚠ 位置是判据的一部分：它在 `present.upload`（画面那批字节）**之后**、
+        //   在 `frame.present()` 之前。于是
+        //   ① `--shot` 那张图里**没有**面板（截图走的是另一条路：回读出来的字节）；
+        //   ② `--image-hash` 那把尺子也不动（同上）；
+        //   ③ 人看到的画面上有面板。S7 那条判据因此一个字都不用改。
+        //
+        // ⚠ 换一个做法——把面板画进 `shot::Target` 那张纹理——就会把判据弄脏：
+        //   屏幕与文件仍然是同一批字节，但**判据那张图**里多了一块 GUI。
+        if let Some(panel) = self.panel.as_mut() {
+            if panel.is_open() {
+                if let Some(window) = self.window.as_ref() {
+                    let [width, height] = [config.width, config.height];
+                    // ⚠ 面板那一张视图用**原生格式**（sRGB），与画面那一张（非 sRGB）不同：
+                    //   画面是"字节进、字节出"，而 egui 按自己的格式选 shader —— 拿非 sRGB
+                    //   视图去喂它，颜色的语义就被解释了两次（面板会发灰/发白）。
+                    let panel_view = frame.texture.create_view(&wgpu::TextureViewDescriptor {
+                        label: Some("px_render 面板（原生格式）"),
+                        ..Default::default()
+                    });
+                    let mut encoder =
+                        device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                            label: Some("px_render 面板"),
+                        });
+                    panel.paint(
+                        window,
+                        device,
+                        queue,
+                        &mut encoder,
+                        &panel_view,
+                        [width, height],
+                        shader::workspace(),
+                    );
+                    queue.submit(Some(encoder.finish()));
+                }
+            }
+        }
+
         frame.present();
         if let Some(note) = note {
             println!("{note}｜呈现 {} ms", present_started.elapsed().as_millis());
@@ -1650,6 +1812,55 @@ impl ApplicationHandler for Viewer {
         _window_id: WindowId,
         event: WindowEvent,
     ) {
+        // ---- 面板先吃（S9）----------------------------------------------------
+        //
+        // ⚠ **先给 egui**：它说"这一下我要了"（点按钮 / 拖滑条 / 在文本框里打字），
+        //   相机与那几个快捷键就当这一下没发生 —— 否则在面板上拖滑条，相机会跟着转。
+        // ⚠ 四样东西**不进** egui：`RedrawRequested`（不是输入，是调度）、
+        //   `CloseRequested`（关窗口与面板无关）、`Resized` / `ScaleFactorChanged`
+        //   （窗口自己的账，要在下面那一支里改交换链）。
+        //   ⚠ 反过来说，**键盘与滚轮要进**：面板关着时 egui 也该知道这些键
+        //   （否则"关掉面板再展开，它还记着上一次的输入"），而它按 `consumed`
+        //   告诉调用方要不要往下传。
+        //
+        // ⚠ `Tab` 是**窗口自己的开关**，要在交给 egui **之前**截走：egui 也认 Tab
+        //   （焦点在控件之间走）⇒ 它会说自己"要了"，那样这个开关就永远按不动。
+        if let WindowEvent::KeyboardInput { event: key, .. } = &event {
+            if key.state == ElementState::Pressed
+                && matches!(
+                    key.logical_key,
+                    Key::Named(NamedKey::Tab) | Key::Named(NamedKey::F1)
+                )
+            {
+                if let Some(panel) = self.panel.as_mut() {
+                    panel.toggle();
+                    println!(
+                        "调参面板：{}",
+                        if panel.is_open() { "展开" } else { "收起" }
+                    );
+                    if panel.is_open() {
+                        self.dirty = true;
+                        self.request_redraw();
+                    }
+                }
+                return;
+            }
+        }
+        let for_panel = !matches!(
+            event,
+            WindowEvent::RedrawRequested
+                | WindowEvent::CloseRequested
+                | WindowEvent::Resized(_)
+                | WindowEvent::ScaleFactorChanged { .. }
+        );
+        if for_panel {
+            if let (Some(panel), Some(window)) = (self.panel.as_mut(), self.window.as_ref()) {
+                if panel.on_window_event(window, &event) {
+                    return;
+                }
+            }
+        }
+
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => self.resize(size),
@@ -1672,6 +1883,11 @@ impl ApplicationHandler for Viewer {
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
+                // ⚠ 指针在面板上时**相机不动**（S9）：egui 上一次说自己要了指针，
+                //   这一下就是"拖滑条"而不是"转视角"。
+                if self.panel_wants_pointer() {
+                    return;
+                }
                 self.drag((position.x, position.y));
                 if self.dirty {
                     self.request_redraw();
@@ -1705,6 +1921,7 @@ impl ApplicationHandler for Viewer {
             self.poll_request();
             self.poll_scene_file();
             self.poll_shaders();
+            self.poll_cook();
             if self.dirty {
                 self.request_redraw();
             }
