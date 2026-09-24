@@ -27,3 +27,7 @@
 - 对账判据：`the_skip_matches_the_dense_march_on_a_blocky_volume`（同一份 WGSL 开/关空跳，
   逐 texel 比）。实测最大 Δ 0.0142（相对 3.9%），来源是两档 quadrature 不同，不是漏气 ——
   数写在 `occupancy.rs` 的模块文档里。
+- 实测收益（`px_graphs nebula --face 64`，release）：真实星云 **66.8% 的粗块精确空**
+  （3072 里活 1020），冷启一次 13.0 s；天穹那一段约快 14%。
+- ⚠ CAS 的键**不含环境变量**：量 `PX_SKIP_OFF` 那一档必须让参数（比如 `steps`）变一下，
+  否则第二次直接命中缓存、量到的是 0.9 s 的读盘时间。

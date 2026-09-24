@@ -2027,6 +2027,32 @@ pub fn raymarch_sky(
         emission.lanes(),
         &emission.data,
     );
+    // 空跳的收益要落在数上：活块比 = 这一份掩码的实际形状（`PX_SKIP_REPORT=1` 时打一行）。
+    if std::env::var("PX_SKIP_REPORT").is_ok() {
+        let total = occupancy.sidecar().len();
+        let live = occupancy
+            .sidecar()
+            .iter()
+            .filter(|word| **word != 0)
+            .count();
+        eprintln!(
+            "空跳掩码：res {} / layers {} / 每面块 {} / 总块 {total} / 活块 {live}（{:.1}%）\
+             ⇒ 空块 {:.1}% 可整段跳过",
+            emission.res,
+            emission.layers,
+            occupancy.blocks_per_face(),
+            live as f64 * 100.0 / total as f64,
+            (total - live) as f64 * 100.0 / total as f64
+        );
+    }
+    // ⚠ **对账用的开关**（`PX_SKIP_OFF=1` 关掉空跳，其余逐字不变）：
+    //   同一个 exe、同一份 WGSL 的两档，A/B 的差异只可能来自这一项。
+    let occupancy = if std::env::var("PX_SKIP_OFF").is_ok() {
+        None
+    } else {
+        Some(occupancy)
+    };
+    let occupancy = occupancy.as_ref();
     // ⚠ 星场是 **R3 稀疏格**（不是一张立方图）：索引拼成一个 buffer、参数走 uniform，
     //   与 `bake_emission` 那一档共用同一份 WGSL（星的查询那几条只有一处实现）。
     let star_grid = StarGrid::of(stars);
@@ -2058,14 +2084,14 @@ pub fn raymarch_sky(
     ]
     .concat();
     let (occupancy_uniform, occupancy_words) = occupancy_bytes(
-        Some(&occupancy),
+        occupancy,
         emission.res,
         emission.layers,
         emission.inner,
         emission.outer,
     );
     let mut uniform = SkyUniform {
-        counts: [steps, face, 0, 1],
+        counts: [steps, face, 0, if occupancy.is_some() { 1 } else { 0 }],
         scalars: [0.0, 0.0, 0.0, emission.inner],
         background: [
             extras.background[0],
