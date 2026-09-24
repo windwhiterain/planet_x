@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use px_protocol::art::{ArtBundle, AssetKind, AssetManifest, Camera};
+use px_protocol::art::{ArtBundle, AssetManifest, Camera};
 use px_protocol::stream::{self, Frame};
 use px_protocol::wire::{Blob, BlobHeader, DType, WireError};
 use px_protocol::{Handshake, HandshakeError, ProtocolId};
@@ -11,7 +11,6 @@ fn frames() -> Vec<Frame> {
     let bundle = ArtBundle {
         assets: vec![AssetManifest {
             id: "planet/terran".to_string(),
-            kind: AssetKind::Mesh,
             params,
             blobs: vec![BlobHeader {
                 dtype: DType::U32,

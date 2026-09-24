@@ -8,7 +8,7 @@
 //! `px_render/src/planet.rs` 的口径，别拿"看起来等价"的写法替。
 
 use px_field_schema::field::Field;
-use px_protocol::art::{CUBE_COLUMNS, CUBE_FACES, Domain, TextureFormat, TextureShape};
+use px_protocol::art::{CUBE_COLUMNS, CUBE_FACES, Domain, TextureFormat};
 
 use super::shade::{half_from_f32, push_color};
 

@@ -547,7 +547,6 @@ impl Camera {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AssetManifest {
     pub id: String,
-    pub kind: AssetKind,
     pub params: BTreeMap<String, f64>,
     pub blobs: Vec<BlobHeader>,
     /// 载荷内容的 FNV-1a 指纹（0 = 没记过，旧产物）。
@@ -674,6 +673,33 @@ impl Domain {
             Self::Volume => "volume",
         }
     }
+
+    /// **域的编号**（`0..5`）—— 载荷清单参数里那一格 `projection` 用的就是它。
+    ///
+    /// ⚠ 为什么域要能**自己**在清单里留一个数：`AssetKind` 已经不再是图缓存载荷的一栏
+    ///   （它是**渲染**那一侧认资产种类的概念），而场载荷**不含**投影
+    ///   （`Field::to_blob` 只存形状）⇒ 读一份盘上的场产物时，"这一格在世界里的哪"
+    ///   就必须由**载荷自己**说清楚。编号是**冻结**的：改了它 = 旧产物读成别的域。
+    pub fn code(self) -> u8 {
+        match self {
+            Self::Equirect => 0,
+            Self::Octahedral => 1,
+            Self::Cube => 2,
+            Self::CubeMap => 3,
+            Self::Volume => 4,
+        }
+    }
+
+    pub fn from_code(code: u8) -> Option<Self> {
+        match code {
+            0 => Some(Self::Equirect),
+            1 => Some(Self::Octahedral),
+            2 => Some(Self::Cube),
+            3 => Some(Self::CubeMap),
+            4 => Some(Self::Volume),
+            _ => None,
+        }
+    }
 }
 
 /// 体网格的**画布尺寸**：`(res, res × layers × 6)`。
@@ -786,10 +812,6 @@ pub fn uv_of(domain: Domain, direction: [f32; 3], width: u32, _height: u32) -> [
 pub enum AssetChange {
     Added,
     Removed,
-    Kind {
-        before: AssetKind,
-        after: AssetKind,
-    },
     /// 载荷指纹不同 ⇒ 同样的参数烘出了不一样的值（最硬的一档）。
     Content,
     /// 哪些参数变了（含新增/删除）。
@@ -808,7 +830,6 @@ impl AssetChange {
         match self {
             Self::Added => "新增".to_string(),
             Self::Removed => "移除".to_string(),
-            Self::Kind { before, after } => format!("类型 {before:?}→{after:?}"),
             Self::Content => "内容变了".to_string(),
             Self::Params { keys } => format!("参数变了（{}）", keys.join(",")),
             Self::Shape { before, after } => {
@@ -907,12 +928,6 @@ pub fn diff(before: &ArtBundle, after: &ArtBundle) -> Diff {
 }
 
 fn classify(before: &AssetManifest, after: &AssetManifest) -> Option<AssetChange> {
-    if before.kind != after.kind {
-        return Some(AssetChange::Kind {
-            before: before.kind,
-            after: after.kind,
-        });
-    }
     if before.fingerprint != 0 && after.fingerprint != 0 && before.fingerprint != after.fingerprint
     {
         return Some(AssetChange::Content);
@@ -948,7 +963,6 @@ mod tests {
         params.insert("relief".to_string(), relief);
         AssetManifest {
             id: id.to_string(),
-            kind: AssetKind::Field2D,
             params,
             blobs: vec![BlobHeader {
                 dtype: DType::F32,

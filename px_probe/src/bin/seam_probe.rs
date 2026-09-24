@@ -14,7 +14,7 @@
 //! ⚠ 为什么 C⁰ 判据抓不到它：`the_baked_sky_is_continuous_across_face_edges` 量的是**值**，
 //!   而逐格随机夹具下共享角点让两侧插值逐位相同 ⇒ 值天生连续（实测跨棱/面内 1.06x）。
 
-use px_protocol::art::{AssetKind, cube_direction};
+use px_protocol::art::cube_direction;
 use px_protocol::stream::{self, Frame};
 use px_volume_schema::VolumeData;
 
@@ -148,10 +148,8 @@ fn main() {
     let mut params = std::collections::BTreeMap::new();
     for frame in &frames {
         if let Frame::Art(bundle) = frame {
-            for asset in &bundle.assets {
-                if asset.kind == AssetKind::Volume {
-                    params = asset.params.clone();
-                }
+            if let Some(asset) = bundle.assets.first() {
+                params = asset.params.clone();
             }
         }
     }

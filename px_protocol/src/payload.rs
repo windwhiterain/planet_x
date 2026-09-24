@@ -12,8 +12,8 @@
 use std::collections::BTreeMap;
 
 use crate::art::{
-    ArtBundle, AssetKind, AssetManifest, CUBE_FACES, Camera, Domain, MeshData, TextureData,
-    TextureFormat, TextureShape, VolumeData,
+    ArtBundle, AssetManifest, CUBE_FACES, Camera, Domain, MeshData, TextureData, TextureFormat,
+    VolumeData,
 };
 use crate::fnv::fnv1a;
 use crate::stream::{self, Frame};
@@ -43,19 +43,21 @@ pub trait Build: Sized {
     fn decode(bundle: &PayloadBundle, projection: Domain, node: &str) -> Result<Self, String>;
 }
 
+/// **节点载荷**：清单参数 + 数据块。
+///
+/// ⚠ **没有"这是什么资产种类"那一栏**。缓存按代码位置取载荷 —— 类型是 `cached::<O>` 里
+///   那个 `O::Payload`，**编译期就已知**（`Build::decode` 由它单态化）⇒ 字节里再写一遍
+///   类型没有任何消费者。`AssetKind` 是**渲染**那一侧的概念（`load_texture` /
+///   `load_mesh` 要从一坨字节里认出"这是什么"），它读的是**显式写进 CAS 的场景资产**
+///   （`Generated` / `write_texture` / `write_generated_mesh`），不是这里的节点载荷。
 pub struct PayloadBundle {
-    pub kind: AssetKind,
     pub params: BTreeMap<String, f64>,
     pub blobs: Vec<Blob>,
 }
 
 impl PayloadBundle {
-    pub fn new(kind: AssetKind, params: BTreeMap<String, f64>, blobs: Vec<Blob>) -> Self {
-        Self {
-            kind,
-            params,
-            blobs,
-        }
+    pub fn new(params: BTreeMap<String, f64>, blobs: Vec<Blob>) -> Self {
+        Self { params, blobs }
     }
 
     /// 载荷内容的指纹（清单里那一格）。
@@ -68,12 +70,11 @@ impl PayloadBundle {
         self.blobs.iter().map(|blob| blob.bytes.len()).sum()
     }
 
-    /// 包成产物字节。`id` / 相机表 / 指纹是驱动补上的那三样。
+    /// 包成产物字节。`id` 与相机表是驱动补上的那两样。
     pub fn to_bytes(&self, id: &str, cameras: &[Camera]) -> Result<Vec<u8>, String> {
         let bundle = ArtBundle {
             assets: vec![AssetManifest {
                 id: id.to_string(),
-                kind: self.kind,
                 params: self.params.clone(),
                 blobs: self.blobs.iter().map(|blob| blob.header.clone()).collect(),
                 fingerprint: self.fingerprint(id),
@@ -88,16 +89,15 @@ impl PayloadBundle {
     }
 
     /// 从产物字节（CAS 里那份）还原。清单帧必须在最前面，与读法一致。
+    ///
+    /// ⚠ **只取参数与数据块** —— 类型由调用方（`Build::decode` 的单态化）说话。
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
         let mut cursor = bytes;
         let frames = stream::read_stream(&mut cursor).map_err(|err| err.to_string())?;
-        let (kind, params) = frames
+        let params = frames
             .iter()
             .find_map(|frame| match frame {
-                Frame::Art(bundle) => bundle
-                    .assets
-                    .first()
-                    .map(|asset| (asset.kind, asset.params.clone())),
+                Frame::Art(bundle) => bundle.assets.first().map(|asset| asset.params.clone()),
                 _ => None,
             })
             .ok_or_else(|| "产物里没有清单帧（`Frame::Art`）".to_string())?;
@@ -111,11 +111,7 @@ impl PayloadBundle {
         if blobs.is_empty() {
             return Err("产物里没有数据块".to_string());
         }
-        Ok(Self {
-            kind,
-            params,
-            blobs,
-        })
+        Ok(Self { params, blobs })
     }
 
     pub fn one(&self) -> Result<&Blob, String> {
@@ -172,7 +168,6 @@ impl Build for TextureData {
     ///   "每通道半精度线性"都是 U8/U16，但语义完全不同）。
     fn encode(payload: &Self) -> Result<PayloadBundle, String> {
         Ok(PayloadBundle::new(
-            AssetKind::Texture,
             BTreeMap::from([
                 ("width".to_string(), f64::from(payload.width)),
                 ("height".to_string(), f64::from(payload.height)),
@@ -259,7 +254,6 @@ mod texture_tests {
     #[test]
     fn the_shape_travels_in_the_manifest() {
         let bundle = TextureData::encode(&sample()).expect("编码");
-        assert_eq!(bundle.kind, AssetKind::Texture);
         for key in ["width", "height", "layers", "levels", "format"] {
             assert!(bundle.params.contains_key(key), "清单里缺 `{key}`");
         }
@@ -306,7 +300,6 @@ impl Build for VolumeData {
 
     fn encode(payload: &Self) -> Result<PayloadBundle, String> {
         Ok(PayloadBundle::new(
-            AssetKind::Volume,
             BTreeMap::from([
                 ("res".to_string(), payload.res as f64),
                 ("layers".to_string(), payload.layers as f64),
@@ -398,7 +391,6 @@ impl Build for MeshData {
 
     fn encode(payload: &Self) -> Result<PayloadBundle, String> {
         Ok(PayloadBundle::new(
-            AssetKind::Mesh,
             BTreeMap::from([
                 ("vertices".to_string(), payload.vertices() as f64),
                 ("triangles".to_string(), payload.triangles() as f64),

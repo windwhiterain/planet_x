@@ -463,7 +463,6 @@ pub fn write_shader(
     let bundle = px_protocol::art::ArtBundle {
         assets: vec![px_protocol::art::AssetManifest {
             id: id.to_string(),
-            kind: px_protocol::AssetKind::Shader,
             params: shader_params(text, closure, &descriptor),
             blobs: vec![wgsl_blob.header.clone(), schema_blob.header.clone()],
             fingerprint: fnv1a(text),

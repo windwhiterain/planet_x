@@ -16,6 +16,8 @@ px_graph_schema = { path = "../px_graph_schema" }
 px_field_schema = { path = "../px_field_schema" }
 px_volume_schema = { path = "../px_volume_schema" }
 px_mesh_schema = { path = "../px_mesh_schema" }
+# NURBS 域的数据（曲线 / 曲面 / 读数）—— 图脚本读写它们要用解出来的类型。
+px_nurbs_schema = { path = "../px_nurbs_schema" }
 # 参照场（判据仪器与体积算子共用同一份）。
 px_verify = { path = "../px_verify" }
 # ⚠ **图脚本唯一那扇门**（`px_cook`）：`begin` / `cook` / 各域算子表（声明）都在它后面。

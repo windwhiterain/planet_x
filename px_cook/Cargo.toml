@@ -16,5 +16,6 @@ px_protocol = { path = "../px_protocol" }
 px_field_schema = { path = "../px_field_schema" }
 px_volume_schema = { path = "../px_volume_schema" }
 px_mesh_schema = { path = "../px_mesh_schema" }
+px_nurbs_schema = { path = "../px_nurbs_schema" }
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"

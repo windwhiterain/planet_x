@@ -20,7 +20,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use px_protocol::art::{self, AssetKind, TextureFormat, TextureShape};
+use px_protocol::art::{self, TextureFormat, TextureShape};
 use px_protocol::material::{MaterialLayout, TextureDimension};
 use px_protocol::scene::{
     AlphaMode, CullMode, FrameMaterial, Geometry, Member, Object, Sampler, SceneSpec, Transform,
@@ -626,13 +626,8 @@ fn load_texture(member: &Member, pcg_root: &Path, what: &str) -> Result<LoadedTe
             _ => None,
         })
         .ok_or_else(|| format!("{what} {member}（{}）里没有清单帧", path.display()))?;
-    if manifest.kind != AssetKind::Texture {
-        return Err(format!(
-            "{what} {member}（{}）不是 Texture 产物：{:?}",
-            path.display(),
-            manifest.kind
-        ));
-    }
+    // ⚠ 这里**不再看资产种类**（它已不是图缓存载荷的一栏）：形状与字节数下面逐项对账，
+    //   对不上就是产物坏了 —— 那一条比"种类对不对"更硬。
     let shape = TextureShape::from_params(&manifest.params)
         .map_err(|err| format!("{what} {member}：{err}"))?;
     let blob = frames

@@ -30,6 +30,25 @@ fn every_declared_operator_loads_from_its_library() {
     px_graph_schema::ops::body::<px_volume_schema::ops::CloudCoarse>().expect("cloud.coarse");
     px_graph_schema::ops::body::<px_mesh_schema::ops::CubeSphere>().expect("mesh.cubesphere");
     px_graph_schema::ops::body::<px_mesh_schema::ops::Proxy>().expect("mesh.proxy");
+    px_graph_schema::ops::body::<px_nurbs_schema::ops::Circle>().expect("nurbs.circle");
+    px_graph_schema::ops::body::<px_nurbs_schema::ops::CurveEval>().expect("nurbs.curve.eval");
+    px_graph_schema::ops::body::<px_nurbs_schema::ops::CurveAt>().expect("nurbs.curve.at");
+    px_graph_schema::ops::body::<px_nurbs_schema::ops::CurveHodograph>()
+        .expect("nurbs.curve.hodograph");
+    px_graph_schema::ops::body::<px_nurbs_schema::ops::CurveInsert>().expect("nurbs.curve.insert");
+    px_graph_schema::ops::body::<px_nurbs_schema::ops::CurveElevate>()
+        .expect("nurbs.curve.elevate");
+    px_graph_schema::ops::body::<px_nurbs_schema::ops::CurveTessellate>()
+        .expect("nurbs.curve.tessellate");
+    px_graph_schema::ops::body::<px_nurbs_schema::ops::Sphere>().expect("nurbs.sphere");
+    px_graph_schema::ops::body::<px_nurbs_schema::ops::SurfaceEval>().expect("nurbs.surface.eval");
+    px_graph_schema::ops::body::<px_nurbs_schema::ops::SurfaceAt>().expect("nurbs.surface.at");
+    px_graph_schema::ops::body::<px_nurbs_schema::ops::SurfaceInsert>()
+        .expect("nurbs.surface.insert");
+    px_graph_schema::ops::body::<px_nurbs_schema::ops::SurfaceElevate>()
+        .expect("nurbs.surface.elevate");
+    px_graph_schema::ops::body::<px_nurbs_schema::ops::SurfaceTessellate>()
+        .expect("nurbs.surface.tessellate");
 }
 
 /// **实现的身份是运行期读出来的**（图程序不重编也能看见它换了）。
@@ -37,10 +56,11 @@ fn every_declared_operator_loads_from_its_library() {
 /// 这条同时钉住"库里有身份符号"与"指纹形状是十六进制"两件事。
 #[test]
 fn every_library_reports_its_own_source_hash() {
-    for lib in ["px_field_op", "px_volume_op", "px_mesh_op"] {
+    for lib in ["px_field_op", "px_volume_op", "px_mesh_op", "px_nurbs_op"] {
         let hash = match lib {
             "px_field_op" => <px_field_schema::ops::Fbm as PxOp>::source_hash(),
             "px_volume_op" => <px_volume_schema::ops::CloudCoarse as PxOp>::source_hash(),
+            "px_nurbs_op" => <px_nurbs_schema::ops::Circle as PxOp>::source_hash(),
             _ => <px_mesh_schema::ops::Proxy as PxOp>::source_hash(),
         }
         .unwrap_or_else(|err| panic!("{lib} 的身份读不到：{err}"));
@@ -52,19 +72,25 @@ fn every_library_reports_its_own_source_hash() {
     }
 }
 
-/// 三个库的身份**互不相同**：它们各自的源码指纹覆盖的是各自那份源码。
+/// 四个库的身份**互不相同**：它们各自的源码指纹覆盖的是各自那份源码。
 ///
-/// ⚠ 这一条顺带证明"实现那一半真的进了键"：三个库都链同一份契约，
-///   如果指纹只覆盖契约，这三个值会一模一样。
+/// ⚠ 这一条顺带证明"实现那一半真的进了键"：四个库都链同一份契约，
+///   如果指纹只覆盖契约，这几个值会一模一样。
 #[test]
-fn the_three_libraries_have_distinct_identities() {
+fn the_four_libraries_have_distinct_identities() {
     let field = ops::source_hash("px_field_op").expect("field 库身份");
     let volume = ops::source_hash("px_volume_op").expect("volume 库身份");
     let mesh = ops::source_hash("px_mesh_op").expect("mesh 库身份");
+    let nurbs = ops::source_hash("px_nurbs_op").expect("nurbs 库身份");
     assert_ne!(
         field, volume,
         "场库与体积库的身份相同 —— 指纹没覆盖到各自的源码"
     );
     assert_ne!(field, mesh, "场库与网格库的身份相同");
     assert_ne!(volume, mesh, "体积库与网格库的身份相同");
+    for (name, other) in [("nurbs", &nurbs)] {
+        assert_ne!(&field, other, "场库与 {name} 库的身份相同");
+        assert_ne!(&volume, other, "体积库与 {name} 库的身份相同");
+        assert_ne!(&mesh, other, "网格库与 {name} 库的身份相同");
+    }
 }

@@ -75,7 +75,7 @@ fn declares_dynamic(manifest: &toml::Value) -> bool {
         .unwrap_or(false)
 }
 
-const OPS: [&str; 3] = ["px_field_op", "px_volume_op", "px_mesh_op"];
+const OPS: [&str; 4] = ["px_field_op", "px_volume_op", "px_mesh_op", "px_nurbs_op"];
 
 /// 算子库是**运行时装载**的 dylib（`px_graph_schema::ops`）。
 #[test]
@@ -174,6 +174,7 @@ fn the_schemas_do_not_link_operators() {
         "px_field_schema",
         "px_volume_schema",
         "px_mesh_schema",
+        "px_nurbs_schema",
     ] {
         let manifest = manifest_of(name);
         let linked = op_dependencies(&manifest, "dependencies");

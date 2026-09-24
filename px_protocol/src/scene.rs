@@ -1479,7 +1479,6 @@ pub fn scene_bytes(spec: &SceneSpec, fingerprint: u64) -> Result<Vec<u8>, String
     let bundle = crate::art::ArtBundle {
         assets: vec![crate::art::AssetManifest {
             id: spec.name.clone(),
-            kind: crate::art::AssetKind::Scene,
             params: BTreeMap::from([
                 ("schema".to_string(), f64::from(spec.schema)),
                 ("objects".to_string(), spec.objects.len() as f64),

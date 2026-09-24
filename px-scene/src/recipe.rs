@@ -926,14 +926,8 @@ fn mesh_radius(member: &px_protocol::scene::Member, root: &Path) -> Result<f32, 
     let bytes = std::fs::read(&path).map_err(|err| format!("读不到 {}：{err}", path.display()))?;
     let frames = px_protocol::stream::read_stream(&mut bytes.as_slice())
         .map_err(|err| format!("解 {} 的流：{err}", path.display()))?;
-    // ⚠ 读法照 `px_render::mesh::load_mesh`：清单帧说 kind、后面的 blob 帧是载荷。
-    let kind = frames.iter().find_map(|frame| match frame {
-        px_protocol::stream::Frame::Art(bundle) => bundle.assets.first().map(|asset| asset.kind),
-        _ => None,
-    });
-    if kind != Some(px_protocol::art::AssetKind::Mesh) {
-        return Err(format!("{} 不是 Mesh 产物：{kind:?}", path.display()));
-    }
+    // ⚠ 读法照 `px_render::mesh::load_mesh`：后面的 blob 帧是载荷；种类不再是载荷的一栏
+    //   ⇒ 由 `MeshData::from_blobs` 自己逐块对账（读不出网格就当场报错）。
     let blobs: Vec<&px_protocol::wire::Blob> = frames
         .iter()
         .filter_map(|frame| match frame {

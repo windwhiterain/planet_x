@@ -17,7 +17,7 @@
 
 use std::collections::HashMap;
 
-use px_protocol::art::{AssetKind, MeshData};
+use px_protocol::art::MeshData;
 use px_protocol::stream::{self, Frame};
 
 use crate::vec::Vec3;
@@ -183,13 +183,8 @@ pub fn weld_normals(mesh: &mut Mesh) {
 pub fn load_mesh(path: &str) -> Result<(Mesh, String), String> {
     let bytes = std::fs::read(path).map_err(|err| format!("读不到 {path}：{err}"))?;
     let frames = stream::read_stream(&mut bytes.as_slice()).map_err(|err| err.to_string())?;
-    let kind = frames.iter().find_map(|frame| match frame {
-        Frame::Art(bundle) => bundle.assets.first().map(|asset| asset.kind),
-        _ => None,
-    });
-    if kind != Some(AssetKind::Mesh) {
-        return Err(format!("{path} 不是 Mesh 产物：{kind:?}"));
-    }
+    // ⚠ 这里**不再看资产种类**（它已不是图缓存载荷的一栏）：`MeshData::from_blobs` 自己
+    //   逐块对账（四块、形状、长度），读不出网格就当场报错。
     let blobs: Vec<&px_protocol::wire::Blob> = frames
         .iter()
         .filter_map(|frame| match frame {

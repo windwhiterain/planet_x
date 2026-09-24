@@ -11,7 +11,6 @@
 
 use std::ops::Range;
 
-use px_protocol::art::AssetKind;
 use px_protocol::art::Domain;
 use px_protocol::payload::{Build, PayloadBundle};
 use px_protocol::wire::Blob;
@@ -179,7 +178,6 @@ impl Build for StarField {
             ),
         ];
         Ok(PayloadBundle::new(
-            AssetKind::StarField,
             BTreeMap::from([
                 ("cell".to_string(), meta.cell as f64),
                 ("origin_x".to_string(), meta.origin[0] as f64),
@@ -286,7 +284,6 @@ mod tests {
         let tint = vec![[0.9, 0.95, 1.0]; positions.len()];
         let field = StarField::build(meta(0.05, 1.5), &positions, &brightness, &tint).expect("造");
         let bundle = <StarField as Build>::encode(&field).expect("编码");
-        assert_eq!(bundle.kind, AssetKind::StarField);
         let back = <StarField as Build>::decode(&bundle, Domain::CubeMap, "stars").expect("解码");
         assert_eq!(back.grid, field.grid);
         assert_eq!(back.stars.len(), field.stars.len());

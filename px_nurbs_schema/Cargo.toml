@@ -1,0 +1,20 @@
+[package]
+name = "px_nurbs_schema"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# 超参数 struct 的 `PxKeyed` 由它生成（加字段自动进键）。
+px_derive = { path = "../px_derive" }
+blake3 = "1"
+# NURBS 的数据与参数：没有算法、没有 CAS、没有驱动。
+px_protocol = { path = "../px_protocol" }
+px_graph_schema = { path = "../px_graph_schema" }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["float_roundtrip"] }
+toml = "0.8"
+
+[build-dependencies]
+# `build.rs` 算**这一份声明**的源码指纹（`SOURCE_HASH`）：它是泛型实例的 key 的一半
+# （`px_op!` 里那句 `DECL_HASH = env!("PX_SOURCE_HASH")`，见 `19-generic-inst.md` §177 / §179.3）。
+px_fingerprint = { path = "../px_fingerprint" }

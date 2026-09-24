@@ -64,6 +64,8 @@ pub use px_graph::{
     scene_key, shader_key, workspace_root, write_graph_manifest, write_shader,
 };
 pub use px_mesh_schema::ops as mesh;
+/// NURBS 域的算子表（曲线 / 曲面）。
+pub use px_nurbs_schema::ops as nurbs;
 /// 图脚本动不动就要写 `Domain::Cube`：从这里一并给出，省得再添一行依赖。
 pub use px_protocol::art::Domain;
 pub use px_volume_schema::ops as volume;

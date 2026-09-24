@@ -1815,6 +1815,7 @@ dependencies = [
  "px_graph",
  "px_graph_schema",
  "px_mesh_schema",
+ "px_nurbs_schema",
  "px_protocol",
  "px_volume_schema",
  "serde",
@@ -1830,6 +1831,7 @@ dependencies = [
  "px_fingerprint",
  "px_graph_schema",
  "px_mesh_schema",
+ "px_nurbs_schema",
  "px_volume_schema",
 ]
 
@@ -1931,6 +1933,7 @@ dependencies = [
  "px_graph",
  "px_graph_schema",
  "px_mesh_schema",
+ "px_nurbs_schema",
  "px_protocol",
  "px_shader",
  "px_verify",
@@ -1964,6 +1967,30 @@ dependencies = [
  "px_graph_schema",
  "px_protocol",
  "px_volume_schema",
+ "serde",
+ "serde_json",
+ "toml",
+]
+
+[[package]]
+name = "px_nurbs_op"
+version = "0.1.0"
+dependencies = [
+ "px_fingerprint",
+ "px_graph_schema",
+ "px_nurbs_schema",
+ "px_protocol",
+]
+
+[[package]]
+name = "px_nurbs_schema"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "px_derive",
+ "px_fingerprint",
+ "px_graph_schema",
+ "px_protocol",
  "serde",
  "serde_json",
  "toml",

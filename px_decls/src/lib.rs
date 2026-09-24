@@ -87,11 +87,41 @@ pub const TABLE: &[(&str, fn() -> DeclFacts)] = &[
     ("Emission", || facts::<px_volume_schema::ops::Emission>()),
     ("SkyNebula", || facts::<px_volume_schema::ops::SkyNebula>()),
     ("Stars", || facts::<px_volume_schema::ops::Stars>()),
+    // ⚠ NURBS 域（`px_nurbs_schema`）：这八条与 `ops.rs` 里的八处 `px_op!` 一一对应。
+    ("Circle", || facts::<px_nurbs_schema::ops::Circle>()),
+    ("CurveEval", || facts::<px_nurbs_schema::ops::CurveEval>()),
+    ("CurveAt", || facts::<px_nurbs_schema::ops::CurveAt>()),
+    ("CurveHodograph", || {
+        facts::<px_nurbs_schema::ops::CurveHodograph>()
+    }),
+    ("CurveInsert", || {
+        facts::<px_nurbs_schema::ops::CurveInsert>()
+    }),
+    ("CurveElevate", || {
+        facts::<px_nurbs_schema::ops::CurveElevate>()
+    }),
+    ("CurveTessellate", || {
+        facts::<px_nurbs_schema::ops::CurveTessellate>()
+    }),
+    ("Sphere", || facts::<px_nurbs_schema::ops::Sphere>()),
+    ("SurfaceEval", || {
+        facts::<px_nurbs_schema::ops::SurfaceEval>()
+    }),
+    ("SurfaceAt", || facts::<px_nurbs_schema::ops::SurfaceAt>()),
+    ("SurfaceInsert", || {
+        facts::<px_nurbs_schema::ops::SurfaceInsert>()
+    }),
+    ("SurfaceElevate", || {
+        facts::<px_nurbs_schema::ops::SurfaceElevate>()
+    }),
+    ("SurfaceTessellate", || {
+        facts::<px_nurbs_schema::ops::SurfaceTessellate>()
+    }),
 ];
 
 /// **声明名 → 事实**。查不到回 `None`（生成器据此报错并点名是 recipe 第几条）。
 ///
-/// ⚠ 三个 schema 的命名空间是**同一个**（`FieldRemap` 与 `CloudCoarse` 都只是类型名）：
+/// ⚠ 各 schema 的命名空间是**同一个**（`FieldRemap` 与 `CloudCoarse` 都只是类型名）：
 ///   重名在 [`TABLE`] 里当场看得见 —— 那说明生成器不知道该写哪个路径。
 /// ⚠ 它是**运行期**函数（不是 `const fn`）：`any::type_name` 与 `PxOp::interface()` 今天都不是
 ///   const（实测 `is not yet stable as a const fn` / "const traits are not yet supported"）。
@@ -113,12 +143,17 @@ pub fn entries() -> Vec<(&'static str, DeclFacts)> {
     TABLE.iter().map(|(name, facts)| (*name, facts())).collect()
 }
 
-/// 三个 schema 的 crate 目录名（相对 workspace 根）。
-pub const SCHEMAS: &[&str] = &["px_field_schema", "px_volume_schema", "px_mesh_schema"];
+/// 各 schema 的 crate 目录名（相对 workspace 根）。
+pub const SCHEMAS: &[&str] = &[
+    "px_field_schema",
+    "px_volume_schema",
+    "px_mesh_schema",
+    "px_nurbs_schema",
+];
 
 /// workspace 根（`CARGO_MANIFEST_DIR` 的上一级）—— 与 `px_graph::workspace_root` 同一口径。
 ///
-/// ⚠ 门的左半边（"扫三个 schema 数 `px_op!` 的处数"）走 [`workspace_root`] + `SCHEMAS` +
+/// ⚠ 门的左半边（"扫各 schema 数 `px_op!` 的处数"）走 [`workspace_root`] + `SCHEMAS` +
 ///   **`px_cook::inst_scan`**，而那个扫描器只是 **dev-dependency** ⇒ `px_cook` **不进本 crate
 ///   的正常依赖图**（它是 `px_graphs` 的 build script 的唯一消费者，不许被拖重）。
 ///   调用点：`tests/inst_gate.rs`。

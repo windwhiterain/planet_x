@@ -79,7 +79,6 @@ fn canonical() -> String {
     let art = ArtBundle {
         assets: vec![AssetManifest {
             id: "planet/terran".to_string(),
-            kind: AssetKind::Field2D,
             params,
             blobs: vec![header.clone()],
             fingerprint: 0x0123_4567_89ab_cdef,

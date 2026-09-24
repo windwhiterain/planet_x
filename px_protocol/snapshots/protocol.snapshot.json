@@ -40,7 +40,6 @@
           ],
           "fingerprint": 81985529216486895,
           "id": "planet/terran",
-          "kind": "Field2D",
           "params": {
             "relief": 0.34
           }
