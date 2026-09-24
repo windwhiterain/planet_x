@@ -271,10 +271,9 @@ pub fn emit_from_field(
     density_params: &DensityParams,
     emission_params: &EmissionParams,
     stars: &StarField,
-    canvas_width: u32,
     density_field: &px_field_schema::field::Field,
 ) -> Result<VolumeData, String> {
-    let density = bake_density(density_params, canvas_width, density_field)?;
+    let density = bake_density(density_params, density_field)?;
     Ok(bake_emission(&density, stars, emission_params))
 }
 
@@ -472,7 +471,6 @@ mod tests {
                 &DensityParams::default(),
                 &EmissionParams::default(),
                 &no_stars(),
-                shape.res,
                 &field
             )
             .is_err(),

@@ -13,7 +13,6 @@ use crate::identity::PxKeyed;
 use crate::keys::Key;
 use crate::ops;
 use crate::payload::Build;
-use crate::protocol::Grid;
 
 /// **图参数**：包着上游节点，键由上游的键聚合而成。
 ///
@@ -63,7 +62,7 @@ impl<P: Build> Cooked<P> {
     ///   两个常量**：内容键里不许掺节点名与相机（那两样是驱动落盘时补的）。
     pub fn of(value: P) -> Result<Self, String> {
         let bundle = P::encode(&value)?;
-        let bytes = bundle.to_bytes("", &[])?;
+        let bytes = bundle.to_bytes("")?;
         let mut hasher = blake3::Hasher::new();
         hasher.update(b"px_cook/cooked/v1");
         hasher.update(&(bytes.len() as u64).to_le_bytes());
@@ -126,15 +125,14 @@ pub trait PxOp: Sized {
         ""
     }
 
-    /// 怎么算：把参数 / 图参数 / 画布交给实现库里那个符号。
+    /// 怎么算：把参数与图参数交给实现库里那个符号。
     fn render(
         &self,
         params: &Self::Params,
         inputs: &Self::Inputs,
-        grid: Grid,
     ) -> Result<Self::Payload, String> {
         let body = ops::body::<Self>()?;
-        body(params, inputs, grid)
+        body(params, inputs)
     }
 }
 
@@ -210,7 +208,7 @@ macro_rules! px_op {
 /// **算子实现**：与 `px_op!` 同名的那一条，导出实现库里的一个符号。
 ///
 /// ```ignore
-/// px_body! { Fbm, |p, _i, g| crate::ops::fbm::eval(p, &[], g) }
+/// px_body! { Fbm, |p, _i| crate::ops::fbm::eval(p, &[]) }
 /// ```
 ///
 /// ⚠ 符号名 = `<本库的包名>__<算子类型名>` —— 与声明侧那句
@@ -218,7 +216,7 @@ macro_rules! px_op {
 ///   **装载失败**（带命令的报错），不是默默调错函数。
 #[macro_export]
 macro_rules! px_body {
-    ($name:ident, |$p:ident, $i:ident, $g:ident| $body:expr) => {
+    ($name:ident, |$p:ident, $i:ident| $body:expr) => {
         #[unsafe(export_name = ::core::concat!(
                                                                     env!("CARGO_PKG_NAME"),
                                                                     "__",
@@ -227,7 +225,6 @@ macro_rules! px_body {
         pub extern "Rust" fn __px_body(
             $p: &<$name as $crate::PxOp>::Params,
             $i: &<$name as $crate::PxOp>::Inputs,
-            $g: $crate::Grid,
         ) -> ::core::result::Result<<$name as $crate::PxOp>::Payload, ::std::string::String> {
             // ⚠ 外面套一层 `Ok`：`$body` 是一个**值**（内部函数回 `Result` 时，
             //   就在块里用 `?` —— 那个 `?` 从本函数往外传）。

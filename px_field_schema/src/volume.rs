@@ -28,8 +28,7 @@
 
 use px_protocol::art::{CUBE_FACES, Domain, cube_direction};
 
-use crate::field::Field;
-use px_graph_schema::Grid;
+use crate::field::{Field, Projection};
 
 /// 一份体网格的**形状**：面内分辨率与径向层数。
 ///
@@ -47,14 +46,21 @@ pub struct VolumeShape {
 }
 
 impl VolumeShape {
-    /// 从画布推形状。`None` = 这张画布不是体网格（域不对，或者行数除不出整数层）。
-    pub fn of(grid: &Grid) -> Option<Self> {
-        if grid.projection != Domain::Volume {
+    /// 从**形状参数**推（`width = res`、`layers = height / (res × 6)`）。
+    ///
+    /// `None` = 这不是一张体网格（域不对，或者行数除不出整数层）。
+    pub fn of(width: u32, height: u32, projection: Projection) -> Option<Self> {
+        if projection != Projection::Volume {
             return None;
         }
-        let res = grid.width.max(1);
-        let layers = px_protocol::art::volume_layers(grid.height, res)?;
+        let res = width.max(1);
+        let layers = px_protocol::art::volume_layers(height, res)?;
         Some(Self { res, layers })
+    }
+
+    /// 从一份**已经拿在手上的场载荷**推（它的形状与投影就在载荷里）。
+    pub fn of_field(field: &Field) -> Option<Self> {
+        Self::of(field.width, field.height, field.projection)
     }
 
     /// 这个形状对应多少行。⚠ 它就是画布的 `height`（一面 = `res × (layers × res)`）。
@@ -202,28 +208,24 @@ mod tests {
         );
     }
 
-    /// **形状完全由画布推出来**（这是"不需要新资产种类"那条承诺的判据）。
+    /// **形状完全由形状参数推出来**（这是"不需要新资产种类"那条承诺的判据）。
     #[test]
-    fn the_shape_comes_back_out_of_the_canvas() {
+    fn the_shape_comes_back_out_of_the_shape_params() {
         let shape = shape();
-        let grid = Grid {
-            width: shape.res,
-            height: shape.height(),
-            projection: Domain::Volume,
-        };
-        assert_eq!(VolumeShape::of(&grid), Some(shape));
+        assert_eq!(
+            VolumeShape::of(shape.res, shape.height(), Domain::Volume),
+            Some(shape)
+        );
         // 行数除不出整数层 ⇒ 不是体网格。
-        let ragged = Grid {
-            height: shape.height() + 1,
-            ..grid
-        };
-        assert_eq!(VolumeShape::of(&ragged), None);
+        assert_eq!(
+            VolumeShape::of(shape.res, shape.height() + 1, Domain::Volume),
+            None
+        );
         // 域不对 ⇒ 不是体网格（哪怕行列数碰巧对得上）。
-        let flat = Grid {
-            projection: Domain::CubeMap,
-            ..grid
-        };
-        assert_eq!(VolumeShape::of(&flat), None);
+        assert_eq!(
+            VolumeShape::of(shape.res, shape.height(), Domain::CubeMap),
+            None
+        );
     }
 
     /// **`matches` 认的是域 + 两个尺寸**：域对、行列数对才算这个形状的体网格。

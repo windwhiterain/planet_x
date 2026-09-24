@@ -382,7 +382,6 @@ fn insts_gen_text(plan: &[Planned]) -> Result<String, String> {
              \x20       &self,\n\
              \x20       p: &Self::Params,\n\
              \x20       i: &Self::Inputs,\n\
-             \x20       g: ::px_graph_schema::Grid,\n\
              \x20   ) -> ::core::result::Result<Self::Payload, ::std::string::String> {{\n\
              \x20       let key = Self::source_hash()?;\n\
              \x20       let path = ::px_cook::inst::library_path(key);\n\
@@ -397,7 +396,7 @@ fn insts_gen_text(plan: &[Planned]) -> Result<String, String> {
              \x20           path.to_string_lossy().as_ref(),\n\
              \x20           Self::SYMBOL,\n\
              \x20       )?;\n\
-             \x20       body(p, i, g)\n\
+             \x20       body(p, i)\n\
              \x20   }}\n\
              }}\n\
              \n",

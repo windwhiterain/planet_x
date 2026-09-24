@@ -34,6 +34,9 @@
 
 pub mod baked;
 pub mod builder;
+/// **评审视角表**（12 个角度）—— ⚠ 它是**场景数据**（2026-09-27 从 `px_graph` 搬过来）：
+/// 相机管「怎么看」，不属于图、不进产物、不进缓存键。
+pub mod cameras;
 pub mod contract;
 pub mod frame;
 pub mod math;

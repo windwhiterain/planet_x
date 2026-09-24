@@ -17,13 +17,15 @@
 //! 图脚本是**普通 Rust**：参数与上游都是**普通的值**，脚本想怎么算就怎么算。
 //!
 //! ```ignore
-//! let graph = begin(GraphSpec::field("planet", 780, 520, Domain::Cube));
+//! let graph = begin(GraphSpec { name: "planet".to_string() });
 //! // 参数：TOML 打底 + 任意 rust 计算（想改哪个字段改哪个）
-//! let p = field::params::fbm::Params { zonal: 2.0, ..node_params(&graph, "clusters")? };
+//! // 尺寸/投影是**参数**（生成类算子那几档的 `Shape`）；这里形状只写一处、每个生成节点都拿它。
+//! let shape = field_params::Shape { width: 780, height: 520, projection: Domain::Cube };
+//! let p = field_params::fbm::Params { shape, zonal: 2.0, ..node_params(&graph, "clusters")? };
 //! // 节点：cached 读缓存；缓存脏了才调算子
 //! let clusters = cached(&graph, "clusters", field::Fbm, p, ())?;
 //! // 不缓存：直接调那个普通函数（同一个参数、同一个上游），拿到的裸值 `Cooked::of` 一下就能进图
-//! let preview = field::Fbm.render(&p2, &(), graph.grid())?;
+//! let preview = field::Fbm.render(&p2, &())?;
 //! let mixed = cached(&graph, "mixed", field::Mix, p3,
 //!                    field::MixInput { a: clusters, b: carved, mask: Cooked::of(preview)? })?;
 //! ```
@@ -52,21 +54,27 @@ use std::time::Instant;
 use px_graph_schema::payload::Build;
 use px_graph_schema::{OpId, PxInputs, PxOp, Report};
 
-/// 契约层那几样：图脚本从这一扇门一并拿到（`Cooked` / `Grid` / 身份哈希 / `blake3` 的 re-export）。
-pub use px_graph_schema::{Cache, Cooked, Grid, blake3, fnv1a, fnv1a_sources};
+/// 契约层那几样：图脚本从这一扇门一并拿到（`Cooked` / 身份哈希 / `blake3` 的 re-export）。
+pub use px_graph_schema::{Cache, Cooked, blake3, fnv1a, fnv1a_sources};
 
 /// 各域的**算子表**：声明在这里，实现在 dylib 里。
 pub use px_field_schema::ops as field;
+/// 场域那几档算子的**参数类型**（生成类的形状参数要从脚本里给）。
+pub use px_field_schema::params as field_params;
 /// 驱动那一半（图的生命周期 + 清单 + 键）。图脚本只从这里拿机制，别处不用再开一扇门。
 pub use px_graph::{
     BakedShader, Graph, GraphSpec, ManifestEntry, SHADER_VERSION, artifact_path_of,
-    bake_shader_graph, begin, cache_root, cameras, graph_manifest, hex, hex_short, manifest_key_of,
+    bake_shader_graph, begin, cache_root, graph_manifest, hex, hex_short, manifest_key_of,
     scene_key, shader_key, workspace_root, write_graph_manifest, write_shader,
 };
 pub use px_mesh_schema::ops as mesh;
+/// NURBS 域的算子表（曲线 / 曲面）。
+pub use px_nurbs_schema::ops as nurbs;
 /// 图脚本动不动就要写 `Domain::Cube`：从这里一并给出，省得再添一行依赖。
 pub use px_protocol::art::Domain;
 pub use px_volume_schema::ops as volume;
+/// 体积域的参数（`cloud.density` 的 `res` 现在是绝对值）。
+pub use px_volume_schema::params as volume_params;
 
 /// 宏生成出来的代码按 `$crate::…` 走 —— 于是用宏的人不必自己依赖契约层。
 pub use px_graph_schema;
@@ -100,7 +108,7 @@ where
 /// * **参数是 `Cooked<T>` ⇒ 这个参数可以被缓存**（键由它自己的键贡献）；
 /// * 缓存命中 ⇒ 解出产物交回去（**不算**）；脏了/没有 ⇒ 调 `f`（实现在实现库里，
 ///   运行期按身份装载）、编码、落盘；
-/// * **不缓存** ⇒ 直接调那个普通函数：`f.render(&params, &inputs, grid)`（`PxOp` 那条路），
+/// * **不缓存** ⇒ 直接调那个普通函数：`f.render(&params, &inputs)`（`PxOp` 那条路），
 ///   拿到的裸值要在图里用就 `Cooked::of(…)` 包一下。
 ///
 /// ⚠ 画布从 `cache` 取，**不是参数**：它本来就住在驱动里（`GraphSpec`），
@@ -115,7 +123,6 @@ pub fn cached<O>(
 where
     O: PxOp,
 {
-    let grid = cache.grid();
     // ⚠ 参数是**值**（不是从文件读的）：键里那一份与算子手里那一份因此必然是同一个。
     let params_json = px_graph_schema::canonical_params(&params);
     // ⚠ 参数索引那一格由**这里**记（生效值）：`node_params` 只管"这份值是不是从文件打底的"。
@@ -127,10 +134,9 @@ where
     // ⚠ **实现的源码指纹**是运行期取的（从实现库的身份符号）—— 图程序不重编也能看见它变了，
     //   于是"改了实现却命中旧产物"这件事不可能发生。
     let source_hash = O::source_hash()?;
-    // ⚠ **画布按域决定要不要进键**：场的分辨率就是画布，体积/网格不是。
-    //   一刀切（都掺）会让"改画布"连带重烘体积；一刀切（都不掺）会让场出现
-    //   "同一个键、不同分辨率"。
-    let canvas = <O::Payload as Build>::RESOLUTION_IS_CANVAS.then_some(grid);
+    // ⚠ **尺寸与投影是参数**（`field.*` 那些算子的 `Shape`），不是驱动塞的画布 ——
+    //   于是"改尺寸要不要重算"由**参数表**回答：参数里有它的算子自然换键，
+    //   没有它的（体积/网格/贴图/NURBS）自然不受影响。
     let base = px_graph_schema::node_key(
         &OpId {
             id: O::ID,
@@ -138,20 +144,14 @@ where
             source_hash,
         },
         &params_json,
-        canvas,
         |hasher| inputs.collect(hasher),
     );
-    // ⚠ 相机那一档：产物里带着相机表 ⇒ 相机变了产物内容就变 ⇒ 必须进键。
-    // ⚠ 相机口径从**载荷类型**推：域就是这个类型，没有第二处声明。
-    let with_cameras = <O::Payload as Build>::WITH_CAMERAS;
-    let key = if with_cameras {
-        px_graph_schema::key_with_cameras(base, cache.cameras())
-    } else {
-        base
-    };
+    // ⚠ **没有相机那一轴**：相机是**场景脚本**里的普通数据（`px-scene` 的 recipe），
+    //   不进产物、也就不进键 —— 它属于「怎么看」，不属于「这个节点算什么」。
+    let key = base;
 
     if let Some(payload) = cache.fetch(key) {
-        let value = <O::Payload as Build>::decode(&payload, grid.projection, node)?;
+        let value = <O::Payload as Build>::decode(&payload, node)?;
         let detail = <O::Payload as Build>::detail(&value);
         cache.store(
             Report {
@@ -161,7 +161,6 @@ where
                 key,
                 hit: true,
                 millis: 0,
-                with_cameras,
                 detail,
             },
             &payload,
@@ -170,7 +169,7 @@ where
     }
 
     let started = Instant::now();
-    let value = f.render(&params, &inputs, grid)?;
+    let value = f.render(&params, &inputs)?;
     let millis = started.elapsed().as_millis() as u64;
     let payload = <O::Payload as Build>::encode(&value)?;
     let detail = <O::Payload as Build>::detail(&value);
@@ -182,7 +181,6 @@ where
             key,
             hit: false,
             millis,
-            with_cameras,
             detail,
         },
         &payload,
@@ -227,7 +225,7 @@ where
 /// ```ignore
 /// struct Band;
 /// px_local_op! { Band, "local.band", BandParams, (), Field,
-///     |p, _i, g| bake(g, |d| (d[2] * p.frequency).sin() * p.gain) }
+///     |p, _i| bake(&p.shape.filled(0.0), |d| (d[2] * p.frequency).sin() * p.gain) }
 /// ```
 ///
 /// ⚠ 它与 `px_op!` 的差别**只在身份那一半**：
@@ -248,7 +246,7 @@ where
 #[macro_export]
 macro_rules! px_local_op {
     ($(#[$meta:meta])* $name:ident, $id:literal, $params:ty, $inputs:ty, $payload:ty,
-     |$p:ident, $i:ident, $g:ident| $body:expr) => {
+     |$p:ident, $i:ident| $body:expr) => {
         $(#[$meta])*
         impl ::px_graph_schema::PxOp for $name {
             const ID: &'static str = $id;
@@ -276,7 +274,6 @@ macro_rules! px_local_op {
                 &self,
                 $p: &$params,
                 $i: &$inputs,
-                $g: ::px_graph_schema::Grid,
             ) -> ::core::result::Result<$payload, ::std::string::String> {
                 ::core::result::Result::Ok($body)
             }
@@ -286,30 +283,40 @@ macro_rules! px_local_op {
 
 #[cfg(test)]
 mod tests {
-    use px_graph_schema::Build;
 
-    /// **哪些域的产物尺寸就是画布** —— 这条决定键里要不要掺画布。
+    /// **尺寸只出现在"产出场的生成类算子"的参数里** —— 这决定"改尺寸要不要重算"。
     ///
-    /// 病根：一刀切都会错。
-    /// * 都掺 ⇒ 改画布连带重烘体积/网格（它们的尺寸由参数给，与画布无关）。
-    /// * 都不掺 ⇒ 场出现「同一个键、不同分辨率」。
+    /// ⚠ 从前这是靠每域手写一条 `Build::RESOLUTION_IS_CANVAS` 声明来回答的（"场的分辨率
+    ///   就是画布，体积/网格不是"）。用户 2026-09-27 的裁定之后**没有画布了**：尺寸与投影
+    ///   是**参数**（`field.*` 那几档的 `Shape`）⇒ 这条性质现在是**结构性的**：
+    ///   参数里有 `shape` 的算子改尺寸必换键；参数里没有的（体积/网格）自然不受影响。
     #[test]
-    fn only_the_field_domain_bakes_the_canvas_into_its_size() {
-        assert!(
-            <px_field_schema::field::Field as Build>::RESOLUTION_IS_CANVAS,
-            "场的分辨率就是画布 ⇒ 画布必须进键"
+    fn only_the_field_generators_carry_a_shape_parameter() {
+        let field = px_graph_schema::canonical_params(
+            &<px_field_schema::ops::Fbm as px_graph_schema::PxOp>::Params::default(),
         );
         assert!(
-            !<px_volume_schema::VolumeData as Build>::RESOLUTION_IS_CANVAS,
-            "体积的分辨率由参数（res/layers）给 ⇒ 画布与它无关"
+            field.contains("\"shape\""),
+            "场生成类算子的参数里没有 `shape`：{field}"
         );
-        assert!(
-            !<px_mesh_schema::MeshData as Build>::RESOLUTION_IS_CANVAS,
-            "网格的尺寸由参数给 ⇒ 画布与它无关"
-        );
-        // 顺带把"相机口径"也读一遍（`cached` 用它，不再有并行的 `OpKind`）。
-        assert!(<px_field_schema::field::Field as Build>::WITH_CAMERAS);
-        assert!(!<px_volume_schema::VolumeData as Build>::WITH_CAMERAS);
-        assert!(<px_mesh_schema::MeshData as Build>::WITH_CAMERAS);
+        for (name, params) in [
+            (
+                "体积",
+                px_graph_schema::canonical_params(
+                    &<px_volume_schema::ops::Density as px_graph_schema::PxOp>::Params::default(),
+                ),
+            ),
+            (
+                "网格",
+                px_graph_schema::canonical_params(
+                    &<px_mesh_schema::ops::CubeSphere as px_graph_schema::PxOp>::Params::default(),
+                ),
+            ),
+        ] {
+            assert!(
+                !params.contains("\"shape\""),
+                "{name} 算子的参数里冒出了 `shape`（尺寸该由它自己的参数说）：{params}"
+            );
+        }
     }
 }

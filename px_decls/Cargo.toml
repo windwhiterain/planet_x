@@ -15,6 +15,7 @@ px_graph_schema = { path = "../px_graph_schema" }
 px_field_schema = { path = "../px_field_schema" }
 px_volume_schema = { path = "../px_volume_schema" }
 px_mesh_schema = { path = "../px_mesh_schema" }
+px_nurbs_schema = { path = "../px_nurbs_schema" }
 
 [build-dependencies]
 # ⚠ 与各 schema / 实现库同一份算法：本 crate 也在**若干份名册**里（它是实现库的

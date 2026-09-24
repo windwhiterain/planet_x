@@ -12,9 +12,8 @@ use px_field_schema::field::Field;
 use px_field_schema::ops::Warp3;
 use px_field_schema::params;
 use px_field_schema::volume::{VolumeShape, local_voxel_of};
-use px_graph_schema::Grid;
 
-px_graph_schema::px_body! { Warp3, |p, i, g| crate::ops::warp3::eval(
+px_graph_schema::px_body! { Warp3, |p, i| crate::ops::warp3::eval(
     p,
     &[
         i.field.value(),
@@ -22,21 +21,21 @@ px_graph_schema::px_body! { Warp3, |p, i, g| crate::ops::warp3::eval(
         i.offset_b.value(),
         i.offset_c.value(),
     ],
-    g,
 ) }
 
-pub fn eval(params: &params::Warp3Params, inputs: &[&Field], grid: Grid) -> Field {
+pub fn eval(params: &params::Warp3Params, inputs: &[&Field]) -> Field {
     let [source, offset_a, offset_b, offset_c] = inputs else {
         panic!(
             "field.warp3 要 4 张上游场（待扭曲的场 + 三个轴的偏移场），拿到 {}",
             inputs.len()
         );
     };
-    let shape = VolumeShape::of(&grid).unwrap_or_else(|| {
+    // ⚠ 输出与**第一张上游场**（待扭曲那张）同形：形状只有一个来源。
+    let shape = VolumeShape::of_field(source).unwrap_or_else(|| {
         panic!(
-            "field.warp3 要一张体网格画布（域 volume、行数 = res × layers × 6），\
+            "field.warp3 要一张体网格（域 volume、行数 = res × layers × 6），\
              拿到的是 {:?} {}×{}",
-            grid.projection, grid.width, grid.height
+            source.projection, source.width, source.height
         )
     });
     for (name, field) in [
@@ -65,7 +64,7 @@ pub fn eval(params: &params::Warp3Params, inputs: &[&Field], grid: Grid) -> Fiel
     // 三个轴的权重：`axial = 0` ⇒ 只沿径向挪（第三张偏移场说了算）。
     let weight = [axial, axial, 1.0];
 
-    let mut field = Field::filled_with(shape.res, shape.height(), 0.0, grid.projection);
+    let mut field = source.like(0.0);
     for y in 0..field.height {
         let (face, _) = shape.slot_of(y).expect("行号在形状之内");
         for x in 0..field.width {
@@ -161,13 +160,35 @@ mod tests {
     use super::*;
     use px_field_schema::field::CUBE_FACES;
     use px_field_schema::field::Projection;
+    use px_field_schema::params::Shape;
 
-    fn grid(res: u32, layers: u32) -> Grid {
-        Grid {
+    /// 体网格那一档的形状参数（`width = res`、`height = res × layers × 6`）。
+    fn shape_of(res: u32, layers: u32) -> Shape {
+        Shape {
             width: res,
             height: res * layers * CUBE_FACES,
             projection: Projection::Volume,
         }
+    }
+
+    /// 一张体网格 fbm3（⚠ 这一档是生成类算子，尺寸由**参数**给）。
+    fn fbm3(shape: Shape, seed: u32) -> Field {
+        crate::ops::fbm3::eval(
+            &params::Fbm3Params {
+                seed,
+                shape,
+                ..Default::default()
+            },
+            &[],
+        )
+    }
+
+    /// 上游场：默认参数的那张 fbm3，尺寸换成 `shape`。
+    fn source_field(shape: VolumeShape) -> Field {
+        fbm3(
+            shape_of(shape.res, shape.layers),
+            params::Fbm3Params::default().seed,
+        )
     }
 
     fn sheet(res: u32, layers: u32, value: f32) -> Field {
@@ -191,8 +212,7 @@ mod tests {
     #[test]
     fn the_sampler_returns_the_texel_it_was_pointed_at() {
         let shape = VolumeShape { res: 8, layers: 4 };
-        let grid = grid(shape.res, shape.layers);
-        let source = crate::ops::fbm3::eval(&params::Fbm3Params::default(), &[], grid);
+        let source = source_field(shape);
         let mut worst = 0.0_f32;
         let mut worst_at = (0_u32, 0_u32, 0_u32, 0.0, 0.0);
         for face in 0..CUBE_FACES {
@@ -226,9 +246,8 @@ mod tests {
     #[test]
     fn zero_strength_returns_the_source_point_by_point() {
         let shape = VolumeShape { res: 8, layers: 4 };
-        let grid = grid(shape.res, shape.layers);
         // 上游用一张有起伏的场，才看得出一条"原样"到底是不是原样。
-        let source = crate::ops::fbm3::eval(&params::Fbm3Params::default(), &[], grid);
+        let source = source_field(shape);
         let flat = sheet(shape.res, shape.layers, 0.5);
         let warped = eval(
             &params::Warp3Params {
@@ -236,7 +255,6 @@ mod tests {
                 axial: 1.0,
             },
             &[&source, &flat, &flat, &flat],
-            grid,
         );
         let worst = source
             .data
@@ -255,8 +273,7 @@ mod tests {
     #[test]
     fn a_constant_offset_field_moves_nothing() {
         let shape = VolumeShape { res: 8, layers: 4 };
-        let grid = grid(shape.res, shape.layers);
-        let source = crate::ops::fbm3::eval(&params::Fbm3Params::default(), &[], grid);
+        let source = source_field(shape);
         let flat = sheet(shape.res, shape.layers, 0.5);
         let warped = eval(
             &params::Warp3Params {
@@ -264,7 +281,6 @@ mod tests {
                 axial: 1.0,
             },
             &[&source, &flat, &flat, &flat],
-            grid,
         );
         let worst = source
             .data
@@ -279,39 +295,17 @@ mod tests {
     #[test]
     fn a_varying_offset_field_actually_displaces_the_samples() {
         let shape = VolumeShape { res: 12, layers: 5 };
-        let grid = grid(shape.res, shape.layers);
-        let source = crate::ops::fbm3::eval(&params::Fbm3Params::default(), &[], grid);
-        let offset_a = crate::ops::fbm3::eval(
-            &params::Fbm3Params {
-                seed: 101,
-                ..Default::default()
-            },
-            &[],
-            grid,
-        );
-        let offset_b = crate::ops::fbm3::eval(
-            &params::Fbm3Params {
-                seed: 202,
-                ..Default::default()
-            },
-            &[],
-            grid,
-        );
-        let offset_c = crate::ops::fbm3::eval(
-            &params::Fbm3Params {
-                seed: 303,
-                ..Default::default()
-            },
-            &[],
-            grid,
-        );
+        let grid_shape = shape_of(shape.res, shape.layers);
+        let source = source_field(shape);
+        let offset_a = fbm3(grid_shape, 101);
+        let offset_b = fbm3(grid_shape, 202);
+        let offset_c = fbm3(grid_shape, 303);
         let warped = eval(
             &params::Warp3Params {
                 strength: 0.8,
                 axial: 1.0,
             },
             &[&source, &offset_a, &offset_b, &offset_c],
-            grid,
         );
         let changed = source
             .data

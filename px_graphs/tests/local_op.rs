@@ -12,9 +12,9 @@
 //!   而这一篇不该往 `art/` 写文件。那条性质由 `px_graph/tests/keys.rs`（规范 JSON 进键）
 //!   与三张真图的产物判据看着。
 
-use px_cook::{Domain, Graph, GraphSpec, begin, cached, node_params, px_local_op};
-use px_field_schema::field::{Field, GridField};
-use px_graph_schema::{Grid, PxOp};
+use px_cook::{Domain, Graph, GraphSpec, begin, cached, field_params, node_params, px_local_op};
+use px_field_schema::field::Field;
+use px_graph_schema::PxOp;
 use serde::{Deserialize, Serialize};
 
 /// 现写算子的超参数 —— 图侧自己定义（`PxKeyed` 由 derive 生成 ⇒ 加字段自动进键）。
@@ -24,6 +24,8 @@ struct BandParams {
     frequency: f32,
     gain: f32,
     axis: u32,
+    /// 产出场的**形状参数**（多大、什么投影）—— 生成类算子的尺寸由**参数**给。
+    shape: field_params::Shape,
 }
 
 impl Default for BandParams {
@@ -32,6 +34,7 @@ impl Default for BandParams {
             frequency: 6.0,
             gain: 1.0,
             axis: 2,
+            shape: field_params::Shape::default(),
         }
     }
 }
@@ -40,10 +43,11 @@ impl Default for BandParams {
 ///
 /// ⚠ 它就是"泛型算子"那一档的全部机关：泛型参数是**一段现写的代码**，
 ///   实例化发生在图程序里 —— 实现库不参与，也不需要知道 `F` 是什么。
-fn bake<F: Fn([f32; 3]) -> f32>(grid: Grid, sample: F) -> Field {
-    let mut field = grid.filled(0.0);
-    for y in 0..grid.height {
-        for x in 0..grid.width {
+/// ⚠ 形状从**参数**来（从前是驱动递进来的画布），所以它现在是这个函数的一栏入参。
+fn bake<F: Fn([f32; 3]) -> f32>(shape: field_params::Shape, sample: F) -> Field {
+    let mut field = shape.filled(0.0);
+    for y in 0..shape.height {
+        for x in 0..shape.width {
             field.set(x, y, sample(field.direction(x, y)));
         }
     }
@@ -53,7 +57,7 @@ fn bake<F: Fn([f32; 3]) -> f32>(grid: Grid, sample: F) -> Field {
 /// 一个只住在本图程序里的算子：沿参数给的那根轴起波带。
 struct Band;
 
-px_local_op! { Band, "local.band", BandParams, (), Field, |p, _i, g| bake(g, |d| {
+px_local_op! { Band, "local.band", BandParams, (), Field, |p, _i| bake(p.shape, |d| {
     // ⚠ 这条闭包捕捉的是**参数**：实例化在图侧，实现库里没有它的任何痕迹。
     let axis = (p.axis as usize).min(2);
     ((d[axis] * p.frequency).sin() * 0.5 + 0.5) * p.gain
@@ -63,7 +67,7 @@ px_local_op! { Band, "local.band", BandParams, (), Field, |p, _i, g| bake(g, |d|
 /// ⇒ 图程序里有两个 `bake` 的单态化实例。
 struct Rings;
 
-px_local_op! { Rings, "local.rings", BandParams, (), Field, |p, _i, g| bake(g, |d| {
+px_local_op! { Rings, "local.rings", BandParams, (), Field, |p, _i| bake(p.shape, |d| {
     let radial = (d[0] * d[0] + d[1] * d[1]).sqrt();
     ((radial * p.frequency).cos() * 0.5 + 0.5) * p.gain
 }) }
@@ -71,11 +75,6 @@ px_local_op! { Rings, "local.rings", BandParams, (), Field, |p, _i, g| bake(g, |
 fn graph() -> Graph {
     begin(GraphSpec {
         name: "local-op".to_string(),
-        // 小画布：这一篇判的是机制，不是数值。
-        width: 8,
-        height: 4,
-        projection: Domain::Cube,
-        cameras: Vec::new(),
     })
 }
 
@@ -87,20 +86,13 @@ fn graph() -> Graph {
 #[test]
 fn a_graph_local_operator_is_a_first_class_operator() {
     // 0) 泛型实现本身：**同一份泛型函数、两个闭包 ⇒ 两个单态化实例**（这是"图侧泛型"的定义）。
-    let region = GraphSpec {
-        name: "local-op".to_string(),
+    let shape = field_params::Shape {
         width: 8,
         height: 4,
-        projection: Domain::Cube,
-        cameras: Vec::new(),
+        projection: Domain::CubeMap,
     };
-    let grid = Grid {
-        width: region.width,
-        height: region.height,
-        projection: region.projection,
-    };
-    let one = bake(grid, |_| 1.0).stats().mean;
-    let two = bake(grid, |_| 2.0).stats().mean;
+    let one = bake(shape, |_| 1.0).stats().mean;
+    let two = bake(shape, |_| 2.0).stats().mean;
     assert!(
         (one - 1.0).abs() < 1e-6 && (two - 2.0).abs() < 1e-6,
         "同一份泛型函数对两个闭包算出 {one:.4} / {two:.4} ⇒ 泛型实例没被真的分开"
@@ -113,8 +105,11 @@ fn a_graph_local_operator_is_a_first_class_operator() {
         &graph,
         "band",
         Band,
-        node_params(&graph, "band")
-            .expect("参数（这张图没有 art/local-op/band.toml ⇒ 走 Default）"),
+        BandParams {
+            shape,
+            ..node_params(&graph, "band")
+                .expect("参数（这张图没有 art/local-op/band.toml ⇒ 走 Default）")
+        },
         (),
     )
     .expect("现写的算子应当能算");
@@ -145,7 +140,10 @@ fn a_graph_local_operator_is_a_first_class_operator() {
         &graph,
         "rings",
         Rings,
-        node_params(&graph, "rings").expect("参数"),
+        BandParams {
+            shape,
+            ..node_params(&graph, "rings").expect("参数")
+        },
         (),
     )
     .expect("第二个现写算子");
@@ -154,7 +152,11 @@ fn a_graph_local_operator_is_a_first_class_operator() {
         &graph,
         "band",
         Band,
-        node_params(&graph, "band").expect("参数"),
+        // ⚠ 与上面那个 `band` **逐字段同一份参数**（键 = 内容）。
+        BandParams {
+            shape,
+            ..node_params(&graph, "band").expect("参数")
+        },
         (),
     )
     .expect("第二次");

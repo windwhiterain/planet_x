@@ -49,7 +49,7 @@ pub use material::{
     MATERIAL_BIND_GROUP, MAX_PARAMS_BYTES, MaterialLayout, PARAMS_ALIGN, PARAMS_BINDING, ParamKind,
     ParamSlot, TEXTURE_SLOTS, TextureDimension, TextureSlot,
 };
-pub use payload::{Build, PayloadBundle};
+pub use payload::PayloadBundle;
 pub use scene::{
     Address, AlphaMode, CullMode, Environment, Filter, Geometry, Light, LightKind, Material,
     Member, Object, SCENE_SCHEMA, Sampler, SceneSpec, TextureRef, Transform, Value,

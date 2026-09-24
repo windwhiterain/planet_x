@@ -25,5 +25,5 @@ fn px_volume_op_gpu(
 
 px_graph_schema::px_body! {
     SkyNebula,
-    |p, i, _g| px_volume_op_gpu(i.volume.value(), i.stars.value(), p)?
+    |p, i| px_volume_op_gpu(i.volume.value(), i.stars.value(), p)?
 }

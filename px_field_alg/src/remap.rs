@@ -27,9 +27,8 @@
 //!   搭成一个 [`Scale`] 再交给同一个 [`map_grid`]。planet/desert 那 14 份产物与搬出去之前
 //!   **逐字节相同**，就是这条的判据。
 
-use px_field_schema::field::{Field, GridField, Projection};
+use px_field_schema::field::{Field, Projection};
 use px_field_schema::params::RemapParams;
-use px_graph_schema::Grid;
 
 use crate::field_fn::{FieldFn, Sampled};
 
@@ -128,8 +127,11 @@ impl Scale {
     }
 }
 
-/// **唯一那条循环**：按格点遍历 `grid`，每一格问上游要 `(值, 坐标, 方向)`、问 [`Cell`] 要这一格的
-/// 值，再按尺子映到输出值域。
+/// **唯一那条循环**：按格点遍历**上游那张场的形状**，每一格问上游要 `(值, 坐标, 方向)`、
+/// 问 [`Cell`] 要这一格的值，再按尺子映到输出值域。
+///
+/// ⚠ 输出**与上游同形**（从前由调用点给一张"画布"，还要求它必须与上游同形 ——
+///   那条要求现在是结构性的：形状只有一个来源）。
 ///
 /// ⚠ 它不认识"这一格的值是什么"：`cell` 是个口子（预置那一档是"照抄上游"，实例那一档是
 ///   `art/inst/*.rs` 里那个函数）；"上游从哪来"也是 —— 但今天两条入口的上游**都是**那张
@@ -142,16 +144,15 @@ pub fn map_grid<C: Cell>(
     gamma: f32,
     upstream: &Field,
     cell: &C,
-    grid: Grid,
 ) -> Field {
-    let mut field = grid.filled(0.0);
+    let mut field = upstream.like(0.0);
     // ⚠ **体网格没有"一个方向"这回事**（`Domain::Volume` 的每一格多一维径向层）⇒
     //   `uv` / `direction` 在工作量上是"逐格白算"，在契约上是**当场炸**。
     //   这一档是**逐格值域映射**（点态）：它根本用不到这两个量 ⇒ 体网格上给 (0,0)/+Y 占位。
     //   球面那几个域照旧（行星美术里"纬向条带 / 极冠"那类函数只能拿方向算）。
     let spherical = upstream.projection != Projection::Volume;
-    for y in 0..grid.height {
-        for x in 0..grid.width {
+    for y in 0..field.height {
+        for x in 0..field.width {
             let t = scale.normalize(upstream.at(x, y));
             let (u, v) = if spherical {
                 upstream.uv(x, y)
@@ -185,13 +186,12 @@ pub fn map_grid<C: Cell>(
 ///   `params::remap::Params` 给的，`RemapParams`（`gain` / `bias` / `bands`）是**给图侧函数
 ///   读的** —— 预置这一档没有图侧函数，所以递进去的是 `RemapParams::default()`（`Sampled`
 ///   本来也不看它）。
-pub fn remap_sampled(scale: &Scale, gamma: f32, input: &Field, grid: Grid) -> Field {
+pub fn remap_sampled(scale: &Scale, gamma: f32, input: &Field) -> Field {
     remap_with(
         scale,
         &RemapParams::default(),
         gamma,
         input,
-        grid,
         &Sampled { field: input },
     )
 }
@@ -230,10 +230,9 @@ pub fn remap_with<F: Cell>(
     params: &RemapParams,
     gamma: f32,
     upstream: &Field,
-    grid: Grid,
     field_fn: &F,
 ) -> Field {
-    map_grid(scale, params, gamma, upstream, field_fn, grid)
+    map_grid(scale, params, gamma, upstream, field_fn)
 }
 
 #[cfg(test)]
@@ -241,12 +240,9 @@ mod tests {
     use super::*;
     use px_field_schema::field::Projection;
 
-    fn grid() -> Grid {
-        Grid {
-            width: 37,
-            height: 23,
-            projection: Projection::Equirect,
-        }
+    /// 一张 37×23 的对照场（形状就是判据里那一档 —— 画布没了，形状跟着场走）。
+    fn sample_field() -> Field {
+        Field::filled_with(37, 23, 0.0, Projection::Equirect)
     }
 
     /// **`gamma` 把中灰压下去、把尖峰留住**（"大片空 + 少数浓"那个形状）。
@@ -270,14 +266,9 @@ mod tests {
             out_max: 1.0,
             smooth: false,
         };
-        // ⚠ 画布必须与输入那张场**同形**（map_grid 按画布逐格读上游）。
-        let small = Grid {
-            width: 6,
-            height: 6,
-            projection: Projection::Equirect,
-        };
-        let plain = remap_sampled(&scale, 1.0, &input, small);
-        let bent = remap_sampled(&scale, 3.0, &input, small);
+        // ⚠ 输出与输入**同形**（形状只有一个来源：上游那张场）。
+        let plain = remap_sampled(&scale, 1.0, &input);
+        let bent = remap_sampled(&scale, 3.0, &input);
         let mut worst_low = f32::INFINITY;
         let mut worst_high = 0.0_f32;
         for index in 0..plain.data.len() {
@@ -297,10 +288,10 @@ mod tests {
     }
 
     /// `(值, 坐标)` 的**对照输入**：故意让值越过 `[0,1]` 的边界。
-    fn input(grid: Grid) -> Field {
-        let mut field = grid.filled(0.0);
-        for y in 0..grid.height {
-            for x in 0..grid.width {
+    fn input(field: &Field) -> Field {
+        let mut field = field.like(0.0);
+        for y in 0..field.height {
+            for x in 0..field.width {
                 let (u, v) = field.uv(x, y);
                 field.set(x, y, (u * 3.0 - v * 1.5).sin() * 0.5 + 0.5);
             }
@@ -312,20 +303,13 @@ mod tests {
     /// 那是"同一条计算路径"的判据（两条入口共用 `map_grid`）。
     #[test]
     fn an_identity_field_function_is_the_preset_entry_bit_for_bit() {
-        let grid = grid();
+        let grid = sample_field();
         let scale = identity();
         let params = RemapParams::default();
-        let input = input(grid);
+        let input = input(&grid);
 
-        let preset = remap_sampled(&scale, 1.0, &input, grid);
-        let generic = remap_with(
-            &scale,
-            &params,
-            1.0,
-            &input,
-            grid,
-            &Sampled { field: &input },
-        );
+        let preset = remap_sampled(&scale, 1.0, &input);
+        let generic = remap_with(&scale, &params, 1.0, &input, &Sampled { field: &input });
         assert_eq!(preset, generic, "同一条路径上两种入口算出了不同的场");
     }
 
@@ -333,10 +317,10 @@ mod tests {
     /// **这一格的球面方向**。
     #[test]
     fn the_field_function_sees_the_normalized_upstream_and_the_texel_center() {
-        let grid = grid();
+        let grid = sample_field();
         let scale = identity();
         let params = RemapParams::default();
-        let input = input(grid);
+        let input = input(&grid);
 
         let seen = std::cell::RefCell::new(Vec::new());
         struct Record<'a> {
@@ -354,7 +338,7 @@ mod tests {
                 upstream
             }
         }
-        let _ = remap_with(&scale, &params, 1.0, &input, grid, &Record { seen: &seen });
+        let _ = remap_with(&scale, &params, 1.0, &input, &Record { seen: &seen });
 
         let seen = seen.into_inner();
         assert_eq!(seen.len(), (grid.width * grid.height) as usize);
@@ -382,9 +366,9 @@ mod tests {
     /// 这一条把那条路钉住：场函数回什么，输出就得是什么。
     #[test]
     fn the_node_params_reach_the_field_function() {
-        let grid = grid();
+        let grid = sample_field();
         let scale = identity();
-        let input = input(grid);
+        let input = input(&grid);
         let params = RemapParams {
             gain: 0.0,
             bias: 0.25,
@@ -405,7 +389,7 @@ mod tests {
         }
 
         // 恒等尺子 ⇒ 输出就是场函数回的那个数（每一格都一样）。
-        let field = remap_with(&scale, &params, 1.0, &input, grid, &ReadsParams);
+        let field = remap_with(&scale, &params, 1.0, &input, &ReadsParams);
         assert!(
             field.data.iter().all(|value| (value - 0.25).abs() < 1e-9),
             "节点参数没到图侧函数（输出不是 `bias`）"
@@ -415,7 +399,7 @@ mod tests {
             bias: 0.75,
             ..params
         };
-        let field = remap_with(&scale, &other, 1.0, &input, grid, &ReadsParams);
+        let field = remap_with(&scale, &other, 1.0, &input, &ReadsParams);
         assert!(
             field.data.iter().all(|value| (value - 0.75).abs() < 1e-9),
             "换了参数内容却没换"

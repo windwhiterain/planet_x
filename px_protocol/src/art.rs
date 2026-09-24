@@ -298,6 +298,57 @@ pub fn octahedral_uv_y_up(direction: [f32; 3]) -> [f32; 2] {
     octahedral_uv([direction[0], -direction[2], direction[1]])
 }
 
+/// **折线**（曲线算子的产物）：一串顶点 + **线段**（两个下标一段）。
+///
+/// ⚠ 为什么它不借 `MeshData` 的壳：折线**不是**一张曲面 —— 它没有法线、没有面积，
+///   而 `MeshData` 说的三件事（"每个顶点一个法线""索引三个一组是三角形""三角形数"
+///   这个读数）都不成立。硬塞进去只能靠零面积三角形假装，于是三角形那一侧读出来的
+///   是一堆退化面、`triangles()` 这个读数在说谎。
+///
+/// ⚠ 与 `MeshData` 同一条口径：形状（顶点数 / 下标个数）走清单参数或 blob 头，
+///   数据一律 `f32` / `u32` 原样，一个都不重排。
+pub const POLYLINE_ATTRIBUTES: [&str; 2] = ["positions", "indices"];
+pub const POLYLINE_POSITION: usize = 0;
+pub const POLYLINE_INDEX: usize = 1;
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct PolylineData {
+    pub positions: Vec<f32>,
+    /// 线段：`[a0, b0, a1, b1, …]`（闭合折线的最后一段接回第一个顶点）。
+    pub indices: Vec<u32>,
+}
+
+impl PolylineData {
+    pub fn vertices(&self) -> usize {
+        self.positions.len() / 3
+    }
+
+    pub fn segments(&self) -> usize {
+        self.indices.len() / 2
+    }
+
+    pub fn blobs(&self) -> Vec<Blob> {
+        vec![
+            Blob::from_f32(vec![self.vertices() as u32, 3], &self.positions),
+            Blob::from_u32(vec![self.indices.len() as u32], &self.indices),
+        ]
+    }
+
+    pub fn from_blobs(blobs: &[&Blob]) -> Result<Self, WireError> {
+        if blobs.len() < POLYLINE_ATTRIBUTES.len() {
+            return Err(WireError::TruncatedFrame);
+        }
+        let line = Self {
+            positions: blobs[POLYLINE_POSITION].f32s()?,
+            indices: blobs[POLYLINE_INDEX].u32s()?,
+        };
+        if line.positions.len() % 3 != 0 || line.indices.len() % 2 != 0 {
+            return Err(WireError::TruncatedFrame);
+        }
+        Ok(line)
+    }
+}
+
 pub const MESH_ATTRIBUTES: [&str; 4] = ["positions", "normals", "uvs", "indices"];
 pub const MESH_POSITION: usize = 0;
 pub const MESH_NORMAL: usize = 1;
@@ -547,16 +598,12 @@ impl Camera {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AssetManifest {
     pub id: String,
-    pub kind: AssetKind,
     pub params: BTreeMap<String, f64>,
     pub blobs: Vec<BlobHeader>,
     /// 载荷内容的 FNV-1a 指纹（0 = 没记过，旧产物）。
     /// diff 靠它分辨「参数一样、值不一样」—— CAS 路径能分辨，同名覆盖分辨不了。
     #[serde(default)]
     pub fingerprint: u64,
-    /// 评审相机表。空 = 这个产物没带看法，渲染器走 `--cam`。
-    #[serde(default)]
-    pub cameras: Vec<Camera>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -674,6 +721,33 @@ impl Domain {
             Self::Volume => "volume",
         }
     }
+
+    /// **域的编号**（`0..5`）—— 载荷清单参数里那一格 `projection` 用的就是它。
+    ///
+    /// ⚠ 为什么域要能**自己**在清单里留一个数：`AssetKind` 已经不再是图缓存载荷的一栏
+    ///   （它是**渲染**那一侧认资产种类的概念），而场载荷**不含**投影
+    ///   （`Field::to_blob` 只存形状）⇒ 读一份盘上的场产物时，"这一格在世界里的哪"
+    ///   就必须由**载荷自己**说清楚。编号是**冻结**的：改了它 = 旧产物读成别的域。
+    pub fn code(self) -> u8 {
+        match self {
+            Self::Equirect => 0,
+            Self::Octahedral => 1,
+            Self::Cube => 2,
+            Self::CubeMap => 3,
+            Self::Volume => 4,
+        }
+    }
+
+    pub fn from_code(code: u8) -> Option<Self> {
+        match code {
+            0 => Some(Self::Equirect),
+            1 => Some(Self::Octahedral),
+            2 => Some(Self::Cube),
+            3 => Some(Self::CubeMap),
+            4 => Some(Self::Volume),
+            _ => None,
+        }
+    }
 }
 
 /// 体网格的**画布尺寸**：`(res, res × layers × 6)`。
@@ -786,10 +860,6 @@ pub fn uv_of(domain: Domain, direction: [f32; 3], width: u32, _height: u32) -> [
 pub enum AssetChange {
     Added,
     Removed,
-    Kind {
-        before: AssetKind,
-        after: AssetKind,
-    },
     /// 载荷指纹不同 ⇒ 同样的参数烘出了不一样的值（最硬的一档）。
     Content,
     /// 哪些参数变了（含新增/删除）。
@@ -808,7 +878,6 @@ impl AssetChange {
         match self {
             Self::Added => "新增".to_string(),
             Self::Removed => "移除".to_string(),
-            Self::Kind { before, after } => format!("类型 {before:?}→{after:?}"),
             Self::Content => "内容变了".to_string(),
             Self::Params { keys } => format!("参数变了（{}）", keys.join(",")),
             Self::Shape { before, after } => {
@@ -907,12 +976,6 @@ pub fn diff(before: &ArtBundle, after: &ArtBundle) -> Diff {
 }
 
 fn classify(before: &AssetManifest, after: &AssetManifest) -> Option<AssetChange> {
-    if before.kind != after.kind {
-        return Some(AssetChange::Kind {
-            before: before.kind,
-            after: after.kind,
-        });
-    }
     if before.fingerprint != 0 && after.fingerprint != 0 && before.fingerprint != after.fingerprint
     {
         return Some(AssetChange::Content);
@@ -948,14 +1011,12 @@ mod tests {
         params.insert("relief".to_string(), relief);
         AssetManifest {
             id: id.to_string(),
-            kind: AssetKind::Field2D,
             params,
             blobs: vec![BlobHeader {
                 dtype: DType::F32,
                 shape: shape.to_vec(),
             }],
             fingerprint,
-            cameras: Vec::new(),
         }
     }
 
@@ -1007,15 +1068,17 @@ mod tests {
         assert_eq!(report.touched().len(), 2);
     }
 
+    /// ⚠ **相机不进产物**（2026-09-27：相机是**场景脚本**的数据 ⇒ 这一条判据连同
+    ///   `AssetManifest.cameras` 一起删了）。这里改为钉住"**参数变了才算变化**"：
+    ///   参数是产物内容的一部分（`diff` 靠它分辨「同名覆盖」）。
     #[test]
-    fn a_camera_change_is_not_a_payload_change() {
-        let mut before = manifest("height", 7, 0.3, [4, 4]);
-        let mut after = before.clone();
-        before.cameras = vec![Camera::new([0.0, 0.0, 1.0], 3.15, "front")];
-        after.cameras = vec![Camera::new([1.0, 1.0, 1.0], 1.4, "corner")];
+    fn a_param_change_is_a_payload_change() {
+        let before = manifest("height", 7, 0.3, [4, 4]);
+        let mut after = manifest("height", 7, 0.3, [4, 4]);
+        after.params.insert("shift".to_string(), 1.0);
         assert!(
-            diff(&bundle(vec![before]), &bundle(vec![after])).is_identical(),
-            "相机表属于「怎么看」不属于「是什么」：值没变就不该算变化"
+            !diff(&bundle(vec![before]), &bundle(vec![after])).is_identical(),
+            "清单参数属于产物内容：改了它就该算变化（否则同名覆盖会静默留下旧内容）"
         );
     }
 
@@ -1172,14 +1235,4 @@ pub fn bundle_of(frames: &[crate::stream::Frame]) -> Option<&ArtBundle> {
         crate::stream::Frame::Art(bundle) => Some(bundle),
         _ => None,
     })
-}
-
-/// 一份清单里声明的评审相机（第一份带相机表的产物说了算）。
-pub fn cameras_of(bundle: &ArtBundle) -> &[Camera] {
-    bundle
-        .assets
-        .iter()
-        .find(|asset| !asset.cameras.is_empty())
-        .map(|asset| asset.cameras.as_slice())
-        .unwrap_or(&[])
 }

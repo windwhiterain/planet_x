@@ -1,7 +1,10 @@
-//! 载荷的线格式**住在 `px_protocol`**：`PayloadBundle` 就是 CAS 里那份文件的形状，
-//! 各域的 `Build` 实现也跟着**它们的载荷类型**走（孤儿规则那条口径）。
+//! 载荷的两个名字**从契约层的路径上**够得到（`px_graph_schema::payload::{Build, PayloadBundle}`）：
 //!
-//! 这里只把它接到契约层的路径上 —— `px_graph_schema::payload::{Build, PayloadBundle}`
-//! 这两个名字照旧可用，别处的 import 不必改。
+//! * `Build` 是**烘图契约**，定义在同目录的 [`crate::build`]；
+//! * `PayloadBundle` 是**线格式**，定义在 `px_protocol::payload`（CAS 里那份文件的形状，
+//!   渲染侧也读它 —— 那条边不该经过契约层）。
+//!
+//! 这一层只负责把两个名字接到一条 import 路径上，别处的 `use` 不必改。
 
-pub use px_protocol::payload::{Build, PayloadBundle};
+pub use crate::build::Build;
+pub use px_protocol::payload::PayloadBundle;

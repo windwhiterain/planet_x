@@ -1,20 +1,19 @@
-use px_field_schema::field::{Field, GridField, normalize, tangent_frame};
+use px_field_schema::field::{Field, normalize, tangent_frame};
 use px_field_schema::ops::Warp;
 use px_field_schema::params;
-use px_graph_schema::Grid;
 
 px_graph_schema::px_body! {
     Warp,
-    |p, i, g| crate::ops::warp::eval(p, &[i.field.value(), i.offset.value()], g)
+    |p, i| crate::ops::warp::eval(p, &[i.field.value(), i.offset.value()])
 }
 
-pub fn eval(params: &params::warp::Params, inputs: &[&Field], grid: Grid) -> Field {
+pub fn eval(params: &params::warp::Params, inputs: &[&Field]) -> Field {
     let (input, warp) = (inputs[0], inputs[1]);
-    let mut field = grid.filled(0.0);
+    let mut field = input.like(0.0);
 
-    for y in 0..grid.height {
-        for x in 0..grid.width {
-            let direction = grid.direction(x, y);
+    for y in 0..field.height {
+        for x in 0..field.width {
+            let direction = field.direction(x, y);
             let (east, north) = tangent_frame(direction);
             let first = warp.sample_direction(direction) - 0.5;
             let probed = normalize([
@@ -66,11 +65,6 @@ mod tests {
                 //   这回事的域不该混进来（用户 2026-09-20 的口径：3D 用独立的算子）。
                 Projection::Volume => continue,
             };
-            let grid = Grid {
-                width,
-                height,
-                projection,
-            };
             let mut input = Field::filled_with(width, height, 0.0, projection);
             for y in 0..height {
                 for x in 0..width {
@@ -78,7 +72,7 @@ mod tests {
                 }
             }
             let flat = Field::filled_with(width, height, 0.5, projection);
-            let warped = eval(&params, &[&input, &flat], grid);
+            let warped = eval(&params, &[&input, &flat]);
 
             let mut worst = 0.0_f32;
             for y in 0..height {

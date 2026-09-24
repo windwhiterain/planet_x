@@ -1,0 +1,21 @@
+[package]
+name = "px_nurbs_op"
+version = "0.1.0"
+edition = "2024"
+
+# ⚠ **只有 dylib**：这一份是**运行时按身份装载**的实现库（`px_graph_schema::ops`），
+#   不是任何人的 cargo 依赖 —— 一旦被图程序依赖，"改一行实现不重编图程序"就没了
+#   （那条性质由 `px_graphs/tests/crate_graph.rs` 看着）。
+[lib]
+crate-type = ["dylib"]
+
+[dependencies]
+# 契约（`PxOp` / 装载 / `Build`）+ NURBS 域的数据与**声明**（算法不吃声明，但符号签名要用它）。
+px_graph_schema = { path = "../px_graph_schema" }
+px_nurbs_schema = { path = "../px_nurbs_schema" }
+# 细分吐的是网格载荷：`MeshData` 与它的 blob 布局住线格式那一层。
+px_protocol = { path = "../px_protocol" }
+
+[build-dependencies]
+# 源码指纹（身份的那一半：进键的"实现是哪一份"）用它，与键里的哈希同一个算法。
+px_fingerprint = { path = "../px_fingerprint" }

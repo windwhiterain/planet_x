@@ -7,19 +7,18 @@ use px_field_schema::field::Field;
 use px_field_schema::noise::FbmSettings;
 use px_field_schema::ops::Ridged3;
 use px_field_schema::params;
-use px_field_schema::volume::{VolumeShape, voxel_of};
-use px_graph_schema::Grid;
+use px_field_schema::volume::voxel_of;
 
 use crate::noise;
 
-px_graph_schema::px_body! { Ridged3, |p, _i, g| crate::ops::ridged3::eval(p, &[], g) }
+px_graph_schema::px_body! { Ridged3, |p, _i| crate::ops::ridged3::eval(p, &[]) }
 
-pub fn eval(params: &params::Ridged3Params, _inputs: &[&Field], grid: Grid) -> Field {
-    let shape = VolumeShape::of(&grid).unwrap_or_else(|| {
+pub fn eval(params: &params::Ridged3Params, _inputs: &[&Field]) -> Field {
+    let shape = params.shape.volume_shape().unwrap_or_else(|| {
         panic!(
             "field.ridged3 要一张体网格画布（域 volume、行数 = res² × layers × 6），\
              拿到的是 {:?} {}×{}",
-            grid.projection, grid.width, grid.height
+            params.shape.projection, params.shape.width, params.shape.height
         )
     });
     let settings = FbmSettings {
@@ -48,7 +47,7 @@ pub fn eval(params: &params::Ridged3Params, _inputs: &[&Field], grid: Grid) -> F
             }
         }
     });
-    Field::with_projection(shape.res, shape.height(), data, grid.projection)
+    Field::with_projection(shape.res, shape.height(), data, params.shape.projection)
 }
 
 #[cfg(test)]
@@ -56,9 +55,12 @@ mod tests {
     use super::*;
     use px_field_schema::field::CUBE_FACES;
     use px_field_schema::field::Projection;
+    use px_field_schema::params::Shape;
+    use px_field_schema::volume::VolumeShape;
 
-    fn grid(res: u32, layers: u32) -> Grid {
-        Grid {
+    /// 体网格那一档的形状参数（`width = res`、`height = res × layers × 6`）。
+    fn shape_of(res: u32, layers: u32) -> Shape {
+        Shape {
             width: res,
             height: res * layers * CUBE_FACES,
             projection: Projection::Volume,
@@ -70,9 +72,11 @@ mod tests {
     fn the_ridges_are_normalised_and_vary_through_the_volume() {
         let shape = VolumeShape { res: 8, layers: 5 };
         let field = eval(
-            &params::Ridged3Params::default(),
+            &params::Ridged3Params {
+                shape: shape_of(shape.res, shape.layers),
+                ..Default::default()
+            },
             &[],
-            grid(shape.res, shape.layers),
         );
         let stats = field.stats();
         assert!(stats.min >= 0.0 && stats.max <= 1.0, "{stats:?}");
@@ -91,15 +95,15 @@ mod tests {
     ///   种子都在变，方向才是这一栏的语义。
     #[test]
     fn a_larger_sharpness_makes_the_ridges_thinner() {
-        let grid = grid(16, 4);
+        let shape = shape_of(16, 4);
         let share = |sharpness: f32| -> f64 {
             let field = eval(
                 &params::Ridged3Params {
                     sharpness,
+                    shape,
                     ..Default::default()
                 },
                 &[],
-                grid,
             );
             let high = field.data.iter().filter(|value| **value > 0.5).count();
             high as f64 / field.data.len() as f64

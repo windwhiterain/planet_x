@@ -32,6 +32,9 @@ px_volume_gpu_op = { path = "../px_volume_gpu_op" }
 #   （探针不许在源码里抄一份星场参数 —— 抄一份就是"量的是另一份星场"）。
 px_sparse = { path = "../px_sparse" }
 px_graph = { path = "../px_graph" }
+# ⚠ 读盘上那份产物要 `Build::decode`（编解码那一半住契约层：`px_graph_schema::build`）。
+px_graph_schema = { path = "../px_graph_schema" }
 toml = "0.8"
 # sphere_probe 用：写 PNG（渲染器 shot::write_png 用的是同一套 image crate）
 image = "0.25"
+

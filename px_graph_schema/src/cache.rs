@@ -3,22 +3,13 @@
 //! `cached`（`px_cook`）只认识这几个方法；驱动（`px_graph`）实现它。
 //! 两边都不需要知道对方的算子长什么样 —— 所以这一层必须比驱动低。
 
-use px_protocol::art::Camera;
-
+use crate::Key;
 use crate::payload::PayloadBundle;
-use crate::{Grid, Key};
 
 /// **缓存机制**：图脚本那边的类型化门面（`px_cook`）只认这一个接口。
 ///
-/// ⚠ 它**不认识任何算子** —— 报上下文、读参数原文、查/写 CAS、记读数，就这四件事。
+/// ⚠ 它**不认识任何算子** —— 报上下文、读参数原文、查/写 CAS、记读数，就这几件事。
 pub trait Cache {
-    /// **画布 = 算子拿到的那个 `Grid`**（尺寸 + 投影）。
-    ///
-    /// ⚠ 只有一个出口：键里那一份与算子 `render` 手里那一份必须是同一个值。
-    ///   从前它们是两处（`canvas()` + `projection()` 给键、`cached` 的参数给算子）——
-    ///   那种"双份真相"是错的。
-    fn grid(&self) -> Grid;
-    fn cameras(&self) -> &[Camera];
     /// `art/<图>/<name>.toml` 的原文；`None` = 文件不存在 ⇒ 用算子默认值。
     fn params_text(&self, name: &str) -> Option<String>;
     /// 记一条"这个节点读了哪些参数"（诊断用：写进 `<图>/params.json`）。
@@ -46,8 +37,6 @@ pub struct Report<'a> {
     pub key: Key,
     pub hit: bool,
     pub millis: u64,
-    /// 体积那一档不掺评审相机。
-    pub with_cameras: bool,
     /// 这份产物"长什么样"，**由域自己说**（类型化的值在它手里，不必让驱动解字节去猜）。
     pub detail: String,
 }

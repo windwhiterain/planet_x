@@ -114,10 +114,6 @@ fn main() {
     // ⚠ 这张图**一个节点都不走缓存**：`begin` 只要它那一行摘要（图名 / 参数目录 / 缓存条数）。
     let _graph = px_cook::begin(px_cook::GraphSpec {
         name: "passdoc".to_string(),
-        width: 0,
-        height: 0,
-        projection: px_protocol::art::Domain::Cube,
-        cameras: Vec::new(),
     });
 
     // 位置参数：<场景产物> <pass 配方> [输出路径]；开关：--frame <名> / --no-frame-graph。

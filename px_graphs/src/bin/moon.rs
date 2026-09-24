@@ -14,7 +14,7 @@
 //! 渲染：`px run scene orbit-moon`（配方在 `art/scene/orbit-moon.toml`）。
 
 use px_cook::{
-    Domain, GraphSpec, artifact_path_of, begin, cached, cameras, field, mesh, node_params,
+    Domain, GraphSpec, artifact_path_of, begin, cached, field, field_params, mesh, node_params,
 };
 
 type Fault = Box<dyn std::error::Error>;
@@ -22,18 +22,23 @@ type Fault = Box<dyn std::error::Error>;
 fn main() -> Result<(), Fault> {
     let graph = begin(GraphSpec {
         name: "moon".to_string(),
+    });
+
+    let shape = field_params::Shape {
         width: 780,
         height: 520,
         projection: Domain::Cube,
-        cameras: cameras::review(),
-    });
+    };
 
     // 基础地形：比行星更平（卫星没有板块运动，起伏靠撞击）。
     let terra = cached(
         &graph,
         "terra",
         field::Fbm,
-        node_params(&graph, "terra")?,
+        field_params::fbm::Params {
+            shape,
+            ..node_params(&graph, "terra")?
+        },
         (),
     )?;
     // 三层印章：`base` 是"被打的那张场"（也当密度遮罩），每一层往上面挖。

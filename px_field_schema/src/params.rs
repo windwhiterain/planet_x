@@ -9,6 +9,68 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::field::{Field, Projection};
+
+/// **一张场的形状**：多大、什么投影。
+///
+/// ⚠ 它是**普通参数**（从前那套"画布"已经删了）：谁产出场，谁就在自己的参数里写清
+///   自己产出多大。于是"改尺寸要不要重算"由**参数表**回答 —— 参数里有它 ⇒ 改尺寸就换键
+///   （不会出现"改了尺寸却命中旧产物"）；别的域的参数里没有它 ⇒ 改它不会连带重烘它们。
+///   不必再有一条 `RESOLUTION_IS_CANVAS` 那样的声明。
+///
+/// ⚠ 投影也在这里（用户 2026-09-27 的裁定："不允许添加画布这个概念，一切皆参数"）：
+///   它是"这张场长什么样"的一部分，与长宽同一档。
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Shape {
+    pub width: u32,
+    pub height: u32,
+    pub projection: Projection,
+}
+
+impl Default for Shape {
+    fn default() -> Self {
+        Self {
+            width: 512,
+            height: 256,
+            projection: Projection::CubeMap,
+        }
+    }
+}
+
+/// ⚠ 手写（不是 `PxParams`）：`PxParams` 生成的是 `PxKeyed`，而参数 struct 的字段要的是
+///   `HashField` —— 嵌套一层就得自己写一条，口径与 derive 一样（**字段名也进键**）。
+impl px_graph_schema::HashField for Shape {
+    fn hash_field(&self, hasher: &mut px_graph_schema::blake3::Hasher) {
+        // 投影按它的 `code()`（u8）进键：`Domain` 是这个仓的线格式类型，不必再实现一遍。
+        for (label, value) in [
+            ("width", u64::from(self.width)),
+            ("height", u64::from(self.height)),
+            ("projection", u64::from(self.projection.code())),
+        ] {
+            hasher.update(label.as_bytes());
+            hasher.update(&value.to_le_bytes());
+        }
+    }
+}
+
+impl Shape {
+    /// 一张填满常数的场。
+    pub fn filled(&self, value: f32) -> Field {
+        Field::filled_with(self.width, self.height, value, self.projection)
+    }
+
+    /// 第 `(x, y)` 格对应的世界方向。
+    pub fn direction(&self, x: u32, y: u32) -> [f32; 3] {
+        crate::field::direction_at(self.width, self.height, self.projection, x, y)
+    }
+
+    /// 这份形状是不是一张体网格（域对且行数除得出整数层）。
+    pub fn volume_shape(&self) -> Option<crate::volume::VolumeShape> {
+        crate::volume::VolumeShape::of(self.width, self.height, self.projection)
+    }
+}
+
 /// **泛型实例那一档的参数**（`FieldRemap` 的 `Params`）。
 ///
 /// ⚠ 它与 [`remap::Params`] **不是**同一个类型，也**不该**合并：`remap` 是"把 `[in_min, in_max]`
@@ -63,11 +125,14 @@ pub struct Fbm3Params {
     /// ⚠ 星云的盘状/纤维状结构是**沿视线方向拉长**的，而各向同性的噪声给的是"一坨坨圆球"
     ///   ⇒ 这一栏是"云"与"絮"之间那个旋钮。`1.0` = 各向同性。
     pub zonal: f32,
+    /// 这张体网格的**形状**（多大、什么投影）—— 生成类算子的尺寸由**参数**给。
+    pub shape: Shape,
 }
 
 impl Default for Fbm3Params {
     fn default() -> Self {
         Self {
+            shape: Shape::default(),
             frequency: 3.0,
             octaves: 6,
             lacunarity: 2.0,
@@ -92,11 +157,14 @@ pub struct Ridged3Params {
     pub seed: u32,
     pub sharpness: f32,
     pub zonal: f32,
+    /// 这张体网格的**形状**（多大、什么投影）—— 生成类算子的尺寸由**参数**给。
+    pub shape: Shape,
 }
 
 impl Default for Ridged3Params {
     fn default() -> Self {
         Self {
+            shape: Shape::default(),
             frequency: 6.0,
             octaves: 5,
             lacunarity: 2.1,
@@ -132,22 +200,28 @@ impl Default for Warp3Params {
 }
 
 pub mod constant {
+    use crate::params::Shape;
     use serde::{Deserialize, Serialize};
 
     #[derive(Debug, Clone, Serialize, Deserialize, px_derive::PxParams)]
     #[serde(default, deny_unknown_fields)]
     pub struct Params {
+        pub shape: Shape,
         pub value: f32,
     }
 
     impl Default for Params {
         fn default() -> Self {
-            Self { value: 0.5 }
+            Self {
+                shape: Shape::default(),
+                value: 0.5,
+            }
         }
     }
 }
 
 pub mod fbm {
+    use crate::params::Shape;
     use serde::{Deserialize, Serialize};
 
     #[derive(Debug, Clone, Serialize, Deserialize, px_derive::PxParams)]
@@ -171,11 +245,14 @@ pub mod fbm {
         /// ⚠ 默认 `1.0` ⇒ **既有节点一位不改**（不是拿 `aspect` 来兼职：它默认 2.0，
         ///   球面档历史上忽略它，改成生效会把全仓每一张球面 fbm 都换掉）。
         pub zonal: f32,
+        /// 这张场的**形状**（多大、什么投影）—— 生成类算子的尺寸由**参数**给。
+        pub shape: Shape,
     }
 
     impl Default for Params {
         fn default() -> Self {
             Self {
+                shape: Shape::default(),
                 frequency: 4.0,
                 octaves: 6,
                 lacunarity: 2.0,
@@ -279,6 +356,7 @@ pub fn bend(value: f32, gamma: f32) -> f32 {
 }
 
 pub mod ridged {
+    use crate::params::Shape;
     use serde::{Deserialize, Serialize};
 
     #[derive(Debug, Clone, Serialize, Deserialize, px_derive::PxParams)]
@@ -292,11 +370,14 @@ pub mod ridged {
         pub aspect: f32,
         pub sharpness: f32,
         pub spherical: bool,
+        /// 这张场的**形状**（多大、什么投影）—— 生成类算子的尺寸由**参数**给。
+        pub shape: Shape,
     }
 
     impl Default for Params {
         fn default() -> Self {
             Self {
+                shape: Shape::default(),
                 frequency: 9.0,
                 octaves: 5,
                 lacunarity: 2.0,

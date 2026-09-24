@@ -42,7 +42,7 @@ use crate::stage::{self, CheckStages, Content, Registration, Stage};
 ///     .skybox(stars_member, 900.0)
 ///     .add(Registration::<Opaque, Surface>::single(surface_params), planet_object)?
 ///     .add_light(sun)
-///     .cameras(px_graph::cameras::review())
+///     .cameras(px_scene::cameras::review())
 ///     .expect("clouds")
 ///     .build()?;
 /// ```

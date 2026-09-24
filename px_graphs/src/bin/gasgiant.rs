@@ -19,7 +19,7 @@
 //!
 //! 渲染：`px run scene orbit-gasgiant`（配方在 `art/scene/orbit-gasgiant.toml`）。
 
-use px_cook::{Domain, GraphSpec, begin, cached, cameras, field, node_params};
+use px_cook::{Domain, GraphSpec, begin, cached, field, field_params, node_params};
 use px_field_schema::field::cube_map_extent;
 
 use px_graphs::insts::LatBands;
@@ -32,18 +32,23 @@ fn main() -> Result<(), Fault> {
     let (width, height) = cube_map_extent(FACE);
     let graph = begin(GraphSpec {
         name: "gasgiant".to_string(),
+    });
+
+    let shape = field_params::Shape {
         width,
         height,
         projection: Domain::CubeMap,
-        cameras: cameras::review(),
-    });
+    };
 
     // 湍流：给条带边界"挪相位"的那一张场（球面 fbm）。
     let turbulence = cached(
         &graph,
         "turbulence",
         field::Fbm,
-        node_params(&graph, "turbulence")?,
+        field_params::fbm::Params {
+            shape,
+            ..node_params(&graph, "turbulence")?
+        },
         (),
     )?;
     // 主角：纬向条带（**实例库**）。`bands` 参数就是"几圈条带"。
@@ -61,7 +66,10 @@ fn main() -> Result<(), Fault> {
         &graph,
         "swirl",
         field::Fbm,
-        node_params(&graph, "swirl")?,
+        field_params::fbm::Params {
+            shape,
+            ..node_params(&graph, "swirl")?
+        },
         (),
     )?;
     // ⚠ 主角那一步：**把条带推歪**（域扭曲）。
@@ -83,7 +91,10 @@ fn main() -> Result<(), Fault> {
         &graph,
         "spots",
         field::Fbm,
-        node_params(&graph, "spots")?,
+        field_params::fbm::Params {
+            shape,
+            ..node_params(&graph, "spots")?
+        },
         (),
     )?;
     let eddied = cached(
@@ -102,7 +113,10 @@ fn main() -> Result<(), Fault> {
         &graph,
         "filaments_raw",
         field::Fbm,
-        node_params(&graph, "filaments_raw")?,
+        field_params::fbm::Params {
+            shape,
+            ..node_params(&graph, "filaments_raw")?
+        },
         (),
     )?;
     let filaments = cached(

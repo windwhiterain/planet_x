@@ -2,18 +2,18 @@
 //!
 //! 三件事，缺一就红：
 //!
-//! 1. **表不缺**：三个 schema crate 的 `src/**` 里 `px_op!` 的**处数** == 表里条数；
+//! 1. **表不缺**：各 schema crate（`px_decls::SCHEMAS`）的 `src/**` 里 `px_op!` 的**处数** == 表里条数；
 //! 2. **表不虚**：表里每个名字都能 `decl()` 查到（且 `decl()` 只认它一个）；
 //! 3. **事实是活的**：每一条的 `interface` / `decl_hash` 都非空、三个类型路径都含自己的 crate
 //!    —— 于是"表里写死了一条过期的声明"这件事跑一次就看得见。
 //!
 //! ⚠ 数调用走的是 **`px_cook::inst_scan`**（与从前那道实例计数门**同一份**口径）：两份解析器
 //!   读同一份源码却数出不同的数（实测 21 vs 1）正是从前那道门失效的原因（`19` §180）。
-//! ⚠ 三个 schema 的顺序与 `px_decls::SCHEMAS` 一致 ⇒ 数出来的处数是**声明侧**的真数。
+//! ⚠ 顺序与 `px_decls::SCHEMAS` 一致 ⇒ 数出来的处数是**声明侧**的真数。
 
 use px_decls::{SCHEMAS, decl, entries, names, workspace_root};
 
-/// 三个 schema crate 的 `src/**` 里 `px_op!` 的**处数**。
+/// 各 schema crate（`px_decls::SCHEMAS`）的 `src/**` 里 `px_op!` 的**处数**。
 ///
 /// ⚠ 走的是 **`px_cook::inst_scan`**（与从前那道实例计数门**同一份**口径）：两份解析器
 ///   读同一份源码却数出不同的数（实测 21 vs 1）正是从前那道门失效的原因（`19` §180）。
@@ -36,7 +36,7 @@ fn the_table_has_one_row_per_px_op_declaration() {
     assert_eq!(
         found,
         listed,
-        "三个 schema 里有 {found} 处 `px_op!`，而 `px_decls::TABLE` 里登记了 {listed} 条\
+        "`SCHEMAS` 那几份 schema 里有 {found} 处 `px_op!`，而 `px_decls::TABLE` 里登记了 {listed} 条\
          （差 {}）—— 每加一个声明就要在 `px_decls/src/lib.rs` 的 `TABLE` 里加一行（\
          `TABLE` 是唯一那份清单）",
         found as i64 - listed as i64
@@ -70,7 +70,7 @@ fn every_row_resolves_by_name() {
 #[test]
 fn the_table_names_are_unique() {
     // ⚠ 单表之后新长出来的一条判据：`decl()` 找的是**第一个**同名的行 ⇒ 重名会让后面那行
-    //   永远查不到（静默），而条数门照样绿（两行算两条）。三个 schema 的命名空间是同一个，
+    //   永远查不到（静默），而条数门照样绿（两行算两条）。各 schema 的命名空间是同一个，
     //   重名本来就是"生成器不知道该写哪个路径"。
     let mut seen: Vec<&str> = Vec::new();
     for (name, _) in entries() {

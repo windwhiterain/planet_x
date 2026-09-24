@@ -1,27 +1,26 @@
-use px_field_schema::field::{Field, GridField, normalize, tangent_frame};
+use px_field_schema::field::{Field, normalize, tangent_frame};
 use px_field_schema::ops::Gradient;
 use px_field_schema::params;
-use px_graph_schema::Grid;
 
-px_graph_schema::px_body! { Gradient, |p, i, g| crate::ops::gradient::eval(p, &[i.field.value()], g) }
+px_graph_schema::px_body! { Gradient, |p, i| crate::ops::gradient::eval(p, &[i.field.value()]) }
 
-pub fn eval(params: &params::gradient::Params, inputs: &[&Field], grid: Grid) -> Field {
+pub fn eval(params: &params::gradient::Params, inputs: &[&Field]) -> Field {
     let input = inputs[0];
     let epsilon = if params.epsilon > 0.0 {
         params.epsilon
     } else {
-        let across = match grid.projection {
-            px_field_schema::field::Projection::CubeMap => grid.width,
-            _ => grid.width.max(1) / 4,
+        let across = match input.projection {
+            px_field_schema::field::Projection::CubeMap => input.width,
+            _ => input.width.max(1) / 4,
         };
         std::f32::consts::FRAC_PI_2 / across.max(1) as f32
     };
     let component = (params.component as usize).min(2);
-    let mut field = grid.filled(0.0);
+    let mut field = input.like(0.0);
 
-    for y in 0..grid.height {
-        for x in 0..grid.width {
-            let direction = grid.direction(x, y);
+    for y in 0..field.height {
+        for x in 0..field.width {
+            let direction = field.direction(x, y);
             let (east, north) = tangent_frame(direction);
             let slope_east = (input.sample_direction(step(direction, east, epsilon))
                 - input.sample_direction(step(direction, east, -epsilon)))
@@ -55,34 +54,30 @@ mod tests {
 
     const FACE: u32 = 64;
 
-    fn cube_grid() -> Grid {
-        Grid {
-            width: FACE,
-            height: FACE * 6,
-            projection: Projection::CubeMap,
-        }
+    /// 一张 CubeMap 场 —— ⚠ 过滤类算子不收形状，形状只有"上游"这一个来源。
+    fn cube_field(value: f32) -> Field {
+        Field::filled_with(FACE, FACE * 6, value, Projection::CubeMap)
     }
 
-    fn bake(grid: Grid, field: &Field, component: u32) -> Field {
+    fn bake(field: &Field, component: u32) -> Field {
         let params = params::gradient::Params {
             component,
             epsilon: 0.0,
         };
-        eval(&params, &[field], grid)
+        eval(&params, &[field])
     }
 
     #[test]
     fn a_linear_field_gives_its_tangential_projection_on_a_cube_map() {
-        let grid = cube_grid();
         for (component, axis) in [
             (0_u32, [1.0_f32, 0.0, 0.0]),
             (1, [0.0, 1.0, 0.0]),
             (2, [0.0, 0.0, 1.0]),
         ] {
-            let mut input = grid.filled(0.0);
-            for y in 0..grid.height {
-                for x in 0..grid.width {
-                    let direction = grid.direction(x, y);
+            let mut input = cube_field(0.0);
+            for y in 0..input.height {
+                for x in 0..input.width {
+                    let direction = input.direction(x, y);
                     input.set(
                         x,
                         y,
@@ -91,11 +86,11 @@ mod tests {
                 }
             }
 
-            let baked = bake(grid, &input, component);
+            let baked = bake(&input, component);
             let mut worst = 0.0_f32;
-            for y in 0..grid.height {
-                for x in 0..grid.width {
-                    let direction = grid.direction(x, y);
+            for y in 0..input.height {
+                for x in 0..input.width {
+                    let direction = input.direction(x, y);
                     let along =
                         axis[0] * direction[0] + axis[1] * direction[1] + axis[2] * direction[2];
                     let wanted = axis[component as usize] - along * direction[component as usize];
@@ -111,13 +106,12 @@ mod tests {
 
     #[test]
     fn a_flat_field_has_no_gradient_anywhere() {
-        let grid = cube_grid();
-        let input = grid.filled(0.37);
+        let input = cube_field(0.37);
         for component in 0..3 {
-            let baked = bake(grid, &input, component);
+            let baked = bake(&input, component);
             let mut worst = 0.0_f32;
-            for y in 0..grid.height {
-                for x in 0..grid.width {
+            for y in 0..input.height {
+                for x in 0..input.width {
                     worst = worst.max(baked.at(x, y).abs());
                 }
             }
@@ -127,19 +121,16 @@ mod tests {
 
     #[test]
     fn the_gradient_does_not_jump_across_a_face_edge() {
-        let grid = cube_grid();
-        let mut input = grid.filled(0.0);
-        for y in 0..grid.height {
-            for x in 0..grid.width {
-                let direction = grid.direction(x, y);
+        let mut input = cube_field(0.0);
+        for y in 0..input.height {
+            for x in 0..input.width {
+                let direction = input.direction(x, y);
                 let bump = direction[0] * 0.5 + direction[1] * 0.3 + direction[2] * 0.2;
                 input.set(x, y, bump * bump);
             }
         }
 
-        let baked: Vec<Field> = (0..3)
-            .map(|component| bake(grid, &input, component))
-            .collect();
+        let baked: Vec<Field> = (0..3).map(|component| bake(&input, component)).collect();
         let mut previous: Option<[f32; 3]> = None;
         let mut worst = 0.0_f32;
         let steps = 400;

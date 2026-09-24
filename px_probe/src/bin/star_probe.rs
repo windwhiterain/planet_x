@@ -270,11 +270,8 @@ fn lit_rings_of_artifact(
     let bytes = std::fs::read(path).map_err(|err| format!("读不到 {path}：{err}"))?;
     let bundle = px_protocol::payload::PayloadBundle::from_bytes(&bytes)
         .map_err(|err| format!("{path} 不是一份产物：{err}"))?;
-    let texture = <px_protocol::art::TextureData as px_protocol::payload::Build>::decode(
-        &bundle,
-        px_protocol::art::Domain::CubeMap,
-        "sky",
-    )?;
+    let texture =
+        <px_protocol::art::TextureData as px_graph_schema::Build>::decode(&bundle, "sky")?;
     let face = texture.width;
     if texture.format != px_protocol::art::TextureFormat::Rgba16Float {
         return Err(format!(
@@ -802,11 +799,8 @@ fn column_density(path: &str, samples: usize) -> Result<Vec<f64>, String> {
     let bytes = std::fs::read(path).map_err(|err| format!("读不到 {path}：{err}"))?;
     let bundle = px_protocol::payload::PayloadBundle::from_bytes(&bytes)
         .map_err(|err| format!("{path} 不是一份产物：{err}"))?;
-    let volume = <px_volume_schema::VolumeData as px_protocol::payload::Build>::decode(
-        &bundle,
-        px_protocol::art::Domain::Volume,
-        "density",
-    )?;
+    let volume =
+        <px_volume_schema::VolumeData as px_graph_schema::Build>::decode(&bundle, "density")?;
     let bins = 8_usize;
     // ⚠ 先自检一次：读进来的密度场均值该与烘图日志里那一行对得上（不然下面的相关是噪声）。
     {

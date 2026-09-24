@@ -6,7 +6,9 @@
 //!   （同一个 `field.fbm` 在别的图里叫别的名字，算子不该知道），想改哪个字段在 Rust 里改；
 //! * 键里多了算子的源码哈希 ⇒ 改算子体必然重算，不靠人记得升版本。
 
-use px_cook::{Domain, Graph, GraphSpec, begin, cached, cameras, field, mesh, node_params, volume};
+use px_cook::{
+    Domain, Graph, GraphSpec, begin, cached, field, field_params, mesh, node_params, volume,
+};
 use px_field_schema::field::cube_map_extent;
 use px_volume_schema::PATCHES;
 
@@ -20,11 +22,13 @@ fn main() -> Result<(), Fault> {
     let (width, height) = cube_map_extent(FACE);
     let graph = begin(GraphSpec {
         name: "clouds".to_string(),
+    });
+
+    let shape = field_params::Shape {
         width,
         height,
         projection: Domain::CubeMap,
-        cameras: cameras::review(),
-    });
+    };
 
     // ── 场：七步，每一步都是「普通函数调用 + 隐式缓存」 ───────────────────────
     // ⚠ 上游是**具名字段的普通 Rust 值**（`Unary1/2/3`），漏一个、接错域都是编译错。
@@ -33,17 +37,32 @@ fn main() -> Result<(), Fault> {
         &graph,
         "clusters",
         field::Fbm,
-        node_params(&graph, "clusters")?,
+        field_params::fbm::Params {
+            shape,
+            ..node_params(&graph, "clusters")?
+        },
         (),
     )?;
     let billows = cached(
         &graph,
         "billows",
         field::Fbm,
-        node_params(&graph, "billows")?,
+        field_params::fbm::Params {
+            shape,
+            ..node_params(&graph, "billows")?
+        },
         (),
     )?;
-    let flow = cached(&graph, "flow", field::Fbm, node_params(&graph, "flow")?, ())?;
+    let flow = cached(
+        &graph,
+        "flow",
+        field::Fbm,
+        field_params::fbm::Params {
+            shape,
+            ..node_params(&graph, "flow")?
+        },
+        (),
+    )?;
     let carved = cached(
         &graph,
         "carved",
@@ -58,7 +77,10 @@ fn main() -> Result<(), Fault> {
         &graph,
         "weight",
         field::Constant,
-        node_params(&graph, "weight")?,
+        field_params::constant::Params {
+            shape,
+            ..node_params(&graph, "weight")?
+        },
         (),
     )?;
     let mixed = cached(

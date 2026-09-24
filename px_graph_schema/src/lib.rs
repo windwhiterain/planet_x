@@ -5,7 +5,7 @@
 //! ```text
 //! px_protocol        线格式（`Frame` / `Blob` / `ArtBundle`）
 //!      ↓
-//! px_graph_schema    这一层：Key / PayloadBundle / Grid / 算子身份与契约（PxOp）+ 装载（ops）
+//! px_graph_schema    这一层：Key / PayloadBundle / 算子身份与契约（PxOp）+ 装载（ops）
 //!      ↓
 //! px_*_schema        各领域的数据、参数、以及**算子声明**（`ops.rs`：`px_op!` 那几行）
 //!      ↓
@@ -38,11 +38,13 @@ pub use cache::{Cache, Report};
 pub use contract::{Cooked, PxInputs, PxOp, interface_hash};
 pub use identity::blake3;
 pub use identity::{FNV_OFFSET, FNV_PRIME, HashField, PxKeyed, fnv1a, fnv1a_bytes, fnv1a_sources};
-pub use keys::{
-    Key, OpId, canonical_params, hex, hex_short, key_with_cameras, node_key, payload_fingerprint,
-};
-pub use payload::{Build, PayloadBundle};
-pub use protocol::{GraphSpec, Grid, ManifestEntry};
+pub use keys::{Key, OpId, canonical_params, hex, hex_short, node_key, payload_fingerprint};
+pub mod build;
+
+pub use build::Build;
+pub use protocol::{GraphSpec, ManifestEntry};
+#[doc(inline)]
+pub use px_protocol::payload::PayloadBundle;
 
 /// **契约这一份源码**的指纹（`build.rs` 按"编译进去的全部源码"算）。
 ///

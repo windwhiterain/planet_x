@@ -13,9 +13,8 @@ use std::time::Instant;
 
 use px_field_schema::field::Field;
 use px_graph_schema::Key;
-use px_protocol::art::{
-    ArtBundle, AssetKind, AssetManifest, Domain, MeshData, TextureFormat, TextureShape,
-};
+use px_protocol::art::{ArtBundle, AssetManifest, MeshData, TextureFormat, TextureShape};
+use px_protocol::payload::PayloadBundle;
 use px_protocol::stream::{self, Frame};
 use px_protocol::wire::{Blob, BlobHeader, DType};
 
@@ -23,38 +22,24 @@ use px_protocol::wire::{Blob, BlobHeader, DType};
 // 产物读取：按清单里的键读一份场（读法与渲染器 `load_field` 相同）
 // ---------------------------------------------------------------------------
 
-/// 读一份场产物。投影由清单里的 `AssetKind` 决定 —— 与渲染器 `planet::load_field`
-/// 同一套映射（`Field2D` → Equirect、`OctahedralField` → Octahedral、
-/// `CubeField` → Cube、`CubeMap` → CubeMap）。**这一步不能省**：投影决定
+/// 读一份场产物。投影取自**载荷清单里那一格**（`px_field_schema::payload::PROJECTION_KEY`）
+/// —— 与渲染器 `planet::load_field` 同一个口径。**这一步不能省**：投影决定
 /// `texel_latitude` 走哪一支、颜色贴图走 `mip_chain` 还是 `mip_chain_cube`、
 /// 要不要 `pole_cap_filter`。
+///
+/// ⚠ 它从前按清单里的 `AssetKind` 反推投影 —— 而资产种类已经不是图缓存载荷的一栏
+///   （那是**渲染**认"盘上这坨字节是什么"的概念）⇒ 由**载荷自己**说清楚。
 pub fn load_field(path: &str) -> Result<Field, String> {
     let bytes = std::fs::read(path).map_err(|err| format!("读不到 {path}：{err}"))?;
     let frames = stream::read_stream(&mut bytes.as_slice()).map_err(|err| err.to_string())?;
 
-    let mut kind = None;
-    for frame in &frames {
-        if let Frame::Art(bundle) = frame {
-            if let Some(asset) = bundle.assets.first() {
-                kind = Some(asset.kind);
-            }
-        }
-    }
-    let projection = match kind {
-        Some(AssetKind::Field2D) => Domain::Equirect,
-        Some(AssetKind::OctahedralField) => Domain::Octahedral,
-        Some(AssetKind::CubeField) => Domain::Cube,
-        Some(AssetKind::CubeMap) => Domain::CubeMap,
-        // 体网格当一张场：域是 `Volume`，形状由行列推出来（`VolumeShape::of`）。
-        Some(AssetKind::VoxelField) => Domain::Volume,
-        Some(other) => {
-            return Err(format!(
-                "{path} 是 {other:?}，星球需要 Field2D / OctahedralField / CubeField / \
-                 CubeMap / VoxelField 产物"
-            ));
-        }
-        None => return Err(format!("{path} 里没有 Art 帧")),
-    };
+    let bundle = PayloadBundle::from_bytes(&bytes)?;
+    let projection = px_field_schema::payload::stored_projection(&bundle).ok_or_else(|| {
+        format!(
+            "{path} 的场产物清单里没有 `{}`（投影）—— 它决定这一格在世界里的哪，读不了",
+            px_field_schema::payload::PROJECTION_KEY,
+        )
+    })?;
 
     let blob = frames
         .iter()
@@ -96,7 +81,6 @@ pub struct Generated {
 fn write_cas(
     root: &Path,
     id: &str,
-    kind: AssetKind,
     params: BTreeMap<String, f64>,
     blobs: Vec<Blob>,
 ) -> Result<Generated, String> {
@@ -105,11 +89,9 @@ fn write_cas(
     let bundle = ArtBundle {
         assets: vec![AssetManifest {
             id: id.to_string(),
-            kind,
             params,
             blobs: blobs.iter().map(|blob| blob.header.clone()).collect(),
             fingerprint,
-            cameras: Vec::new(),
         }],
     };
     let mut frames = vec![Frame::Art(bundle)];
@@ -137,8 +119,8 @@ fn write_cas(
     })
 }
 
-/// 把一份贴图写进 CAS：清单帧（`kind = AssetKind::Texture`、
-/// `params = TextureShape::params()`、`fingerprint` = 对载荷算的 FNV-1a 指纹）
+/// 把一份贴图写进 CAS：清单帧（`params = TextureShape::params()`、
+/// `fingerprint` = 对载荷算的 FNV-1a 指纹）—— ⚠ 清单里**没有**"资产种类"那一栏
 /// + 一个 blob（`Rgba8Srgb` → `DType::U8`；`Rgba16Float` → `DType::U16`，字节原样）。
 ///
 /// 要一个 CAS 根：默认走 [`crate::cache_root`]（纯函数，与开不开图无关）；
@@ -192,10 +174,10 @@ pub fn write_texture_at(
     )
     .map_err(|err| err.to_string())?;
 
-    write_cas(root, id, AssetKind::Texture, shape.params(), vec![blob])
+    write_cas(root, id, shape.params(), vec![blob])
 }
 
-/// 网格产物同理（`kind = AssetKind::Mesh`，用 `MeshData::blobs()`），供环用。
+/// 网格产物同理（用 `MeshData::blobs()`），供环用。
 ///
 /// 要一个 CAS 根：默认走 [`crate::cache_root`]；不方便依赖它时用 [`write_generated_mesh_at`]。
 pub fn write_generated_mesh(id: &str, mesh: &MeshData) -> Result<Generated, String> {
@@ -212,7 +194,7 @@ pub fn write_generated_mesh_at(
         ("vertices".to_string(), mesh.vertices() as f64),
         ("triangles".to_string(), mesh.triangles() as f64),
     ]);
-    write_cas(root, id, AssetKind::Mesh, params, mesh.blobs())
+    write_cas(root, id, params, mesh.blobs())
 }
 
 /// 一份生成物的指纹（与 `px_graph::write_artifact` 用的是同一个函数）。审计/对账用。

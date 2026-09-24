@@ -6,7 +6,7 @@
 //! `&[&Artifact]` 字节边界，类型全擦除）。现在接错一个输入、少给一个上游都是**编译错**。
 
 use px_cook::{
-    Domain, GraphSpec, artifact_path_of, begin, cached, cameras, field, mesh, node_params,
+    Domain, GraphSpec, artifact_path_of, begin, cached, field, field_params, mesh, node_params,
 };
 
 type Fault = Box<dyn std::error::Error>;
@@ -14,31 +14,45 @@ type Fault = Box<dyn std::error::Error>;
 fn main() -> Result<(), Fault> {
     let graph = begin(GraphSpec {
         name: "planet".to_string(),
+    });
+
+    let shape = field_params::Shape {
         width: 780,
         height: 520,
         projection: Domain::Cube,
-        cameras: cameras::review(),
-    });
+    };
+
+    // 这张图的**形状参数**：产出场的节点都拿它当自己的参数 —— 尺寸在脚本里是**一个值**，
+    // 不再有藏在驱动里的第二份真相（用户 2026-09-27 的裁定：不允许"画布"这个概念）。
 
     let continents = cached(
         &graph,
         "continents",
         field::Fbm,
-        node_params(&graph, "continents")?,
+        field_params::fbm::Params {
+            shape,
+            ..node_params(&graph, "continents")?
+        },
         (),
     )?;
     let mountains = cached(
         &graph,
         "mountains",
         field::Ridged,
-        node_params(&graph, "mountains")?,
+        field_params::ridged::Params {
+            shape,
+            ..node_params(&graph, "mountains")?
+        },
         (),
     )?;
     let weight = cached(
         &graph,
         "weight",
         field::Constant,
-        node_params(&graph, "weight")?,
+        field_params::constant::Params {
+            shape,
+            ..node_params(&graph, "weight")?
+        },
         (),
     )?;
     let terrain = cached(

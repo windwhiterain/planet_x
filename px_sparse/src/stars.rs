@@ -11,9 +11,8 @@
 
 use std::ops::Range;
 
-use px_protocol::art::AssetKind;
-use px_protocol::art::Domain;
-use px_protocol::payload::{Build, PayloadBundle};
+use px_graph_schema::Build;
+use px_protocol::payload::PayloadBundle;
 use px_protocol::wire::Blob;
 use std::collections::BTreeMap;
 
@@ -125,13 +124,6 @@ impl StarField {
 /// 星表的 blob：`[n, STRIDE]` 一段 f32（**索引住清单参数**）。
 impl Build for StarField {
     /// 星场没人看（渲染器不读它，只喂天空与光照烘焙）⇒ 不掺评审相机。
-    const WITH_CAMERAS: bool = false;
-    /// 星的位置与亮度全由参数给 ⇒ 画布与它无关。
-    ///
-    /// ⚠ 这一条**是两张图共用一份星场的前提**：画布不进键 ⇒ `nebula` 图
-    ///   （`cloud.emission` 用）与 `nebulasky` 图（`sky.nebula` 用）里同名同参的节点
-    ///   解析到**同一个键**，CAS 只存一份。
-    const RESOLUTION_IS_CANVAS: bool = false;
 
     fn detail(payload: &Self) -> String {
         let mut min = f32::INFINITY;
@@ -179,7 +171,6 @@ impl Build for StarField {
             ),
         ];
         Ok(PayloadBundle::new(
-            AssetKind::StarField,
             BTreeMap::from([
                 ("cell".to_string(), meta.cell as f64),
                 ("origin_x".to_string(), meta.origin[0] as f64),
@@ -195,7 +186,7 @@ impl Build for StarField {
         ))
     }
 
-    fn decode(bundle: &PayloadBundle, _projection: Domain, node: &str) -> Result<Self, String> {
+    fn decode(bundle: &PayloadBundle, node: &str) -> Result<Self, String> {
         let _ = node;
         let param = |key: &str| -> Result<f64, String> {
             bundle
@@ -286,8 +277,7 @@ mod tests {
         let tint = vec![[0.9, 0.95, 1.0]; positions.len()];
         let field = StarField::build(meta(0.05, 1.5), &positions, &brightness, &tint).expect("造");
         let bundle = <StarField as Build>::encode(&field).expect("编码");
-        assert_eq!(bundle.kind, AssetKind::StarField);
-        let back = <StarField as Build>::decode(&bundle, Domain::CubeMap, "stars").expect("解码");
+        let back = <StarField as Build>::decode(&bundle, "stars").expect("解码");
         assert_eq!(back.grid, field.grid);
         assert_eq!(back.stars.len(), field.stars.len());
         for index in 0..field.stars.len() {
