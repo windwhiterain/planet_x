@@ -36,11 +36,19 @@ pub fn take_last_error() -> Option<String> {
     LAST_ERROR.lock().ok().and_then(|mut slot| slot.take())
 }
 
+/// 用哪个后端建实例。
+///
+/// ⚠ **缺省是 Vulkan，不是 DX12**（2026-09-28 改）：`px_render` 在 `Cargo.toml` 里
+///   **编译期**只带了 Vulkan（§104 第 9 条："后端不是可选项"），而这一层从前的缺省是 DX12
+///   ⇒ **烘图（算子 dylib 走 `px_gpu::connect`）与出图（宿主）跑在两个后端上**。
+///   本仓的铁律是"夹具 / 桩不能替被测物挡枪"（§144），两个后端比同一个后端更坏。
+///   `WGPU_BACKEND` 仍然可以覆盖（`vulkan` / `gl` / `gles`），这个口子是给
+///   "换一台机器、Vulkan 不在"那一档留的逃生门。
 fn backends() -> wgpu::Backends {
     match std::env::var("WGPU_BACKEND").as_deref() {
-        Ok("vulkan") => wgpu::Backends::VULKAN,
+        Ok("dx12") => wgpu::Backends::DX12,
         Ok("gl") | Ok("gles") => wgpu::Backends::GL,
-        _ => wgpu::Backends::DX12,
+        _ => wgpu::Backends::VULKAN,
     }
 }
 

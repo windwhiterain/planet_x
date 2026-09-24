@@ -3,8 +3,8 @@ name = "px_probe"
 version = "0.1.0"
 edition = "2024"
 
-# 探针不是测试：它有 GPU、要几分钟、退出码才是判据（§47）。
-# 所以它不进 workspace 的 default-members，`cargo test` 不会碰它。
+# ⚠ 探针不是测试：它有 GPU、要几分钟、退出码才是判据（§47）⇒ 与 `px_render` 一样
+# **不在 `default-members`**，默认 `cargo test` 不碰它（`cargo test --workspace` 才跑到）。
 [dependencies]
 px_gpu = { path = "../px_gpu" }
 # ⚠ **不依赖任何宿主 crate**（S8-a 之前它只为了 `px_render::shaders::assemble` 而依赖 bevy 宿主）。
@@ -18,7 +18,9 @@ px_verify = { path = "../px_verify" }
 px_protocol = { path = "../px_protocol" }
 # 参数块的**布局**也来自契约：`params.rs` 反射 `clouds.wgsl` 自己声明的结构体，
 # 探针那份 `CloudParams` 只剩「值」（原来它是一份手抄的字节镜像，§69 S2）。
-wgpu = "29"
+# ⚠ 与 `px_gpu` / `px_render` / `px_pass` 逐字同一档：**只有 Vulkan**
+#   （缺省特性会把 dx12 / metal / gles / webgpu 全拉回来，而那是已经否决过的后端）。
+wgpu = { version = "29", default-features = false, features = ["vulkan", "wgsl"] }
 bytemuck = { version = "1", features = ["derive"] }
 pollster = "0.4"
 # ⚠ `seam_probe` 用：读一份烘好的体网格 `.pxart`（`px_protocol::stream`），
