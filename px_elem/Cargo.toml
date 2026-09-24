@@ -1,0 +1,19 @@
+[package]
+name = "px_elem"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# 参数 struct 的 `PxKeyed`（加一栏自动进键）由它生成。
+px_derive = { path = "../px_derive" }
+# `Elementwise<F>` 要 `PxOp` / `PxInputs` / 装载；`Field` 与 `Shape` 是这一档的输出与形状参数。
+px_graph_schema = { path = "../px_graph_schema" }
+px_field_schema = { path = "../px_field_schema" }
+# 实例库的落点（`target/pcg/inst/<key>.dll`）—— 泛型算子**不自己编**，它按内容键去装那一份库。
+px_cook = { path = "../px_cook" }
+serde = { version = "1", features = ["derive"] }
+
+[build-dependencies]
+# `decl_hash()` = **本 crate**（element 函数的家）的源码指纹：参数 struct 加一栏就换实例键
+# （`19-generic-inst.md` §177 那条老账）。
+px_fingerprint = { path = "../px_fingerprint" }

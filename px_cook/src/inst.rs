@@ -186,11 +186,19 @@ pub fn key(inst: &Inst<'_>) -> Result<String, String> {
     let mut hasher = blake3::Hasher::new();
     hasher.update(VERSION);
     field(&mut hasher, px_graph_schema::TOOLCHAIN_HASH);
-    field(&mut hasher, px_graph_schema::SOURCE_HASH);
     field(&mut hasher, inst.decl_hash);
     field(&mut hasher, &px_fingerprint::hash(&roster));
     hasher.update(&inst.interface.to_le_bytes());
-    field(&mut hasher, inst.op_id);
+    // ⚠⚠ **`op_id` 与图程序自己的 `SOURCE_HASH` 都不在身份里了**（2026-09-27，用户裁定
+    //   "实例身份 = 内容"、"单态化实例可以共享"）。从前它们在，于是**两个图用到同一个函数**
+    //   也会算出两个键（图名不同 ⇒ 图程序源码指纹不同；每条实例的名字不同）⇒ 库与产物都不共享。
+    //   今天这一份身份 = 声明指纹 ‖ 根名册 ‖ 接口 ‖ 体模板 ‖ 体文件字节 —— 全是**内容**：
+    //   * 两个图用同一个文件、同一份模板 ⇒ **同一个键、同一份库、同一份产物**；
+    //   * 体文件里改一个字节 ⇒ 换键（只有那一条要重编，R1 不破）；
+    //   * 把同名文件挪个位置（内容不变）⇒ 不换键。
+    //   ⚠ `op_id` 仍是**读数与报错**用的标签（`InstInfo` / sidecar / `px list`），只是不进身份。
+    //   ⚠ 图程序自己的源码指纹**不该**在这一层：体与它的依赖全在 dylib 里，`decl_hash` +
+    //     根名册 + 模板 + 体文件字节已经覆盖；图程序改一个字与这份库无关。
     // ⚠ 模板（去空白后）也是身份的一部分：它决定"泛型参数怎么装进声明"。
     field(&mut hasher, &normalize_template(inst.template));
 
@@ -649,7 +657,7 @@ pub fn manifest_text(root: &Path, roots: &[String], schema: &str) -> Result<Stri
 /// ⚠ `px_body!` 的第一段是 **`$name:ident`**（不是 `$decl:ty`），所以 `19` 里写的
 ///   `px_body! { volume::CloudCoarse, … }` 宏匹配不过（实测 `error: no rules expected ::`）。
 ///   生成物因此先把声明**按原名引进作用域**（`pub use <声明的真路径>;`），再写裸名。
-/// ⚠ 体（`|p, i, g| …` 那一段）**逐字**取自 recipe 那一栏 —— 里面写的是**真类型名**
+/// ⚠ 体（`|p, i| …` 那一段）**逐字**取自 recipe 那一栏 —— 里面写的是**真类型名**
 ///   （`&Waves`），因为生成物 `include!` 了 `source` ⇒ `Waves` 就在作用域里
 ///   （`21-codegen-types.md`：占位符与文本替换都没了）。
 pub fn lib_text(
@@ -672,7 +680,7 @@ pub fn lib_text(
          \n\
          px_graph_schema::px_body! {{\n\
          \x20   {},\n\
-         \x20   |p, i, g| {}\n\
+         \x20   |p, i| {}\n\
          }}\n\
          \n\
          px_graph_schema::px_impl_lib!();\n",
@@ -889,3 +897,5 @@ fn field(hasher: &mut blake3::Hasher, text: &str) {
     hasher.update(&(text.len() as u64).to_le_bytes());
     hasher.update(text.as_bytes());
 }
+
+

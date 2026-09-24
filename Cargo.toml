@@ -10,11 +10,12 @@ edition = "2024"
 #   `px_render` 一律指 **Bevy 那支**，取法 `git show f121ee3^:px_render/…`）。
 #   改名不带一个字节的产物移动（判据见 §157）。删 Bevy 那支**不减少**任何判据 ——
 #   六张判据图 + 六份冻产物仍然逐字节可比（回归集复测过）。
-members = ["px_gpu", "px_volume_gpu_op", "px_nurbs_gpu_op", "px_derive", "px_fingerprint", "px_decls", "game", "px_protocol", "px_sparse", "px_graph_schema", "px_graph", "px_field_schema", "px_field_alg", "px_field_op", "px_volume_schema", "px_volume_alg", "px_volume_op", "px_mesh_schema", "px_mesh_op", "px_nurbs_schema", "px_nurbs_op", "px_shader", "px_pass", "px_render", "px_graphs", "px-scene", "px_verify", "px_probe"]
-default-members = ["px_gpu", "px_volume_gpu_op", "px_nurbs_gpu_op", "px_nurbs_gpu_op", "px_derive", "px_fingerprint", "px_decls", "game", "px_protocol", "px_sparse", "px_graph_schema", "px_graph", "px_field_schema", "px_field_alg", "px_field_op", "px_volume_schema", "px_volume_alg", "px_volume_op", "px_mesh_schema", "px_mesh_op", "px_nurbs_schema", "px_nurbs_op", "px_shader", "px_pass", "px_graphs", "px-scene", "px_verify"]
+members = ["px_gpu", "px_volume_gpu_op", "px_nurbs_gpu_op", "px_derive", "px_fingerprint", "px_decls", "game", "px_protocol", "px_sparse", "px_graph_schema", "px_graph", "px_elem", "px_field_schema", "px_field_alg", "px_field_op", "px_volume_schema", "px_volume_alg", "px_volume_op", "px_mesh_schema", "px_mesh_op", "px_nurbs_schema", "px_nurbs_op", "px_shader", "px_pass", "px_render", "px_graphs", "px-scene", "px_verify", "px_probe"]
+default-members = ["px_gpu", "px_volume_gpu_op", "px_nurbs_gpu_op", "px_nurbs_gpu_op", "px_derive", "px_fingerprint", "px_decls", "game", "px_protocol", "px_sparse", "px_graph_schema", "px_graph", "px_elem", "px_field_schema", "px_field_alg", "px_field_op", "px_volume_schema", "px_volume_alg", "px_volume_op", "px_mesh_schema", "px_mesh_op", "px_nurbs_schema", "px_nurbs_op", "px_shader", "px_pass", "px_graphs", "px-scene", "px_verify"]
 
 [dependencies]
 
 [profile.dev]
 debug = "line-tables-only"
+
 

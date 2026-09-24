@@ -99,7 +99,7 @@ pub const INSTANCES: &[InstRecipe] = &[
         type_name: "Waves",
         roots: &["px_field_alg"],
         source: "art/inst/waves.rs",
-        body: "px_field_alg::remap_with(&px_field_alg::identity(), p, 1.0, i.input.value(), g, ARG)",
+        body: "px_field_alg::remap_with(&px_field_alg::identity(), p, 1.0, i.input.value(), ARG)",
     },
     InstRecipe {
         op_id: "field.remap/latbands",
@@ -107,6 +107,7 @@ pub const INSTANCES: &[InstRecipe] = &[
         type_name: "LatBands",
         roots: &["px_field_alg"],
         source: "art/inst/latbands.rs",
-        body: "px_field_alg::remap_with(&px_field_alg::identity(), p, 1.0, i.input.value(), g, ARG)",
+        body: "px_field_alg::remap_with(&px_field_alg::identity(), p, 1.0, i.input.value(), ARG)",
     },
 ];
+

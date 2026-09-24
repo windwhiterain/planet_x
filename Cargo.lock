@@ -1845,6 +1845,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "px_elem"
+version = "0.1.0"
+dependencies = [
+ "px_cook",
+ "px_derive",
+ "px_field_schema",
+ "px_fingerprint",
+ "px_graph_schema",
+ "serde",
+]
+
+[[package]]
 name = "px_field_alg"
 version = "0.1.0"
 dependencies = [
