@@ -1,17 +1,22 @@
 //! **生成物那两道门 + 一条端到端**（`21-codegen-types.md`）。
 //!
-//! 1. **图不漏**：`inst_recipe.rs` 那张表里的条数 == 图（`insts::build`）里声明的节点数
-//!    —— 从前这是"数 `px_inst!` 宏调用"，今天宏调用没有了，改数**表里的条目**：
-//!    生成物（`insts_gen.rs`）是按那张表生成出来的，表里加一条而生成物不认识它、
-//!    或者反过来，都在这里当场红。
+//! 1. **图不漏**：`inst_recipe.rs` 那张表（+ `px_elem::ELEM_SPECS` 那张表）里的条数 ==
+//!    图（`insts::build`）里声明的节点数 —— 从前这是"数 `px_inst!` 宏调用"，今天宏调用没有了，
+//!    改数**表里的条目**：声明那一档的生成物（`insts_gen.rs`）是按 recipe 生成出来的、
+//!    element 那一档的规格是 `px_elem` 里编译进来的常量表（**没有生成物**，见 `44` §8）
+//!    —— 两张表里加一条而 `insts::build` 不认识它，都在这里当场红。
 //! 2. **生成物与 recipe 一致**：生成物里的 `INST_TEMPLATE`（= **key 的那一轴**）必须与
 //!    recipe 里那一栏**逐字相同**；`INST_BODY`（抄进实例库的那一份）必须是把 `ARG`
 //!    换成 `&<类型名>` 之后的结果。对不上的话 key 会按旧模板算、复用错的构件（真缺陷的形状）。
 //! 3. **库路径 ↔ 身份**：每条实例的库路径（`<key>.dll`）必须与它自己算出来的 key 是同一个
-//!    —— 纯事实，不需要任何产物，任何 checkout 都断言得动。
-//!    ⚠ **运行那一半**（真装载、真 cached、真命中）搬进了**探针** `--bin inst_probe`：
-//!    它要 `px build` 的产物才能跑，而测试不该替构建产物负责。搬出去之前那一段在库里写着
+//!    —— 纯事实，不需要任何产物，任何 checkout 都断言得动。⚠ 名单从 build graph 与
+//!    `codegen()` 来（**两档合流之后的那一份**），所以 element 那几条也在这里被判。
+//!    ⚠ **运行那一半**（真装载、真 cached、真命中）住在 `tests/elem.rs`（element 那一档）
+//!    与**探针** `--bin inst_probe`（声明那一档）：它们要 `px build` 的产物才能跑，
+//!    而测试不该替构建产物负责。搬出去之前那一段在库里写着
 //!    "库不在盘上就打印一行、然后 return" —— 那就是"跳过"，本仓不吃这一套。
+//!    ⚠ element 那一档留在 `tests/elem.rs` 里的理由是**它自己会编**（`missing()` +
+//!    `compile_missing()`，缺才编、一次约 2 秒）—— 声明那一档编一次要几十秒，所以只在探针里。
 
 use std::path::Path;
 
@@ -29,13 +34,16 @@ fn graph() -> BuildGraph {
 
 #[test]
 fn every_recipe_row_is_in_the_graph() {
-    let listed = px_graphs::insts::recipe::INSTANCES.len();
+    // ⚠ 两张表**都数**：声明那一档（recipe）与 element 那一档（`px_elem::ELEM_SPECS`）。
+    //   等式仍然是等式（不是"至少"）—— 少一条、多一条都当场红。
+    let listed = px_graphs::insts::recipe::INSTANCES.len() + px_elem::ELEM_SPECS.len();
     let in_graph = graph().instances().len();
     assert_eq!(
         listed,
         in_graph,
-        "`inst_recipe.rs` 里有 {listed} 条实例，而 build graph 里声明了 {in_graph} 条\
-         （差 {}）—— 每条 recipe 都要能在 `insts::build` 里登记（表里加一条就该多一条节点）",
+        "`inst_recipe.rs` 与 `px_elem::ELEM_SPECS` 里一共 {listed} 条实例，而 build graph 里\
+         声明了 {in_graph} 条（差 {}）—— 两张表都要能在 `insts::build` 里登记\
+         （哪张表加一条就该多一条节点）",
         listed as i64 - in_graph as i64
     );
 }

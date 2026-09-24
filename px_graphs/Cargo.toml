@@ -24,6 +24,13 @@ px_verify = { path = "../px_verify" }
 # ⚠ 这里**不许出现任何 `px_*_op`**：实现库是运行时按身份装载的，一旦成了 cargo 依赖，
 #   「改一行实现不重编图程序」立刻没了（见 tests/crate_graph.rs 那道门）。
 px_cook = { path = "../px_cook" }
+# ⚠ **element 那一档的规格表**（`px_elem::ELEM_SPECS`）：`insts::build` / `insts::codegen`
+#   要照它登记节点与 catalogue 条目 —— 这一档**没有生成物**（内容键在运行期算），
+#   所以表得由图程序自己带着（`px_elem` 也把 `Elementwise<F>` 交给图脚本写节点用）。
+#   ⚠ 它不是算子实现库：`px_elem` 只放**声明面**（`ElementFn` / `Elementwise` / 规格），
+#   算法在 `px_elem/body/*.rs` 里、由 `px build` 编进实例库（那几份文件不在 `src/` 下 ⇒
+#   不进本 crate 的源码指纹）⇒ 加它不动「改一行 element 算法不重编图程序」。
+px_elem = { path = "../px_elem" }
 # ⚠ **只给"写一张自己拼的贴图"用**（星云的三条通道要拼成一张 HDR 立方贴图 →
 #   `px_graph::generate::{color_cube, store::write_texture}`）。
 #   ⚠ 这条依赖**不许**把 `px_*_op` 带进来：`tests/crate_graph.rs` 那道门的原话是

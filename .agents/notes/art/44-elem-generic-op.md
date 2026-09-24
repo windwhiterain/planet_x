@@ -21,7 +21,8 @@
 ## §2 三样东西各在哪
 
 ```text
-px_elem/src/lib.rs      ElementFn（Params / Inputs / NAME）+ Elementwise<F>（PxOp 实现）+ Facts
+px_elem/src/lib.rs      ElementFn（Params / Inputs / NAME / SOURCE / ROOTS / BODY / SYMBOL / shape）
+                        + Elementwise<F>（PxOp 实现，按内容键装库）+ fill（唯一那条循环）
 px_elem/src/specs.rs    **数据表**：ty / name / roots / source（体文件）/ body（体模板）
 px_elem/src/<函数>.rs   作者那一面：`struct Waves;` + `impl ElementFn for Waves` + `WavesParams`
 px_elem/body/<函数>.rs  真正那一格怎么算（**不在 `src/` 下**）
@@ -56,28 +57,41 @@ pub trait ElementFn: 'static {
     /// 在**一个循环**里算完整条链"（一个节点、一个产物、上游只读一次）。
     type Inputs: PxInputs;
     const NAME: &'static str;
+    /// 下面这四栏**由 `px_elem_specs!` 填**（作者不写）：身份与构建的输入，不是艺术参数。
+    const SOURCE: &'static str;                 // 体文件（相对 workspace 根）：内容进身份
+    const ROOTS: &'static [&'static str];       // 体编译时链的 crate（build graph 的边）
+    const BODY: &'static str;                   // px_body! 的体表达式
+    const SYMBOL: &'static str;                 // px_inst__<类型名>
+    /// 输出那张场的形状：生成类从参数来、过滤类从上游来。
+    fn shape(params: &Self::Params, inputs: &Self::Inputs) -> Shape;
 }
 
-pub struct Elementwise<F: ElementFn + Facts>(PhantomData<F>);
-impl<F: ElementFn + Facts> PxOp for Elementwise<F> {
+pub struct Elementwise<F: ElementFn>(PhantomData<F>);
+impl<F: ElementFn> PxOp for Elementwise<F> {
     const ID: &'static str = F::NAME;
     const LIB: &'static str = "";          // 实现不在预置库里
     const SYMBOL: &'static str = F::SYMBOL;
     type Params = F::Params; type Inputs = F::Inputs; type Payload = Field;
+    fn source_hash() -> Result<&'static str, String> { cached_key::<F>() }   // ← 内容键，运行期算
+    fn decl_hash() -> &'static str { px_elem::DECL_HASH }
     fn render(&self, p, i) -> Result<Field, String> {
-        let body = ops::load_at::<Self>(inst::library_path(F::KEY), F::SYMBOL)?;  // 从实例库装载
+        let body = ops::load_at::<Self>(inst::library_path(Self::source_hash()?), F::SYMBOL)?;
         body(p, i)
     }
 }
 ```
 
-* `Facts`（`KEY` / `SYMBOL`）是**生成物**给每个函数补的（`px_graphs/build.rs` 读体文件字节
-  才能算出 KEY）—— 与今天"每条实例一个生成类型"是同一件事，只是**事实挂在函数类型上**，
-  于是图侧可以写泛型 `Elementwise::<Waves>`。
+* **键在运行期算**：`px_elem::key_of::<F>()` = `px_cook::inst::key_of_facts("", interface,
+  DECL_HASH, F::ROOTS, F::SOURCE, F::BODY)` —— 与 `px build` 判断"缺哪些库"**同一个函数**。
+  `source_hash()` 要返回 `&'static str`，所以每个 `F` 缓存一格（`TypeId` → 泄漏的字符串）。
+  ⚠ 这里**不是** `interface()` 那道"泛型里的 static 不按单态化分开"的坑：缓存键用了 `TypeId`。
 * `interface()` 由 `Self::Params/Inputs/Payload` 的**类型名**算（继承 `PxOp` 的默认实现）：
-  泛型参数进类型名 ⇒ 不同函数天然不同接口。
+  泛型参数进类型名 ⇒ 不同函数天然不同接口。`facts_of::<F>()` 走**同一个** `interface_hash`，
+  于是"看不见类型的那一侧"（build script）与图程序拿到的是同一份事实。
 * `decl_hash()` = `px_elem` 那一份源码指纹（`px_elem/build.rs` 发的 `PX_SOURCE_HASH`）：
   参数 struct 加一栏就换键（`19-generic-inst.md` §177 那条老账仍然钉着）。
+* **没有"生成物补 const"那种 `Facts` 了**（第一版设计有，实测绕不过孤儿规则：
+  `impl Facts for <px_elem 的类型>` 写在图程序里非法 —— 两个类型都外来）。
 
 ## §5 收掉的三个预置
 
@@ -125,9 +139,23 @@ impl<F: ElementFn + Facts> PxOp for Elementwise<F> {
 * `px_elem`（新 crate，进 workspace）：`ElementFn`（`Params`/`Inputs`/`NAME`/`SOURCE`/`ROOTS`/`BODY`/
   `SYMBOL`/`shape`）+ `Elementwise<F>`（`PxOp`，`LIB = ""`）+ `fill`（唯一那条循环）+
   `px_elem_specs!`（一处声明展开出：标记类型 + `ElementFn` 实现 + `ElemSpec` + 事实）。
-* **element 这一档不需要代码生成**：内容键在**运行期**算（`px_elem::key_of::<F>()` 走
-  `px_cook::inst::key_of_facts`，与 `px build` 判断"缺哪些库"同一个函数）⇒ 没有生成物、
-  没有孤儿规则那道墙（`impl Facts for <px_elem 的类型>` 写在图程序里非法），
+* **图侧不需要生成物**（**不是**"element 这一档不需要代码生成" —— 那句话说错了，2026-09-27 纠正）：
+  `px build` 那一侧**照样**写一个极小的具体 crate（`target/jit/<内容键>/src/lib.rs`）再编成 dylib
+  —— **单态化就发生在编它的时候**（Rust 的泛型只在编译期单态化，dylib 里装不下泛型函数，
+  这是"实例必须要 dylib"的硬约束）。那一份生成物长这样：
+
+  ```rust
+  type Constant = px_elem::Elementwise<px_elem::specs::Constant>;
+  include!("<体文件绝对路径>");                     // 作者的算法原样进来
+  px_graph_schema::px_body! { Constant, |p, i|
+      px_elem::fill::<Constant>(p, i, |uv, direction| value(p, i, uv, direction)) }
+  px_graph_schema::px_impl_lib!();
+  ```
+
+  它省的只是**图侧**那一份生成物（`OUT_DIR/insts_gen.rs` 的类型 + 事实表）：图侧能在
+  **运行期**算出同一个内容键（`px_elem::key_of::<F>()` 走 `px_cook::inst::key_of_facts`，
+  与 `px build` 判断"缺哪些库"同一个函数）⇒ 没有"把事实烘成 const"这一步，
+  也就没有孤儿规则那道墙（`impl Facts for <px_elem 的类型>` 写在图程序里非法）。
   代价是每个节点算一次键（几毫秒的文件读取 + 名册哈希，与既有实例那一档同量级）。
 * **实例身份 = 内容**（`px_cook::inst::key`）：`op_id` 与图程序的 `SOURCE_HASH` 都拿掉了。
   实测：3 条既有实例（band/latbands/waves）用新键编出来、`inst_probe` 装载→算→命中全过。

@@ -1940,6 +1940,7 @@ dependencies = [
  "px_cook",
  "px_decls",
  "px_derive",
+ "px_elem",
  "px_field_schema",
  "px_fingerprint",
  "px_graph",

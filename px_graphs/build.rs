@@ -171,12 +171,11 @@ fn plan_instances(root: &Path) -> Result<Vec<Planned>, String> {
         )
         .map_err(|err| format!("{}：{err}", at()))?;
         let body = item.generated_body();
-        let generated = root
-            .join("target/jit")
-            .join(&key)
-            .display()
-            .to_string()
-            .replace('\\', "/");
+        // ⚠ 这个路径的口径只在 `px_cook::inst` 一处（[`inst::generated_dir`]）：element 那几条
+        //   由 `px_graphs::insts::codegen()` 在运行期现造 `InstCodegen`，两处必须给同一个字符串
+        //   —— 而且两边都从 `px_cook` 的 `workspace_root()` 出发（`root` 这一格是 build script
+        //   自己按 `CARGO_MANIFEST_DIR` 算的，同一个目录）。
+        let generated = inst::generated_dir(&key);
         planned.push(Planned {
             op_id: item.op_id.to_string(),
             type_name: item.type_name.to_string(),
@@ -447,24 +446,31 @@ fn insts_gen_text(plan: &[Planned]) -> Result<String, String> {
 ///
 /// ⚠ 它不进图程序（`insts.rs` 只并进 `insts_gen.rs`）；类型一律写**全路径**
 ///   ⇒ 图程序与 `tests/*.rs` 两边都编得过。
+/// ⚠ 这里落的是**条目切片**（不是 `InstCatalogue` 本身）：element 那一档的条目**不住生成物里**
+///   （它的规格住在 `px_elem` 里、内容键在运行期算）⇒ 由 `px_graphs::insts::codegen()` 把这一串
+///   拷成一张可增长的表、再把 `ELEM_SPECS` 每条插进去。生成物只出"声明那一档"那几条。
 fn catalogue_text(plan: &[Planned]) -> String {
     let mut out = String::from(
         "// **生成物的旁挂件**（`px_graphs/build.rs` 写的）：每条实例的 op id / key / 体住哪。\n\
          //\n\
          // 谁读它：`px build` / `px run --build`（**错误映射**：编不过时报`体来自 recipe 第几行`）\n\
          // 与端到端测试。⚠ 它**不参与任何 key**、也不进图程序。\n\
+         //\n\
+         // ⚠ 形状是**条目切片**：`px_graphs::insts::codegen()` 把这一串拷成可增长的表，\n\
+         //   再把 `px_elem::ELEM_SPECS` 那几条（这一档没有生成物）插进去。\n\
          \n\
-         pub static INST_CODEGEN: ::px_cook::inst::InstCatalogue =\n\
-         \x20   ::px_cook::inst::InstCatalogue { entries: &[\n",
+         pub static INST_CODEGEN: &[::px_cook::inst::InstCodegen] = &[\n",
     );
     for item in plan {
         out.push_str(&format!(
             "        ::px_cook::inst::InstCodegen {{\n\
              \x20           op_id: \"{op_id}\",\n\
              \x20           key: \"{key}\",\n\
-             \x20           schema: \"{schema}\",\n\
-             \x20           module: \"{module}\",\n\
-             \x20           decl: \"{decl}\",\n\
+             \x20           kind: ::px_cook::inst::InstKind::Decl {{\n\
+             \x20               schema: \"{schema}\",\n\
+             \x20               module: \"{module}\",\n\
+             \x20               decl: \"{decl}\",\n\
+             \x20           }},\n\
              \x20           source: \"{source}\",\n\
              \x20           body: \"{body}\",\n\
              \x20           recipe_line: {recipe_line},\n\
@@ -485,6 +491,6 @@ fn catalogue_text(plan: &[Planned]) -> String {
             generated = item.generated,
         ));
     }
-    out.push_str("    ] };\n");
+    out.push_str("];\n");
     out
 }

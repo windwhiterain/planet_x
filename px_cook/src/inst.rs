@@ -223,6 +223,21 @@ pub fn library_path(key: &str) -> PathBuf {
         .join(format!("{key}{}", std::env::consts::DLL_SUFFIX))
 }
 
+/// 那条实例的**生成物目录**：`target/jit/<key>`（`InstCodegen::generated` 那一栏）。
+///
+/// ⚠ 它有一个函数而**不是两处各拼一遍**：口径必须与 [`library_path`] 同源（同一个
+///   `workspace_root()`），而两个写它的地方 —— `px_graphs/build.rs`（生成 catalogue）
+///   与 `px_graphs::insts::codegen()`（element 那几条）—— 正是"最容易漂开"的一对。
+/// ⚠ 正斜杠：它要进生成物（Rust 字符串字面量与 TOML 里，反斜杠都是转义）。
+pub fn generated_dir(key: &str) -> String {
+    crate::workspace_root()
+        .join("target/jit")
+        .join(key)
+        .display()
+        .to_string()
+        .replace('\\', "/")
+}
+
 /// 生成的 crate 里 `px_body!` 拼出来的符号名（`concat!(包名, "__", 声明类型名)`）。
 pub fn symbol(decl: &str) -> String {
     format!("{PACKAGE}__{decl}")
@@ -468,28 +483,95 @@ pub fn key_of_info(info: &InstInfo) -> String {
         .to_string()
 }
 
+/// **这条实例复用的是哪一档** —— 生成物头两行的形状由它决定。
+///
+/// ⚠ 为什么要有这一栏（而不是把三栏路径继续摊在 `InstCodegen` 上）：`compile_one` 要回答的是
+///   "生成的 crate 里怎么写这一句"，而两档抄进去的东西**形状不同**：
+///
+/// * [`InstKind::Decl`]：引进一个**声明**（`pub use <schema>::<module>::<decl>;`）—— 既有那一档，
+///   声明住各 `px_*_schema`；
+/// * [`InstKind::Element`]：引进 `px_elem` 里那个**泛型算子的一次单态化**
+///   （`type <ty> = px_elem::Elementwise<px_elem::specs::<ty>>;`）—— element 那一档。
+///
+/// ⚠ **element 这一档没有生成物**：它的内容键在运行期算（`px_elem::key_of` 走同一份
+///   [`key_of_facts`]）⇒ 它只在"生成的 crate 怎么写"这一步与声明那一档分家，
+///   连"缺哪些库"都不需要生成器参与。
+#[derive(Debug, Clone)]
+pub enum InstKind {
+    /// 复用某个**声明**（`px_decls` 表里那一条）。
+    Decl {
+        /// 声明住的 schema crate（`px_volume_schema`）—— 生成物的 `[dependencies]` 与 `use` 用它。
+        schema: &'static str,
+        /// 声明在它 crate 里的**模块路径**（`ops`）。
+        module: &'static str,
+        /// 声明名（`CloudCoarse`）—— 符号名 `px_inst__<它>`。
+        decl: &'static str,
+    },
+    /// 复用 `px_elem` 那个泛型算子的**一次单态化**（`Elementwise::<Constant>`）。
+    Element {
+        /// element 函数的类型名（`Constant`，`px_elem_specs!` 那一行展开出来的标记类型）
+        /// —— 它同时是生成物里那个**裸名**（`px_body!` 的 `$name`）与符号名的后半。
+        ty: &'static str,
+    },
+}
+
+impl InstKind {
+    /// 生成物里那个**裸名**：`px_body! { <它>, |p, i| … }` 的 `$name`，
+    /// 也是符号名 `px_inst__<它>` 的后半。
+    ///
+    /// ⚠ 两档都只有一个名字（声明那一档是声明名，element 那一档是函数类型名）——
+    ///   于是符号名的口径在**一处**（[`symbol`]），不会出现"两处各拼一次"。
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Decl { decl, .. } => decl,
+            Self::Element { ty } => ty,
+        }
+    }
+
+    /// 这一档复用的东西住哪个 crate（sidecar 那一栏 `decl_crate`）。
+    ///
+    /// ⚠ element 那一档住 `px_elem`（参数 struct 与规格表都在那儿）—— 它**没有** schema：
+    ///   旧口径那个"声明住的 schema"在它身上不成立，所以这里返回的不是从 `Decl` 抄来的。
+    pub fn decl_crate(&self) -> &'static str {
+        match self {
+            Self::Decl { schema, .. } => schema,
+            Self::Element { .. } => "px_elem",
+        }
+    }
+
+    /// 声明那一档住的 schema crate；element 那一档**没有**（[`Self::decl_crate`] 才是通用的一栏）。
+    pub fn schema(&self) -> Option<&'static str> {
+        match self {
+            Self::Decl { schema, .. } => Some(schema),
+            Self::Element { .. } => None,
+        }
+    }
+}
+
 /// 一条实例的**生成物事实**：生成器（`px_graphs/build.rs`）算好后写进
 /// `OUT_DIR/insts_gen_catalogue.rs`，`px build` / `px run --build` / 端到端测试都读它。
 ///
 /// ⚠ 为什么要有这一份：`compile_one` 需要「体表达式原文 + 它住哪」，而今天体**不在**图侧源码里
 ///   （它是 recipe 里的一段字面量）⇒ 谁也扫不出来。生成器知道它（它就是生成器读的那张表）⇒
 ///   由生成器落一份下来。**只读**，不参与任何 key。
+/// ⚠ element 那一档的条目**不是生成物**：它由 `px_graphs::insts::codegen()` 从
+///   `px_elem::ELEM_SPECS` 现读一份插进表里（见 [`InstCatalogue::insert`]）——
+///   形状与这一份完全相同，只是来源不同。
 #[derive(Debug, Clone)]
 pub struct InstCodegen {
     /// 这条实例的 op id（认领源码里的记录、报错时点名）。
     pub op_id: &'static str,
     pub key: &'static str,
-    /// 声明住的 schema crate（`px_volume_schema`）—— 生成物的 `[dependencies]` 与 `use` 用它。
-    pub schema: &'static str,
-    /// 声明在它 crate 里的**模块路径**（`ops`）—— 生成物那句 `pub use <schema>::<module>::<decl>;`。
-    pub module: &'static str,
-    /// 声明名（`CloudCoarse`）—— 符号名 `px_inst__<它>`。
-    pub decl: &'static str,
+    /// 复用什么（声明还是 element 的单态化）—— 生成物头两行与 `[dependencies]` 按它分叉。
+    pub kind: InstKind,
     /// 泛型参数源文件（相对 workspace 根）。
     pub source: &'static str,
     /// 体表达式**原文**（recipe 里那一栏）—— 逐字抄进生成物。
     pub body: &'static str,
     /// `body` 在 recipe 文件里的行号（**错误映射**用：编不过时报它）。
+    ///
+    /// ⚠ element 那一档是 `0`：它的体模板由宏（`px_elem/src/lib.rs` 的 `px_elem_specs!`）
+    ///   拼出来，规格表那一行里**没有**那段原文 ⇒ 报不出行号（报错仍有 `source` 与 `generated`）。
     pub recipe_line: u32,
     /// recipe 文件（相对 workspace 根）。
     pub recipe: &'static str,
@@ -497,21 +579,53 @@ pub struct InstCodegen {
     pub generated: &'static str,
 }
 
-/// 全部实例的生成物事实（`for_op` 按 op id 取一条）。
+/// catalogue（`for_op` 按 op id 取一条）。
+///
+/// ⚠ **它是可增长的**：声明那一档的条目来自生成物（一串编译期字面量，见
+///   [`Self::from_generated`]），element 那一档**没有生成物**（规格住在 `px_elem` 里）⇒
+///   由 `px_graphs::insts::codegen()` 在运行期读表插进来（[`Self::insert`]）。
+///   ⚠ 两档合在一张表里的理由是"`px build` 只有一条路"：`compile_missing` / `compile_one`
+///   只认这张表，不认识"这一条是从哪来的"。
+#[derive(Debug, Clone)]
 pub struct InstCatalogue {
-    pub entries: &'static [InstCodegen],
+    pub entries: Vec<InstCodegen>,
 }
 
 impl InstCatalogue {
-    pub fn for_op(&self, op_id: &str) -> Result<&'static InstCodegen, String> {
+    /// 生成物那一侧用：把 `static INST_CODEGEN` 里那一串**拷成**可增长的表。
+    ///
+    /// ⚠ 为什么要拷而不用那份切片当表：生成物里是 `&'static [InstCodegen]`（编译期字面量，
+    ///   正好能住在一个 `static` 里），而 element 那几条只有运行期才知道 ⇒ 表必须是可增长的
+    ///   `Vec`。代价是每条实例一份几十字节的拷贝 —— 进程一次。
+    pub fn from_generated(entries: &[InstCodegen]) -> Self {
+        Self {
+            entries: entries.to_vec(),
+        }
+    }
+
+    /// **运行期登记一条**（`px_graphs::insts::codegen()` 把 `ELEM_SPECS` 每条插进来）。
+    ///
+    /// ⚠ op id 撞了就**当场拒**：这张表是 `px build` 认领"该抄哪一份体"的唯一依据，
+    ///   两条同 id 的记录会让后面那条**静默**用错体（与 `BuildGraph::facts` 同一条规矩）。
+    pub fn insert(&mut self, codegen: InstCodegen) {
+        assert!(
+            !self.entries.iter().any(|seen| seen.op_id == codegen.op_id),
+            "catalogue 里有两条同 op id 的记录：{}（id 必须唯一）",
+            codegen.op_id,
+        );
+        self.entries.push(codegen);
+    }
+
+    pub fn for_op(&self, op_id: &str) -> Result<&InstCodegen, String> {
         self.entries
             .iter()
             .find(|entry| entry.op_id == op_id)
             .ok_or_else(|| {
                 format!(
-                    "生成物里没有 op id 为 {op_id} 的记录\
-                     \n  ⇒ `{}` 与 `px_graphs/src/insts.rs` 里那张图不同步？跑 `cargo build` 重新生成",
-                    RECIPE
+                    "catalogue 里没有 op id 为 {op_id} 的记录\
+                     \n  ⇒ `px_graphs::insts::codegen()` 没登记它：声明那一档来自 `{RECIPE}`\
+                     \n     （改过表就跑 `cargo build` 重新生成），element 那一档来自 \
+                     `px_elem::ELEM_SPECS`"
                 )
             })
     }
@@ -540,17 +654,16 @@ pub fn compile_one(info: &InstInfo, key: &str, codegen: &InstCodegen) -> Result<
 fn compile_generated(info: &InstInfo, key: &str, codegen: &InstCodegen) -> Result<(), String> {
     let root = crate::workspace_root();
     // ⚠ 生成的 crate 一律叫 `px_inst` ⇒ 符号名是编译期字面量（`PACKAGE` 那一份）。
-    let symbol = symbol(codegen.decl);
-    // 生成的 crate 里怎么把那个声明引进来：声明住的 crate 与模块**由声明表给**
-    // （`px_decls::decl` 是编译过类型的那一侧，路径不会抄错）。
-    let decl_path = format!("{}::{}", codegen.schema, codegen.module);
+    //   两档的名字都从 `kind` 来：声明那一档是声明名，element 那一档是函数类型名
+    //   （`px_elem` 里那个 `SYMBOL` 也是照它拼的 —— 判据 `tests/elem.rs` 逐条钉住）。
+    let symbol = symbol(codegen.kind.name());
     let dir = root.join("target/jit").join(key);
     let src = dir.join("src");
     std::fs::create_dir_all(&src).map_err(|err| format!("建不了 {}：{err}", src.display()))?;
 
-    let manifest = manifest_text(&root, &info.alg_roots, codegen.schema)?;
+    let manifest = manifest_text(&root, &info.alg_roots, &codegen.kind)?;
     write(&dir.join("Cargo.toml"), &manifest)?;
-    write(&src.join("lib.rs"), &lib_text(&root, codegen, &decl_path)?)?;
+    write(&src.join("lib.rs"), &lib_text(&root, codegen)?)?;
     write(&dir.join("build.rs"), BUILD_RS)?;
 
     println!(
@@ -606,7 +719,11 @@ fn compile_generated(info: &InstInfo, key: &str, codegen: &InstCodegen) -> Resul
 /// ⚠ 路径一律**绝对**：生成物住在 `target/` 下，相对路径会飘（`19` §179.4）。
 /// ⚠ `[workspace]` 是**必须的**：它是一个自成的 workspace 根，否则 cargo 会往上找到主
 ///   workspace 的 `Cargo.toml`、把它当成员、还会共用主 target 目录。
-pub fn manifest_text(root: &Path, roots: &[String], schema: &str) -> Result<String, String> {
+/// ⚠ `[dependencies]` 按 `kind` 与 `roots` 两处一起凑：**每一个根都要写进去**（`20` §183 的边，
+///   泛型参数 `use` 不到第二个 crate 就是编不过），而声明那一档还要额外一行它的 schema
+///   （那个 crate 通常**不在** `roots` 里 —— `roots` 是"泛型体住的 crate"）。
+///   element 那一档不需要额外那一行：`px_elem` 就在规格的 `roots` 里（`px_elem/src/specs.rs`）。
+pub fn manifest_text(root: &Path, roots: &[String], kind: &InstKind) -> Result<String, String> {
     if roots.is_empty() {
         return Err(
             "这条实例没登记任何根（`inst::InstInfo::alg_roots` 是空的）—— 泛型体住哪个 crate？\
@@ -615,13 +732,22 @@ pub fn manifest_text(root: &Path, roots: &[String], schema: &str) -> Result<Stri
         );
     }
     let graph_schema = slash(&crate_path(root, "px_graph_schema")?);
-    let schema_path = slash(&crate_path(root, schema)?);
     let fingerprint = slash(&crate_path(root, "px_fingerprint")?);
+    let schema = kind.schema();
+    let schema_line = match schema {
+        Some(name) => format!(
+            "{name} = {{ path = \"{}\" }}\n",
+            slash(&crate_path(root, name)?)
+        ),
+        None => String::new(),
+    };
     // ⚠ **每一个根都要写进去**，不只第一个：这一栏 = "这个实例编译时链了谁"（`20` §183 的边）。
     //   只写第一个 ⇒ 泛型参数 `use` 不到第二个 crate（而 key 已经覆盖了它 —— 身份对、manifest 没给）。
+    //   ⚠ 与 `schema_line` 撞名时以 `schema_line` 为准（同一行写两遍是 cargo 的**重复键**错），
+    //   而"声明住的 schema 也在 roots 里"是会发生的（`field.remap` 那一条）。
     let mut deps = String::new();
     for name in roots {
-        if name != "px_graph_schema" && name != schema {
+        if name != "px_graph_schema" && Some(name.as_str()) != schema {
             deps.push_str(&format!(
                 "{name} = {{ path = \"{}\" }}\n",
                 slash(&crate_path(root, name)?)
@@ -640,8 +766,7 @@ pub fn manifest_text(root: &Path, roots: &[String], schema: &str) -> Result<Stri
          \n\
          [dependencies]\n\
          px_graph_schema = {{ path = \"{graph_schema}\" }}\n\
-         {schema} = {{ path = \"{schema_path}\" }}\n\
-         {deps}\
+         {schema_line}{deps}\
          \n\
          [build-dependencies]\n\
          px_fingerprint = {{ path = \"{fingerprint}\" }}\n\
@@ -653,28 +778,51 @@ pub fn manifest_text(root: &Path, roots: &[String], schema: &str) -> Result<Stri
 
 /// 生成的 `src/lib.rs`（形状见 `19` §179.1）。
 ///
-/// ⚠ `include!` 用**绝对路径**：生成物在 `target/` 下，而泛型参数的源在 `art/inst/` 里。
+/// ⚠ `include!` 用**绝对路径**：生成物在 `target/` 下，而泛型参数的源在 `art/inst/` 或
+///   `px_elem/body/` 里。
 /// ⚠ `px_body!` 的第一段是 **`$name:ident`**（不是 `$decl:ty`），所以 `19` 里写的
 ///   `px_body! { volume::CloudCoarse, … }` 宏匹配不过（实测 `error: no rules expected ::`）。
-///   生成物因此先把声明**按原名引进作用域**（`pub use <声明的真路径>;`），再写裸名。
-/// ⚠ 体（`|p, i| …` 那一段）**逐字**取自 recipe 那一栏 —— 里面写的是**真类型名**
+///   生成物因此先把要复用的东西**按裸名引进作用域**，再写裸名 —— 两档引进的方式不同（见下）。
+/// ⚠ 体（`|p, i| …` 那一段）**逐字**取自 `codegen.body`：声明那一档里写的是**真类型名**
 ///   （`&Waves`），因为生成物 `include!` 了 `source` ⇒ `Waves` 就在作用域里
-///   （`21-codegen-types.md`：占位符与文本替换都没了）。
-pub fn lib_text(
-    root: &Path,
-    codegen: &InstCodegen,
-    declaration_path: &str,
-) -> Result<String, String> {
+///   （`21-codegen-types.md`：占位符与文本替换都没了）；element 那一档写的是
+///   `px_elem::fill::<px_elem::specs::<ty>>(...)` —— **全路径**，理由见下面那一段。
+pub fn lib_text(root: &Path, codegen: &InstCodegen) -> Result<String, String> {
     let source = root.join(codegen.source);
     if !source.is_file() {
         return Err(format!("泛型参数源不在盘上：{}", source.display()));
     }
+    let name = codegen.kind.name();
+    // 复用的东西按裸名引进作用域 —— 两档形状不同：
+    //
+    // ⚠ **声明那一档**：`pub use <声明真路径>::<声明名>;`（路径由 `px_decls` 那张表给，
+    //   不会抄错）。
+    //
+    // ⚠ **element 那一档**：`type <ty> = px_elem::Elementwise<px_elem::specs::<ty>>;`
+    //   —— 裸名必须是 `Elementwise<…>` 这一份，因为 `px_body!` 的 `$name` 要 `PxOp`
+    //   （三个关联类型、`Payload`、符号名都从它来）。
+    //   ⚠ 而体里的 `px_elem::fill::<…>` 要的是 `ElementFn`（那个标记类型 `specs::<ty>`）——
+    //   同一个裸名不可能同时是这两种类型，**所以体模板里写的是全路径**
+    //   （`px_elem/src/lib.rs` 的 `BODY`，与"生成物里的 `use` 一律全路径"同一条规矩）。
+    let head = match &codegen.kind {
+        InstKind::Decl {
+            schema,
+            module,
+            decl,
+        } => format!(
+            "// 复用的那个声明（`{schema}::{module}::{decl}`）——引进来当 `{decl}`：\n\
+             #[allow(unused_imports)]\n\
+             pub use {schema}::{module}::{decl};\n",
+        ),
+        InstKind::Element { ty } => format!(
+            "// 复用的那个泛型算子（`px_elem::Elementwise<px_elem::specs::{ty}>`）——引进来当 `{ty}`：\n\
+             type {ty} = px_elem::Elementwise<px_elem::specs::{ty}>;\n",
+        ),
+    };
     Ok(format!(
         "//! 生成物（`px build` 写的）。别手改 —— 改 {} 里的源文件，然后重跑。\n\
          \n\
-         // 复用的那个声明（`{}`）——引进来当 `{}`：\n\
-         #[allow(unused_imports)]\n\
-         pub use {declaration_path}::{};\n\
+         {head}\
          \n\
          include!(\"{}\");\n\
          \n\
@@ -685,11 +833,8 @@ pub fn lib_text(
          \n\
          px_graph_schema::px_impl_lib!();\n",
         codegen.source,
-        codegen.decl,
-        codegen.decl,
-        codegen.decl,
         slash(&source),
-        codegen.decl,
+        name,
         codegen.body,
     ))
 }
@@ -703,12 +848,15 @@ const BUILD_RS: &str = "//! 实例库自己的身份（源码指纹 + 工具链�
 ///
 /// ⚠ `template` 记的是**体表达式原文**（recipe 里那一份）：归一那一步只是 key 的口径，
 ///   给人看的时候要的是它能读。
+/// ⚠ `decl` / `decl_crate` 两栏按 `kind` 填（声明那一档是声明名 + 它住的 schema；
+///   element 那一档是函数类型名 + `px_elem`）—— 这一对是"这条实例复用了什么"的读数口径，
+///   两档在同一个字段名下说同一件事。
 pub fn sidecar_text(info: &InstInfo, key: &str, symbol: &str, codegen: &InstCodegen) -> String {
     let fields = [
         ("key", key.to_string()),
         ("op_id", info.op_id.clone()),
-        ("decl", codegen.decl.to_string()),
-        ("decl_crate", codegen.schema.to_string()),
+        ("decl", codegen.kind.name().to_string()),
+        ("decl_crate", codegen.kind.decl_crate().to_string()),
         ("alg", info.alg_roots.join(",")),
         ("source", info.source.clone()),
         ("template", codegen.body.to_string()),

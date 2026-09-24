@@ -38,6 +38,14 @@ pub mod constant;
 
 pub mod specs;
 
+/// **各函数的参数类型**从它们的模块提到 crate 根。
+///
+/// ⚠ 为什么要这一行：体文件（`px_elem/body/*.rs`）里参数类型写的是 `px_elem::<Params>`
+///   （它们被 `include!` 进生成的实例库 —— 那儿只有"外部 crate 名"可用，见那个文件的头一段），
+///   而**同一个类型在两处必须能写**：作者面（图脚本给参数）与体文件。
+///   ⚠ 加一个 element 函数 = 这里再 re-export 它那一个参数 struct：`px_elem_specs!` 那一行
+///   给的是**类型**（不是路径），宏没法替任意类型发一句 `use`。
+pub use constant::ConstantParams;
 pub use px_field_schema::field::Field;
 pub use px_graph_schema::interface_hash;
 pub use specs::ELEM_SPECS;
@@ -251,8 +259,13 @@ macro_rules! px_elem_specs {
                 const SYMBOL: &'static str =
                     ::core::concat!("px_inst__", ::core::stringify!($ty));
                 // ⚠ 体模板由宏推出来（人只写"哪个文件"）：逐格那条循环只有 `px_elem::fill` 一条。
+                //   ⚠ 那个泛型实参写的是**全路径**（`px_elem::specs::<ty>`，那个标记类型），
+                //   **不是**裸名 `<ty>`：生成物里裸名被 `px_body!` 占着，指向
+                //   `Elementwise<<ty>>`（它只有 `PxOp`；`$name` 要 `PxOp` 才写得出 `Params`/符号名），
+                //   而 `fill` 要的是 `ElementFn`。同一个名字不可能同时是这两种类型 ⇒
+                //   体里走全路径（与"生成物里的 `use` 一律全路径"同一条规矩）。
                 const BODY: &'static str = ::core::concat!(
-                    "px_elem::fill::<",
+                    "px_elem::fill::<px_elem::specs::",
                     ::core::stringify!($ty),
                     ">(p, i, |uv, direction| value(p, i, uv, direction))"
                 );
