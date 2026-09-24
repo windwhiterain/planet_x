@@ -204,14 +204,38 @@ impl<F: ElementFn> PxOp for Elementwise<F> {
    同一条规矩）。⚠ 模板是键的一轴 ⇒ element 实例的键跟着换；这一档此前**一份库都没编出来过**，
    没有陈旧库可命中。
 
-⚠ 记在明面上、本轮**没改**的两处：
+⚠ 记在明面上、**上一段末尾已由修法 A 收掉**的两处（历史，别再照着写）：
 
-* **element 实例库会把 `px_cook` / `px_graph` 链进去**：实例库的 `roots` 是 `px_elem`，而
-  `px_elem` 为了 `Elementwise<F>: PxOp`（`source_hash` / `library_path` / `load_at`）依赖
-  `px_cook`，`px_cook` 又 re-export 驱动 `px_graph` ⇒ 生成的 dylib 里带一份驱动。
-  `tests/crate_graph.rs` 第 2 条（"实现库不许依赖 `px_graph` / `px_cook`"）挡的是五份
-  `px_*_op`，管不到生成的实例库。修法是**拆 `px_elem`**（作者面/算法面 vs op 包装面），
-  **不是**改依赖方向（用户裁定：撞到依赖方向就停下报告）。
-* **`Elementwise::<Constant>` 不是一个值**（`PhantomData` 字段私有）⇒ 图脚本只能写
-  `Elementwise::<Constant>::new()`；预置那一档（`field::Fbm` 是单元结构体）能裸写类型名。
-  要对齐手感得改那个结构体的形状（或给每条规格发一个 const）。
+* ~~element 实例库会把 `px_cook` / `px_graph` 链进去~~（**已修**，见 §10）。
+* ~~`Elementwise::<Constant>` 不是一个值~~（**已修**：图侧生成单元结构体，脚本写 `elem::Constant`）。
+
+## §10 修法 A：拆依赖 + 裸体宏 + 图侧单元结构体（2026-09-27，同一天第三段）
+
+那两条不是"记着的小账"，是**真问题**：element 库 **15.0 MB vs 声明档 5.3–5.8 MB**
+（`px_elem` 为了 `Elementwise<F>` 的 `render`/`source_hash` 依赖 `px_cook` ⇒ 整条驱动链被静态
+链进每一份实例库），而"实例编成 dylib 是为了编译速度"是用户明确的口径；另外
+`crate_graph.rs` 那条"实现库不许依赖驱动"的不变式**在这一档没有门看着**。
+用户选 A，落地如下：
+
+| 层 | 现在 | 为什么 |
+| --- | --- | --- |
+| `px_elem`（作者面） | 参数 struct / `ElementFn` / 规格表 / `fill` / 体文件；依赖只剩 `px_graph_schema` + `px_field_schema` | **不懂驱动**——懂了就会把驱动链进每一份实例库 |
+| 生成的实例库 | `px_body_raw! { <ty>, <Params>, <Inputs>, <Payload>, \|p,i\| … }`（契约层新增的**裸体宏**）：不引任何算子类型 | 引 `Elementwise<…>` = 引整条驱动链 |
+| `px_graphs::elem`（图侧） | 每条规格一个**单元结构体**（脚本写 `elem::Constant` 当值用；与 `field::Fbm` 同形）+ 内容键 + 装载（`ElemOp<F>` 只在这儿存在） | 它要 `px_cook`；而实例库不引它 |
+| `px_graphs/build.rs` | 为每条 `ELEM_SPECS` 生成那个单元结构体（`OUT_DIR/elem_gen.rs`）+ catalogue 条目 | 类型必须住图侧；手感因此与预置档一致 |
+
+* **读数**：element 库 **15.0 MB → 5.3 MB**；`px build --gc` 回收 31.3 MB；
+  内容键随根集合更新（多了 `px_field_schema`：参数里的 `Shape` 住那儿，改它必须换键）；
+  节点键在 `elem-one`/`elem-two` 下仍相同、第二个图必命中；`px_graphs` 23 个测试二进制全绿。
+* **新增的门**（`tests/elem.rs` ④）：对每条规格断言 `px_elem::all_roots(spec)` **不含**
+  `px_graph`/`px_cook`/`px_render`/`px-scene`/`px_pass`/`px_graphs` —— 15.0 MB 那件事从此有门。
+* `px_elem::all_roots` 是**唯一**那处根口径（生成器算键、图侧算键、生成物 `[dependencies]`
+  三处都走它）—— 实测栽过一次：payload 写 `px_field_schema::field::Field` 而 manifest 里
+  没这个依赖 ⇒ 生成的库编不过。
+* ⚠ **图侧代码生成回来了**（`elem_gen.rs`），但理由与从前不同：从前是"把事实烘成 const"，
+  现在是"**算子类型必须住图侧**"（住作者面 = 15 MB 库）+ 手感对齐。两档的键都由生成器算：
+  element 那一档生成器读得到 `px_elem::ELEM_SPECS`（build-dependency）与体文件字节 ⇒
+  与图侧运行期算的是同一个值（同一个 `key_of_facts`）。
+* 仍记着的两条小账：element 条目的报错行号指向**规格表那一行**（体模板是宏拼的，表里没有
+  那段原文，指到那一行是诚实的近似）；`InstCatalogue::insert` 的唯一性仍是**断言**
+  （与 `BuildGraph::facts` 一致）。

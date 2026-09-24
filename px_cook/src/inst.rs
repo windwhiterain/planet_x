@@ -510,10 +510,19 @@ pub enum InstKind {
         decl: &'static str,
     },
     /// 复用 `px_elem` 那个泛型算子的**一次单态化**（`Elementwise::<Constant>`）。
+    ///
+    /// ⚠⚠ **生成物不引图侧那个算子类型**（那会把驱动链进每一份实例库：实测 15.0 MB vs 5.3 MB）。
+    ///   它写的是**裸体**：`px_body_raw! { <ty>, <params>, <inputs>, <payload>, |p, i| … }`
+    ///   —— 三个类型直接摊在签名上，于是生成的库只依赖 `px_elem`（+ 契约层与 `px_field_schema`，
+    ///   它们都是叶子）。
     Element {
         /// element 函数的类型名（`Constant`，`px_elem_specs!` 那一行展开出来的标记类型）
-        /// —— 它同时是生成物里那个**裸名**（`px_body!` 的 `$name`）与符号名的后半。
+        /// —— 它同时是生成物里那个**裸名**（`px_body_raw!` 的第一栏）与符号名的后半。
         ty: &'static str,
+        /// 三个类型路径（`px_elem::ElementFn` 的关联类型，从 `px_elem::specs` 的事实取）。
+        params: &'static str,
+        inputs: &'static str,
+        payload: &'static str,
     },
 }
 
@@ -526,7 +535,7 @@ impl InstKind {
     pub fn name(&self) -> &'static str {
         match self {
             Self::Decl { decl, .. } => decl,
-            Self::Element { ty } => ty,
+            Self::Element { ty, .. } => ty,
         }
     }
 
@@ -795,50 +804,67 @@ pub fn lib_text(root: &Path, codegen: &InstCodegen) -> Result<String, String> {
     if !source.is_file() {
         return Err(format!("泛型参数源不在盘上：{}", source.display()));
     }
-    let name = codegen.kind.name();
     // 复用的东西按裸名引进作用域 —— 两档形状不同：
     //
     // ⚠ **声明那一档**：`pub use <声明真路径>::<声明名>;`（路径由 `px_decls` 那张表给，
     //   不会抄错）。
     //
-    // ⚠ **element 那一档**：`type <ty> = px_elem::Elementwise<px_elem::specs::<ty>>;`
-    //   —— 裸名必须是 `Elementwise<…>` 这一份，因为 `px_body!` 的 `$name` 要 `PxOp`
-    //   （三个关联类型、`Payload`、符号名都从它来）。
-    //   ⚠ 而体里的 `px_elem::fill::<…>` 要的是 `ElementFn`（那个标记类型 `specs::<ty>`）——
-    //   同一个裸名不可能同时是这两种类型，**所以体模板里写的是全路径**
-    //   （`px_elem/src/lib.rs` 的 `BODY`，与"生成物里的 `use` 一律全路径"同一条规矩）。
-    let head = match &codegen.kind {
+    // ⚠⚠ **element 那一档：什么都不引**（2026-09-27 改）。从前这里是一句
+    //   `type <ty> = px_elem::Elementwise<px_elem::specs::<ty>>;`，而那个泛型算子住在图侧、
+    //   要 `library_path` 与内容键 ⇒ **整条驱动链被静态链进每一份实例库**（实测 15.0 MB
+    //   vs 声明档 5.3 MB），而且"实现库不许依赖 `px_graph`/`px_cook`"那条不变式在这一档
+    //   没有门看着。现在生成物写**裸体**（[`px_body_raw!`]）：符号名与三个类型直接摊开，
+    //   于是这份库只依赖 `px_elem` 与契约层。
+    let (head, body_block) = match &codegen.kind {
         InstKind::Decl {
             schema,
             module,
             decl,
-        } => format!(
-            "// 复用的那个声明（`{schema}::{module}::{decl}`）——引进来当 `{decl}`：\n\
-             #[allow(unused_imports)]\n\
-             pub use {schema}::{module}::{decl};\n",
+        } => (
+            format!(
+                "// 复用的那个声明（`{schema}::{module}::{decl}`）——引进来当 `{decl}`：\n\
+                 #[allow(unused_imports)]\n\
+                 pub use {schema}::{module}::{decl};\n"
+            ),
+            format!(
+                "px_graph_schema::px_body! {{\n\
+                 \x20   {decl},\n\
+                 \x20   |p, i| {}\n\
+                 }}\n",
+                codegen.body,
+            ),
         ),
-        InstKind::Element { ty } => format!(
-            "// 复用的那个泛型算子（`px_elem::Elementwise<px_elem::specs::{ty}>`）——引进来当 `{ty}`：\n\
-             type {ty} = px_elem::Elementwise<px_elem::specs::{ty}>;\n",
+        InstKind::Element {
+            ty,
+            params,
+            inputs,
+            payload,
+        } => (
+            String::new(),
+            format!(
+                "// ⚠ **裸体**：不引任何算子类型（引了就把驱动链进来）——符号名与三个类型直接给。\n\
+                 px_graph_schema::px_body_raw! {{\n\
+                 \x20   {ty},\n\
+                 \x20   {params},\n\
+                 \x20   {inputs},\n\
+                 \x20   {payload},\n\
+                 \x20   |p, i| {}\n\
+                 }}\n",
+                codegen.body,
+            ),
         ),
     };
     Ok(format!(
         "//! 生成物（`px build` 写的）。别手改 —— 改 {} 里的源文件，然后重跑。\n\
          \n\
          {head}\
-         \n\
          include!(\"{}\");\n\
          \n\
-         px_graph_schema::px_body! {{\n\
-         \x20   {},\n\
-         \x20   |p, i| {}\n\
-         }}\n\
+         {body_block}\
          \n\
          px_graph_schema::px_impl_lib!();\n",
         codegen.source,
         slash(&source),
-        name,
-        codegen.body,
     ))
 }
 

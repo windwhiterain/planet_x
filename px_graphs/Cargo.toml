@@ -60,8 +60,12 @@ px_fingerprint = { path = "../px_fingerprint" }
 #   ⚠ 它**只许住这里**（build-dependencies）：一旦进了 `[dependencies]`，它就进了图程序的名册，
 #   "改声明表 ⇒ 重编图程序"就成了一件正常的事（而它该由本脚本的 `rerun-if-changed` 管）。
 px_decls = { path = "../px_decls" }
+# ⚠ **element 函数那张规格表**（`px_elem`）：图侧要为每条规格生成一个算子类型
+#   （脚本写 `elem::Constant`），生成器得看见规格本身（体模板、根、体文件路径）。
+px_elem = { path = "../px_elem" }
 # ⚠ **stage 1 的生成器要它**：`px_cook::inst` 算 key、写实例库的 `Cargo.toml` / `src/lib.rs`。
 #   从前 `build.rs` 不依赖它（那时它是运行期那一侧的事）；今天生成器要在**编译图程序之前**
 #   就把 key 算出来（`key_of_facts`）⇒ 它必须住 build-dependencies。
 #   ⚠ 它**不会**因此进任何实现库的名册（那些库的 manifest 由 `px_cook::inst` 按边一条一条写）。
 px_cook = { path = "../px_cook" }
+

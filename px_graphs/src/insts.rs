@@ -74,14 +74,19 @@ pub fn build(g: &mut px_cook::inst::BuildGraph) {
     }
     // ⚠ op id 用**规格的人读名**（`field.constant`）：它是读数与报错用的标签，不进身份
     //   （身份 = 内容，见 `px_cook::inst::key` 里那段裁定）—— 但 `BuildGraph::facts` 要求它唯一。
+    // ⚠ 根用 `px_elem::all_roots(spec)`（作者声明的 ∪ `px_elem`/`px_field_schema`）：
+    //   它同时是**算键的输入**与**生成物 `[dependencies]` 的来源** ⇒ 两边各写一份就会出
+    //   "键对不上"或"库引不到类型"（后者实测过一次：payload 写的 `px_field_schema::field::Field`
+    //   而 manifest 里没有这个依赖）。口径只在 `px_elem::all_roots` 一处。
     for spec in px_elem::ELEM_SPECS {
         let facts = (spec.facts)();
+        let roots = px_elem::all_roots(spec);
         g.facts(
             spec.ty,
             spec.name,
             facts.interface,
             facts.decl_hash,
-            spec.roots,
+            &roots,
             spec.source,
             spec.body,
         );
@@ -91,63 +96,20 @@ pub fn build(g: &mut px_cook::inst::BuildGraph) {
 /// 生成物的**旁挂件**：每条实例的 op id / key / 体住哪（`px build` 的错误映射与门读它）。
 ///
 /// ⚠ 它**不参与任何 key**、也不进图程序（只在工具与测试里被 include）。
-/// ⚠ 这里是**条目切片**（不是 `InstCatalogue`）：element 那几条不在生成物里，由下面的
-///   [`codegen`] 插进来。
+/// ⚠ 这里是**条目切片**（不是 `InstCatalogue`），**两档都在里面**（声明那一档与 element
+///   那一档 —— 后者的键由生成器读体文件字节算出来，与图侧运行期算的是同一个值）。
 pub mod catalogue {
     include!(concat!(env!("OUT_DIR"), "/insts_gen_catalogue.rs"));
 }
 
-/// 每条实例的生成期事实（工具与门用）—— **两档在这里合流**。
+/// 每条实例的生成期事实（工具与门用）—— **两档已经在生成物里合流**。
 ///
-/// ⚠ 声明那一档是生成物里的一串编译期字面量；element 那一档由下面那段循环从
-///   `px_elem::ELEM_SPECS` 现读一条条插进来。合在一张表里的理由是"`px build` 只有一条路"：
-///   `missing()` / `compile_missing` / `compile_one` 只认这张表，不认识"这一条是从哪来的"。
-///
-/// ⚠ 用 `OnceLock` 缓存（本函数从前返回的就是 `&'static`）：element 那几条要**算内容键**
-///   （读体文件字节 + 数各根的源码名册，几毫秒）—— 每次调用都重算的话，`px build` 一条一条
-///   编的时候会白算几十遍。缓存之后签名不变（调用方拿到的仍是 `&'static`）。
-///
-/// ⚠ 键与生成物那一栏同口径（`InstCodegen::key` = 库文件名 `<key>.dll` 的那个 key）：
-///   `BuildGraph::missing()` 与 `tests/inst_gate.rs` 都按它对照 —— 两处算键的入口是同一个
-///   [`px_cook::inst::key_of_facts`]，与图脚本装载时（`px_elem::key_of`）也是同一个。
+/// ⚠ element 那一档从前由这里在运行期现造（那要 `OnceLock` + `Box::leak` 两份字符串），
+///   2026-09-27 收掉了：生成器读得到 `px_elem::ELEM_SPECS`（它是 build-dependency），
+///   于是两档都由生成物出 ⇒ 这一层只剩一层转发，调用方拿到的仍是 `&'static`。
 pub fn codegen() -> &'static px_cook::inst::InstCatalogue {
-    static MERGED: std::sync::OnceLock<px_cook::inst::InstCatalogue> = std::sync::OnceLock::new();
-    MERGED.get_or_init(|| {
-        let mut catalogue = px_cook::inst::InstCatalogue::from_generated(catalogue::INST_CODEGEN);
-        for spec in px_elem::ELEM_SPECS {
-            let facts = (spec.facts)();
-            // ⚠ **空 op id**：手写名不进身份（"实例身份 = 内容"）—— 与 `px_elem::key_of` 逐字同参。
-            //   两处不一样就是"图脚本算的键与 `px build` 编出来的库不是同一个"那种最难查的错。
-            let key = px_cook::inst::key_of_facts(
-                "",
-                facts.interface,
-                facts.decl_hash,
-                spec.roots,
-                spec.source,
-                spec.body,
-            )
-            .unwrap_or_else(|err| panic!("element 规格 `{}` 的内容键算不出来：{err}", spec.name));
-            // ⚠ `InstCodegen` 这两栏是 `&'static str`（生成物那一档要住在 `static` 里），
-            //   而这两个字符串只有运行期算得出 ⇒ 各泄漏一份。条数 = `ELEM_SPECS` 的长度、
-            //   进程一次（与 `px_elem` 里那个内容键缓存同一个代价口径）。
-            let key: &'static str = Box::leak(key.into_boxed_str());
-            let generated: &'static str =
-                Box::leak(px_cook::inst::generated_dir(key).into_boxed_str());
-            catalogue.insert(px_cook::inst::InstCodegen {
-                op_id: spec.name,
-                key,
-                kind: px_cook::inst::InstKind::Element { ty: spec.ty },
-                source: spec.source,
-                body: spec.body,
-                // ⚠ 0：体模板是 `px_elem` 的宏拼出来的，`px_elem/src/specs.rs` 那一行里
-                //   **没有**那段原文 ⇒ 报不出行号（报错仍有 source 与 generated 两条线索）。
-                recipe_line: 0,
-                recipe: "px_elem/src/specs.rs",
-                generated,
-            });
-        }
-        catalogue
-    })
+    static ALL: std::sync::OnceLock<px_cook::inst::InstCatalogue> = std::sync::OnceLock::new();
+    ALL.get_or_init(|| px_cook::inst::InstCatalogue::from_generated(catalogue::INST_CODEGEN))
 }
 
 // ⚠ **图侧的 `px_inst` 宏调用没有了**（`21-codegen-types.md`）：类型由 build.rs 生成，

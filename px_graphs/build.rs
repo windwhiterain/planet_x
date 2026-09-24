@@ -18,6 +18,14 @@ use std::path::{Path, PathBuf};
 
 use px_cook::inst::{self, RECIPE};
 
+/// element 函数那张规格表（`px_elem/src/specs.rs`）—— **图侧要读它**：
+/// 每条规格在图侧生成一个单元结构体（脚本写 `elem::Constant` 当值用）。
+///
+/// ⚠ 路径与 `px_elem` 里那份**同一处**（那边是 crate 内的模块，这边是工作区相对路径）：
+///   它只是"重跑条件 + 错误映射要的那一行"用，用错了是**读不到文件**（当场 panic），
+///   不是静默走错表。
+const ELEM_SPECS: &str = "px_elem/src/specs.rs";
+
 fn main() {
     // ① 图程序自己的源码指纹（从前就有；`px_local_op!` 那一档的身份用它）。
     px_fingerprint::cargo_fingerprint_for_crate(&[]);
@@ -34,11 +42,17 @@ fn main() {
 
     let plan = plan_instances(&root).unwrap_or_else(|err| panic!("{err}"));
     let generated = insts_gen_text(&plan).unwrap_or_else(|err| panic!("{err}"));
-    let catalogue = catalogue_text(&plan);
+    let elems = plan_elems(&root).unwrap_or_else(|err| panic!("{err}"));
+    let elem_gen = elem_gen_text(&elems).unwrap_or_else(|err| panic!("{err}"));
+    let catalogue = catalogue_text(&plan, &elems);
 
     // 生成物写到 `OUT_DIR`。⚠ `insts_gen_catalogue.rs` 是**给工具/门的旁挂件**（`px build` 的
     //   错误映射与端到端测试读它），不参与图程序的编译。
     write_if_changed(&out_dir().join("insts_gen.rs"), &generated);
+    // ⚠ `elem_gen.rs` **进图程序**（`px_graphs::elem` 把它的单元结构体 re-export 给脚本）——
+    //   与实例那一档相反：那边图侧只需要事实，这边图侧要的是**算子类型本身**（脚本写
+    //   `elem::Constant` 当值用），而那份类型必须住在图侧（住在作者面就会把驱动链进实例库）。
+    write_if_changed(&out_dir().join("elem_gen.rs"), &elem_gen);
     write_if_changed(&out_dir().join("insts_gen_catalogue.rs"), &catalogue);
 }
 
@@ -442,22 +456,151 @@ fn insts_gen_text(plan: &[Planned]) -> Result<String, String> {
     Ok(out)
 }
 
+/// 一条 **element 函数**的生成期事实（生成物与旁挂件都从它来）。
+///
+/// ⚠ 与 [`Planned`] 分成两份结构是**有意**的：两者的生成物形状不同（element 那些单元结构体
+///   要进图程序、实例那几条只出事实），而相同的只有"算 key / 落哪一行"这几栏。
+struct ElemPlanned {
+    /// 类型名（`Constant`）—— 生成物里那个单元结构体的名字，也是符号名的后半。
+    ty: String,
+    /// 人读名（`field.constant`）：`PxOp::ID`（读数与报错）。
+    name: String,
+    /// 三个关联类型的**全路径**（从 `px_elem::specs` 的事实取）。
+    params: String,
+    inputs: String,
+    payload: String,
+    roots: Vec<String>,
+    source: String,
+    /// `px_body_raw!` 的体表达式（宏拼的那一条：唯一那条循环 + 体文件里的 `value`）。
+    body: String,
+    key: String,
+    interface: u64,
+    decl_hash: String,
+    generated: String,
+    /// 规格表里那一行（错误映射用：element 的体是宏拼的，报错要指到**那一行规格**）。
+    spec_line: u32,
+}
+
+/// **element 函数那一张表**（`px_elem::ELEM_SPECS`）+ 每条的生成期事实。
+///
+/// ⚠ element **不需要代码生成去算事实**（内容键在运行期也算得出），这里生成的是**算子类型**：
+///   脚本要写 `elem::Constant`（一个**单元结构体值**，与预置那一档 `field::Fbm` 同形），
+///   而那个类型必须住在**图侧**（住作者面就会把驱动链进每一份实例库）。
+fn plan_elems(root: &Path) -> Result<Vec<ElemPlanned>, String> {
+    let spec_text = std::fs::read_to_string(root.join(ELEM_SPECS))
+        .map_err(|err| format!("读不了 {ELEM_SPECS}：{err}"))?;
+    let mut planned = Vec::new();
+    for spec in px_elem::ELEM_SPECS {
+        let facts = (spec.facts)();
+        // ⚠ 根 = 作者声明的那些 ∪ **两个固定的**（`px_elem` 与 `px_field_schema`）：
+        //   参数/上游那些类型住在那儿，它们的源码变了也该换键。
+        let roots = px_elem::all_roots(spec);
+        let root_refs: Vec<&str> = roots.iter().copied().collect();
+        let key = inst::key_of_facts(
+            // ⚠ **空 op id**：手写名不进身份（用户裁定"实例身份 = 内容"）。
+            "",
+            facts.interface,
+            facts.decl_hash,
+            &root_refs,
+            spec.source,
+            spec.body,
+        )
+        .map_err(|err| format!("element {}：{err}", spec.ty))?;
+        let spec_line = spec_text
+            .lines()
+            .position(|line| line.contains(spec.name))
+            .map(|at| at as u32 + 1)
+            .unwrap_or(0);
+        planned.push(ElemPlanned {
+            ty: spec.ty.to_string(),
+            name: spec.name.to_string(),
+            params: facts.params.to_string(),
+            inputs: facts.inputs.to_string(),
+            payload: facts.payload.to_string(),
+            roots: roots.iter().map(|each| each.to_string()).collect(),
+            source: spec.source.to_string(),
+            body: spec.body.to_string(),
+            generated: inst::generated_dir(&key),
+            key,
+            interface: facts.interface,
+            decl_hash: facts.decl_hash.to_string(),
+            spec_line,
+        });
+    }
+    Ok(planned)
+}
+
+/// **`OUT_DIR/elem_gen.rs`**：每条 element 函数一个**单元结构体** + 它的 `PxOp` 实现。
+///
+/// ⚠ 这是**图侧代码生成**（用户裁定：手感要对齐预置那一档 —— 脚本写 `elem::Constant`）。
+///   它不烘任何事实：关联类型是三个**路径**（`px_elem` 的事实给的），键与装载都转给
+///   `px_graphs::elem`（那里才认识 `px_cook`）。
+fn elem_gen_text(plan: &[ElemPlanned]) -> Result<String, String> {
+    let mut out = String::from(
+        "// **生成物**（`px_graphs/build.rs` 写的）—— 别手改。\n\
+         //\n\
+         // 每条 element 函数一个单元结构体：脚本把**类型名当值**用（`elem::Constant`），\n\
+         // 与预置那一档（`field::Fbm`）同一个手感。\n\
+         // ⚠ 类型住**图侧**是有意的：住在作者面（`px_elem`）就会把驱动链进每一份实例库。\n\
+         \n",
+    );
+    for item in plan {
+        out.push_str(&format!(
+            "/// `{name}` —— element 函数（实现在 `{source}`，编成 `{generated}` 那一份内容寻址的库）。\n\
+             pub struct {ty};\n\
+             \n\
+             impl ::px_graph_schema::PxOp for {ty} {{\n\
+             \x20   const ID: &'static str = \"{name}\";\n\
+             \x20   /// **空串** = 不住在预置库里（按内容键去装那一份实例库）。\n\
+             \x20   const LIB: &'static str = \"\";\n\
+             \x20   const SYMBOL: &'static str = \"px_inst__{ty}\";\n\
+             \x20   type Params = {params};\n\
+             \x20   type Inputs = {inputs};\n\
+             \x20   type Payload = {payload};\n\
+             \x20   fn new() -> Self {{ Self }}\n\
+             \x20   fn source_hash() -> ::core::result::Result<&'static str, ::std::string::String> {{\n\
+             \x20       crate::elem::source_hash_of::<::px_elem::specs::{ty}>()\n\
+             \x20   }}\n\
+             \x20   fn decl_hash() -> &'static str {{\n\
+             \x20       \"{decl_hash}\"\n\
+             \x20   }}\n\
+             \x20   fn render(\n\
+             \x20       &self,\n\
+             \x20       p: &Self::Params,\n\
+             \x20       i: &Self::Inputs,\n\
+             \x20   ) -> ::core::result::Result<Self::Payload, ::std::string::String> {{\n\
+             \x20       crate::elem::render::<::px_elem::specs::{ty}>(p, i)\n\
+             \x20   }}\n\
+             }}\n\
+             \n",
+            name = item.name,
+            ty = item.ty,
+            params = item.params,
+            inputs = item.inputs,
+            payload = item.payload,
+            source = item.source,
+            generated = item.generated,
+            decl_hash = item.decl_hash,
+        ));
+    }
+    Ok(out)
+}
+
 /// **`OUT_DIR/insts_gen_catalogue.rs`**：给工具与门的旁挂件（`InstCatalogue`）。
 ///
 /// ⚠ 它不进图程序（`insts.rs` 只并进 `insts_gen.rs`）；类型一律写**全路径**
 ///   ⇒ 图程序与 `tests/*.rs` 两边都编得过。
-/// ⚠ 这里落的是**条目切片**（不是 `InstCatalogue` 本身）：element 那一档的条目**不住生成物里**
-///   （它的规格住在 `px_elem` 里、内容键在运行期算）⇒ 由 `px_graphs::insts::codegen()` 把这一串
-///   拷成一张可增长的表、再把 `ELEM_SPECS` 每条插进去。生成物只出"声明那一档"那几条。
-fn catalogue_text(plan: &[Planned]) -> String {
+/// ⚠ 这里落的是**条目切片**（不是 `InstCatalogue` 本身）；**两档都在里面**
+///   （声明那一档与 element 那一档 —— 后者的键由这一侧算：它读得到体文件字节，
+///   而图侧运行期也要能算出同一个值，两边走同一个 `px_cook::inst::key_of_facts`）。
+fn catalogue_text(plan: &[Planned], elems: &[ElemPlanned]) -> String {
     let mut out = String::from(
         "// **生成物的旁挂件**（`px_graphs/build.rs` 写的）：每条实例的 op id / key / 体住哪。\n\
          //\n\
          // 谁读它：`px build` / `px run --build`（**错误映射**：编不过时报`体来自 recipe 第几行`）\n\
          // 与端到端测试。⚠ 它**不参与任何 key**、也不进图程序。\n\
          //\n\
-         // ⚠ 形状是**条目切片**：`px_graphs::insts::codegen()` 把这一串拷成可增长的表，\n\
-         //   再把 `px_elem::ELEM_SPECS` 那几条（图侧没有生成物）插进去。\n\
+         // ⚠ 形状是**条目切片**：两档（声明 / element）都在里面。\n\
          \n\
          pub static INST_CODEGEN: &[::px_cook::inst::InstCodegen] = &[\n",
     );
@@ -488,6 +631,38 @@ fn catalogue_text(plan: &[Planned]) -> String {
             body = item.body,
             recipe_line = item.recipe_line,
             recipe = RECIPE,
+            generated = item.generated,
+        ));
+    }
+    for item in elems {
+        out.push_str(&format!(
+            "        ::px_cook::inst::InstCodegen {{\n\
+             \x20           op_id: \"{op_id}\",\n\
+             \x20           key: \"{key}\",\n\
+             \x20           kind: ::px_cook::inst::InstKind::Element {{\n\
+             \x20               ty: \"{ty}\",\n\
+             \x20               params: \"{params}\",\n\
+             \x20               inputs: \"{inputs}\",\n\
+             \x20               payload: \"{payload}\",\n\
+             \x20           }},\n\
+             \x20           source: \"{source}\",\n\
+             \x20           body: \"{body}\",\n\
+             \x20           recipe_line: {spec_line},\n\
+             \x20           recipe: \"{recipe}\",\n\
+             \x20           generated: \"{generated}\",\n\
+             \x20       }},\n",
+            op_id = item.name,
+            key = item.key,
+            ty = item.ty,
+            params = item.params,
+            inputs = item.inputs,
+            payload = item.payload,
+            source = item.source,
+            body = item.body,
+            spec_line = item.spec_line,
+            // ⚠ element 的体是**宏拼的**（规格表那一行说了"哪个文件"，模板由 `BODY` 给）
+            //   ⇒ 报错指向**规格表那一行**，不指 `:0`。
+            recipe = ELEM_SPECS,
             generated = item.generated,
         ));
     }

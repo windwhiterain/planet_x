@@ -37,10 +37,8 @@
 //! ⚠ **融合就是"一个函数一次拿到全部上游"**：`F::Inputs` 自己声明几个上游（`()/FieldInput/
 //!   FieldPairInput/…`），整条链在一个循环里算完 ⇒ 一个节点、一个产物、上游只读一次。
 
-use std::marker::PhantomData;
-
 pub use px_field_schema::params::Shape;
-use px_graph_schema::{PxInputs, PxKeyed, PxOp};
+use px_graph_schema::{PxInputs, PxKeyed};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
@@ -59,6 +57,23 @@ pub use constant::ConstantParams;
 pub use px_field_schema::field::Field;
 pub use px_graph_schema::interface_hash;
 pub use specs::ELEM_SPECS;
+
+/// 一条 element 函数的**全部根**：作者声明的那些 ∪ **两个固定的**。
+///
+/// ⚠ 为什么固定的两个也在里面：参数 / 上游那些**类型**住在那两个 crate 里
+///   （`px_elem` 的 `ConstantParams`、`px_field_schema` 的 `Shape`/`Field`）——
+///   它们的源码变了（比如 `Shape` 加一栏）也必须换实例键，否则会命中一份按旧布局编的库。
+/// ⚠ 这一条口径**只有这一处**：生成器（build script）与图侧运行期算键都调它，
+///   两边各写一份就会出"库名与图谱算的键对不上"那种最难查的错。
+pub fn all_roots(spec: &ElemSpec) -> Vec<&'static str> {
+    let mut roots = vec!["px_elem", "px_field_schema"];
+    for each in spec.roots {
+        if !roots.contains(each) {
+            roots.push(each);
+        }
+    }
+    roots
+}
 
 /// 一个 element 函数的**类型级事实**（生成器 / `px build` / 门读它）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,15 +95,15 @@ pub struct ElemSpec {
     pub source: &'static str,
     /// 体编译时链的 crate（build graph 的边）。
     pub roots: &'static [&'static str],
-    /// `px_body!` 的体表达式（生成物逐字抄它）。
+    /// `px_body_raw!` 的体表达式（生成物逐字抄它）。
     pub body: &'static str,
     /// 类型级事实（从**真类型**取）。
     pub facts: fn() -> ElemFacts,
 }
 
-/// `px_elem` 那一份源码指纹（element 函数的家）—— [`Elementwise::decl_hash`] 就是它。
+/// `px_elem` 那一份源码指纹（element 函数的家）—— 实例键的一轴（`decl_hash`）。
 ///
-/// ⚠ `env!` 在**本 crate** 展开 ⇒ 任何用到 `Elementwise<F>` 的图程序拿到的都是这个常量：
+/// ⚠ `env!` 在**本 crate** 展开 ⇒ 图侧那一边（`px_graphs::elem` 的生成物）读到的就是它：
 ///   往参数 struct 里加一栏、或改规格表 ⇒ 换 `decl_hash` ⇒ 换实例键（`19-generic-inst.md` §177）。
 pub const DECL_HASH: &str = env!("PX_SOURCE_HASH");
 
@@ -118,23 +133,6 @@ pub trait ElementFn: 'static {
     fn shape(params: &Self::Params, inputs: &Self::Inputs) -> Shape;
 }
 
-/// **这一条实例的内容键** —— `target/pcg/inst/<键>.dll` 的名字，也是它进节点键的那一轴。
-///
-/// ⚠ 与 `px build` 判断"缺哪些库"走**同一个函数**（[`px_cook::inst::key_of_facts`]）：
-///   两处各写一份算法就会出"图谱算的键与库名对不上"那种最难查的错。
-pub fn key_of<F: ElementFn>() -> Result<String, String> {
-    px_cook::inst::key_of_facts(
-        // ⚠ **空 op id**：手写名不进身份（用户裁定"实例身份 = 内容"）——
-        //   两个图用同一个函数才会落到同一个键上。
-        "",
-        facts_of::<F>().interface,
-        DECL_HASH,
-        F::ROOTS,
-        F::SOURCE,
-        F::BODY,
-    )
-}
-
 /// 从一个**真类型**取事实（`F` 是作者面那个类型，不是 `Elementwise<F>`）。
 pub fn facts_of<F: ElementFn>() -> ElemFacts {
     ElemFacts {
@@ -148,62 +146,6 @@ pub fn facts_of<F: ElementFn>() -> ElemFacts {
         inputs: ::core::any::type_name::<F::Inputs>(),
         payload: ::core::any::type_name::<Field>(),
     }
-}
-
-/// **那个泛型算子**：`Elementwise::<Constant>`。
-pub struct Elementwise<F: ElementFn>(PhantomData<F>);
-
-impl<F: ElementFn> PxOp for Elementwise<F> {
-    const ID: &'static str = F::NAME;
-    /// ⚠ **空串** = 这个算子不住在任何预置库里（它按内容键去装那一份实例库）。
-    const LIB: &'static str = "";
-    /// ⚠ 实现库里的符号名由**已知的命名口径**给：生成物一律 `px_body! { <类型名>, … }`，
-    ///   于是符号就是 `px_inst__<类型名>`。类型名从 `F` 的**全路径**末段取（`Constant`）。
-    const SYMBOL: &'static str = F::SYMBOL;
-
-    type Params = F::Params;
-    type Inputs = F::Inputs;
-    type Payload = Field;
-
-    fn new() -> Self {
-        Self(PhantomData)
-    }
-
-    /// 进节点键的那一轴：**内容键**（不是"哪个库"）—— 于是"改体文件 ⇒ 换键"自动成立。
-    ///
-    /// ⚠ 返回值必须是 `&'static str`，而键是运行期算的 ⇒ 缓存一次（每个函数一次，
-    ///   与 `PxOp::interface()` 那道"泛型里的 static 不按单态化分开"的坑**不同**：
-    ///   这里的缓存按 `F` 分开 —— 因为 `key_of::<F>()` 是**单态化函数**，
-    ///   每个 `F` 拿到自己那一格）。
-    fn source_hash() -> Result<&'static str, String> {
-        Ok(cached_key::<F>()?)
-    }
-
-    /// 本 crate（element 函数的家）那一份源码指纹：改参数 struct / 规格表 ⇒ 换键。
-    fn decl_hash() -> &'static str {
-        DECL_HASH
-    }
-
-    fn render(&self, params: &Self::Params, inputs: &Self::Inputs) -> Result<Field, String> {
-        let path = px_cook::inst::library_path(Self::source_hash()?);
-        let body =
-            px_graph_schema::ops::load_at::<Self>(path.to_string_lossy().as_ref(), F::SYMBOL)?;
-        body(params, inputs)
-    }
-}
-
-/// **每个函数一格**的内容键缓存（`source_hash()` 要 `&'static str`，而键是运行期算的）。
-fn cached_key<F: ElementFn>() -> Result<&'static str, String> {
-    static KEYS: std::sync::Mutex<Vec<(std::any::TypeId, &'static str)>> =
-        std::sync::Mutex::new(Vec::new());
-    let id = std::any::TypeId::of::<F>();
-    let mut keys = KEYS.lock().expect("内容键缓存锁坏了");
-    if let Some((_, key)) = keys.iter().find(|(each, _)| *each == id) {
-        return Ok(key);
-    }
-    let key: &'static str = Box::leak(key_of::<F>()?.into_boxed_str());
-    keys.push((id, key));
-    Ok(key)
 }
 
 /// **element 算子的唯一那条循环**（与 `px_field_alg::map_grid` 同一档）。

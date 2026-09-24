@@ -21,6 +21,11 @@
 //! **本 crate** 这一份源码（[`SOURCE_HASH`]），实现在图脚本里、泛型参数在图侧实例化。
 //! 真样本在 `tests/local_op.rs`。
 pub mod cloud_proxy;
+/// **element 算子**（泛型那一档）的图侧：生成的单元结构体（`elem::Constant`）+ 内容键 + 装载。
+///
+/// ⚠ 类型住这里而不是作者面（`px_elem`）是**尺寸问题**：作者面一认识驱动，每一份实例库
+///   就会把驱动静态链进去（实测 15.0 MB vs 声明档 5.3 MB）。见 `px_body_raw!`。
+pub mod elem;
 /// **泛型实例**的声明（`px_inst`）与 **stage 1 的 build graph**（`insts::build`）——
 /// bin `px`（`list` / `build` / `run`）与 `tests/inst_gate.rs` 都看它。
 pub mod insts;

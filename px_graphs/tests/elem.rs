@@ -20,8 +20,9 @@
 use px_cook::inst::{self, BuildGraph};
 use px_cook::{Domain, GraphSpec, begin, cached};
 use px_elem::specs::Constant;
-use px_elem::{ConstantParams, ElementFn, Elementwise, Shape};
+use px_elem::{ConstantParams, ElementFn, Shape};
 use px_graph_schema::PxOp;
+use px_graphs::elem;
 
 /// 端到端 + 跨图共享（共用一份库，所以合在一个测试里 —— 见文件头那条并行规矩）。
 #[test]
@@ -48,7 +49,7 @@ fn a_generic_element_op_runs_and_is_shared_by_two_graphs() {
         shape,
         value: expected,
     };
-    let key = px_elem::key_of::<Constant>().expect("element 实例的内容键应当算得出来");
+    let key = elem::key_of::<Constant>().expect("element 实例的内容键应当算得出来");
     let library = inst::library_path(&key);
     println!(
         "element 实例：key {key}｜库 {}（{} 字节）",
@@ -65,14 +66,8 @@ fn a_generic_element_op_runs_and_is_shared_by_two_graphs() {
     let one = begin(GraphSpec {
         name: "elem-one".to_string(),
     });
-    let cooked = cached(
-        &one,
-        "constant",
-        Elementwise::<Constant>::new(),
-        params(),
-        (),
-    )
-    .expect("element 实例应当能算（库不在盘上时这里会带命令报错）");
+    let cooked = cached(&one, "constant", elem::Constant, params(), ())
+        .expect("element 实例应当能算（库不在盘上时这里会带命令报错）");
     let field = cooked.value();
     assert_eq!(
         (field.width, field.height),
@@ -107,14 +102,8 @@ fn a_generic_element_op_runs_and_is_shared_by_two_graphs() {
     let two = begin(GraphSpec {
         name: "elem-two".to_string(),
     });
-    let again = cached(
-        &two,
-        "constant",
-        Elementwise::<Constant>::new(),
-        params(),
-        (),
-    )
-    .expect("第二个图里的同一份内容");
+    let again =
+        cached(&two, "constant", elem::Constant, params(), ()).expect("第二个图里的同一份内容");
     assert_eq!(
         again.key, cooked.key,
         "两个图名算出了两个节点键 ⇒ 图名（或图程序自己的源码指纹）还在实例身份里"
@@ -149,14 +138,14 @@ fn the_key_is_the_body_bytes_and_the_symbol_is_the_same_string() {
     );
 
     // **同一个函数、同一个输入**：图脚本（`px_elem::key_of`）与这里（显式事实）算出来的键。
-    let key = px_elem::key_of::<Constant>().expect("内容键");
+    let key = elem::key_of::<Constant>().expect("内容键");
     let by_facts = |source: &str, body: &str| {
         inst::key_of_facts(
             // ⚠ 空 op id：手写名不进身份（"实例身份 = 内容"）—— 与 `px_elem::key_of` 同参。
             "",
             facts.interface,
             facts.decl_hash,
-            spec.roots,
+            &px_elem::all_roots(spec),
             source,
             body,
         )
@@ -224,14 +213,33 @@ fn the_key_is_the_body_bytes_and_the_symbol_is_the_same_string() {
         "element 函数的 `SYMBOL` 与 `inst::symbol` 拼出来的不是同一个字符串"
     );
     assert_eq!(
-        <Elementwise<Constant> as PxOp>::SYMBOL,
+        <elem::Constant as PxOp>::SYMBOL,
         inst::symbol(spec.ty),
-        "`Elementwise<F>` 报的符号名与工具那一侧不一致 ⇒ 装载必然找不到符号"
+        "图侧那个算子类型报的符号名与工具那一侧不一致 ⇒ 装载必然找不到符号"
     );
     assert!(
-        <Elementwise<Constant> as PxOp>::LIB.is_empty(),
+        <elem::Constant as PxOp>::LIB.is_empty(),
         "element 算子的实现不在任何预置库里（它按内容键装载）⇒ `LIB` 必须是空串"
     );
+
+    // ④ **算法那一侧不许认识驱动**（2026-09-27 的尺寸问题）：`roots` 就是那份实例库编译时
+    //    链的 crate 集合 ⇒ 它一旦包含驱动/烘图层，那份库就会把驱动静态链进去
+    //    （实测 15.0 MB vs 声明档 5.3 MB），而且"实现库不许依赖 `px_graph`/`px_cook`"那条
+    //    不变式在这一档就没有门看着。⚠ `crate_graph.rs` 只管五份预置库，管不到这里。
+    let roots = px_elem::all_roots(spec);
+    for forbidden in [
+        "px_graph",
+        "px_cook",
+        "px_render",
+        "px-scene",
+        "px_pass",
+        "px_graphs",
+    ] {
+        assert!(
+            !roots.contains(&forbidden),
+            "element 实例的根里有 `{forbidden}` ⇒ 那份实例库会把驱动/烘图层链进去：{roots:?}"
+        );
+    }
 
     // 副本用完就收：`target/` 下不留垃圾（断言失败时留着 —— 那正好是现场）。
     let _ = std::fs::remove_dir_all(&probe);

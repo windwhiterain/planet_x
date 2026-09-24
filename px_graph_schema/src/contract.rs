@@ -233,6 +233,37 @@ macro_rules! px_body {
     };
 }
 
+/// **裸体**：与 [`px_body!`] 同一件事，但**不需要一个 `PxOp` 类型** —— 符号名与三个类型
+/// 直接给。
+///
+/// ⚠ 它存在的唯一理由是**依赖方向**：element 那一档的实现在**作者面**（`px_elem`）里，
+///   而作者面**不许认识驱动与烘图层**（认识了就会把驱动链进每一份实例库：实测 15.0 MB
+///   vs 声明档 5.3 MB）。`px_body!` 要 `<$name as PxOp>::Params/…`，而那个 `PxOp` 实现
+///   只能住在**图侧**（泛型算子包装要 `library_path` / 内容键）⇒ 生成的实例库一旦用
+///   `px_body!`，就非把图侧那一整套拖进来不可。裸体宏把签名摊平成三个**路径**，
+///   于是生成的库只依赖作者面 + 契约层。
+///
+/// ⚠ 符号名口径与 [`px_body!`]**逐字相同**（`<本库的包名>__<类型名>`）：两条路拼出来的
+///   字符串必须一样，否则装载失败。
+#[macro_export]
+macro_rules! px_body_raw {
+    ($name:ident, $params:ty, $inputs:ty, $payload:ty, |$p:ident, $i:ident| $body:expr) => {
+        #[unsafe(export_name = ::core::concat!(
+                                                                    env!("CARGO_PKG_NAME"),
+                                                                    "__",
+                                                                    ::core::stringify!($name)
+                                                                ))]
+        pub extern "Rust" fn __px_body(
+            $p: &$params,
+            $i: &$inputs,
+        ) -> ::core::result::Result<$payload, ::std::string::String> {
+            // ⚠ 外面套一层 `Ok`：`$body` 是一个**值**（内部函数回 `Result` 时，
+            //   就在块里用 `?` —— 那个 `?` 从本函数往外传）。
+            ::core::result::Result::Ok($body)
+        }
+    };
+}
+
 /// **实现库的身份**：每个实现库在自己的 `lib.rs` 里写一次。
 ///
 /// 它导出两样东西：
