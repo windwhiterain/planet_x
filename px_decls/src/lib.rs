@@ -87,7 +87,7 @@ pub const TABLE: &[(&str, fn() -> DeclFacts)] = &[
     ("Emission", || facts::<px_volume_schema::ops::Emission>()),
     ("SkyNebula", || facts::<px_volume_schema::ops::SkyNebula>()),
     ("Stars", || facts::<px_volume_schema::ops::Stars>()),
-    // ⚠ NURBS 域（`px_nurbs_schema`）：这八条与 `ops.rs` 里的八处 `px_op!` 一一对应。
+    // ⚠ NURBS 域（`px_nurbs_schema`）：这十五条与 `ops.rs` 里的十五处 `px_op!` 一一对应。
     ("Circle", || facts::<px_nurbs_schema::ops::Circle>()),
     ("CurveEval", || facts::<px_nurbs_schema::ops::CurveEval>()),
     ("CurveAt", || facts::<px_nurbs_schema::ops::CurveAt>()),
@@ -116,6 +116,14 @@ pub const TABLE: &[(&str, fn() -> DeclFacts)] = &[
     }),
     ("SurfaceTessellate", || {
         facts::<px_nurbs_schema::ops::SurfaceTessellate>()
+    }),
+    // ⚠ 这两个的实现在**另一个库**里（`px_nurbs_gpu_op`）：声明仍然住 `px_nurbs_schema`
+    //   （图侧编译的是那一份），"声明 ↔ 实现"那根线是 `px_op!` 里的库名字符串。
+    ("SurfaceTessellateGpu", || {
+        facts::<px_nurbs_schema::ops::SurfaceTessellateGpu>()
+    }),
+    ("CurveTessellateGpu", || {
+        facts::<px_nurbs_schema::ops::CurveTessellateGpu>()
     }),
 ];
 

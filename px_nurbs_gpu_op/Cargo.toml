@@ -3,8 +3,20 @@ name = "px_nurbs_gpu_op"
 version = "0.0.0"
 edition = "2024"
 
+[lib]
+# ⚠ **dylib**：图程序按身份在运行期装载这里的 `__px_body`（`px_op!` 声明的那个）。
+#   这一档与 CPU 那一档（`px_nurbs_op`）是**两个库、两种身份**：选谁进图由节点说，
+#   而两者的键天然不同（身份里含实现库的源码指纹）。
+crate-type = ["dylib"]
+
 [dependencies]
-# 声明与数据（曲线 / 曲面 / 装配）：GPU 这一侧只求值，不看参数长什么样。
+# 声明、数据与装配（曲线 / 曲面 / `mesh.rs`）：GPU 这一侧只负责求值。
 px_nurbs_schema = { path = "../px_nurbs_schema" }
+# 契约层（`PxOp` / `px_body!` / 身份那一对符号）。**不许**链驱动或门面（见 crate_graph 那道门）。
+px_graph_schema = { path = "../px_graph_schema" }
 # **无窗口 GPU 计算的最小宿主**（起设备 / 派发 / 回读）：与体积那一档同一个宿主。
 px_gpu = { path = "../px_gpu" }
+
+[build-dependencies]
+# 这个库的源码指纹（进键的"实现是哪一份"）。
+px_fingerprint = { path = "../px_fingerprint" }

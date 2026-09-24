@@ -215,7 +215,7 @@ fn collect_crate(crate_dir: &Path, files: &mut Roster, seen: &mut BTreeSet<PathB
     //   不是问题时也值得留一行痕迹，免得"少算了一份"无声无息。
     if files.len() == before && std::env::var_os("CARGO_MANIFEST_DIR").is_some() {
         println!(
-            "cargo:warning=源码指纹：{} 没有可收的 .rs",
+            "cargo:warning=源码指纹：{} 没有可收的 .rs / .wgsl",
             crate_dir.display()
         );
     }
@@ -243,7 +243,12 @@ fn collect_sources(crate_dir: &Path, files: &mut Roster) {
     }
 }
 
-/// 把一棵目录树（`root` 之下）的 `.rs` 收进名册，标签前缀用 `prefix`。
+/// 把一棵目录树（`root` 之下）收进名册，标签前缀用 `prefix`。
+///
+/// ⚠ 收的是 **`.rs` + `.wgsl`**：着色器不是"资源"，是 `include_str!` **编进二进制**的
+///   那一半实现（`px_nurbs_gpu_op` / `px_volume_gpu_op` 的核都在 `src/` 里）。
+///   只收 `.rs` 会让"改一行着色器"**不换身份、不换键** —— 那是这个 crate 存在的理由
+///   被绕过（`19-generic-inst.md` §179.3 同一条）。
 ///
 /// ⚠ 它同时给 crate 自己的 `src/`（前缀 = crate 目录名）与额外的根用。
 fn collect_tree(dir: &Path, root: &Path, prefix: &str, files: &mut Roster) {
@@ -258,7 +263,10 @@ fn collect_tree(dir: &Path, root: &Path, prefix: &str, files: &mut Roster) {
                 continue;
             }
             collect_tree(&path, root, prefix, files);
-        } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+        } else if matches!(
+            path.extension().and_then(|e| e.to_str()),
+            Some("rs") | Some("wgsl")
+        ) {
             let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
             if name.contains("_test") || name.starts_with("test_") {
                 continue;
@@ -341,4 +349,36 @@ fn normalized(path: &Path) -> PathBuf {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// **着色器进名册**：`src/*.wgsl` 是 `include_str!` 编进二进制的那一半实现
+    /// （`px_nurbs_gpu_op` / `px_volume_gpu_op` 的核）。⚠ 只收 `.rs` 的话，
+    /// "改一行着色器"不换身份、不换键 —— 那正是这个 crate 存在的理由被绕过。
+    ///
+    /// ⚠ 拿**真仓库**里那两个 crate 量（它们的核就住在 `src/`）：这一条同时钉住
+    /// "WGSL 在 `src/` 里"与"收得进来"两件事。
+    #[test]
+    fn the_roster_carries_the_shaders() {
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("px_fingerprint 住在 workspace 下")
+            .to_path_buf();
+        for (crate_name, shader) in [
+            ("px_nurbs_gpu_op", "src/surface.wgsl"),
+            ("px_nurbs_gpu_op", "src/curve.wgsl"),
+            ("px_volume_gpu_op", "src/sampler.wgsl"),
+        ] {
+            let roster = roster(&workspace.join(crate_name), &[]);
+            let label = format!("{crate_name}/{shader}");
+            assert!(
+                roster.contains_key(&label),
+                "{crate_name} 的名册里没有 {shader}：{}",
+                roster.keys().cloned().collect::<Vec<_>>().join(" / ")
+            );
+        }
+    }
 }

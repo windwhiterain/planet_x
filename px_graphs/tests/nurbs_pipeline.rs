@@ -198,3 +198,66 @@ fn the_tessellation_is_reproducible() {
     assert_eq!(first.uvs, second.uvs);
     assert_eq!(first.indices, second.indices);
 }
+
+/// **GPU 那一档也走装载门**：`nurbs.sphere → nurbs.surface.tessellate.gpu`，
+/// 判据与 CPU 那一档**同一条**（顶点在球面上、每条边恰好被两个三角形用到、欧拉数 = 2）
+/// —— 同一个域的两条实现必须交出同一种东西。
+///
+/// ⚠ 没有卡时**跳过**（判据测的是"装载得起来、算得对"，不是"这台机器必须有卡"）；
+///   生产那一侧仍然是**硬失败**（`Err`，不回退 CPU）。
+#[test]
+fn the_gpu_tessellation_reaches_a_watertight_mesh_through_the_loading_gate() {
+    let ball = sphere(3.0);
+    let rendered = nurbs::SurfaceTessellateGpu.render(
+        &nurbs_params::tessellate::TessellateParams {
+            tolerance: 1e-2,
+            depth: 3,
+            segments: 2,
+        },
+        &nurbs::SurfaceInput {
+            surface: cooked(ball),
+        },
+        grid(),
+    );
+    let mesh = match rendered {
+        Ok(mesh) => mesh,
+        Err(err) if err.contains("没有可用 GPU") => {
+            println!("nurbs.surface.tessellate.gpu：没有可用 GPU，跳过");
+            return;
+        }
+        Err(err) => panic!("GPU 细分失败：{err}"),
+    };
+    assert!(mesh.vertices() > 32, "网格太寒酸了，这个判据没在测东西");
+    for vertex in 0..mesh.vertices() {
+        let point = &mesh.positions[vertex * 3..vertex * 3 + 3];
+        let radius = (point[0] * point[0] + point[1] * point[1] + point[2] * point[2]).sqrt();
+        assert!(
+            (radius - 3.0).abs() < 1e-3,
+            "第 {vertex} 个顶点离球心 {radius}（应当是 3）"
+        );
+    }
+    let mut edges: std::collections::HashMap<(u32, u32), usize> = std::collections::HashMap::new();
+    for triangle in mesh.indices.chunks_exact(3) {
+        for pair in 0..3 {
+            let one = triangle[pair];
+            let two = triangle[(pair + 1) % 3];
+            let key = if one < two { (one, two) } else { (two, one) };
+            *edges.entry(key).or_default() += 1;
+        }
+    }
+    let open = edges.values().filter(|count| **count == 1).count();
+    let nonmanifold = edges.values().filter(|count| **count > 2).count();
+    println!(
+        "GPU 球网格：{} 顶点 / {} 三角形（{} 条边）｜开口 {open}、非流形 {nonmanifold}",
+        mesh.vertices(),
+        mesh.triangles(),
+        edges.len(),
+    );
+    assert_eq!(open, 0, "有 {open} 条开口边");
+    assert_eq!(nonmanifold, 0, "有 {nonmanifold} 条非流形边");
+    assert_eq!(
+        mesh.vertices() as i64 - edges.len() as i64 + mesh.triangles() as i64,
+        2,
+        "欧拉数不是 2 ⇒ 这不是一张闭合的球面网格"
+    );
+}

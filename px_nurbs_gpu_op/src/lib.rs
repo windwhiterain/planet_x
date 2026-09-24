@@ -417,5 +417,13 @@ fn distance(one: [f64; 3], two: [f64; 3]) -> f64 {
     (delta[0] * delta[0] + delta[1] * delta[1] + delta[2] * delta[2]).sqrt()
 }
 
+pub mod ops;
+
+// 这个库的身份：`…__source_hash`（进键的"实现是哪一份"）与 `…__contract_hash`
+// （装载时与图程序对账"我们是不是同一份契约编出来的"）。
+// ⚠ WGSL 也在 `src/` 里 ⇒ 它同样进指纹（`px_fingerprint` 收 `.rs` 与 `.wgsl`）：
+//   改一行着色器就换身份、换键。
+px_graph_schema::px_impl_lib!();
+
 #[cfg(test)]
 mod tests;

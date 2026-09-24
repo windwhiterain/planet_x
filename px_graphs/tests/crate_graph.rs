@@ -75,7 +75,13 @@ fn declares_dynamic(manifest: &toml::Value) -> bool {
         .unwrap_or(false)
 }
 
-const OPS: [&str; 4] = ["px_field_op", "px_volume_op", "px_mesh_op", "px_nurbs_op"];
+const OPS: [&str; 5] = [
+    "px_field_op",
+    "px_volume_op",
+    "px_mesh_op",
+    "px_nurbs_op",
+    "px_nurbs_gpu_op",
+];
 
 /// 算子库是**运行时装载**的 dylib（`px_graph_schema::ops`）。
 #[test]

@@ -1976,7 +1976,9 @@ dependencies = [
 name = "px_nurbs_gpu_op"
 version = "0.0.0"
 dependencies = [
+ "px_fingerprint",
  "px_gpu",
+ "px_graph_schema",
  "px_nurbs_schema",
 ]
 

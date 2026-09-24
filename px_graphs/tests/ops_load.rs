@@ -56,11 +56,20 @@ fn every_declared_operator_loads_from_its_library() {
 /// 这条同时钉住"库里有身份符号"与"指纹形状是十六进制"两件事。
 #[test]
 fn every_library_reports_its_own_source_hash() {
-    for lib in ["px_field_op", "px_volume_op", "px_mesh_op", "px_nurbs_op"] {
+    for lib in [
+        "px_field_op",
+        "px_volume_op",
+        "px_mesh_op",
+        "px_nurbs_op",
+        "px_nurbs_gpu_op",
+    ] {
         let hash = match lib {
             "px_field_op" => <px_field_schema::ops::Fbm as PxOp>::source_hash(),
             "px_volume_op" => <px_volume_schema::ops::CloudCoarse as PxOp>::source_hash(),
             "px_nurbs_op" => <px_nurbs_schema::ops::Circle as PxOp>::source_hash(),
+            "px_nurbs_gpu_op" => {
+                <px_nurbs_schema::ops::SurfaceTessellateGpu as PxOp>::source_hash()
+            }
             _ => <px_mesh_schema::ops::Proxy as PxOp>::source_hash(),
         }
         .unwrap_or_else(|err| panic!("{lib} 的身份读不到：{err}"));
@@ -72,25 +81,34 @@ fn every_library_reports_its_own_source_hash() {
     }
 }
 
-/// 四个库的身份**互不相同**：它们各自的源码指纹覆盖的是各自那份源码。
+/// 五个库的身份**两两不同**：各自的源码指纹覆盖的是各自那份源码。
 ///
-/// ⚠ 这一条顺带证明"实现那一半真的进了键"：四个库都链同一份契约，
+/// ⚠ 这一条顺带证明"实现那一半真的进了键"：五个库都链同一份契约，
 ///   如果指纹只覆盖契约，这几个值会一模一样。
+/// ⚠ `px_nurbs_gpu_op` 与 `px_nurbs_op` 尤其要紧：**同一个域的两种实现**
+///   （CPU / GPU），身份一样就等于两条路的产物互相覆盖。
 #[test]
-fn the_four_libraries_have_distinct_identities() {
-    let field = ops::source_hash("px_field_op").expect("field 库身份");
-    let volume = ops::source_hash("px_volume_op").expect("volume 库身份");
-    let mesh = ops::source_hash("px_mesh_op").expect("mesh 库身份");
-    let nurbs = ops::source_hash("px_nurbs_op").expect("nurbs 库身份");
-    assert_ne!(
-        field, volume,
-        "场库与体积库的身份相同 —— 指纹没覆盖到各自的源码"
-    );
-    assert_ne!(field, mesh, "场库与网格库的身份相同");
-    assert_ne!(volume, mesh, "体积库与网格库的身份相同");
-    for (name, other) in [("nurbs", &nurbs)] {
-        assert_ne!(&field, other, "场库与 {name} 库的身份相同");
-        assert_ne!(&volume, other, "体积库与 {name} 库的身份相同");
-        assert_ne!(&mesh, other, "网格库与 {name} 库的身份相同");
+fn the_five_libraries_have_distinct_identities() {
+    let names = [
+        "px_field_op",
+        "px_volume_op",
+        "px_mesh_op",
+        "px_nurbs_op",
+        "px_nurbs_gpu_op",
+    ];
+    let mut hashes = Vec::new();
+    for name in names {
+        hashes.push((
+            name,
+            ops::source_hash(name).unwrap_or_else(|err| panic!("{name}：{err}")),
+        ));
+    }
+    for (index, (name, hash)) in hashes.iter().enumerate() {
+        for (other_name, other) in &hashes[index + 1..] {
+            assert_ne!(
+                hash, other,
+                "{name} 与 {other_name} 的身份相同 —— 指纹没覆盖到各自的源码"
+            );
+        }
     }
 }

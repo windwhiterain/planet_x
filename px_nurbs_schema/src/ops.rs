@@ -108,3 +108,21 @@ px_op! {
     /// **球面 → 一张有理二次 NURBS 曲面**（精确球面，不是细分逼近）。
     Sphere, "nurbs.sphere", "px_nurbs_op", params::curve::SphereParams, (), Surface
 }
+
+px_op! {
+    /// **曲面细分（GPU）**：与 [`SurfaceTessellate`] **同一条判据**（弦误差、水密、欧拉数），
+    /// 只是逐格求值在 GPU 上（`px_nurbs_gpu_op`：WGSL 热点 + Rust 编排）。
+    ///
+    /// ⚠ 两个算子**并存**（不是一个参数切换）：身份不同 ⇒ 键不同 ⇒ 两条路各自的产物
+    ///   互不覆盖；选谁进图由节点说。⚠ 这一档**没有可用设备就硬失败**（`Err`），
+    ///   不回退 CPU —— 选了它等于声明这台机器有卡。
+    SurfaceTessellateGpu, "nurbs.surface.tessellate.gpu", "px_nurbs_gpu_op", params::tessellate::TessellateParams, SurfaceInput, MeshData
+}
+
+px_op! {
+    /// **曲线细分（GPU）**：与 [`CurveTessellate`] 同一条判据（弦误差、闭合），逐点求值在 GPU。
+    ///
+    /// ⚠ 与 CPU 那一档**拓扑可能不同**（这一档每一级整体对分，CPU 那一档逐段自适应），
+    ///   但判据是同一条：折线到曲线的弦误差 ≤ `tolerance`。
+    CurveTessellateGpu, "nurbs.curve.tessellate.gpu", "px_nurbs_gpu_op", params::tessellate::TessellateParams, CurveInput, PolylineData
+}

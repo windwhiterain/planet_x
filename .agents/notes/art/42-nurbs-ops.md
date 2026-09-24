@@ -161,3 +161,32 @@
 ⚠ 还没做（下一步）：把它接成**可装载的算子**（今天它是一份 rlib，与
 `px_volume_gpu_op` 的现状一样）；`insert_knot` / `elevate` 这两档（逐行独立、
 线数只有几十）留在 CPU —— 上 GPU 的收益抵不上一次派发的开销。
+
+### §8.2 已经接成可装载的算子（两条声明）
+
+```text
+SurfaceTessellateGpu, "nurbs.surface.tessellate.gpu", "px_nurbs_gpu_op", …TessellateParams, SurfaceInput, MeshData
+CurveTessellateGpu,   "nurbs.curve.tessellate.gpu",   "px_nurbs_gpu_op", …TessellateParams, CurveInput,   PolylineData
+```
+
+* 声明仍住 `px_nurbs_schema::ops`（图侧编译的是那一份），"声明 ↔ 实现"那根线是
+  `px_op!` 里的**库名字符串**；`px_nurbs_gpu_op` 因此是 `crate-type = ["dylib"]`
+  + `build.rs`（源码指纹）+ `px_impl_lib!()`，与 `px_nurbs_op` 逐条同构；
+* **两个算子并存**（不是一个参数切换）：身份不同 ⇒ 键不同 ⇒ 两条路的产物互不覆盖，
+  选谁进图由节点说。`px_decls::TABLE` 也因此是 **15** 条 NURBS 行
+  （13 CPU + 2 GPU），`crate_graph` 的 `OPS` 是 **5** 个库；
+* **装载门实证**：`px_graphs/tests/nurbs_pipeline.rs` 里新增一条
+  `nurbs.sphere → nurbs.surface.tessellate.gpu`：走"运行时装载 → 调符号"那条真路，
+  交出**水密**（开口 0、非流形 0、欧拉数 2）且顶点在球面上的网格 —— 与 CPU 那一档
+  同一条判据、同一个装配函数。没有卡时这条判据**跳过**（生产那一侧仍是硬失败）。
+
+### §8.3 着色器也要进"实现是哪一份"的指纹
+
+`px_fingerprint` 的名册原来只收 `.rs` ⇒ `include_str!` 编进二进制的 **WGSL 不在指纹里**：
+"改一行着色器不换身份、不换键"——正是这个 crate 存在的理由被绕过。已把它改成
+**`.rs` + `.wgsl`**，并配一条判据（拿真仓库里那两个 GPU crate 量：`src/surface.wgsl` /
+`src/curve.wgsl` / `src/sampler.wgsl` 必须在名册里）。
+
+⚠ 副作用（正确的那个）：`px_graph_schema` 的指纹覆盖到了 `px_fingerprint` 的源码
+⇒ 契约哈希随之变了 ⇒ **所有实现库都要重编**，否则装载时握手会（正确地）拒掉旧 DLL。
+实测症状：`px_nurbs_op.dll 与契约不是同一份编出来的`——重编五个库即愈。
