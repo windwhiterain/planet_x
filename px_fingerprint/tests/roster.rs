@@ -1,13 +1,16 @@
 //! See docs/invariants.md
 //!
-//! Three gates over one mechanism: `px_fingerprint::roster()` walks the filesystem rather than the
+//! Four gates over one mechanism: `px_fingerprint::roster()` walks the filesystem rather than the
 //! module tree, so anything it skips by name is compiled when declared yet invisible to identity —
 //! "same key, different content". The skip rules below are copied from `collect_tree` deliberately:
 //! a gate that invents its own stricter list drifts away from the rule it watches.
 //!
 //! The third gate watches the other half of identity: a source the key can see is still not the
 //! same as a key that determines its content, so a payload-producing file may not read an input
-//! no key carries (docs/invariants.md, "A node key must determine its content").
+//! no key carries (docs/invariants.md, "A node key must determine its content"). The fourth closes
+//! the same hole from the other side: data embedded with `include_str!` / `include_bytes!` reaches
+//! a binary without passing through the module tree, and `collect_tree` accepts only `.rs`/`.wgsl`,
+//! so an embedded JSON or PNG is compiled while no roster names it.
 
 use std::path::Path;
 
@@ -124,6 +127,8 @@ const UNKEYED_READS: &[&str] = &[
     "thread_rng",
     "getrandom",
     "from_entropy",
+    "gethostname",
+    "as_ptr() as usize",
 ];
 
 /// One call site inside a file that may read an unkeyed source, and why. `argument` is the literal
@@ -137,13 +142,15 @@ struct ExemptRead {
     needle: &'static str,
     path: &'static str,
     argument: &'static str,
+    /// Why the read cannot reach a payload that shares a key with a run that did not take this
+    /// branch, and — when the read exists for a measurement — which knob it is.
     reason: &'static str,
 }
 
 impl ExemptRead {
     /// The pre-image of the call after `rustfmt`, whitespace removed: the scanner compares this
     /// against the stripped line, so the exception does not depend on where a line happened to
-    /// break.
+    /// break, and an exception written for one call never covers its neighbour on the same line.
     fn call(&self) -> String {
         without_whitespace(&format!("\"{}\").is_ok()", self.argument))
     }
@@ -212,6 +219,31 @@ fn rust_sources(root: &Path, out: &mut Vec<std::path::PathBuf>) {
     }
 }
 
+fn workspace_dir() -> std::path::PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("px_fingerprint 住在 workspace 下")
+        .to_path_buf()
+}
+
+/// Crates that participate in identity: a `px_` prefix keeps `game` out (its manifest is not a
+/// product crate's), and `px_fingerprint` itself has no roster to check a target against.
+fn fingerprinting_crates(workspace: &Path) -> Vec<std::path::PathBuf> {
+    let mut crates: Vec<std::path::PathBuf> = std::fs::read_dir(workspace)
+        .expect("读不了 workspace")
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.join("Cargo.toml").is_file())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("px_"))
+        })
+        .collect();
+    crates.sort();
+    crates
+}
+
 /// The bytes a line would have after `rustfmt`, so an exception can be written naturally and still
 /// match the source (the two files it names are formatted, but a wrapped call would otherwise
 /// depend on where the line happened to break).
@@ -220,10 +252,9 @@ fn without_whitespace(text: &str) -> String {
 }
 
 /// The neighbourhood of one occurrence, as a pre-image candidate: 80 characters either side of the
-/// needle, floored to `char` boundaries because a comment on the same line can be non-ASCII.
-/// Two occurrences on one line are resolved independently — the caller asserts that *every*
-/// occurrence in an excepted file is covered, which is what keeps an exception from reading the
-/// neighbour's call.
+/// needle, floored to `char` boundaries because a comment on the same line can be non-ASCII. The
+/// window is wide enough for the call's argument on either side of the needle, which is what the
+/// exception is keyed on; a line holding two reads is then resolved per occurrence.
 fn call_context(line: &str, at: usize) -> String {
     let mut start = at.saturating_sub(80);
     while !line.is_char_boundary(start) {
@@ -238,10 +269,7 @@ fn call_context(line: &str, at: usize) -> String {
 
 #[test]
 fn no_payload_source_reads_an_input_its_key_cannot_see() {
-    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("px_fingerprint 住在 workspace 下")
-        .to_path_buf();
+    let workspace = workspace_dir();
     let mut scanned = Vec::new();
     for root in payload_source_roots(&workspace) {
         rust_sources(&root, &mut scanned);
@@ -320,18 +348,219 @@ fn no_payload_source_reads_an_input_its_key_cannot_see() {
 }
 
 /// The reasons are prose, but the list is not: an entry whose reason does not name a mechanism
-/// (a diagnostic sink, a deliberate measurement knob, a parameter) is the one place this rule
-/// gets lost. Kept cheap on purpose.
+/// (a diagnostic sink, a deliberate measurement knob) is the one place this rule gets lost. Both
+/// exception tables are checked here, so a new entry cannot ship as a bare path.
 #[test]
-fn every_exempt_read_names_its_mechanism() {
+fn every_exemption_names_its_mechanism() {
+    let mechanisms = ["diagnostic", "deliberate", "parameter"];
     for exempt in EXEMPT_READS {
         assert!(
-            ["diagnostic", "deliberate", "parameter"]
-                .iter()
-                .any(|word| exempt.reason.contains(word)),
+            mechanisms.iter().any(|word| exempt.reason.contains(word)),
             "{} 的豁免理由没有点名机制：{}",
             exempt.path,
             exempt.reason
         );
     }
+    for exempt in EXEMPT_EMBEDS {
+        assert!(
+            exempt.reason.contains("consumer"),
+            "{} 的豁免理由没有说清谁消费它：{}",
+            exempt.path,
+            exempt.reason
+        );
+        assert!(
+            exempt.reason.contains("Expiry"),
+            "{} 的豁免没有写失效条件（没有失效条件的豁免会一直留着）：{}",
+            exempt.path,
+            exempt.reason
+        );
+    }
+}
+
+/// One embedded file that no roster carries, and the mechanism that makes it safe. `consumer` is
+/// the one symbol whose reads are allowed to reach the embedded bytes; the expiry is the check the
+/// fourth gate runs against that symbol rather than a note in the reason.
+struct ExemptEmbed {
+    path: &'static str,
+    consumer: &'static str,
+    reason: &'static str,
+}
+
+const EXEMPT_EMBEDS: &[ExemptEmbed] = &[ExemptEmbed {
+    path: "px_protocol/snapshots/protocol.snapshot.json",
+    consumer: "PROTOCOL_SNAPSHOT",
+    reason: "its single consumer is `protocol_hash()`, which enters `ProtocolId` and is compared \
+             value-by-value by `Handshake::verify`: two different snapshots refuse to communicate \
+             instead of silently exchanging wrong content. `.gitattributes` marks the path `-text` \
+             so the bytes are stable everywhere. ⚠ Expiry: a second consumer — anything that \
+             derives payloads, artifacts or keys from it — ends the exemption and puts the file in \
+             a roster.",
+}];
+
+/// Collapses `.` and `..` without touching the filesystem: the roster keys are built from the
+/// paths the collector walked, so a resolved embed target has to look like one of those to be
+/// compared with them (`src/../snapshots/x.json` is the same file as `snapshots/x.json`, and a
+/// `canonicalize` would add a `\\?\` prefix on this platform while leaving symlinks a second
+/// spelling).
+fn normalized(path: &str) -> String {
+    let mut out: Vec<&str> = Vec::new();
+    for part in path.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                out.pop();
+            }
+            other => out.push(other),
+        }
+    }
+    out.join("/")
+}
+
+/// The literal path of one `include_str!`/`include_bytes!` in a file, if the macro is given a
+/// literal. A `concat!(env!("OUT_DIR"), …)` form is invisible here by construction: the target is
+/// generated rather than checked in, and rustc records it as a dependency of the crate anyway.
+fn embedded_targets(text: &str) -> Vec<String> {
+    let mut targets = Vec::new();
+    for macro_name in ["include_str!", "include_bytes!"] {
+        let mut from = 0usize;
+        while let Some(offset) = text[from..].find(macro_name) {
+            let rest = &text[from + offset + macro_name.len()..];
+            if let Some(open) = rest.find('"') {
+                if let Some(close) = rest[open + 1..].find('"') {
+                    targets.push(rest[open + 1..open + 1 + close].to_string());
+                }
+            }
+            from += offset + macro_name.len();
+        }
+    }
+    targets
+}
+
+/// Counts the reads of one symbol over the same files identity is computed from, so the exemption's
+/// expiry ("no second consumer") is a check and not a note. Over-counting cannot hide a consumer:
+/// the assertion below only cares that the count is exactly the one reader named by the exception.
+fn symbol_reads(workspace: &Path, symbol: &str) -> Vec<String> {
+    let mut readers = Vec::new();
+    for crate_dir in fingerprinting_crates(workspace) {
+        let mut files = Vec::new();
+        rust_sources(&crate_dir.join("src"), &mut files);
+        let build = crate_dir.join("build.rs");
+        if build.is_file() {
+            files.push(build);
+        }
+        for path in files {
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            if text.contains(symbol) {
+                readers.push(
+                    path.strip_prefix(workspace)
+                        .unwrap_or(&path)
+                        .to_string_lossy()
+                        .replace('\\', "/"),
+                );
+            }
+        }
+    }
+    readers
+}
+
+/// Backlog's second designed gate. The hole is not hypothetical in shape: `collect_tree` accepts
+/// only `.rs` and `.wgsl`, so any other file type reaches a binary through `include_str!` /
+/// `include_bytes!` while no roster names it, and editing it then changes behaviour without
+/// changing any key.
+#[test]
+fn every_embedded_file_is_in_a_roster_or_on_the_exception_list() {
+    let workspace = workspace_dir();
+    let mut violations: Vec<String> = Vec::new();
+    let mut checked = 0usize;
+    for crate_dir in fingerprinting_crates(&workspace) {
+        if !crate_dir.join("src").is_dir() {
+            continue;
+        }
+        let roster = px_fingerprint::roster(&crate_dir, &[]);
+        let tracked: Vec<String> = roster
+            .values()
+            .map(|path| slash(&path.to_string_lossy()))
+            .collect();
+        let crate_name = crate_dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("")
+            .to_string();
+        let mut files = Vec::new();
+        rust_sources(&crate_dir.join("src"), &mut files);
+        for path in files {
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let source = path
+                .strip_prefix(&workspace)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            for target in embedded_targets(&text) {
+                checked += 1;
+                let resolved = normalized(
+                    &path
+                        .parent()
+                        .unwrap_or(&crate_dir)
+                        .join(&target)
+                        .to_string_lossy()
+                        .replace('\\', "/"),
+                );
+                let relative = normalized(
+                    &Path::new(&resolved)
+                        .strip_prefix(&workspace)
+                        .unwrap_or(Path::new(&resolved))
+                        .to_string_lossy()
+                        .replace('\\', "/"),
+                );
+                let present = Path::new(&resolved).is_file();
+                let in_roster = tracked
+                    .iter()
+                    .any(|entry| entry == &resolved || entry.ends_with(&format!("/{target}")));
+                let exempt = EXEMPT_EMBEDS.iter().any(|exempt| relative == exempt.path);
+                if !present {
+                    violations.push(format!(
+                        "{source} 嵌入 {target}，但 {resolved} 不在（路径写错或文件被删）"
+                    ));
+                } else if !in_roster && !exempt {
+                    violations.push(format!(
+                        "{source} 嵌入 {relative}，而 {crate_name} 的名册里没有它 ⇒ \
+                         改这个文件会换行为不换键"
+                    ));
+                }
+            }
+        }
+    }
+    for exempt in EXEMPT_EMBEDS {
+        let readers = symbol_reads(&workspace, exempt.consumer);
+        assert!(
+            readers.len() == 1,
+            "豁免失效：`{}` 的消费者现在有 {} 个（{}）—— 该文件必须进名册，豁免到此结束",
+            exempt.consumer,
+            readers.len(),
+            readers.join(" / ")
+        );
+        assert_eq!(
+            readers[0], "px_protocol/src/lib.rs",
+            "`{}` 的消费者挪到了 {}：豁免说的是 `protocol_hash()` 那一处",
+            exempt.consumer, readers[0]
+        );
+        assert!(
+            workspace.join(exempt.path).is_file(),
+            "豁免指着 {}，而它不在",
+            exempt.path
+        );
+    }
+    assert!(checked > 0, "一个嵌入点都没扫到 ⇒ 这道门看的是空集也会绿");
+    assert!(
+        violations.is_empty(),
+        "这些文件被 `include_str!`/`include_bytes!` 带进二进制，却不在任何名册里（`collect_tree` \
+         只收 `.rs`/`.wgsl`）⇒ 同键、不同内容:\n  {}\n  \
+         修法：把它放进该 crate 的 `src/`（.rs/.wgsl），或写进 EXEMPT_EMBEDS 并给出\
+         \u{201c}谁消费它、为什么失败会响\u{201d}的理由，以及它的失效条件。",
+        violations.join("\n  ")
+    );
 }

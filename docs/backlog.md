@@ -129,46 +129,43 @@ without either is not a replay candidate. The learned policy's reward counts onl
 startup gate) and the thin dirty set are separate homes — the vocabulary does not belong in either
 file.
 
-## Gates designed, not built (frozen this round)
+## Gates shipped, and the one still missing
 
-Each is a check whose absence is currently covered only by convention. All
-three live in `tests/`, so none costs a key rotation; none is implemented yet.
+Three checks that used to be convention only now have a home in `tests/`, so none of them costs a
+key rotation. Two are shipped and are described here as contracts rather than as pending work.
 
-**No operator may read a source its key cannot see.** A payload that depends on
-an environment variable, a process id, a wall clock or an unseeded RNG breaks
-"same key ⇒ same bytes" silently: the second run overwrites the first in the
-CAS and the manifest stays self-consistent. The rule belongs to
-[invariants.md](invariants.md); the gate would scan for those call sites. Scope
-must include what production actually cooks repeatedly — `px_*_op/src`,
-`px_*_alg/src`, **`px_elem/body/*.rs`**, **`art/inst/*.rs`**, and any
-`px_local_op!` body — because the instance bodies sit outside every crate's
-`src/` (that placement is what makes "edit one body, rotate one key" work), so
-scanning only `src/` would watch the least likely place to fail. The deny list
-should be explicit and extensible (`std::env::*`, RNG, `Instant`/`SystemTime`,
-reads of files outside the key, HashMap iteration order that reaches output,
-address/pid/hostname) rather than a phrase like "non-deterministic".
+**No payload-producing source may read an input its key cannot see.** A payload that depends on an
+environment variable, a process id, a wall clock or an unseeded RNG breaks "same key ⇒ same bytes"
+silently: the second run overwrites the first in the CAS and the manifest stays self-consistent. The
+rule is [invariants.md](invariants.md)'s; the check is
+`px_fingerprint/tests/roster.rs::no_payload_source_reads_an_input_its_key_cannot_see`. Its scan
+covers what production actually cooks repeatedly — `px_*_op/src`, `px_*_alg/src`,
+**`px_elem/body/*.rs`**, **`art/inst/*.rs`** — because the instance bodies sit outside every
+crate's `src/` (that placement is what makes "edit one body, rotate one key" work), so scanning
+only `src/` would watch the least likely place to fail. The deny list is a list of literals, not a
+phrase like "non-deterministic"; an exemption names one call site (file plus the literal argument)
+and the mechanism that makes it safe. Two shapes the literal list deliberately does not reach, and
+which therefore remain convention: **HashMap iteration order that reaches output** (it needs a
+value-to-output trace, not a call site; today's `px_mesh_op` HashMaps only feed order-independent
+values), and **reads of files outside the key** (a path's contents are not a call site either).
 
-**An `include_str!`/`include_bytes!` target must be inside a roster or on a
-named exception list.** `collect_sources` walks only `src/` and `build.rs`, and
-`collect_tree` accepts only `.rs`/`.wgsl`, so embedded data reaches the binary
-without reaching identity. One case exists and is exempt:
-`px_protocol/src/lib.rs:28` includes `../snapshots/protocol.snapshot.json`. The
-reason is that its only consumer is `protocol_hash()` (verified single call
-site), which enters `ProtocolId` and is compared value-by-value by
-`Handshake::verify` — so two different snapshots refuse to communicate rather
-than silently exchanging wrong content. The coverage is what exempts it;
-`.gitattributes` marking that path `-text` is only a precondition, keeping the
-bytes stable so the hash means the same thing everywhere. The exemption carries
-its own expiry: **if the snapshot gains a second consumer — anything that
-derives payload, artifacts or keys from it — the exemption ends and the file
-belongs in a roster.** That is one grep to check, and
-`snapshot_drives_the_protocol_hash` already pins the hash as driven and
-deterministic. The gate would list each embed site against this rule.
+**An `include_str!`/`include_bytes!` target must be inside a roster or on a named exception list.**
+`collect_sources` walks only `src/` and `build.rs`, and `collect_tree` accepts only `.rs`/`.wgsl`, so
+embedded data reaches the binary without reaching identity. The check is
+`px_fingerprint/tests/roster.rs::every_embedded_file_is_in_a_roster_or_on_the_exception_list`. One
+case is exempt: `px_protocol/src/lib.rs` embeds `../snapshots/protocol.snapshot.json`. Its coverage
+is what exempts it — the only consumer is `protocol_hash()`, which enters `ProtocolId` and is
+compared value-by-value by `Handshake::verify`, so two different snapshots refuse to communicate
+rather than silently exchanging wrong content (`.gitattributes` marking that path `-text` is only a
+precondition, keeping the bytes stable so the hash means the same thing everywhere). The exemption
+carries its own expiry as a check: **if the snapshot gains a second consumer — anything that derives
+payloads, artifacts or keys from it — the gate fails and the file belongs in a roster.** The gate
+also refuses an embed whose path does not exist, and refuses a `.rs` file it cannot read.
 
-**The element parallel banding has no bit-exact gate for the helper production
-uses.** Shipped as `px_field_schema/tests/row_bands.rs`; still open is routing
-`px_elem::fill` through it, which needs a key count first (see Known costs
-above). Recorded here so the remaining half is not mistaken for done.
+**The element parallel banding has no bit-exact gate for the helper production uses.** Shipped as
+`px_field_schema/tests/row_bands.rs`; still open is routing `px_elem::fill` through it, which needs a
+key count first (see Known costs above). Recorded here so the remaining half is not mistaken for
+done.
 
 ## Unconsumed inputs
 
