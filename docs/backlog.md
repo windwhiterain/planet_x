@@ -7,6 +7,26 @@ Confirmed defects and stale artefacts live in [`FINDINGS.md`](../FINDINGS.md) at
 with a reproduction or a source trace for each. An entry belongs here only while nothing about it is
 true yet: once it is confirmed broken, it moves there.
 
+## Migrating the raise points to `Fault` (per crate, not per window)
+
+`px_graph_schema::Fault` (with `Kind`, the closed set of fifteen) is the shape a failure carries, and
+the loader in that crate already returns it: opening a library, reading a symbol, identifying a
+contract and checking the toolchain all produce a `Fault` with a kind instead of prose, and the
+operator-library table's lock refuses (`ops::lock_error`) rather than unwrapping. The string boundary
+still exists on purpose — `From<Fault> for String` gives the stable line, so the cook-side
+`Result<_, String>` APIs and the exported operator `Body` signature are unchanged.
+
+What is left is the rest of the tree: in the `src/` of the shipped crates, about 440 sites return
+`Err(format!(…))`/`Err("…")` prose and about 540 more are `panic!`/`expect`/`unwrap`. Migrating them
+is **per crate**: each crate's edit rotates its own key family (any crate whose bytes are in a roster
+rotates that roster's keys), so the work is paid for crate by crate as each crate is touched anyway,
+and it does not need a batch window of its own once the contract type exists. The trigger to pick a
+crate up: a failure of that crate's is being branched on by kind somewhere, or the crate is being
+changed for another reason and its error surface can come along.
+
+The loader half is done because it is the half every entrance's first failure passes through: a plan
+that cannot load a library reports `library`/`symbol` without a hand-written prefix at the call site.
+
 ## Batch window discipline
 
 **The toolchain gate guards the driver's entrances, not the loader.** `px run` refuses a plan whose

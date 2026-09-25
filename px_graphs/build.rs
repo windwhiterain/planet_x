@@ -355,7 +355,7 @@ fn insts_gen_text(plan: &[Planned]) -> Result<String, String> {
              \x20   /// 身份 = **实例 key**（图程序不重编也能看出泛型参数/alg/契约/工具链变了）。\n\
              \x20   /// ⚠ 算一次就记住（`OnceLock`）：key 要读盘数名册，别每次调都重算\n\
              \x20   ///   —— 与 `px_inst!` 当年展开的那一份同形（那份宏已经不在了）。\n\
-             \x20   fn source_hash() -> ::core::result::Result<&'static str, ::std::string::String> {{\n\
+             \x20   fn source_hash() -> ::core::result::Result<&'static str, ::px_graph_schema::Fault> {{\n\
              \x20       static KEY: ::std::sync::OnceLock<\n\
              \x20           ::core::result::Result<::std::string::String, ::std::string::String>,\n\
              \x20       > = ::std::sync::OnceLock::new();\n\
@@ -370,7 +370,7 @@ fn insts_gen_text(plan: &[Planned]) -> Result<String, String> {
              \x20           )\n\
              \x20       }}) {{\n\
              \x20           ::core::result::Result::Ok(text) => ::core::result::Result::Ok(text.as_str()),\n\
-             \x20           ::core::result::Result::Err(err) => ::core::result::Result::Err(err.clone()),\n\
+             \x20           ::core::result::Result::Err(err) => ::core::result::Result::Err(::px_graph_schema::Fault::from(err.clone())),\n\
              \x20       }}\n\
              \x20   }}\n\
              \n\
@@ -519,7 +519,7 @@ fn elem_gen_text(plan: &[ElemPlanned]) -> Result<String, String> {
              \x20   type Inputs = {inputs};\n\
              \x20   type Payload = {payload};\n\
              \x20   fn new() -> Self {{ Self }}\n\
-             \x20   fn source_hash() -> ::core::result::Result<&'static str, ::std::string::String> {{\n\
+             \x20   fn source_hash() -> ::core::result::Result<&'static str, ::px_graph_schema::Fault> {{\n\
              \x20       crate::elem::source_hash_of::<::px_elem::specs::{ty}>()\n\
              \x20   }}\n\
              \x20   fn decl_hash() -> &'static str {{\n\

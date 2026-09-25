@@ -201,6 +201,16 @@ differ, the second overwrites the first in the CAS, and the manifest stays self-
 reports it. Every repair, retry and search loop rests on this: re-cooking a key is expected to give
 back what is already stored unless something real changed.
 
+**A failure is a value with a kind, and the kind has one home.** `px_graph_schema::Fault` carries a
+`Kind` (the closed set of fifteen) plus the sentence a person reads, and `Display` writes the stable
+line `px-error[<kind>]: <message>`. The contract crate owns the set because every entrance's first
+failure passes through its loader, and because a caller that branches on a kind must be able to depend
+on that name without depending on a graph program. A bare `String` converts to `Fault::Internal` — the
+unclassified kind, whose appearance is a finding — and `From<Fault> for String` converts back, which is
+what keeps the string-shaped boundaries (the cook-side APIs and the exported operator body signature)
+from having to move. The remaining raise points across the tree migrate per crate, each paying its own
+key rotation (docs/backlog.md).
+
 **A worker's panic needs the scope's own teardown panic caught too.** `std::thread::scope` panics
 while it tears the scope down when any of its threads panicked, and it does so **after** the handle was
 joined: handling the `join()` result is therefore not enough, because the scope still unwinds a moment

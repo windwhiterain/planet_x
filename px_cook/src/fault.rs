@@ -16,24 +16,10 @@
 
 use std::error::Error;
 
-/// The closed set of kinds. A caller may rely on these names; adding one is a documentation change.
-pub const KINDS: &[&str] = &[
-    "params",
-    "operator",
-    "missing-instance",
-    "stale-toolchain",
-    "missing-graph",
-    "manifest",
-    "library",
-    "symbol",
-    "payload",
-    "shape",
-    "write",
-    "scene",
-    "panic",
-    "usage",
-    "internal",
-];
+/// The closed set of kinds, which lives in the contract crate
+/// (`px_graph_schema::fault`). A caller may rely on these names; adding one is a documentation
+/// change.
+pub const KINDS: &[&str] = px_graph_schema::Kind::NAMES;
 
 /// The token a caller greps for, at the start of the line.
 pub const PREFIX: &str = "px-error";
@@ -47,6 +33,12 @@ pub fn line(kind: &str, subject: &str, what: &str) -> String {
     } else {
         format!("{PREFIX}[{kind}]: {subject} | {what}")
     }
+}
+
+/// The same line, from a classified failure. The kind travels with the message from the crate that
+/// classified it, so an entrance does not have to guess one back.
+pub fn line_of(fault: &px_graph_schema::Fault, subject: &str) -> String {
+    line(fault.kind.name(), subject, &fault.message)
 }
 
 /// The identity of a node failure: the node name, the operator id, and a short key. Every one of them

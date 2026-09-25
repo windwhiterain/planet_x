@@ -5,37 +5,47 @@ use std::sync::{Mutex, OnceLock};
 
 use libloading::Library;
 
-use crate::PxOp;
+use crate::{Fault, PxOp};
 
+/// The body an implementation library exports. Its signature does not carry a `Fault`: the body is
+/// the operator's own interface, and this window leaves that axis alone (docs/backlog.md).
 pub type Body<O> =
     fn(&<O as PxOp>::Params, &<O as PxOp>::Inputs) -> Result<<O as PxOp>::Payload, String>;
 
-pub fn body<O: PxOp>() -> Result<Body<O>, String> {
+pub fn body<O: PxOp>() -> Result<Body<O>, Fault> {
     load_at::<O>(O::LIB, O::SYMBOL)
 }
 
-pub fn load_at<O: PxOp>(library: &str, symbol: &str) -> Result<Body<O>, String> {
+pub fn load_at<O: PxOp>(library: &str, symbol: &str) -> Result<Body<O>, Fault> {
     let prefix = symbol.split("__").next().unwrap_or(library);
     let opened = open(library, prefix)?;
-    let pointer =
-        raw::<*mut c_void>(opened, symbol).map_err(|err| format!("{err}{}", hint(library)))?;
+    let pointer = raw::<*mut c_void>(opened, symbol)
+        .map_err(|err| Fault::symbol(format!("{err}{}", hint(library))))?;
     Ok(unsafe { std::mem::transmute::<*mut c_void, Body<O>>(pointer) })
 }
 
-pub fn source_hash(lib: &'static str) -> Result<&'static str, String> {
+pub fn source_hash(lib: &'static str) -> Result<&'static str, Fault> {
     let library = open(lib, lib)?;
     let name = format!("{lib}__source_hash");
     let text = raw::<extern "Rust" fn() -> &'static str>(library, &name)
-        .map_err(|err| format!("{err}{}", hint(lib)))?;
+        .map_err(|err| Fault::symbol(format!("{err}{}", hint(lib))))?;
     Ok(text())
 }
 
-fn open(name: &str, prefix: &str) -> Result<&'static Library, String> {
+/// The operator-library table's lock, refused instead of unwrapped. `Mutex::lock` fails only when a
+/// thread panicked while holding it, which is a defect in this crate rather than a caller's mistake,
+/// so the kind is `internal` — and returning it keeps the loader's contract ("a failure is a value")
+/// even on the path where the crate itself is broken.
+pub fn lock_error<T>(_: std::sync::PoisonError<T>) -> Fault {
+    Fault::internal("算子库表锁坏了（有线程持锁时 panic 过）")
+}
+
+fn open(name: &str, prefix: &str) -> Result<&'static Library, Fault> {
     static LIBS: OnceLock<Mutex<HashMap<String, &'static Library>>> = OnceLock::new();
     let mut libs = LIBS
         .get_or_init(|| Mutex::new(HashMap::new()))
         .lock()
-        .expect("算子库表锁坏了");
+        .map_err(lock_error)?;
     if let Some(found) = libs.get(name) {
         return Ok(found);
     }
@@ -43,30 +53,36 @@ fn open(name: &str, prefix: &str) -> Result<&'static Library, String> {
     let path = if Path::new(name).is_absolute() || name.contains(['/', '\\']) {
         PathBuf::from(name)
     } else {
-        library_path(name).ok_or_else(|| format!("找不到实现库 {name}{}", hint(name)))?
+        library_path(name)
+            .ok_or_else(|| Fault::library(format!("找不到实现库 {name}{}", hint(name))))?
     };
     if !path.is_file() {
-        return Err(format!("实现库不在盘上：{}{}", path.display(), hint(name)));
+        return Err(Fault::library(format!(
+            "实现库不在盘上：{}{}",
+            path.display(),
+            hint(name)
+        )));
     }
-    let loaded = unsafe { Library::new(&path) }
-        .map_err(|err| format!("装载 {} 失败：{err}{}", path.display(), hint(name)))?;
+    let loaded = unsafe { Library::new(&path) }.map_err(|err| {
+        Fault::library(format!("装载 {} 失败：{err}{}", path.display(), hint(name)))
+    })?;
 
     let contract =
         raw::<extern "Rust" fn() -> &'static str>(&loaded, &format!("{prefix}__contract_hash"))
             .map_err(|err| {
-                format!(
+                Fault::symbol(format!(
                     "{} 不是一份实现库（没有身份符号）：{err}{}",
                     path.display(),
                     hint(name)
-                )
+                ))
             })?;
     if contract() != crate::SOURCE_HASH {
-        return Err(format!(
+        return Err(Fault::library(format!(
             "{} 与契约**不是同一份**编出来的（DLL {} / 图程序 {}）—— 先 `cargo build -p {name}`",
             path.display(),
             contract(),
             crate::SOURCE_HASH,
-        ));
+        )));
     }
 
     let toolchain = raw::<extern "Rust" fn() -> &'static str>(
@@ -74,19 +90,19 @@ fn open(name: &str, prefix: &str) -> Result<&'static Library, String> {
         &format!("{prefix}__toolchain_hash"),
     )
     .map_err(|err| {
-        format!(
+        Fault::symbol(format!(
             "{} 没有工具链身份符号（{err}）—— 它是旧形状的实现库，重编：cargo build -p {name}",
             path.display(),
-        )
+        ))
     })?;
     if toolchain() != crate::TOOLCHAIN_HASH {
-        return Err(format!(
+        return Err(Fault::library(format!(
             "{} 与图程序**不是同一套工具链**编出来的\n  DLL {} / 图程序 {}\n  \
              ⇒ 用同一套 rustc/target/RUSTFLAGS/profile 重编（实例库：`px_jit build`）",
             path.display(),
             toolchain(),
             crate::TOOLCHAIN_HASH,
-        ));
+        )));
     }
 
     if !name.contains(['/', '\\']) {

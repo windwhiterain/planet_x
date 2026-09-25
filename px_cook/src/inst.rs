@@ -353,7 +353,7 @@ pub fn gate_ready(graph: Option<(&str, &BuildGraph)>, libs: &[&'static str]) -> 
     }
     for lib in libs {
         if let Err(err) = px_graph_schema::ops::source_hash(lib) {
-            failures.push(crate::fault::line("library", &format!("lib={lib}"), &err));
+            failures.push(crate::fault::line_of(&err, &format!("lib={lib}")));
         }
     }
     if failures.is_empty() {

@@ -2,6 +2,7 @@
 
 pub mod cache;
 pub mod contract;
+pub mod fault;
 pub mod identity;
 pub mod keys;
 pub mod ops;
@@ -10,6 +11,7 @@ pub mod protocol;
 
 pub use cache::{Cache, Report};
 pub use contract::{Cooked, PxInputs, PxOp, interface_hash};
+pub use fault::{Fault, Kind};
 pub use identity::blake3;
 pub use identity::{FNV_OFFSET, FNV_PRIME, HashField, PxKeyed, fnv1a, fnv1a_bytes, fnv1a_sources};
 pub use keys::{Key, OpId, canonical_params, hex, hex_short, node_key, payload_fingerprint};

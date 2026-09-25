@@ -56,7 +56,7 @@ where
 
     let interface = O::interface();
     let source_hash = O::source_hash()
-        .map_err(|err| fault::line("library", &format!("node={node} op={}", O::ID), &err))?;
+        .map_err(|err| fault::line_of(&err, &format!("node={node} op={}", O::ID)))?;
     let base = px_graph_schema::node_key(
         &OpId {
             id: O::ID,
@@ -145,7 +145,10 @@ macro_rules! px_local_op {
                 $name
             }
 
-            fn source_hash() -> ::core::result::Result<&'static str, ::std::string::String> {
+            fn source_hash() -> ::core::result::Result<
+                &'static str,
+                ::px_graph_schema::Fault,
+            > {
                 ::core::result::Result::Ok(env!("PX_SOURCE_HASH"))
             }
 

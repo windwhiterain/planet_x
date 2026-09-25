@@ -68,7 +68,7 @@ pub trait PxOp: Sized {
         ])
     }
 
-    fn source_hash() -> Result<&'static str, String> {
+    fn source_hash() -> Result<&'static str, crate::Fault> {
         ops::source_hash(Self::LIB)
     }
 
