@@ -59,6 +59,13 @@ are not a score. Read logs in full; tailing the last twelve lines hides the erro
 test that cannot find its target must say so loudly — a `skip` line printed among a column of
 `ok`s has already hidden a dead verdict for a full round.
 
+**A measurement whose output did not change measured nothing.** Content-addressing makes an edit
+invisible when it produces the same key: re-applying one fixed value to a parameter file cooks once
+and hits forever after, with the run succeeding, the parameter index recording the new value, and the
+artifact reused. Nothing reports it. So an increment or repair loop must vary its input each round and
+assert the output differs (a byte count or digest of the produced image is enough), rather than timing
+a repeated action and reading a hit as speed.
+
 ⚠ **A GPU-dependent test that prints "no device, skipping" and returns is a policy violation, not a
 convenience.** `px_volume_gpu_op` and `px_nurbs_gpu_op` are default members, so on a machine without
 a GPU the fast chain reports green while the GPU comparisons never executed. Either require the
