@@ -151,15 +151,19 @@ address/pid/hostname) rather than a phrase like "non-deterministic".
 **An `include_str!`/`include_bytes!` target must be inside a roster or on a
 named exception list.** `collect_sources` walks only `src/` and `build.rs`, and
 `collect_tree` accepts only `.rs`/`.wgsl`, so embedded data reaches the binary
-without reaching identity. One case exists today and is deliberate:
-`px_protocol/src/lib.rs:28` includes `../snapshots/protocol.snapshot.json`,
-which drives `protocol_hash()` and therefore the handshake, and is pinned
-byte-exact by a `-text` entry in `.gitattributes`. That is covered by a
-different mechanism, so it is an exception rather than a defect — but
-[operators.md](operators.md) says shaders count *because* they are
-`include_str!`-ed, so an unnamed future case would violate the written rule
-while looking like precedent. The gate names each target and requires either
-roster membership or a listed reason.
+without reaching identity. One case exists and is exempt:
+`px_protocol/src/lib.rs:28` includes `../snapshots/protocol.snapshot.json`. The
+reason is that its only consumer is `protocol_hash()` (verified single call
+site), which enters `ProtocolId` and is compared value-by-value by
+`Handshake::verify` — so two different snapshots refuse to communicate rather
+than silently exchanging wrong content. The coverage is what exempts it;
+`.gitattributes` marking that path `-text` is only a precondition, keeping the
+bytes stable so the hash means the same thing everywhere. The exemption carries
+its own expiry: **if the snapshot gains a second consumer — anything that
+derives payload, artifacts or keys from it — the exemption ends and the file
+belongs in a roster.** That is one grep to check, and
+`snapshot_drives_the_protocol_hash` already pins the hash as driven and
+deterministic. The gate would list each embed site against this rule.
 
 **The element parallel banding has no bit-exact gate for the helper production
 uses.** Shipped as `px_field_schema/tests/row_bands.rs`; still open is routing
