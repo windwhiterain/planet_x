@@ -157,9 +157,24 @@ Found while giving the sidecar's `toolchain` field its first reader: the reader 
 "unparseable sidecar" look identical to a caller.
 
 Not urgent — nothing shipped parses this file except the new `px list` marker, which scans for the
-quoted field instead of parsing. Fix: emit the comma between fields rather than after each one. That
-edits `px_cook/src/inst.rs`, which is inside `px_graphs`' roster ⇒ it rotates every instance key and
-needs a rebuild and re-bake, so it belongs in a rotation window.
+quoted field instead of parsing.
+
+**The cost of the writer fix is zero keys today, and this was measured, not inferred.** The edit was
+applied temporarily to the pristine tree, with a forced rebuild on each step (an unforced `cargo test`
+after a same-second checkout reads the previous build, which produced two wrong readings before the
+measurement was redone):
+
+| tree | `px_graphs` `PX_SOURCE_HASH` | `px list` |
+|---|---|---|
+| pristine | `5f4446de63c8bbd1…` | 7 instances, all `有` |
+| comma between fields | `22610d2d96a2ddbe…` | **byte-identical** |
+| restored | `5f4446de63c8bbd1…` | byte-identical |
+
+So the edit does move `px_graphs`' own source fingerprint — `px_cook` reaches that roster through
+`[build-dependencies]`, which is why the hash changed — but that fingerprint is only the identity of a
+`px_local_op!` node and no shipped graph has one today, so **no instance key moves**. The edit is
+therefore available immediately rather than as rotation-window debt; it still needs a rebuild of the
+graph programs because their generated input changed.
 
 ### 1. ✅ Any `elem::*` node on a `Domain::Volume` field aborts the process
 
