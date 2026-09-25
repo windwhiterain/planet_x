@@ -29,6 +29,7 @@ numbers as approximate. Re-derive a location with `git grep` before acting on on
 | 11 | `game`'s sources sat in every operator key through one `[dev-dependencies]` edge | the dependency walk skips `[dev-dependencies]`, so a crate the product never compiles is out of identity; `px_fingerprint/tests/dev_dependency.rs` pins it |
 | 12 | `collect_tree` skipped paths by name, so a declared module or shader could be compiled and invisible | the collector follows `mod` / `#[path]` / `include!` and takes every `.rs` a declaration reaches plus every `.wgsl` under `src/`; the same gate covers the reverse direction |
 | 14 | 13 comment pointers in 12 `build.rs` files named `docs/system/*.md`, retired pages, and carried `§` numbers | rewritten to name the live pages; every crate's `build.rs` is inside its own roster, so this rode the same window |
+| 15 | the instance sidecar was not strict JSON (a trailing comma on every field), so a strict reader silently saw nothing | the comma sits between fields; `px list` parses it strictly again and separates "no sidecar" from "will not parse"; measured zero key cost |
 
 ⚠ **Two content consequences; both are settled, and the next bake recomputes from source.**
 
@@ -140,28 +141,25 @@ The convention that costs nothing today and prevents the misreading: **within a 
 session, fix `--release` vs debug and never mix**; treat `-Level opt` as numerically distinct evidence
 even though it shares keys.
 
-### 15. ⬜ The instance sidecar is not strict JSON (a trailing comma on every field)
+### 15. ✅ The instance sidecar was not strict JSON (a trailing comma on every field)
 
-`px_cook::inst::sidecar_text` (`px_cook/src/inst.rs`) writes each field with a comma and then closes
-the object:
+`px_cook::inst::sidecar_text` (`px_cook/src/inst.rs`) wrote each field with a comma and then closed
+the object, so `target/pcg/inst/<key>.json` was accepted by lenient parsers (PowerShell's
+`ConvertFrom-Json` reads it) and rejected by strict ones — `serde_json::from_str` reported `trailing
+comma at line 11 column 1`. Found while giving the sidecar's `toolchain` field its first reader: the
+reader silently returned `None` for all seven libraries, which is the failure shape worth recording,
+because "no sidecar" and "unparseable sidecar" looked identical to a caller.
 
-```
-  "toolchain": "b5b4454c…",
-}
-```
+Fix: the comma goes between fields and the closing brace is bare, so the sidecar parses. The reader in
+`px_graphs/src/bin/px.rs` went back to a strict `serde_json` parse and now returns five distinct
+outcomes instead of an `Option` (`Current`, `Old`, `NotBuilt`, `Unrecorded`, `Invalid`), so a missing
+sidecar and an unparseable one are reported as different conditions, each naming the row it is about.
+Verified in both directions: deleting one sidecar prints `没有 sidecar` for that row, writing garbage
+into it prints the parse error itself, and restoring it returns the listing to clean.
 
-so `target/pcg/inst/<key>.json` is accepted by lenient parsers (PowerShell's `ConvertFrom-Json` reads
-it) and rejected by strict ones — `serde_json::from_str` reports `trailing comma at line 11 column 1`.
-Found while giving the sidecar's `toolchain` field its first reader: the reader silently returned
-`None` for all seven libraries, which is the failure shape to worry about, because "no sidecar" and
-"unparseable sidecar" look identical to a caller.
-
-Not urgent — nothing shipped parses this file except the new `px list` marker, which scans for the
-quoted field instead of parsing.
-
-**The cost of the writer fix is zero keys today, and this was measured, not inferred.** The edit was
-applied temporarily to the pristine tree, with a forced rebuild on each step (an unforced `cargo test`
-after a same-second checkout reads the previous build, which produced two wrong readings before the
+**The writer fix cost zero keys, and that was measured rather than inferred.** The edit was applied
+temporarily to the pristine tree, with a forced rebuild on each step (an unforced `cargo test` after a
+same-second checkout reads the previous build, which produced two wrong readings before the
 measurement was redone):
 
 | tree | `px_graphs` `PX_SOURCE_HASH` | `px list` |
@@ -172,9 +170,12 @@ measurement was redone):
 
 So the edit does move `px_graphs`' own source fingerprint — `px_cook` reaches that roster through
 `[build-dependencies]`, which is why the hash changed — but that fingerprint is only the identity of a
-`px_local_op!` node and no shipped graph has one today, so **no instance key moves**. The edit is
-therefore available immediately rather than as rotation-window debt; it still needs a rebuild of the
-graph programs because their generated input changed.
+`px_local_op!` node and no shipped graph has one today, so **no instance key moves**.
+
+⚠ Regenerating the sidecars exposed one more thing: **`px build`'s completion test is whether the
+library is on disk, not whether the sidecar is.** Deleting sidecars alone rebuilds nothing, because the
+plan considers those instances done; the library has to go for `compile_one` to run and rewrite the
+sidecar.
 
 ### 1. ✅ Any `elem::*` node on a `Domain::Volume` field aborts the process
 
