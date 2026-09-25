@@ -197,6 +197,44 @@ directions: injecting each of the four shapes fails the gate with that exact pat
 returns it to green. Convention for anyone adding a check: gates go in a crate-root `tests/` directory —
 inside `src/`, the names `tests/`, `*_test.*`, `test_*.*` mean "compiled but invisible", not "safe".
 
+### 13. ⬜ `-Level opt` shares instance keys with `-Level dev`, while `-Level release` does not
+
+The toolchain fingerprint is `blake3(rustc -vV, TARGET, RUSTFLAGS, PROFILE)`
+(`px_fingerprint/src/lib.rs:70-91`), and an instance key folds it in (`px_cook/src/inst.rs:128`). Cargo
+sets `PROFILE` to only `debug` or `release`, so the axis distinguishes those two and nothing else.
+
+That collides with the documented measurement practice. `px.ps1 -Level opt` appends
+`--config profile.dev.package.<pkg>.opt-level=2` (programs.md) — still `PROFILE=debug`. So **an arbiter
+run at `-Level opt` produces byte-identical keys to a `-Level dev` run of the same source, and whichever
+built first leaves its libraries on disk for both.** The same driver also warns that `-Level` overrides
+are deliberately withheld from `list`/`build`/`gc` because instance libraries form their own workspace
+root under `target/jit/<key>/` that the main config cannot reach — so the very runs that disagree about
+optimisation level agree about the key, by construction.
+
+Two things follow, and they point in opposite directions from what operators.md currently claims:
+
+- operators.md §3.2 justifies excluding `DEBUG`/`opt-level` because they "do not move layout". For the
+  *numerical* payload that holds — which is why the CAS can be shared across levels at all. But float
+  results are exactly where this bites: `opt-level=2` may reassociate FP ops through
+  `RUSTFLAGS`-invisible codegen options, so an "optimized" reading and a "dev" reading of the same key
+  can differ in content while sharing identity. The doc's reason is sound for layout and silent about
+  numerics; the gap should be stated rather than inferred.
+- `-Level release` **does** rotate every instance key, since `PROFILE` changes. This is the operational
+  trap deepseek measured: switching build environment silently rotates all instance keys with zero
+  source edits, and the superseded libraries stay on disk (`target/pcg/inst/` was observed holding two
+  generations side by side). Nothing in the key says which level produced a library, and no gate checks
+  it — `sidecar_text` records a `toolchain` field but nothing reads it back (§11's cost-telemetry entry
+  is the same root cause).
+
+Not fixed here: any change either way touches `px_fingerprint/src/lib.rs` or `px_cook/src/inst.rs`, both
+inside every roster ⇒ full-family rotation, so it belongs in the scheduled batch (§11) or needs a
+decision. Cheap part available now at zero key cost: a `tests/` gate asserting one canonical build
+configuration per measurement session, plus recording which level built each instance library.
+
+The convention that costs nothing today and prevents the misreading: **within a batch window or a timing
+session, fix `--release` vs debug and never mix**; treat `-Level opt` as numerically distinct evidence
+even though it shares keys.
+
 ### 1. ✅ Any `elem::*` node on a `Domain::Volume` field aborts the process
 
 `px_elem::fill` asked every cell for its direction, and `px_protocol::art::direction_at` panicked for
