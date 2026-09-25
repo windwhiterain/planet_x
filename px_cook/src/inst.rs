@@ -712,7 +712,7 @@ pub fn inst_env(name: &str) -> &'static str {
     }
 }
 
-pub fn cargo_build(dir: &Path) -> Result<(), String> {
+pub fn cargo_build(dir: &Path) -> Result<(), px_graph_schema::Fault> {
     let manifest = dir.join("Cargo.toml");
     let target = dir.parent().unwrap_or(dir).join("target");
     let mut command = Command::new(inst_env("PX_CARGO"));
@@ -740,16 +740,22 @@ pub fn cargo_build(dir: &Path) -> Result<(), String> {
     if !rustflags.is_empty() {
         command.env("RUSTFLAGS", rustflags);
     }
-    let output = command
-        .output()
-        .map_err(|err| format!("跑不了 cargo：{err}"))?;
+    let output = command.output().map_err(|err| {
+        px_graph_schema::Fault::new(
+            px_graph_schema::Kind::Library,
+            format!("跑不了 cargo：{err}"),
+        )
+    })?;
     print!("{}", String::from_utf8_lossy(&output.stdout));
     eprint!("{}", String::from_utf8_lossy(&output.stderr));
     if !output.status.success() {
-        return Err(format!(
-            "cargo build 失败（{}）：{}",
-            output.status,
-            manifest.display()
+        return Err(px_graph_schema::Fault::new(
+            px_graph_schema::Kind::Library,
+            format!(
+                "cargo build 失败（{}）：{}",
+                output.status,
+                manifest.display()
+            ),
         ));
     }
     Ok(())
@@ -795,12 +801,15 @@ pub fn recipe_line_of(body: &str) -> u32 {
     0
 }
 
-fn crate_path(root: &Path, name: &str) -> Result<PathBuf, String> {
+fn crate_path(root: &Path, name: &str) -> Result<PathBuf, px_graph_schema::Fault> {
     let path = root.join(name);
     if !path.join("Cargo.toml").is_file() {
-        return Err(format!(
-            "{} 不是一个 workspace crate（`px_inst` 里的 crate 名写错了？）",
-            path.display()
+        return Err(px_graph_schema::Fault::new(
+            px_graph_schema::Kind::Params,
+            format!(
+                "{} 不是一个 workspace crate（`px_inst` 里的 crate 名写错了？）",
+                path.display()
+            ),
         ));
     }
     Ok(path)
@@ -810,8 +819,13 @@ fn slash(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
-fn write(path: &Path, text: &str) -> Result<(), String> {
-    std::fs::write(path, text).map_err(|err| format!("写不了 {}：{err}", path.display()))
+fn write(path: &Path, text: &str) -> Result<(), px_graph_schema::Fault> {
+    std::fs::write(path, text).map_err(|err| {
+        px_graph_schema::Fault::new(
+            px_graph_schema::Kind::Write,
+            format!("写不了 {}：{err}", path.display()),
+        )
+    })
 }
 
 fn json_string(text: &str) -> String {

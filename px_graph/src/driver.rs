@@ -504,13 +504,13 @@ pub fn param_root() -> PathBuf {
     }
 }
 
-pub fn apply_store_args() -> Result<(), String> {
+pub fn apply_store_args() -> Result<(), px_graph_schema::Fault> {
     let (store, _) = split_store_args()?;
     let Some(store) = store else {
         return Ok(());
     };
     if store.is_empty() {
-        return Err("--store 的目录是空的".to_string());
+        return Err(px_graph_schema::Fault::usage("--store 的目录是空的"));
     }
     unsafe { std::env::set_var("PX_ART", &store) };
     Ok(())
@@ -520,7 +520,7 @@ pub fn args_without_store() -> Result<Vec<String>, String> {
     Ok(split_store_args()?.1)
 }
 
-fn split_store_args() -> Result<(Option<String>, Vec<String>), String> {
+fn split_store_args() -> Result<(Option<String>, Vec<String>), px_graph_schema::Fault> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut store: Option<String> = None;
     let mut rest = Vec::with_capacity(args.len());
@@ -529,7 +529,9 @@ fn split_store_args() -> Result<(Option<String>, Vec<String>), String> {
         let arg = args[index].as_str();
         if arg == "--store" {
             let Some(value) = args.get(index + 1) else {
-                return Err("--store 后面要跟一个目录（--store <目录>）".to_string());
+                return Err(px_graph_schema::Fault::usage(
+                    "--store 后面要跟一个目录（--store <目录>）",
+                ));
             };
             store = Some(value.clone());
             index += 2;
@@ -592,14 +594,25 @@ fn artifact_path(cache_root: &Path, key: &Key) -> PathBuf {
     px_protocol::scene::cas_path(cache_root, &hex(key)).unwrap_or_else(|_| cache_root.join("ab"))
 }
 
-pub fn graph_manifest(graph: &str) -> Result<Vec<ManifestEntry>, String> {
+pub fn graph_manifest(graph: &str) -> Result<Vec<ManifestEntry>, px_graph_schema::Fault> {
     let path = cache_root().join(graph).join("manifest.json");
-    let text = std::fs::read_to_string(&path)
-        .map_err(|err| format!("图 '{graph}' 的清单读不到（{}）：{err}", path.display()))?;
-    let entries: Vec<ManifestEntry> =
-        serde_json::from_str(&text).map_err(|err| format!("图 '{graph}' 的清单解不开：{err}"))?;
+    let text = std::fs::read_to_string(&path).map_err(|err| {
+        px_graph_schema::Fault::new(
+            px_graph_schema::Kind::Manifest,
+            format!("图 '{graph}' 的清单读不到（{}）：{err}", path.display()),
+        )
+    })?;
+    let entries: Vec<ManifestEntry> = serde_json::from_str(&text).map_err(|err| {
+        px_graph_schema::Fault::new(
+            px_graph_schema::Kind::Manifest,
+            format!("图 '{graph}' 的清单解不开：{err}"),
+        )
+    })?;
     if entries.is_empty() {
-        return Err(format!("图 '{graph}' 的清单是空的（{}）", path.display()));
+        return Err(px_graph_schema::Fault::new(
+            px_graph_schema::Kind::Manifest,
+            format!("图 '{graph}' 的清单是空的（{}）", path.display()),
+        ));
     }
     Ok(entries)
 }
