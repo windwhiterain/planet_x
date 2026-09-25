@@ -177,7 +177,7 @@ fn run() -> Result<(), Fault> {
     check(&graph, "coarse", &mixed, &coarse, &proxy);
     check(&graph, "coarse_fine", &mixed, &fine, &proxy_fine);
 
-    graph.finish();
+    graph.finish()?;
     Ok(())
 }
 

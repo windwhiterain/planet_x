@@ -69,9 +69,9 @@ const METRICS_MAX_LINES_TEST: u64 = 4097;
 fn a_run_is_recorded_as_a_header_and_one_line_per_node() {
     let dir = scratch("round-trip");
     let graph = graph_in(&dir);
-    graph.record(entry("a", "aa", false, 12, 100));
-    graph.record(entry("b", "bb", true, 0, 200));
-    graph.finish();
+    graph.record(entry("a", "aa", false, 12, 100)).unwrap();
+    graph.record(entry("b", "bb", true, 0, 200)).unwrap();
+    graph.finish().unwrap();
 
     let lines = lines(&dir);
     assert_eq!(lines.len(), 3, "一条 run 头 + 两个节点：{lines:?}");
@@ -105,8 +105,8 @@ fn a_second_run_appends_and_the_sequence_counts_up() {
     let dir = scratch("append");
     for expected in 1..=3_u64 {
         let graph = graph_in(&dir);
-        graph.record(entry("only", "11", false, 1, 1));
-        graph.finish();
+        graph.record(entry("only", "11", false, 1, 1)).unwrap();
+        graph.finish().unwrap();
         let lines = lines(&dir);
         assert_eq!(
             lines.len() as u64,
@@ -135,8 +135,8 @@ fn a_damaged_line_is_skipped_and_the_sequence_still_advances() {
     .expect("坏账本写得进");
 
     let graph = graph_in(&dir);
-    graph.record(entry("next", "22", false, 2, 2));
-    graph.finish();
+    graph.record(entry("next", "22", false, 2, 2)).unwrap();
+    graph.finish().unwrap();
 
     let lines = lines(&dir);
     let last = value(lines.last().expect("有行"));
@@ -151,8 +151,8 @@ fn a_damaged_line_is_skipped_and_the_sequence_still_advances() {
 fn an_empty_or_absent_ledger_starts_at_one() {
     let dir = scratch("absent");
     let graph = graph_in(&dir);
-    graph.record(entry("first", "33", false, 3, 3));
-    graph.finish();
+    graph.record(entry("first", "33", false, 3, 3)).unwrap();
+    graph.finish().unwrap();
     assert_eq!(value(&lines(&dir)[0])["seq"], 1);
 }
 

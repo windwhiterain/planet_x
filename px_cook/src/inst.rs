@@ -80,6 +80,7 @@ pub fn key_of_facts(
         source,
         template,
     })
+    .map_err(String::from)
 }
 
 pub fn info_of_facts(
@@ -106,16 +107,19 @@ pub fn info_of_facts(
     }
 }
 
-pub fn key(inst: &Inst<'_>) -> Result<String, String> {
+pub fn key(inst: &Inst<'_>) -> Result<String, px_graph_schema::Fault> {
     let root = crate::workspace_root();
     let mut roster = px_fingerprint::Roster::new();
     for alg in inst.alg_roots {
         let crate_dir = root.join(alg);
         let files = px_fingerprint::roster(&crate_dir);
         if files.is_empty() {
-            return Err(format!(
-                "实例 key：{} 里没有可数的源码（recipe 的 `roots` 那一栏把 crate 名字写错了？）",
-                crate_dir.display()
+            return Err(px_graph_schema::Fault::new(
+                px_graph_schema::Kind::Params,
+                format!(
+                    "实例 key：{} 里没有可数的源码（recipe 的 `roots` 那一栏把 crate 名字写错了？）",
+                    crate_dir.display()
+                ),
             ));
         }
         for (label, path) in files {
@@ -133,9 +137,12 @@ pub fn key(inst: &Inst<'_>) -> Result<String, String> {
 
     let source_path = root.join(inst.source);
     let source = std::fs::read(&source_path).map_err(|err| {
-        format!(
-            "实例 key：读不了泛型参数源 {}：{err}",
-            source_path.display()
+        px_graph_schema::Fault::new(
+            px_graph_schema::Kind::Params,
+            format!(
+                "实例 key：读不了泛型参数源 {}：{err}",
+                source_path.display()
+            ),
         )
     })?;
     hasher.update(&(source.len() as u64).to_le_bytes());
@@ -466,46 +473,65 @@ impl InstCatalogue {
         self.entries.push(codegen);
     }
 
-    pub fn for_op(&self, op_id: &str) -> Result<&InstCodegen, String> {
+    pub fn for_op(&self, op_id: &str) -> Result<&InstCodegen, px_graph_schema::Fault> {
         self.entries
             .iter()
             .find(|entry| entry.op_id == op_id)
             .ok_or_else(|| {
-                format!(
-                    "catalogue 里没有 op id 为 {op_id} 的记录\
-                     \n  ⇒ `px_graphs::insts::codegen()` 没登记它：声明那一档来自 `{RECIPE}`\
-                     \n     （改过表就跑 `cargo build` 重新生成），element 那一档来自 \
-                     `px_elem::ELEM_SPECS`"
+                px_graph_schema::Fault::new(
+                    px_graph_schema::Kind::Internal,
+                    format!(
+                        "catalogue 里没有 op id 为 {op_id} 的记录\
+                         \n  ⇒ `px_graphs::insts::codegen()` 没登记它：声明那一档来自 `{RECIPE}`\
+                         \n     （改过表就跑 `cargo build` 重新生成），element 那一档来自 \
+                         `px_elem::ELEM_SPECS`"
+                    ),
                 )
             })
     }
 }
 
-pub fn compile_one(info: &InstInfo, key: &str, codegen: &InstCodegen) -> Result<(), String> {
+pub fn compile_one(
+    info: &InstInfo,
+    key: &str,
+    codegen: &InstCodegen,
+) -> Result<(), px_graph_schema::Fault> {
     match compile_generated(info, key, codegen) {
         Ok(()) => Ok(()),
-        Err(err) => Err(format!(
-            "✗ 这个实例编不过：op id {}\
-             \n  · 体（body）来自 {}:{}（recipe 里那一条的 `body` 一栏）\
-             \n  · 参数文件 {}（生成物里是 include! 进去的 ⇒ 报告里的 \
-             target/jit/{key}/src/lib.rs:<行> 对应它）\
-             \n  · 生成物：{}（留着，不删）\
-             \n{err}",
-            codegen.op_id,
-            codegen.recipe,
-            codegen.recipe_line,
-            codegen.source,
-            generated_dir(key),
+        Err(err) => Err(px_graph_schema::Fault::new(
+            px_graph_schema::Kind::Library,
+            format!(
+                "✗ 这个实例编不过：op id {}\
+                 \n  · 体（body）来自 {}:{}（recipe 里那一条的 `body` 一栏）\
+                 \n  · 参数文件 {}（生成物里是 include! 进去的 ⇒ 报告里的 \
+                 target/jit/{key}/src/lib.rs:<行> 对应它）\
+                 \n  · 生成物：{}（留着，不删）\
+                 \n{err}",
+                codegen.op_id,
+                codegen.recipe,
+                codegen.recipe_line,
+                codegen.source,
+                generated_dir(key),
+            ),
         )),
     }
 }
 
-fn compile_generated(info: &InstInfo, key: &str, codegen: &InstCodegen) -> Result<(), String> {
+fn compile_generated(
+    info: &InstInfo,
+    key: &str,
+    codegen: &InstCodegen,
+) -> Result<(), px_graph_schema::Fault> {
     let root = crate::workspace_root();
     let symbol = symbol(codegen.kind.name());
     let dir = root.join("target/jit").join(key);
     let src = dir.join("src");
-    std::fs::create_dir_all(&src).map_err(|err| format!("建不了 {}：{err}", src.display()))?;
+    std::fs::create_dir_all(&src).map_err(|err| {
+        px_graph_schema::Fault::new(
+            px_graph_schema::Kind::Write,
+            format!("建不了 {}：{err}", src.display()),
+        )
+    })?;
 
     let manifest = manifest_text(&root, &info.alg_roots, &codegen.kind)?;
     write(&dir.join("Cargo.toml"), &manifest)?;
@@ -534,21 +560,31 @@ fn compile_generated(info: &InstInfo, key: &str, codegen: &InstCodegen) -> Resul
     .map(|dir| dir.join(&name))
     .find(|path| path.is_file());
     let Some(produced) = produced else {
-        return Err(format!(
-            "编译过了，但 {} 不在盘上（`--target`/profile 那一层目录写错了？）",
-            nested.join(profile_dir()).join(&name).display()
+        return Err(px_graph_schema::Fault::new(
+            px_graph_schema::Kind::Library,
+            format!(
+                "编译过了，但 {} 不在盘上（`--target`/profile 那一层目录写错了？）",
+                nested.join(profile_dir()).join(&name).display()
+            ),
         ));
     };
     let library = PathBuf::from(&info.library);
     if let Some(parent) = library.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|err| format!("建不了 {}：{err}", parent.display()))?;
+        std::fs::create_dir_all(parent).map_err(|err| {
+            px_graph_schema::Fault::new(
+                px_graph_schema::Kind::Write,
+                format!("建不了 {}：{err}", parent.display()),
+            )
+        })?;
     }
     std::fs::copy(&produced, &library).map_err(|err| {
-        format!(
-            "拷 {} → {} 失败：{err}",
-            produced.display(),
-            library.display()
+        px_graph_schema::Fault::new(
+            px_graph_schema::Kind::Write,
+            format!(
+                "拷 {} → {} 失败：{err}",
+                produced.display(),
+                library.display()
+            ),
         )
     })?;
 
@@ -557,13 +593,17 @@ fn compile_generated(info: &InstInfo, key: &str, codegen: &InstCodegen) -> Resul
     Ok(())
 }
 
-pub fn manifest_text(root: &Path, roots: &[String], kind: &InstKind) -> Result<String, String> {
+pub fn manifest_text(
+    root: &Path,
+    roots: &[String],
+    kind: &InstKind,
+) -> Result<String, px_graph_schema::Fault> {
     if roots.is_empty() {
-        return Err(
+        return Err(px_graph_schema::Fault::new(
+            px_graph_schema::Kind::Params,
             "这条实例没登记任何根（`inst::InstInfo::alg_roots` 是空的）—— 泛型体住哪个 crate？\
-             （那就是 `docs/operators.md` 里的**边**）"
-                .to_string(),
-        );
+             （那就是 `docs/operators.md` 里的**边**）",
+        ));
     }
     let graph_schema = slash(&crate_path(root, "px_graph_schema")?);
     let fingerprint = slash(&crate_path(root, "px_fingerprint")?);
@@ -606,10 +646,13 @@ pub fn manifest_text(root: &Path, roots: &[String], kind: &InstKind) -> Result<S
     ))
 }
 
-pub fn lib_text(root: &Path, codegen: &InstCodegen) -> Result<String, String> {
+pub fn lib_text(root: &Path, codegen: &InstCodegen) -> Result<String, px_graph_schema::Fault> {
     let source = root.join(codegen.source);
     if !source.is_file() {
-        return Err(format!("泛型参数源不在盘上：{}", source.display()));
+        return Err(px_graph_schema::Fault::new(
+            px_graph_schema::Kind::Params,
+            format!("泛型参数源不在盘上：{}", source.display()),
+        ));
     }
     let (head, body_block) = match &codegen.kind {
         InstKind::Decl {

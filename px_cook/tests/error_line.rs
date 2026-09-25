@@ -121,3 +121,15 @@ fn a_gate_that_collects_several_failures_still_starts_with_its_own_line() {
         "the first line is the one a caller greps"
     );
 }
+
+#[test]
+fn a_panic_that_names_its_kind_keeps_it() {
+    // The one place a failure can be named without a `Result` in the signature is a panic, and the
+    // reason to name it is that the entrance's hook is otherwise forced to label it `panic`: a
+    // library that cannot change its own signature can still tell the caller what went wrong.
+    let named = px_cook::px_graph_schema::Fault::internal("参数表锁坏了").line();
+    assert_eq!(fault::panic_report(&named, Some("driver.rs:1")), named);
+    let bare = fault::panic_report("boom", Some("driver.rs:1"));
+    assert_eq!(parsed_kind(&bare), Some("panic"));
+    assert_eq!(field(&bare, "at"), Some("driver.rs:1"));
+}

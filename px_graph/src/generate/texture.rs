@@ -148,20 +148,26 @@ pub(super) fn image_from(width: u32, height: u32, data: Vec<u8>, cube: bool) -> 
     TextureData::new(width, height, 1, levels, TextureFormat::Rgba8Srgb, chain)
 }
 
-pub fn coverage_cube(mask: &Field, slopes: [&Field; 3]) -> Result<TextureData, String> {
+pub fn coverage_cube(
+    mask: &Field,
+    slopes: [&Field; 3],
+) -> Result<TextureData, px_graph_schema::Fault> {
     let field = mask;
     if field.projection != Domain::CubeMap {
-        return Err(format!(
-            "云覆盖度需要 CubeMap 产物，这份是 {:?}",
-            field.projection
+        return Err(px_graph_schema::Fault::new(
+            px_graph_schema::Kind::Shape,
+            format!("云覆盖度需要 CubeMap 产物，这份是 {:?}", field.projection),
         ));
     }
     let face = field.width.max(1);
     if field.height != face * CUBE_FACES {
-        return Err(format!(
-            "云覆盖度的行数应当是 {face} × {CUBE_FACES} = {}，实际 {}",
-            face * CUBE_FACES,
-            field.height
+        return Err(px_graph_schema::Fault::new(
+            px_graph_schema::Kind::Shape,
+            format!(
+                "云覆盖度的行数应当是 {face} × {CUBE_FACES} = {}，实际 {}",
+                face * CUBE_FACES,
+                field.height
+            ),
         ));
     }
     for slope in slopes {
@@ -169,9 +175,12 @@ pub fn coverage_cube(mask: &Field, slopes: [&Field; 3]) -> Result<TextureData, S
             || slope.width != face
             || slope.height != field.height
         {
-            return Err(format!(
-                "云的梯度场必须和覆盖度同形（{face}×{}），这份是 {:?} {}×{}",
-                field.height, slope.projection, slope.width, slope.height
+            return Err(px_graph_schema::Fault::new(
+                px_graph_schema::Kind::Shape,
+                format!(
+                    "云的梯度场必须和覆盖度同形（{face}×{}），这份是 {:?} {}×{}",
+                    field.height, slope.projection, slope.width, slope.height
+                ),
             ));
         }
     }
@@ -198,21 +207,31 @@ pub fn coverage_cube(mask: &Field, slopes: [&Field; 3]) -> Result<TextureData, S
     ))
 }
 
-pub fn color_cube(red: &Field, green: &Field, blue: &Field) -> Result<TextureData, String> {
+pub fn color_cube(
+    red: &Field,
+    green: &Field,
+    blue: &Field,
+) -> Result<TextureData, px_graph_schema::Fault> {
     let face = red.width.max(1);
     for (name, field) in [("R", red), ("G", green), ("B", blue)] {
         if field.projection != Domain::CubeMap {
-            return Err(format!(
-                "颜色立方贴图的 {name} 通道需要 CubeMap 产物，这份是 {:?}",
-                field.projection
+            return Err(px_graph_schema::Fault::new(
+                px_graph_schema::Kind::Shape,
+                format!(
+                    "颜色立方贴图的 {name} 通道需要 CubeMap 产物，这份是 {:?}",
+                    field.projection
+                ),
             ));
         }
         if field.width != face || field.height != face * CUBE_FACES {
-            return Err(format!(
-                "颜色立方贴图的 {name} 通道形状应当是 {face}×{}（`width × 6`），实际 {}×{}",
-                face * CUBE_FACES,
-                field.width,
-                field.height,
+            return Err(px_graph_schema::Fault::new(
+                px_graph_schema::Kind::Shape,
+                format!(
+                    "颜色立方贴图的 {name} 通道形状应当是 {face}×{}（`width × 6`），实际 {}×{}",
+                    face * CUBE_FACES,
+                    field.width,
+                    field.height,
+                ),
             ));
         }
     }
@@ -235,19 +254,25 @@ pub fn color_cube(red: &Field, green: &Field, blue: &Field) -> Result<TextureDat
     ))
 }
 
-pub fn field_cube(field: &Field) -> Result<TextureData, String> {
+pub fn field_cube(field: &Field) -> Result<TextureData, px_graph_schema::Fault> {
     if field.projection != Domain::CubeMap {
-        return Err(format!(
-            "场当立方贴图需要 CubeMap 产物，这份是 {:?}",
-            field.projection
+        return Err(px_graph_schema::Fault::new(
+            px_graph_schema::Kind::Shape,
+            format!(
+                "场当立方贴图需要 CubeMap 产物，这份是 {:?}",
+                field.projection
+            ),
         ));
     }
     let face = field.width.max(1);
     if field.height != face * CUBE_FACES {
-        return Err(format!(
-            "场的行数应当是 {face} × {CUBE_FACES} = {}，实际 {}",
-            face * CUBE_FACES,
-            field.height
+        return Err(px_graph_schema::Fault::new(
+            px_graph_schema::Kind::Shape,
+            format!(
+                "场的行数应当是 {face} × {CUBE_FACES} = {}，实际 {}",
+                face * CUBE_FACES,
+                field.height
+            ),
         ));
     }
 

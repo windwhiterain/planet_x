@@ -75,6 +75,20 @@ pub fn report(error: &str) -> ! {
     std::process::exit(1);
 }
 
+/// The stable line for a panic. A payload that already carries the stable line passes through
+/// unchanged — a library whose call chain cannot return a `Result` can still name the kind of the
+/// failure it is about to unwind — and anything else is a panic, with its location as the subject.
+pub fn panic_report(what: &str, at: Option<&str>) -> String {
+    if is_line(what) {
+        return what.to_string();
+    }
+    let subject = match at {
+        Some(at) => format!("at={at}"),
+        None => String::new(),
+    };
+    line("panic", &subject, what)
+}
+
 /// Turns a worker panic into a stable line instead of an unhandled abort. The panic still unwinds and
 /// the exit code stays the panic one, so a caller can tell a refusal from a crash by exit code alone.
 pub fn install_panic_hook() {
@@ -86,11 +100,10 @@ pub fn install_panic_hook() {
                 None => "panic with a payload that is not text".to_string(),
             },
         };
-        let subject = match info.location() {
-            Some(at) => format!("at={}:{}", at.file(), at.line()),
-            None => String::new(),
-        };
-        eprintln!("{}", line("panic", &subject, &what));
+        let at = info
+            .location()
+            .map(|location| format!("{}:{}", location.file(), location.line()));
+        eprintln!("{}", panic_report(&what, at.as_deref()));
     }));
 }
 

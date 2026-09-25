@@ -110,6 +110,6 @@ fn run() -> Result<(), Fault> {
         artifact_path_of(&surface.key).display(),
     );
 
-    graph.finish();
+    graph.finish()?;
     Ok(())
 }

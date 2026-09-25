@@ -36,21 +36,31 @@ impl Graph {
     /// Records one finished node in this run's manifest. The graph side calls this with the composed
     /// label (`<graph>::<node>`), which is why the label is opaque here: the graph already owns the
     /// label, and writing it in two places would mean two sources for the ledger's `node` field.
-    pub fn record(&self, entry: ManifestEntry) {
-        self.manifest.lock().expect("清单锁坏了").push(entry);
+    pub fn record(&self, entry: ManifestEntry) -> Result<(), px_graph_schema::Fault> {
+        self.manifest
+            .lock()
+            .map_err(px_graph_schema::ops::lock_error)?
+            .push(entry);
+        Ok(())
     }
 
     pub fn params_text(&self, name: &str) -> Option<String> {
         load_params_text(&self.param_dir, name)
     }
 
-    pub fn finish(&self) {
-        let manifest = self.manifest.lock().expect("清单锁坏了");
+    pub fn finish(&self) -> Result<(), px_graph_schema::Fault> {
+        let manifest = self
+            .manifest
+            .lock()
+            .map_err(px_graph_schema::ops::lock_error)?;
         let hits = manifest.iter().filter(|entry| entry.hit).count();
         let cooked = manifest.len() - hits;
         let millis: u64 = manifest.iter().map(|entry| entry.millis).sum();
 
-        let used = self.params_used.lock().expect("参数表锁坏了");
+        let used = self
+            .params_used
+            .lock()
+            .map_err(px_graph_schema::ops::lock_error)?;
         let params_path = self.cache_root.join(&self.spec.name).join("params.json");
         let no_file: Vec<&String> = used
             .iter()
@@ -139,6 +149,7 @@ impl Graph {
         if let Err(err) = append_metrics(&self.cache_root, &self.spec.name, &manifest) {
             eprintln!("⚠ 这轮的测量没记上：{err}");
         }
+        Ok(())
     }
 }
 
@@ -149,7 +160,20 @@ impl Cache for Graph {
 
     fn record_params(&self, node: &str, op: &str, params_json: &str, from_file: bool) {
         let value = serde_json::from_str(params_json).unwrap_or(serde_json::Value::Null);
-        let mut used = self.params_used.lock().expect("参数表锁坏了");
+        // `Cache::record_params` is declared in the contract crate, whose bytes are in every
+        // instance roster, so its signature cannot become fallible without rotating every key.
+        // The panic still names the kind: the entrance's hook prints a payload that is already a
+        // stable line (docs/programs.md, Failure lines).
+        let mut used = match self.params_used.lock() {
+            Ok(used) => used,
+            Err(_) => panic!(
+                "{}",
+                px_graph_schema::Fault::internal(
+                    "参数表锁坏了（有线程持锁时 panic 过）——这一轮的参数索引不完整"
+                )
+                .line()
+            ),
+        };
         let entry = used.entry(node.to_string()).or_insert_with(|| ParamsUsed {
             op: String::new(),
             from_file: false,
@@ -205,7 +229,7 @@ impl Cache for Graph {
         let detail = report.detail.clone();
         self.manifest
             .lock()
-            .expect("清单锁坏了")
+            .map_err(px_graph_schema::ops::lock_error)?
             .push(ManifestEntry {
                 node: report.node.to_string(),
                 op: report.op.to_string(),
@@ -314,11 +338,16 @@ const METRICS_MAX_LINES: u64 = 4096;
 
 /// Renames the ledger to `<name>.jsonl.1` when it has outgrown either limit. `append_metrics` is the
 /// only caller, so the thresholds are driven through that path rather than exposed.
-fn rotate_if_large(path: &Path) -> Result<(), String> {
+fn rotate_if_large(path: &Path) -> Result<(), px_graph_schema::Fault> {
     let meta = match std::fs::metadata(path) {
         Ok(meta) => meta,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(err) => return Err(format!("看不了 {}：{err}", path.display())),
+        Err(err) => {
+            return Err(px_graph_schema::Fault::new(
+                px_graph_schema::Kind::Write,
+                format!("看不了 {}：{err}", path.display()),
+            ));
+        }
     };
     let lines = std::fs::read_to_string(path)
         .map(|text| text.lines().filter(|line| !line.trim().is_empty()).count() as u64)
@@ -755,34 +784,48 @@ pub struct BakedShader {
     pub closure: String,
 }
 
-pub fn bake_shader_graph() -> Result<Vec<BakedShader>, String> {
+pub fn bake_shader_graph() -> Result<Vec<BakedShader>, px_graph_schema::Fault> {
     let root = workspace_root();
     let dir = root.join("art").join("shaders");
     let modules = px_shader::workspace_modules(&root)?;
 
     let mut slots: Vec<String> = Vec::new();
-    let entries = std::fs::read_dir(&dir)
-        .map_err(|err| format!("读不了 shader 目录 {}：{err}", dir.display()))?;
+    let entries = std::fs::read_dir(&dir).map_err(|err| {
+        px_graph_schema::Fault::new(
+            px_graph_schema::Kind::Library,
+            format!("读不了 shader 目录 {}：{err}", dir.display()),
+        )
+    })?;
     for entry in entries.flatten() {
         let path = entry.path();
         if path.extension().and_then(|value| value.to_str()) != Some("wgsl") {
             continue;
         }
-        let text = std::fs::read_to_string(&path)
-            .map_err(|err| format!("读不了 {}：{err}", path.display()))?;
+        let text = std::fs::read_to_string(&path).map_err(|err| {
+            px_graph_schema::Fault::new(
+                px_graph_schema::Kind::Library,
+                format!("读不了 {}：{err}", path.display()),
+            )
+        })?;
         if px_shader::import_path_of(&text).is_some() {
             continue;
         }
         let Some(name) = path.file_stem().and_then(|value| value.to_str()) else {
-            return Err(format!("{} 没有文件名", path.display()));
+            return Err(px_graph_schema::Fault::new(
+                px_graph_schema::Kind::Library,
+                format!("{} 没有文件名", path.display()),
+            ));
         };
         slots.push(name.to_string());
     }
     slots.sort();
     if slots.is_empty() {
-        return Err(format!(
-            "{} 里一个入口 shader 都没有：槽表是从目录扫出来的，扫不到就没有东西可烘",
-            dir.display()
+        return Err(px_graph_schema::Fault::new(
+            px_graph_schema::Kind::Library,
+            format!(
+                "{} 里一个入口 shader 都没有：槽表是从目录扫出来的，扫不到就没有东西可烘",
+                dir.display()
+            ),
         ));
     }
 
@@ -790,8 +833,12 @@ pub fn bake_shader_graph() -> Result<Vec<BakedShader>, String> {
     let mut manifest: Vec<ManifestEntry> = Vec::with_capacity(slots.len());
     for slot in &slots {
         let path = dir.join(format!("{slot}.wgsl"));
-        let text = std::fs::read_to_string(&path)
-            .map_err(|err| format!("读不了 {}：{err}", path.display()))?;
+        let text = std::fs::read_to_string(&path).map_err(|err| {
+            px_graph_schema::Fault::new(
+                px_graph_schema::Kind::Library,
+                format!("读不了 {}：{err}", path.display()),
+            )
+        })?;
         let closure = px_shader::closure(&text, &modules);
         let (key, artifact, bytes) = write_shader(slot, &text, &closure, &modules)?;
         let summary = closure.summary();

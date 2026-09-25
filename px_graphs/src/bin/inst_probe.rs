@@ -85,6 +85,8 @@ fn main() {
     assert!(again.hit, "同一个节点再算一次没命中 ⇒ 实例 key 不稳定");
     assert_eq!(first.key, again.key);
     assert!(!first.value().data.is_empty(), "实例算子算出了一份空体积");
-    graph.finish();
+    if let Err(err) = graph.finish() {
+        px_cook::fault::report(&err.line());
+    }
     println!("OK：装载、算、命中、键稳定四件事都过了");
 }

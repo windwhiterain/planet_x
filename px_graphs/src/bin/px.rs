@@ -267,7 +267,12 @@ fn collect_garbage(graph: &BuildGraph, deep: bool, target: bool) -> Result<(), S
 
     if inst_dir.is_dir() {
         let mut entries: Vec<PathBuf> = std::fs::read_dir(&inst_dir)
-            .map_err(|err| format!("读不了 {}：{err}", inst_dir.display()))?
+            .map_err(|err| {
+                px_graph_schema::Fault::new(
+                    px_graph_schema::Kind::Library,
+                    format!("读不了 {}：{err}", inst_dir.display()),
+                )
+            })?
             .flatten()
             .map(|entry| entry.path())
             .collect();
@@ -288,8 +293,12 @@ fn collect_garbage(graph: &BuildGraph, deep: bool, target: bool) -> Result<(), S
                 continue;
             }
             let size = std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
-            std::fs::remove_file(&path)
-                .map_err(|err| format!("删不了 {}：{err}", path.display()))?;
+            std::fs::remove_file(&path).map_err(|err| {
+                px_graph_schema::Fault::new(
+                    px_graph_schema::Kind::Write,
+                    format!("删不了 {}：{err}", path.display()),
+                )
+            })?;
             println!(
                 "  删 {}（{:.1} MB）",
                 path.display(),
@@ -304,7 +313,12 @@ fn collect_garbage(graph: &BuildGraph, deep: bool, target: bool) -> Result<(), S
         let jit = root.join("target/jit");
         if jit.is_dir() {
             let mut dirs: Vec<PathBuf> = std::fs::read_dir(&jit)
-                .map_err(|err| format!("读不了 {}：{err}", jit.display()))?
+                .map_err(|err| {
+                    px_graph_schema::Fault::new(
+                        px_graph_schema::Kind::Library,
+                        format!("读不了 {}：{err}", jit.display()),
+                    )
+                })?
                 .flatten()
                 .map(|entry| entry.path())
                 .filter(|path| path.is_dir())
@@ -318,8 +332,12 @@ fn collect_garbage(graph: &BuildGraph, deep: bool, target: bool) -> Result<(), S
                     continue;
                 }
                 let size = dir_size(&dir);
-                std::fs::remove_dir_all(&dir)
-                    .map_err(|err| format!("删不了 {}：{err}", dir.display()))?;
+                std::fs::remove_dir_all(&dir).map_err(|err| {
+                    px_graph_schema::Fault::new(
+                        px_graph_schema::Kind::Write,
+                        format!("删不了 {}：{err}", dir.display()),
+                    )
+                })?;
                 println!(
                     "  删源码目录 {}（{:.1} MB）",
                     dir.display(),
@@ -336,8 +354,12 @@ fn collect_garbage(graph: &BuildGraph, deep: bool, target: bool) -> Result<(), S
         match std::fs::metadata(&cache) {
             Ok(_) => {
                 let size = dir_size(&cache);
-                std::fs::remove_dir_all(&cache)
-                    .map_err(|err| format!("删不了 {}：{err}", cache.display()))?;
+                std::fs::remove_dir_all(&cache).map_err(|err| {
+                    px_graph_schema::Fault::new(
+                        px_graph_schema::Kind::Write,
+                        format!("删不了 {}：{err}", cache.display()),
+                    )
+                })?;
                 println!(
                     "  清共享编译中间物 {}（{:.1} MB；下次 build 会重编）",
                     cache.display(),
@@ -455,9 +477,9 @@ fn parse_run(args: &[String]) -> Result<(String, bool, Option<String>, Vec<Strin
 
 fn graph_exe(name: &str) -> Result<PathBuf, String> {
     let here = std::env::current_exe().map_err(|err| format!("问不到自己在哪：{err}"))?;
-    let dir = here
-        .parent()
-        .ok_or_else(|| format!("{} 没有父目录？", here.display()))?;
+    let dir = here.parent().ok_or_else(|| {
+        px_graph_schema::Fault::internal(format!("{} 没有父目录？", here.display()))
+    })?;
     let exe = dir.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
     if exe.is_file() {
         return Ok(exe);

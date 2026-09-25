@@ -62,10 +62,19 @@ fn volume_layers() -> Result<u32, Fault> {
         .join("art")
         .join("nebula")
         .join("density_volume.toml");
-    let text = std::fs::read_to_string(&path)
-        .map_err(|err| format!("读不到 {}：{err}", path.display()))?;
+    let text = std::fs::read_to_string(&path).map_err(|err| {
+        px_graph_schema::Fault::new(
+            px_graph_schema::Kind::Params,
+            format!("读不到 {}：{err}", path.display()),
+        )
+    })?;
     let params: px_volume_schema::params::density::DensityParams =
-        toml::from_str(&text).map_err(|err| format!("{} 解不开：{err}", path.display()))?;
+        toml::from_str(&text).map_err(|err| {
+            px_graph_schema::Fault::new(
+                px_graph_schema::Kind::Params,
+                format!("{} 解不开：{err}", path.display()),
+            )
+        })?;
     Ok(params.layers)
 }
 
@@ -74,9 +83,18 @@ fn star_params() -> Result<StarsParams, Fault> {
         .join("art")
         .join("nebulasky")
         .join("stars.toml");
-    let text = std::fs::read_to_string(&path)
-        .map_err(|err| format!("读不到 {}：{err}", path.display()))?;
-    Ok(toml::from_str(&text).map_err(|err| format!("{} 解不开：{err}", path.display()))?)
+    let text = std::fs::read_to_string(&path).map_err(|err| {
+        px_graph_schema::Fault::new(
+            px_graph_schema::Kind::Params,
+            format!("读不到 {}：{err}", path.display()),
+        )
+    })?;
+    Ok(toml::from_str(&text).map_err(|err| {
+        px_graph_schema::Fault::new(
+            px_graph_schema::Kind::Params,
+            format!("{} 解不开：{err}", path.display()),
+        )
+    })?)
 }
 
 fn report(name: &str, field: &Field) {
@@ -330,8 +348,8 @@ fn run() -> Result<(), Fault> {
         px_graph_schema::payload::Build::detail(sky.value())
     );
 
-    shape_graph.finish();
-    sky_graph.finish();
+    shape_graph.finish()?;
+    sky_graph.finish()?;
     println!("共 {:.1} 秒", started.elapsed().as_secs_f64());
     Ok(())
 }

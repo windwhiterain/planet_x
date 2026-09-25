@@ -74,7 +74,7 @@ fn a_bare_value_is_a_content_keyed_input() {
         "上游内容变了而下游的键没变 ⇒ 上游的键没真的进下游的键"
     );
 
-    graph.finish();
+    graph.finish().unwrap();
 }
 
 #[test]

@@ -21,14 +21,18 @@ impl Invocation {
     }
 }
 
-pub fn scan(dir: &Path) -> Result<Vec<Invocation>, String> {
+pub fn scan(dir: &Path) -> Result<Vec<Invocation>, px_graph_schema::Fault> {
     let mut files = Vec::new();
     collect_rs(dir, &mut files);
     files.sort();
     let mut found = Vec::new();
     for file in files {
-        let text = std::fs::read_to_string(&file)
-            .map_err(|err| format!("读不了 {}：{err}", file.display()))?;
+        let text = std::fs::read_to_string(&file).map_err(|err| {
+            px_graph_schema::Fault::new(
+                px_graph_schema::Kind::Operator,
+                format!("读不了 {}：{err}", file.display()),
+            )
+        })?;
         for call in find_named(&text, "px_inst!")? {
             found.push(parse_call(&file, &call)?);
         }
@@ -37,27 +41,31 @@ pub fn scan(dir: &Path) -> Result<Vec<Invocation>, String> {
 }
 
 pub fn count(dir: &Path) -> Result<usize, String> {
-    count_named(dir, "px_inst!")
+    count_named(dir, "px_inst!").map_err(String::from)
 }
 
-pub fn count_named(dir: &Path, macro_name: &str) -> Result<usize, String> {
+pub fn count_named(dir: &Path, macro_name: &str) -> Result<usize, px_graph_schema::Fault> {
     let mut files = Vec::new();
     collect_rs(dir, &mut files);
     files.sort();
     let mut total = 0;
     for file in files {
-        let text = std::fs::read_to_string(&file)
-            .map_err(|err| format!("读不了 {}：{err}", file.display()))?;
+        let text = std::fs::read_to_string(&file).map_err(|err| {
+            px_graph_schema::Fault::new(
+                px_graph_schema::Kind::Operator,
+                format!("读不了 {}：{err}", file.display()),
+            )
+        })?;
         total += find_named(&text, macro_name)?.len();
     }
     Ok(total)
 }
 
 pub fn find_calls(text: &str) -> Result<Vec<String>, String> {
-    find_named(text, "px_inst!")
+    find_named(text, "px_inst!").map_err(String::from)
 }
 
-pub fn find_named(text: &str, macro_name: &str) -> Result<Vec<String>, String> {
+pub fn find_named(text: &str, macro_name: &str) -> Result<Vec<String>, px_graph_schema::Fault> {
     let needle = macro_name;
     let bytes = text.as_bytes();
     let mut out = Vec::new();
@@ -86,12 +94,18 @@ pub fn find_named(text: &str, macro_name: &str) -> Result<Vec<String>, String> {
             let before = text[..at].chars().next_back();
             if !before.is_some_and(|ch| ch.is_alphanumeric() || ch == '_' || ch == '!') {
                 let rest = &text[at + needle.len()..];
-                let skip = rest
-                    .find(|ch: char| !ch.is_whitespace())
-                    .ok_or_else(|| format!("`{macro_name}` 之后什么都没有"))?;
+                let skip = rest.find(|ch: char| !ch.is_whitespace()).ok_or_else(|| {
+                    px_graph_schema::Fault::new(
+                        px_graph_schema::Kind::Operator,
+                        format!("`{macro_name}` 之后什么都没有"),
+                    )
+                })?;
                 let tail = &rest[skip..];
                 let Some(open) = tail.chars().next() else {
-                    return Err(format!("`{macro_name}` 之后什么都没有"));
+                    return Err(px_graph_schema::Fault::new(
+                        px_graph_schema::Kind::Internal,
+                        format!("`{macro_name}` 之后什么都没有"),
+                    ));
                 };
                 if let Some(close) = match open {
                     '{' => Some('}'),
@@ -111,7 +125,7 @@ pub fn find_named(text: &str, macro_name: &str) -> Result<Vec<String>, String> {
     Ok(out)
 }
 
-fn skip_block_comment(text: &str, at: usize) -> Result<usize, String> {
+fn skip_block_comment(text: &str, at: usize) -> Result<usize, px_graph_schema::Fault> {
     let mut depth = 0_u32;
     let mut index = at;
     let bytes = text.as_bytes();
@@ -129,10 +143,13 @@ fn skip_block_comment(text: &str, at: usize) -> Result<usize, String> {
             index += text[index..].chars().next().map_or(1, char::len_utf8);
         }
     }
-    Err("块注释没有收尾（`*/`）".to_string())
+    Err(px_graph_schema::Fault::new(
+        px_graph_schema::Kind::Operator,
+        "块注释没有收尾（`*/`）",
+    ))
 }
 
-fn skip_string(text: &str, at: usize) -> Result<usize, String> {
+fn skip_string(text: &str, at: usize) -> Result<usize, px_graph_schema::Fault> {
     let mut index = at + 1;
     while index < text.len() {
         match text[index..].chars().next() {
@@ -142,7 +159,10 @@ fn skip_string(text: &str, at: usize) -> Result<usize, String> {
             None => break,
         }
     }
-    Err("字符串字面量没有收尾（`\"`）".to_string())
+    Err(px_graph_schema::Fault::new(
+        px_graph_schema::Kind::Operator,
+        "字符串字面量没有收尾（`\"`）",
+    ))
 }
 
 fn skip_quote(text: &str, at: usize) -> usize {
@@ -179,7 +199,11 @@ fn skip_escape(text: &str, at: usize) -> usize {
     }
 }
 
-fn balanced(tail: &str, open: char, close: char) -> Result<(String, usize), String> {
+fn balanced(
+    tail: &str,
+    open: char,
+    close: char,
+) -> Result<(String, usize), px_graph_schema::Fault> {
     let mut depth = 0_i64;
     let mut state = State::Code;
     let mut iter = tail.char_indices().peekable();
@@ -232,7 +256,10 @@ fn balanced(tail: &str, open: char, close: char) -> Result<(String, usize), Stri
             }
         }
     }
-    Err(format!("`{open}` 没有配平的 `{close}`"))
+    Err(px_graph_schema::Fault::new(
+        px_graph_schema::Kind::Operator,
+        format!("`{open}` 没有配平的 `{close}`"),
+    ))
 }
 
 #[derive(PartialEq)]
@@ -317,52 +344,64 @@ pub fn split_top_level(body: &str) -> Vec<String> {
     parts
 }
 
-pub fn parse_call(file: &Path, body: &str) -> Result<Invocation, String> {
+pub fn parse_call(file: &Path, body: &str) -> Result<Invocation, px_graph_schema::Fault> {
     let parts: Vec<String> = split_top_level(&strip_leading_comments(body))
         .into_iter()
         .map(|part| part.trim().to_string())
         .filter(|part| !part.is_empty() && !only_comments(part))
         .collect();
     if parts.len() != 6 {
-        return Err(format!(
-            "{}：一处 `px_inst` 有 {} 段（要 6 段：类型名 / id / 声明 / alg / 源 / 体模板）",
-            file.display(),
-            parts.len()
+        return Err(px_graph_schema::Fault::new(
+            px_graph_schema::Kind::Params,
+            format!(
+                "{}：一处 `px_inst` 有 {} 段（要 6 段：类型名 / id / 声明 / alg / 源 / 体模板）",
+                file.display(),
+                parts.len()
+            ),
         ));
     }
     let name = parts[0].clone();
     if !is_ident(&name) {
-        return Err(format!(
-            "{}：`px_inst` 第一段 `{name}` 不是标识符",
-            file.display()
+        return Err(px_graph_schema::Fault::new(
+            px_graph_schema::Kind::Params,
+            format!("{}：`px_inst` 第一段 `{name}` 不是标识符", file.display()),
         ));
     }
     let op_id = unquote(&parts[1]).ok_or_else(|| {
-        format!(
-            "{}：`px_inst` 第二段 `{}` 不是字符串字面量（id）",
-            file.display(),
-            parts[1]
+        px_graph_schema::Fault::new(
+            px_graph_schema::Kind::Params,
+            format!(
+                "{}：`px_inst` 第二段 `{}` 不是字符串字面量（id）",
+                file.display(),
+                parts[1]
+            ),
         )
     })?;
     let decl = parts[2].clone();
     if decl.is_empty() {
-        return Err(format!(
-            "{}：`px_inst` 第三段（声明）是空的",
-            file.display()
+        return Err(px_graph_schema::Fault::new(
+            px_graph_schema::Kind::Params,
+            format!("{}：`px_inst` 第三段（声明）是空的", file.display()),
         ));
     }
     let source = unquote(&parts[4]).ok_or_else(|| {
-        format!(
-            "{}：`px_inst` 第五段 `{}` 不是字符串字面量（泛型参数源文件）",
-            file.display(),
-            parts[4]
+        px_graph_schema::Fault::new(
+            px_graph_schema::Kind::Params,
+            format!(
+                "{}：`px_inst` 第五段 `{}` 不是字符串字面量（泛型参数源文件）",
+                file.display(),
+                parts[4]
+            ),
         )
     })?;
     let (placeholder, template) = template_of(&parts[5]).ok_or_else(|| {
-        format!(
-            "{}：`px_inst` 第六段 `{}` 不是 `|p, i, g, ARG| …` 形状的体模板",
-            file.display(),
-            parts[5]
+        px_graph_schema::Fault::new(
+            px_graph_schema::Kind::Params,
+            format!(
+                "{}：`px_inst` 第六段 `{}` 不是 `|p, i, g, ARG| …` 形状的体模板",
+                file.display(),
+                parts[5]
+            ),
         )
     })?;
     Ok(Invocation {
@@ -483,7 +522,10 @@ pub fn workspace_members(manifest: &str) -> Vec<String> {
         .collect()
 }
 
-pub fn declaration_crate(root: &Path, name: &str) -> Result<Option<(String, PathBuf)>, String> {
+pub fn declaration_crate(
+    root: &Path,
+    name: &str,
+) -> Result<Option<(String, PathBuf)>, px_graph_schema::Fault> {
     let manifest = std::fs::read_to_string(root.join("Cargo.toml")).unwrap_or_default();
     let members = workspace_members(&manifest);
     let mut crates: Vec<PathBuf> = vec![root.to_path_buf()];
@@ -494,8 +536,12 @@ pub fn declaration_crate(root: &Path, name: &str) -> Result<Option<(String, Path
         walk_crate(crate_dir, &mut files)?;
         files.sort();
         for file in files {
-            let text = std::fs::read_to_string(&file)
-                .map_err(|err| format!("读不了 {}：{err}", file.display()))?;
+            let text = std::fs::read_to_string(&file).map_err(|err| {
+                px_graph_schema::Fault::new(
+                    px_graph_schema::Kind::Operator,
+                    format!("读不了 {}：{err}", file.display()),
+                )
+            })?;
             for call in find_named(&text, "px_op!")? {
                 let first = split_top_level(&strip_leading_comments(&call))
                     .into_iter()

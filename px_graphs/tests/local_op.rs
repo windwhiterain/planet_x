@@ -131,7 +131,7 @@ fn a_graph_local_operator_is_a_first_class_operator() {
     );
     assert_eq!(band.key, again.key);
 
-    graph.finish();
+    graph.finish().unwrap();
 }
 
 #[test]
@@ -181,5 +181,5 @@ fn a_hit_leaves_the_artifact_untouched() {
         "命中路径改动了产物大小"
     );
 
-    graph.finish();
+    graph.finish().unwrap();
 }

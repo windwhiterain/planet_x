@@ -324,8 +324,8 @@ fn a_generic_element_op_runs_and_is_shared_by_two_graphs() {
         left.width, left.height, mid.millis, fused.millis,
     );
 
-    one.finish();
-    two.finish();
+    one.finish().unwrap();
+    two.finish().unwrap();
 }
 
 #[test]

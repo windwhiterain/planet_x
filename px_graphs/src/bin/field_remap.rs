@@ -62,6 +62,6 @@ fn run() -> Result<(), Fault> {
         stats.max,
     );
 
-    graph.finish();
+    graph.finish()?;
     Ok(())
 }

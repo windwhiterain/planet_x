@@ -134,6 +134,6 @@ fn run() -> Result<(), Fault> {
     );
     println!("看这一份内容：px run scene orbit-gasgiant（配方 art/scene/orbit-gasgiant.toml）");
 
-    graph.finish();
+    graph.finish()?;
     Ok(())
 }
