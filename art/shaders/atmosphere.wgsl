@@ -37,7 +37,7 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
 
     let chord = max(end - entry, 0.0);
     let ray = -to_camera;
-    // 太阳由场景那盏灯说了算（§60）：点光源时方向随位置变，所以逐采样点现取（5 步而已）。
+    // 太阳由场景那盏灯说了算：点光源时方向随位置变，所以逐采样点现取（5 步而已）。
     let steps = 5;
     var sunlit = 0.0;
     for (var index = 0; index < steps; index += 1) {

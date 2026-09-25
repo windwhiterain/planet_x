@@ -31,7 +31,7 @@ struct CloudParams {
     bound: u32,
     gradient: u32,
     /// 细节风：两层各一份**幅度**（方向单位，0 = 不动）。两层的时间尺度写在 shader 里
-    /// 且故意不同 ⇒ 细的那层在粗的那层上滑动。§61
+    /// 且故意不同 ⇒ 细的那层在粗的那层上滑动。
     wind: f32,
     wind_skin: f32,
 };
@@ -49,7 +49,7 @@ const SHADOW_GAIN: f32 = 4.0;
 /// 所以开关只能走这个从没被体积路读过的参数）。
 ///
 /// 旧版是"累积光深到 `SOFT_TAU` 才算法线、算一次"：那等于拿一个**累积量**开关一个逐像素属性，
-/// 掠射的轮廓射线永远到不了阈值 ⇒ 整条射线回退成全亮 ⇒ 轮廓上一圈银边（§51.16）。
+/// 掠射的轮廓射线永远到不了阈值 ⇒ 整条射线回退成全亮 ⇒ 轮廓上一圈银边。
 /// 现在没有这个开关了：只有每一步的受光，回退分支从构造上不存在。
 const SOFT_GRADIENT: u32 = 2u;
 /// 软档的密度凹重映射宽度：等值面**高度以上**这层宽度里把密度从 0 爬到 1。
@@ -113,7 +113,7 @@ fn detail_curve_slope(value: f32) -> f32 {
     return 0.5 / max(sqrt(value), 1e-4);
 }
 
-/// 细节风（§61）：两层细节的采样点各自搬一份，速度不同 ⇒ 粗/细细节互相搓动。
+/// 细节风：两层细节的采样点各自搬一份，速度不同 ⇒ 粗/细细节互相搓动。
 ///
 /// **时间从哪来**：Bevy 的 shader 内时钟 `globals.time`（开机以来的秒数），
 /// 由渲染侧每帧自己写进 uniform —— **不经逻辑帧注入**（P31 把"按逻辑帧推进的自转"删掉，
@@ -137,7 +137,7 @@ const WIND_RATE_TOWER: f32 = 0.13;
 const WIND_RATE_SKIN: f32 = 0.37;
 
 /// 片段入点的第一句：把这一刻的风偏置算好。`params.wind == 0` 时是零向量
-/// ⇒ 与加这个特性之前逐位相同（缺省就是 0，见 §61.2）。
+/// ⇒ 与加这个特性之前逐位相同（缺省就是 0）。
 ///
 /// ⚠ 偏置是**有界的正弦**，不是"速度 × 时间"的线性漂移：线性漂移下采样点会一直往外走，
 /// 挂上半小时之后常数项就盖过方向项 ⇒ 整颗球的细节被抹成一片（而且再也回不来）。
@@ -552,7 +552,7 @@ fn grid_point(camera: vec3<f32>, ray: vec3<f32>, entry: f32, stride: f32, index:
 
 @fragment
 fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
-    // 细节风的第一句：这一帧这一刻的两层风偏置（§61）。`wind == 0` 时是零向量。
+    // 细节风的第一句：这一帧这一刻的两层风偏置。`wind == 0` 时是零向量。
     arm_wind();
     if params.ablate == ABLATE_NORMALS || params.ablate == ABLATE_SURFACE {
         let camera = view.world_position.xyz;
@@ -617,7 +617,7 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
             discard;
         }
 
-        // 法线是这段里唯一读梯度的东西（§43：找面靠步进，梯度只用来算法线）。
+        // 法线是这段里唯一读梯度的东西（找面靠步进，梯度只用来算法线）。
         // `gradient == 0` 时**整个调用都不发**，否则量到的是"发了再覆盖"的代价。
         var normal = vec3<f32>(0.0, 1.0, 0.0);
         if params.gradient != 0u {
@@ -658,7 +658,7 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let steps = u32(clamp(chord / stride, 16.0, ceiling_steps));
     let step = chord / f32(steps);
 
-    // 太阳由场景那盏灯说了算（§60）：点光源的方向**每个着色点都不一样**，所以这里
+    // 太阳由场景那盏灯说了算：点光源的方向**每个着色点都不一样**，所以这里
     // 现算一次，整条步进共用（云壳只有 0.05 个半径厚，壳内方向变化可以忽略）。
     let principal = sun_light(in.world_position.xyz, in.position.xy);
     let sun = principal.direction;
@@ -702,7 +702,7 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
         if cover <= 0.0 {
             continue;
         }
-        // 软档的保守上界早退：与 `cloud_field` 里那个 `bound`（§51.7）是同一条论证 ——
+        // 软档的保守上界早退：与 `cloud_field` 里那个 `bound` 是同一条论证 ——
         // `shape_of` 对 noise 单调非降、`billows` 夹在 [0,1] ⇒ 上界够不着等值面 ⇒
         // 下面那次 `smoothstep` 恰为 0 ⇒ 这一步的 `visible` 是 0、透射率一字不变
         // ⇒ 整段跳过与算出来**逐位相同**，省掉 `billows` ＋ 那一步的法线 ＋ 一次 shadow map 采样。
@@ -731,12 +731,12 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
             // 这一步的受光 = 硬表面同一条 Lambert（全亮 1.0 / 全暗 0.14）；`shadow` 是自阴影
             // 强度旋钮（0 = 关）。密度不再额外乘一次：它已经通过 `visible` 进了权重，再乘就是双计。
             let lit = mix(1.0, 0.14 + 0.86 * facing, clamp(params.shadow, 0.0, 1.0));
-            // 「别人投在云上的影」：山尖 / 环挡住的太阳，由 Bevy 的阴影贴图说了算（§59.1）。
+            // 「别人投在云上的影」：山尖 / 环挡住的太阳，由 Bevy 的阴影贴图说了算。
             // **自己的自阴影不在这里** —— 那一条是上面那句 `facing`（每步法线的 N·L）。
-            // 影子是 cube 还是级联由**灯的种类**决定（§60）：点光源查 cube，方向光查级联。
+            // 影子是 cube 还是级联由**灯的种类**决定：点光源查 cube，方向光查级联。
             // 灯没开影子时 `principal.shadow_maps == 0` ⇒ 一次采样都不发（输出仍是 1.0）。
             // ⚠ 名字不能叫 `cast`：WGSL 的保留字。
-            // ⚠ 只有点光源这一支：宇宙里没有平行光（§64.9）。
+            // ⚠ 只有点光源这一支：宇宙里没有平行光。
             var cast_shadow = 1.0;
             if facing > 0.0 && principal.shadow_maps != 0u {
                 cast_shadow = fetch_point_shadow(

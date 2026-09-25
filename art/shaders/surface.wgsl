@@ -4,7 +4,7 @@
 #import bevy_pbr::mesh_view_bindings::{view, lights}
 #import bevy_pbr::shadows::fetch_point_shadow
 
-// 行星表面的自写材质（§39.6 阶段 3/4 的那一步，口径与实测见 `06-clouds.md` §59）。
+// 行星表面的自写材质。
 //
 // 为什么必须自写：`StandardMaterial` 的两条光照路径都没有"只压直接光"的位置 ——
 // `diffuse_occlusion` 只吃间接光，直接光那一项在 `apply_pbr_lighting` 里直接乘了阴影贴图
@@ -13,7 +13,7 @@
 // 换来的是两件事可以分开算：
 //   ① 直接光 × 阴影贴图（山自己投的影、环投在行星上的影）—— 归 Bevy 的 shadow map；
 //   ② 直接光 × 云影 —— 归这张云覆盖度立方图，自成本文件里的一条解析近似。
-// 间接光（环境光）两项都不乘：云在天上挡的是太阳，不是天光（§39.6 阶段 4 的口径）。
+// 间接光（环境光）两项都不乘：云在天上挡的是太阳，不是天光。
 struct SurfaceParams {
     /// 行星的**世界朝向**（`SYSTEM_TILT × spin`），与云材质拿的是同一个四元数：
     /// 覆盖度立方图烘在未倾斜的局部系里，查它之前要把方向转回去。
@@ -67,7 +67,7 @@ fn coverage_lookup(direction: vec3<f32>) -> f32 {
 /// 方向那一步只搬**切向分量** —— `s` 的径向那份只把半径抬到云带上（那正是"指定高度"的意思），
 /// 方向由 `(s − (s·d)d)·t` 决定。于是一次查询就是"这方向抬头看，云有多厚"。
 ///
-/// `sun` 是从**这一片地表**指向光源的单位向量：太阳换成点光源之后它逐片元不同（§60），
+/// `sun` 是从**这一片地表**指向光源的单位向量：太阳换成点光源之后它逐片元不同，
 /// 而这个二次式对"每片元一个方向"本来就是对的 —— 云带仍是绕行星的那颗球。
 fn cloud_shadow(world_position: vec3<f32>, sun: vec3<f32>) -> f32 {
     if params.shadow <= 0.0 {
@@ -133,7 +133,7 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let camera = view.world_position.xyz;
     let view_vector = normalize(camera - in.world_position.xyz);
 
-    // 太阳由场景那盏灯说了算（§60）：点光源时 `sun` 逐片元不同、`principal.color` 已经
+    // 太阳由场景那盏灯说了算：点光源时 `sun` 逐片元不同、`principal.color` 已经
     // 含强度与距离衰减；方向光是同一套代码的另一个分支（`color` 就是照度）。
     // ⚠ 2026-09-20 多光源之后，"主光"（第 0 盏）只剩两处用途：**云影的太阳方向**与下面
     //   `sun` 的取用；**漫反射那一支改成了逐灯求和**（见 ②b）—— 在那之前第二盏灯是看不见的。

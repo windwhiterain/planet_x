@@ -1,14 +1,14 @@
 #define_import_path planet_x::light
 
-// 「场景里的那盏太阳」。**不许再写死方向**（§60）：太阳是哪种灯由场景说了算，
+// 「场景里的那盏太阳」。**不许再写死方向**：太阳是哪种灯由场景说了算，
 // 这里只负责把 Bevy 的光源数据翻成着色要用的那一份。
 //
 // 太阳 = 场景里那盏**点光源**（`spawn_lights` 摆的）：它住在聚类缓冲 `clustered_lights.data` 里
 // （`Lights` 那份 uniform 只有方向光）。
-// ⚠ 但**只取第 0 格，不走 `view_fragment_cluster_index`**（§64：那条路按格子/z 切片取灯，
+// ⚠ 但**只取第 0 格，不走 `view_fragment_cluster_index`**：那条路按格子/z 切片取灯，
 //    相机拉远时大气的采样点会有一半"查不到灯"，画面上留下一条硬台阶）。
 // ⚠ **没有方向光兜底**：宇宙里没有平行光，没有点光源就是"这一帧没有光"（颜色 0 ⇒ 全黑）。
-//    多光源以后再说（§60.5、§64.9）。
+//    多光源以后再说。
 
 #import bevy_pbr::mesh_view_bindings::clustered_lights
 #import bevy_pbr::mesh_view_bindings::lights
@@ -17,7 +17,7 @@
 //    符号写在同一行 —— 折行的话后面那几行会被离线门当成源码，报"expected global item"。
 // ⚠ 模块名是 `clustered_forward`（文件 `clustered_forward.wgsl`），**不是** `clustering`：
 //    写错的话离线门照样过（它按我写的字符串给桩），运行期那条管线会永远停在
-//    "import 还没到"⇒ 出图等管线超时、画面只有星空（§60.3 实测踩过）。
+//    "import 还没到"⇒ 出图等管线超时、画面只有星空。
 //    —— 这份 shader 现在**不再引它**了（不查聚类），那两条坑留给以后要用的人。
 
 struct SunLight {
@@ -32,13 +32,13 @@ struct SunLight {
     point: u32,
     /// 这盏灯的 shadow map 开着没有（0 = 没开 ⇒ 连采样都不发）。
     shadow_maps: u32,
-    /// 影子那张图的 id：目前恒为 0（只摆一盏灯；多光源时这里要改成真 id，§64.9）。
+    /// 影子那张图的 id：目前恒为 0（只摆一盏灯；多光源时这里要改成真 id）。
     shadow_id: u32,
 };
 
 /// 距离衰减：逐字抄 `bevy_pbr::lighting::getDistanceAttenuation`（含 range 的平滑落零）。
 /// 抄而不是引，是因为它只有三行 —— 引进来要多一个 `bevy_pbr::lighting` 的桩，
-/// 而那一份抄错了会立刻在"受光面亮度对不对"上露出来（§60.2 的判据就是量它）。
+/// 而那一份抄错了会立刻在"受光面亮度对不对"上露出来（判据就是量它）。
 fn range_attenuation(distance_squared: f32, inverse_range_squared: f32) -> f32 {
     let factor = distance_squared * inverse_range_squared;
     // ⚠ 变量别叫 `smooth` —— 和 `cast` 一样是 WGSL 保留字（`smoothstep` 的前缀不算数）。
@@ -56,19 +56,19 @@ fn light_count() -> u32 {
 
 /// 取**第 `index` 盏**点光源（`sun_light` 就是第 0 盏）。
 ///
-/// ⚠ **不问 cluster**（§64 实测）：`view_fragment_cluster_index` 那条路按片元所在的格子取灯，
+/// ⚠ **不问 cluster**（实测）：`view_fragment_cluster_index` 那条路按片元所在的格子取灯，
 ///    而"我们的采样点落在哪个格子/哪一层 z 切片"是 Bevy 聚类网格的内部细节 —— 相机拉到远距离
 ///    （viewer 里 `--place …,14`）时，大气沿 chord 的 5 个采样点**有一半查不到灯**，
 ///    于是画面上沿网格边界出现一条**硬台阶**（左右两半的失败率 4% 对 57%）。
 ///    这个渲染器摆的灯是**配方里那几盏**（通常就一盏太阳）⇒ 直接按序取，既省一整套格子计算、
 ///    又不受视口影响。
-/// ⚠ **没有兜底**（用户口径，§64.9）：宇宙里没有平行光，没被写过的格子（uniform 数组默认值 = 全 0）
+/// ⚠ **没有兜底**（用户口径）：宇宙里没有平行光，没被写过的格子（uniform 数组默认值 = 全 0）
 ///    就是"这一盏不存在" —— 颜色 0、`point = 0`，它那一份贡献是 0。
 /// ⚠ `frag_coord` 只为不动调用点而留着（取灯不再需要片元坐标）。
 fn point_light(index: u32, point: vec3<f32>) -> SunLight {
     let data = &clustered_lights.data[index];
     // ⚠ 判"这格写没写过"**只能看颜色**：`position_radius.w` 不是 range（实测对这盏灯读到 0），
-    //    拿它当阈值会把有点光源的场景也判成"没光"（§64.3 那次"整幅受光变了"就是这么来的）。
+    //    拿它当阈值会把有点光源的场景也判成"没光"。
     let lit = !all((*data).color_inverse_square_range.rgb == vec3<f32>(0.0));
 
     let offset = (*data).position_radius.xyz - point;
