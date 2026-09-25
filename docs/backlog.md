@@ -28,6 +28,12 @@ two key columns; they must be byte-identical, and the most recent run's `manifes
 half of that check. A window whose columns differ is void —
 none of its numbers enters a ledger.
 
+**The re-cook goes last, after the final source edit of the window.** Inside a window every source
+edit rotates keys again, so a re-cook placed before the last one bakes a superseded key set and has to
+be run twice. Editing a *test* module inside a rostered `src/` file counts as a source edit for this
+purpose (docs/model.md, the whole-text rule). Order the window as: source edits, `cargo build` of the
+libraries the nodes load, re-cook, then the closing `px list`.
+
 ## Awaiting a decision
 
 **Where does an idea go before it is true?** `docs/` states only what holds today. An idea that

@@ -85,6 +85,13 @@ reachable runtime or build path dependency (a dev-dependency is not compiled int
 it is not folded in). That has a consequence worth internalizing: **editing a comment changes the
 key.** The key is an identity, not a summary of behaviour.
 
+The whole text means the whole text: a `#[cfg(test)]` module inside a file that is in a roster is part
+of that file's bytes, so **editing a test module in `src/` rotates the key** even though the module is
+never compiled into the artifact. The exclusion the rosters make is by *path*, not by `cfg`: a file
+under a crate-root `tests/` is not walked, and a `mod tests` inside `src/` is. Measured:
+`px_volume_gpu_op`'s reconciliation fixtures live in `src/lib.rs`, and giving one of their calls an
+`.expect(…)` rotated that library's fingerprint.
+
 Because the source fingerprint is read from the *loaded library* rather than baked into the graph
 program, a rebuilt implementation is visible without recompiling the graph — which is what makes
 "changed the implementation but hit the old artifact" impossible **once the library has been rebuilt**. A

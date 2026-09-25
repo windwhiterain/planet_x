@@ -399,6 +399,9 @@ Concretely:
   process, so `rows` catches it (the scope re-panics at teardown even after a joined handle, which is
   why catching the join result alone is not enough) and returns it as an error the operator body
   propagates. Callers that cannot fail — tests, probes — say `.expect(…)` at the call site.
+  Changing that return type is a window operation: it rotates the keys of every crate that calls the
+  helper, so the re-cook belongs after the last source edit of the window (docs/backlog.md, batch
+  window discipline).
 
 That is what makes "same parameters, same upstream ⇒ same bytes" true, and therefore what makes a
 cache key over parameters and upstream keys sound.

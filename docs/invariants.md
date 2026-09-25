@@ -201,6 +201,26 @@ differ, the second overwrites the first in the CAS, and the manifest stays self-
 reports it. Every repair, retry and search loop rests on this: re-cooking a key is expected to give
 back what is already stored unless something real changed.
 
+**A worker's panic needs the scope's own teardown panic caught too.** `std::thread::scope` panics
+while it tears the scope down when any of its threads panicked, and it does so **after** the handle was
+joined: handling the `join()` result is therefore not enough, because the scope still unwinds a moment
+later with `a scoped thread panicked` — the worker's own message is not in that payload. Turning a band
+worker's panic into a returned error takes both halves: the join result is kept in preference (that is
+where the original message survives), and the whole scoped call is wrapped in
+`std::panic::catch_unwind(AssertUnwindSafe(…))` so the teardown panic is consumed rather than unwinding
+into the operator dylib boundary, where an uncaught panic aborts the process instead of failing.
+`px_field_schema::parallel::rows` is the one place this is done; the criterion for it drives a closure
+that panics and requires an `Err` naming that panic.
+
+**A signature change is counted by grepping the changed item, not by walking its callers.** Estimating
+what a changed function will touch is a counting problem with a known failure mode: following one call
+chain finds the callers you thought of and misses the rest. `px_elem::fill` was changed to return a
+`Result` and the estimate was "two files", taken from the one path that reaches `fill` from generated
+code; grepping the callee itself — `parallel::rows` — finds five production call sites, of which the
+missed four were in `px_volume_alg` (two) and `px_field_op` (two), and the window was reopened for
+them. The same family as "read bytes, not views": the instrument that answers the question is the one
+aimed at the changed thing, not at the path someone happened to be looking down.
+
 ## Repository conventions
 
 **Line endings are mixed.** Some files are CRLF on disk and some are LF, and the
