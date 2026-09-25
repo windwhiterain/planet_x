@@ -147,6 +147,14 @@ cursor spins in place and every ray near a block seam goes black.
 environment variable, vary a *parameter* too, or the second run is a cache hit and you measure disk
 read time instead.
 
+**A node key must determine its content, not merely exclude inputs.** The rule above is about what
+the hash leaves out; the obligation on the other side is stronger. Nothing that produces a payload
+may read a source the key cannot see — no environment variable, no process id, no wall clock, no RNG
+that is not seeded from a parameter. When one of those enters an operator, two runs of the same key
+differ, the second overwrites the first in the CAS, and the manifest stays self-consistent, so nothing
+reports it. Every repair, retry and search loop rests on this: re-cooking a key is expected to give
+back what is already stored unless something real changed.
+
 ## Repository conventions
 
 **Line endings are mixed.** Some files are CRLF on disk and some are LF, and the bytes on disk are
