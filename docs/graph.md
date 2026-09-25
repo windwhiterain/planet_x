@@ -346,7 +346,11 @@ artifact file; "present but compiled against a different contract" is *not* caug
 — per-node `cached` still walks the loader handshake and refuses it, and a startup handshake needs
 a loader entry point, so that half waits for the loader window. A caller may also pass named
 libraries; each is checked through `source_hash`, which is the full `open()` handshake, so the
-memoized entry the gate builds is reused by the first cooking node.
+memoized entry the gate builds is reused by the first cooking node. The list must be exactly the
+libraries this graph can reach: the gate refuses everything on it, so an unused-but-listed
+library would turn "the run can start" into a false failure, while an unlisted one falls back to
+today's mid-run refusal — named lists per graph exe are derived from the operators the binary
+actually `cached`s, and the schema declarations they point at stay authoritative.
 
 ## Deliberately absent
 

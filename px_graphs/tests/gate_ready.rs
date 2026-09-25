@@ -38,3 +38,17 @@ fn five_named_libraries_pass_the_gate_when_they_are_the_exes_own_products() {
         Err(message) => panic!("命名库与图 exe 是同一套cargo build ⇒ 不该拦：{message}"),
     }
 }
+
+#[test]
+fn a_named_list_the_graph_does_not_use_is_not_the_gates_job() {
+    // 门对名单里每一条都要求真握手；把这张图永远不加载的库塞进名单，
+    // 门就会因一个不需要的库拒绝启动 —— 那是假失败，所以名单必须窄。
+    //（deepseek 9/2 的裁定：这类条目不进名单，宁可让首个节点兜底。）
+    // 本判据不构造那种名单，只钉三条正向：名单是常量、窄、且能过。
+    let used = ["px_field_op", "px_mesh_op"];
+    let outcome = gate_ready(None, &used);
+    match outcome {
+        Ok(()) => {}
+        Err(message) => panic!("图的 exe 自有实现库 ⇒ 不该拦：{message}"),
+    }
+}
