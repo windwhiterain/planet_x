@@ -233,14 +233,6 @@ aimed at the changed thing, not at the path someone happened to be looking down.
 
 ## Repository conventions
 
-**An explicit path does not separate two authors inside one file.** `git add <path>` stages the whole
-file, so a path that is yours to edit can still be carrying someone else's uncommitted work in the same
-file: staging it commits their text under your message, and their half leaves `git status` before they
-ever read it. Listing paths instead of `git add -A` prevents sweeping files you never touched; it does
-not prevent sweeping a *shared* file. Read the diff of every path before staging, and when a file
-carries two authors' work, either agree on who commits it or commit it once and name the other
-author's part in the message.
-
 **Line endings are mixed.** Some files are CRLF on disk and some are LF, and the
 bytes on disk are an input to every key. Before a bulk edit, check per file. The
 stored side is what keys see: with `core.autocrlf=true` a checkout can be CRLF
@@ -258,7 +250,9 @@ work side by side. So: add **by path**, never `-a`/`-A`; before any commit, `git
 --stat` must contain only your own files (if it does not, `git reset` the foreign entries instead
 of committing or reverting them); never run git *write* operations against a colleague's uncommitted
 work (`checkout`/`restore`/`stash`, and per-path adds are not a shield against one file holding two
-authors' edits); and confirm with the other author before touching anything you did not write.
+authors' edits); and confirm with the other author before touching anything you did not write. Read
+the diff of what you stage, not only the list of names: a staged path can hold two authors' work, and
+the commit takes the whole index, including entries someone else staged before you.
 `./format.sh` counts as a source edit: run it **before** any bake/final-build step of a window, not
 after, or it rotates every key you just baked.
 

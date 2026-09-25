@@ -98,6 +98,14 @@ program, a rebuilt implementation is visible without recompiling the graph — w
 library whose sources are newer than it is only warned about (`px_graph_schema::ops`' staleness check on
 load), never refused, so until it is rebuilt a stale implementation answers for its key.
 
+A crate's bytes reach a key only through an axis that names it, and a dependency edge is not that axis
+by itself. `px_graphs`' self-fingerprint is the identity of **`px_local_op!`** nodes; the graphs that
+ship declare none (measured: zero `px_local_op!` in `px_graphs/src`, two in its tests, and tests are
+outside the rosters), so editing `px_graphs/src`, or a crate it depends on such as `px_scene`, rotates
+no key today. Instance keys never included `px_graphs` either: an instance crate's dependencies are
+`px_graph_schema`, `px_elem`, `px_field_schema`, `px_field_alg` and `px_fingerprint`. Adding the first
+local op to a shipped graph is what would make those bytes visible to a key.
+
 Artifacts live in a content-addressed CAS under `target/pcg/ab/<2 hex>/<full hash>.pxart`.
 
 ## 3. Two stages: code, then data

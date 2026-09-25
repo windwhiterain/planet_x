@@ -51,11 +51,9 @@ none of its numbers enters a ledger.
 **The re-cook goes last, after the final source edit of the window.** Inside a window every source
 edit rotates keys again, so a re-cook placed before the last one bakes a superseded key set and has to
 be run twice. Editing a *test* module inside a rostered `src/` file counts as a source edit for this
-purpose (docs/model.md, the whole-text rule), and so does **`./format.sh`**: it rewrites rostered
-bytes, so a window that formats only to satisfy the commit convention, after its build, rotates every
-key a second time and leaves the plan reading `缺` until it is rebuilt and re-cooked. Order the window
-as: source edits, `./format.sh`, `cargo build` of the libraries the nodes load, re-cook, then the
-closing `px list` — and treat the formatter as part of the edits, not as part of the commit.
+purpose (docs/model.md, the whole-text rule), and so does `./format.sh` (docs/invariants.md, the
+shared-checkout entry). Order the window as: source edits, `./format.sh`, `cargo build` of the
+libraries the nodes load, re-cook, then the closing `px list`.
 
 ## Awaiting a decision
 
