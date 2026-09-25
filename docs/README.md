@@ -92,4 +92,7 @@ rounds, no "previously we did X", no numbered-section references. When a decisio
 *document* states the constraint and its reason directly; the reasoning that led there is in the
 git history, which is where history belongs.
 
+Source references give a file path plus a symbol name — never a line number. Line numbers drift
+whenever comments are stripped or a file is reordered; symbols do not.
+
 If you find a statement here that the code contradicts, the code is right and this file is a bug.
