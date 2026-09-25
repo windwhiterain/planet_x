@@ -31,6 +31,7 @@ pub const KINDS: &[&str] = &[
     "write",
     "scene",
     "panic",
+    "usage",
     "internal",
 ];
 

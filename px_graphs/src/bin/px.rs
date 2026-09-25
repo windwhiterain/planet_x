@@ -12,11 +12,11 @@ fn main() {
         Some("build") => build(&args[1..]),
         Some("run") => run(&args[1..]),
         Some(other) => Err(px_cook::fault::line(
-            "internal",
+            "usage",
             "",
             &format!("不认识的子命令 `{other}`\n{}", usage()),
         )),
-        None => Err(px_cook::fault::line("internal", "", &usage())),
+        None => Err(px_cook::fault::line("usage", "", &usage())),
     };
     if let Err(err) = result {
         px_cook::fault::report(&err);
@@ -170,13 +170,21 @@ fn build(flags: &[String]) -> Result<(), String> {
     let target = flags.iter().any(|flag| flag == "--target");
     for flag in flags {
         if !matches!(flag.as_str(), "--gc" | "--deep" | "--target") {
-            return Err(format!("不认识的开关 `{flag}`\n{}", usage()));
+            return Err(px_cook::fault::line(
+                "usage",
+                "",
+                &format!("不认识的开关 `{flag}`\n{}", usage()),
+            ));
         }
     }
     if (deep || target) && !gc {
-        return Err(format!(
-            "`--deep` / `--target` 是 `--gc` 的细化开关，得一起给：px build --gc [--deep] [--target]\n{}",
-            usage()
+        return Err(px_cook::fault::line(
+            "usage",
+            "",
+            &format!(
+                "`--deep` / `--target` 是 `--gc` 的细化开关，得一起给：px build --gc [--deep] [--target]\n{}",
+                usage()
+            ),
         ));
     }
 
@@ -398,7 +406,7 @@ fn parse_run(args: &[String]) -> Result<(String, bool, Option<String>, Vec<Strin
         _ => args,
     };
     let Some(name) = args.first().filter(|arg| !arg.starts_with('-')) else {
-        return Err(usage());
+        return Err(px_cook::fault::line("usage", "", &usage()));
     };
     let mut build = false;
     let mut store: Option<String> = None;
@@ -417,7 +425,11 @@ fn parse_run(args: &[String]) -> Result<(String, bool, Option<String>, Vec<Strin
             "--build" => build = true,
             "--store" => {
                 let Some(value) = args.get(index + 1) else {
-                    return Err(format!("--store 后面要跟一个目录\n{}", usage()));
+                    return Err(px_cook::fault::line(
+                        "usage",
+                        "",
+                        &format!("--store 后面要跟一个目录\n{}", usage()),
+                    ));
                 };
                 store = Some(value.clone());
                 index += 1;
@@ -425,7 +437,13 @@ fn parse_run(args: &[String]) -> Result<(String, bool, Option<String>, Vec<Strin
             other if !other.starts_with('-') => passthrough.push(other.to_string()),
             other => match other.strip_prefix("--store=") {
                 Some(value) => store = Some(value.to_string()),
-                None => return Err(format!("不认识的参数 `{other}`\n{}", usage())),
+                None => {
+                    return Err(px_cook::fault::line(
+                        "usage",
+                        "",
+                        &format!("不认识的参数 `{other}`\n{}", usage()),
+                    ));
+                }
             },
         }
         index += 1;
