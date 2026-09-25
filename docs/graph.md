@@ -65,11 +65,13 @@ What it does, in order:
    effect (the `false` means "not straight from the parameter file").
 3. `interface = O::interface()` — the interface shape hash, computed once and reused by the key, the
    report, and the manifest.
-4. `source_hash = O::source_hash()?` — the implementation's source fingerprint, read **at run time
-   from the operator library**. This happens *before* the cache lookup, so even a run that hits every
-   node needs the library on disk and needs the contract check to pass. A library whose sources are
-   newer than it is only warned about (`px_graph_schema::ops`' staleness check), not refused, so a stale
-   implementation still answers for its key until it is rebuilt.
+4. `source_hash = O::source_hash()?` — the implementation's fingerprint, taken **before** the cache
+   lookup, so what even a hit needs follows from where the implementation lives. A preset operator or an
+   instance node loads its library and passes the loader's checks: the contract, and a toolchain symbol
+   that must equal the consumer's own. A `px_local_op!` node loads nothing, because its fingerprint is
+   its own crate's, taken at compile time. A library whose sources are newer than it is only warned
+   about (`px_graph_schema::ops`' staleness check), not refused, so a stale implementation still answers
+   for its key until it is rebuilt.
 5. `key = node_key(&OpId { id: O::ID, interface, source_hash }, &params_json, |h| inputs.collect(h))`.
 6. `cache.fetch(key)`:
    * `Some(payload)` → `Build::decode` → `cache.store(Report { hit: true, millis: 0, … }, &payload)`
@@ -331,10 +333,11 @@ Loud, before or instead of any computation:
 
 * **A parameter file that does not parse**, including an unknown field name — `node_params` returns
   an error and the graph program's `?` ends the run.
-* **A missing operator library**, or one that fails the contract check against the graph program
-  (different contract sources). This fails even on an all-hit run, because the source fingerprint is
-  read from the library before the cache is consulted. The error names the library and the command to
-  build it. A library whose sources are newer than it is only warned about, never refused.
+* **A missing operator library**, or one the loader refuses — a different contract, or a toolchain
+  symbol that differs from the consumer's. Both are checked before the cache is consulted, so they fail
+  even on a run that hits every node; the exception is a `px_local_op!` node, which loads no library at
+  all. The error names the library and the command to build it. A library whose sources are newer than
+  it is only warned about, never refused.
 * **A payload that fails to decode on a hit** (the domain's `Build::decode`).
 * **A failed artifact write** — `store` returns an error rather than continuing.
 * **`--store` with no value, or an empty value.**

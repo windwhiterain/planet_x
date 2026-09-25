@@ -6,7 +6,7 @@
 //! current one, which separates `release` from `debug` and stays quiet across `opt`/`dev`; `px run`
 //! refuses a plan whose present libraries were recorded by another build.
 //!
-//! Four cases, and the fourth is the one an implementation gets wrong: the switch must be *recoverable*
+//! Five cases, and the last is the one an implementation gets wrong: the switch must be *recoverable*
 //! by rebuilding, not a permanent refusal.
 
 use std::path::{Path, PathBuf};

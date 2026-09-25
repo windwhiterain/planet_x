@@ -359,14 +359,19 @@ selected:
   `-Task list` to report every instance `缺` on the first run after switching; that is the rotation,
   not a regression, and `-Task build` compiles the new family.
 
-Because a `-Level release` switch changes that hash while an `opt` switch does not, the gate compares a
-library's recorded build against the current one rather than trying to read a level out of it. `-Task
-list` reads the `toolchain` field of the sidecar next to each compiled library
-(`target/pcg/inst/<key>.json`) and marks a library whose record differs from the current one with `!`;
-`px run` **refuses** such a plan, naming the operator and both hashes, and `px build` treats that library
-as work to redo. So the recovery from a `release` switch is `build` then `run`, never `run` alone — and
-across `opt`/`dev` the gate stays quiet, because those two produce the same bytes. A library with no
-sidecar is neither marked nor refused — an absent record is not evidence of another build.
+What the gate compares is a library's **recorded** build against the current one, rather than trying to
+read a level out of it, and its subject is narrow: **one key produced by two different builds**. A
+`-Level release` switch is not that case — it changes `PROFILE`, which changes every instance key and
+with it every library path, so the switch presents itself as a plan full of **missing** libraries and
+`build` fills it. What the comparison catches is a library that sits at a key the plan still computes
+while its record says another build: the environment captured when the library was built differs from
+the one the key was computed with, which a partially rebuilt tree can produce. `-Task list` reads the
+`toolchain` field of the sidecar next to each compiled library (`target/pcg/inst/<key>.json`) and marks
+such a library with `!`; `px run` **refuses** that plan, naming the operator and both hashes, and
+`px build` treats the library as work to redo. The loader makes the same comparison from the library's
+own symbol, so a mismatch that goes unnoticed at plan time is refused when the library is opened. Across
+`opt`/`dev` the gate stays quiet, because those two produce the same hash and the same bytes. A library
+with no sidecar is neither marked nor refused — an absent record is not evidence of another build.
 
 The three task names `planet`, `desert`, `clouds` and the `run` task first build
 `px_field_op`, `px_volume_op`, and `px_mesh_op` with the same flags, because the operator

@@ -50,13 +50,14 @@ A **node key** (what `cached` computes for a graph node) is:
 px_graph_schema::node_key(OpId { id, interface, source_hash }, params_json, inputs)
 ```
 
-where `source_hash` is the implementation's fingerprint, read at runtime from the library's identity
-symbol, and what it covers depends on where the implementation lives: a `px_*_op` preset contributes
-that dylib's `PX_SOURCE_HASH`, a `px_local_op!` contributes the graph crate's own fingerprint, and an
-element or recorded instance contributes the **instance content key** (the declaration fingerprint, the
-toolchain hash, each algorithm root's roster, the interface, the normalised body template and the body
-bytes). So a node key covers the operator id, the interface shape, the implementation's source, the
-parameters canonicalised to JSON, and whatever the inputs contribute through their own keys.
+where `source_hash` is the implementation's fingerprint, and where it comes from depends on where the
+implementation lives: a `px_*_op` preset reads it at runtime from its dylib's identity symbol, a
+`px_local_op!` takes the graph crate's own fingerprint at compile time and loads no library at all, and
+an element or recorded instance reads the **instance content key** from its instance library (the
+declaration fingerprint, the toolchain hash, each algorithm root's roster, the interface, the normalised
+body template and the body bytes). So a node key covers the operator id, the interface shape, the
+implementation's source, the parameters canonicalised to JSON, and whatever the inputs contribute
+through their own keys.
 
 ⚠ The **toolchain hash has no axis of its own in a node key**, but it is not absent from one either: for
 a node backed by an instance it sits inside `source_hash`, because that is the instance content key,

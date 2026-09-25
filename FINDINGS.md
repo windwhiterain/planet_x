@@ -140,10 +140,13 @@ gate, and what it does is compare a library's **recorded** build against the cur
 reading a level out of the key: `px run` refuses a plan whose present libraries were recorded by another
 build, naming the operator and both hashes; `px build` treats such a library as work to redo (it compiles
 with the current toolchain, so refusing there would leave no way to switch level); a library with no
-sidecar is not a mismatch, since the gate separates two *known* builds. It therefore catches a
-`release`↔`debug` switch and is deliberately quiet across `opt`↔`dev`, where the hash and the bytes are
-the same. The gate lives in `px_graphs/src/lib.rs` and is covered by `px_graphs/tests/toolchain_gate.rs`;
-the change is zero-key, because `px_graphs` and `px_cook` are in no instance root's closure.
+sidecar is not a mismatch, since the gate separates two *known* builds. Its subject is narrow — **one key
+produced by two different builds** — because a `release` switch rotates the key itself and so appears as
+missing libraries rather than as a mismatch at one path; across `opt`↔`dev` the hash and the bytes are
+the same and the gate stays quiet. The loader performs the same comparison from the library's toolchain
+symbol, so a mismatch unnoticed by the plan is refused when the library is opened. The gate lives in
+`px_graphs/src/lib.rs` and is covered by `px_graphs/tests/toolchain_gate.rs`; the change is zero-key,
+because `px_graphs` and `px_cook` are in no instance root's closure.
 
 `-Level release` still rotates every instance key, since `PROFILE` changes, and the superseded libraries
 stay on disk (`target/pcg/inst/` has been observed holding two generations side by side). That remains
