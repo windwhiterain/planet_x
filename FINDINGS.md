@@ -134,14 +134,16 @@ comparison without it degenerates into "the second run hit the cache" and proves
 also applies to the graph whose `begin()` runs in that process, not to a whole graph tree: in the
 `nebula` pair the `nebulasky` row is still `hit=true`, which is the expected shape.
 
-The warning half is unchanged: `tools/px.ps1` warns on stderr for `-Level opt` and `-Level release`
-(what each does to identity), and `docs/programs.md` states both. What is new is the gate. Because the
-key cannot separate the levels, the **recorded toolchain** does: `px run` refuses a plan whose present
-libraries were compiled by another build, naming the operator and both hashes; `px build` treats such a
-library as work to redo (it compiles with the current toolchain, so refusing there would leave no way to
-switch level); a library with no sidecar is not a mismatch, since the gate separates two *known* builds.
-The gate lives in `px_graphs/src/lib.rs` and is covered by `px_graphs/tests/toolchain_gate.rs`; the
-change is zero-key, because `px_graphs` and `px_cook` are in no instance root's closure.
+What was the warning half is unchanged: `tools/px.ps1` warns on stderr for `-Level opt` and
+`-Level release` (what each does to identity), and `docs/programs.md` states both. What is new is the
+gate, and what it does is compare a library's **recorded** build against the current one rather than
+reading a level out of the key: `px run` refuses a plan whose present libraries were recorded by another
+build, naming the operator and both hashes; `px build` treats such a library as work to redo (it compiles
+with the current toolchain, so refusing there would leave no way to switch level); a library with no
+sidecar is not a mismatch, since the gate separates two *known* builds. It therefore catches a
+`release`↔`debug` switch and is deliberately quiet across `opt`↔`dev`, where the hash and the bytes are
+the same. The gate lives in `px_graphs/src/lib.rs` and is covered by `px_graphs/tests/toolchain_gate.rs`;
+the change is zero-key, because `px_graphs` and `px_cook` are in no instance root's closure.
 
 `-Level release` still rotates every instance key, since `PROFILE` changes, and the superseded libraries
 stay on disk (`target/pcg/inst/` has been observed holding two generations side by side). That remains

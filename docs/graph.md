@@ -67,7 +67,9 @@ What it does, in order:
    report, and the manifest.
 4. `source_hash = O::source_hash()?` — the implementation's source fingerprint, read **at run time
    from the operator library**. This happens *before* the cache lookup, so even a run that hits every
-   node needs the libraries on disk and needs the contract/toolchain handshake to pass.
+   node needs the library on disk and needs the contract check to pass. A library whose sources are
+   newer than it is only warned about (`px_graph_schema::ops`' staleness check), not refused, so a stale
+   implementation still answers for its key until it is rebuilt.
 5. `key = node_key(&OpId { id: O::ID, interface, source_hash }, &params_json, |h| inputs.collect(h))`.
 6. `cache.fetch(key)`:
    * `Some(payload)` → `Build::decode` → `cache.store(Report { hit: true, millis: 0, … }, &payload)`
@@ -254,10 +256,11 @@ manifest leaves artifacts in the CAS with no names attached to them, and the sce
 **`metrics.jsonl`** — the measurement ledger, appended once per run by `finish()` and separate from
 the manifest because the manifest is an index that every run overwrites. A run writes a header
 (`seq`, `graph`, `started`, `node_count`) and then one line per node (`seq`, `node`, `key`, `hit`,
-`cook_millis`, `bytes`). `seq` counts runs of that graph and comes back from the last line already in
-the file, so it is the field a reader orders by; `started` is for people. Past 256 KB or 4096 lines
-the file becomes `metrics.jsonl.1` and the sequence keeps counting. A line that will not parse is
-reported and skipped, never treated as "no previous run". Nothing under `target/` is in any
+`cook_millis`, `bytes`). `seq` counts runs of that graph and comes back from the most recent line that
+carries one, so it is the field a reader orders by; `started` is for people. Past 256 KB or 4096 lines
+the file becomes `metrics.jsonl.1` and the sequence keeps counting. Damage older than that most recent
+readable line is not reported by this routine — the scan stops at the first line that yields a `seq` —
+and when no line yields one the run is still recorded, as `seq` 1. Nothing under `target/` is in any
 fingerprint roster, so writing here cannot rotate a key.
 
 `finish()` **overwrites** `target/pcg/<graph>/manifest.json` with this run's entries. A graph that
@@ -328,10 +331,10 @@ Loud, before or instead of any computation:
 
 * **A parameter file that does not parse**, including an unknown field name — `node_params` returns
   an error and the graph program's `?` ends the run.
-* **A missing operator library**, or one that fails the handshake with the graph program (different
-  contract sources, different toolchain). This fails even on an all-hit run, because the source
-  fingerprint is read from the library before the cache is consulted. The error names the library and
-  the command to build it.
+* **A missing operator library**, or one that fails the contract check against the graph program
+  (different contract sources). This fails even on an all-hit run, because the source fingerprint is
+  read from the library before the cache is consulted. The error names the library and the command to
+  build it. A library whose sources are newer than it is only warned about, never refused.
 * **A payload that fails to decode on a hit** (the domain's `Build::decode`).
 * **A failed artifact write** — `store` returns an error rather than continuing.
 * **`--store` with no value, or an empty value.**

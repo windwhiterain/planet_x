@@ -237,11 +237,14 @@ failed instance's generated sources are left on disk so the compile error can be
 recipe line.
 
 The sidecar is strict JSON (one field per line, no trailing comma) so that tools can read it back:
-the key file name is the identity, and the sidecar's `toolchain` field is the only record of which
-build compiled that library. `px list` reads it to mark a library that came from another build, and
-`px run` reads it to refuse one; a sidecar that is missing and one that will not parse are reported as
-different conditions, because they call for different reactions (`-Task list` prints `没有 sidecar` for
-the first and the parse error for the second).
+the key file name is the identity, and the sidecar's `toolchain` field is a readable copy of the axis
+the instance key already folds in — it records the library's `TOOLCHAIN_HASH`, so it **cannot separate
+`-Level opt` from `-Level dev`**, which produce that same hash. What it enables is a plan-time
+comparison: `px list` marks a library whose recorded build differs from the current one, and `px run`
+refuses one. The compiled library exports the same hash as a symbol, so the sidecar's text and the
+library's own symbol carry the same value. A sidecar that is missing and one that will not parse are
+reported as different conditions, because they call for different reactions (`-Task list` prints
+`没有 sidecar` for the first and the parse error for the second).
 
 Flags:
 
@@ -356,12 +359,14 @@ selected:
   `-Task list` to report every instance `缺` on the first run after switching; that is the rotation,
   not a regression, and `-Task build` compiles the new family.
 
-Because the key cannot separate the levels, the recorded toolchain does. `-Task list` reads the
-`toolchain` field of the sidecar next to each compiled library (`target/pcg/inst/<key>.json`) and marks
-a library whose recorded toolchain differs from the current one with `!`; `px run` **refuses** such a
-plan, naming the operator and both hashes, and `px build` treats that library as work to redo. So the
-recovery from a level switch is `build` then `run`, never `run` alone. A library with no sidecar is
-neither marked nor refused — an absent record is not evidence of another build.
+Because a `-Level release` switch changes that hash while an `opt` switch does not, the gate compares a
+library's recorded build against the current one rather than trying to read a level out of it. `-Task
+list` reads the `toolchain` field of the sidecar next to each compiled library
+(`target/pcg/inst/<key>.json`) and marks a library whose record differs from the current one with `!`;
+`px run` **refuses** such a plan, naming the operator and both hashes, and `px build` treats that library
+as work to redo. So the recovery from a `release` switch is `build` then `run`, never `run` alone — and
+across `opt`/`dev` the gate stays quiet, because those two produce the same bytes. A library with no
+sidecar is neither marked nor refused — an absent record is not evidence of another build.
 
 The three task names `planet`, `desert`, `clouds` and the `run` task first build
 `px_field_op`, `px_volume_op`, and `px_mesh_op` with the same flags, because the operator

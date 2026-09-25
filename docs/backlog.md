@@ -103,23 +103,26 @@ unattractive because that service is itself not being built (see the cost entry 
 
 **The fingerprint axis is crate-wide, so a signature edit rotates unrelated keys.** `interface_hash`
 folds in `type_name::<Params>()`, so adding one field to a parameter struct changes that node's key —
-correctly. But `source_hash` is the whole declaring crate's source fingerprint, and a schema crate
-holds the declarations, the parameter structs and the domain data together, so the same edit also
-rotates every other operator that crate declares. In a repair loop that repeatedly widens parameter
-structs, this reads as "fix one node, dirty the whole graph". Splitting the declaration surface from
-the data surface, or deriving the interface hash from a structural layout summary instead of a type
-name, would move each of those consequences onto its own axis.
+correctly. What `source_hash` covers depends on where the implementation lives (graph.md's axis table): a
+preset contributes its own dylib's fingerprint, a `px_local_op!` the graph crate's, and an element or
+recorded instance the **instance content key** — which folds in that instance's `decl_hash` and the
+algorithm roots' roster. A schema crate holds declarations, parameter structs and domain data together,
+so one widened struct still rotates every operator that crate declares. In a repair loop that repeatedly
+widens parameter structs, this reads as "fix one node, dirty the whole graph": the axis such an edit
+belongs on is the instance's `decl_hash`/interface, and the crate-wide source fingerprint is what makes
+it wider than that.
 
 **Cost telemetry writes to a ledger that is not part of identity, and the first machine reader is
 still to be written.** `Graph::finish()` appends one run to `target/pcg/<graph>/metrics.jsonl`: a
 header line (`seq`, `graph`, `started`, `node_count`) followed by one line per node (`seq`, `node`,
-`key`, `hit`, `cook_millis`, `bytes`). `seq` counts runs per graph and is read back from the last line
-already in the file, so it orders the file even when two runs start in the same second; `started` is
-the human-readable anchor only. The file rotates to `metrics.jsonl.1` past 256 KB or 4096 lines, and
-every failure — an unreadable line, a write that does not go through — is reported rather than
-swallowed. Nothing under `target/` is in any roster, so recording a measurement cannot invalidate what
-it measured. What is missing is the consumer: no command reads the ledger yet, so a cost model is
-still a manual exercise over the JSONL.
+`key`, `hit`, `cook_millis`, `bytes`). `seq` counts runs per graph and is read back from the most recent
+line that carries one, so it orders the file even when two runs start in the same second; `started` is
+the human-readable anchor only. The file rotates to `metrics.jsonl.1` past 256 KB or 4096 lines, and a
+write that does not go through is reported rather than swallowed. Damage older than that most recent
+readable line is outside what this routine reports: the scan stops at the first line that yields a `seq`,
+and when none does the run is recorded as `seq` 1. Nothing under `target/` is in any roster, so recording
+a measurement cannot invalidate what it measured. What is missing is the consumer: no command reads the
+ledger yet, so a cost model is still a manual exercise over the JSONL.
 
 **A resident cook service is not worth building today; the reading and the reason are below.** The
 idea was a long-lived process holding the operator libraries and the `Graph`, so repeated cooks stop
@@ -284,10 +287,14 @@ never be worth doing. A contract field is what makes the first milestone a batch
 single field added to `AssetManifest` rotates every instance key and every node key, because
 `px_protocol` and `px_graph_schema` sit in every roster.
 
-## Gates shipped, and the one still missing
+No per-face or per-layer editing workflow is known on any node kind today, so the format stays designed
+and the three trigger conditions above carry the launch. When such a workflow, or a consumer that diffs
+child fingerprints, appears, the first milestone's window can be opened following the shape above.
+
+## Gates shipped
 
 Three checks that used to be convention only now have a home in `tests/`, so none of them costs a
-key rotation. Two are shipped and are described here as contracts rather than as pending work.
+key rotation. All three are shipped and are described here as contracts rather than as pending work.
 
 **No payload-producing source may read an input its key cannot see.** A payload that depends on an
 environment variable, a process id, a wall clock or an unseeded RNG breaks "same key ⇒ same bytes"

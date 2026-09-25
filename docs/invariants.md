@@ -38,13 +38,15 @@ moves either, for the same reason `px_cook` and `px_decls` are free: no shipped 
 
 Consequence: **a repository-wide comment edit is never free** — count the files first.
 
-**A gate on a crate that participates in a fingerprint belongs in the crate-root `tests/`**, because
-that directory is walked by no roster, and adding a file under `src/` would rotate a key. `px_render` is
-the exception, and it is the only one: it is a bin-only host that appears in no roster, no instance
-closure and no dependency list, so its gates live in an in-file `#[cfg(test)] mod tests` (as 17 of its
-source files already do) and rotating nothing is not at stake. **Do not copy that shape onto a crate
-whose key face is not zero** — on any other crate the in-file module is a key rotation waiting to be
-committed.
+**A *criterion* on a crate that participates in a fingerprint belongs in the crate-root `tests/`**,
+because that directory is walked by no roster, while adding a file under `src/` would rotate a key. A
+*production* gate still lives in `src/`, where the binaries can call it: the toolchain gate's runtime
+half is `px_graphs::assert_toolchain_matches` in `src/lib.rs`, and its five criteria are in
+`tests/toolchain_gate.rs`. `px_render` is the exception, and it is the only one: it is a bin-only host
+that appears in no roster, no instance closure and no dependency list, so **its criteria** live in an
+in-file `#[cfg(test)] mod tests` (as 17 of its source files already do) and rotating nothing is not at
+stake. **Do not copy that shape onto a crate whose key face is not zero** — there the in-file module is a
+key rotation waiting to be committed.
 
 **A shader's content includes its `#import` closure.** An entry file whose text did not change is
 still a different key if a module it imports changed. On load the renderer recomputes the closure

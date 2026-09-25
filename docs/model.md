@@ -50,13 +50,19 @@ A **node key** (what `cached` computes for a graph node) is:
 px_graph_schema::node_key(OpId { id, interface, source_hash }, params_json, inputs)
 ```
 
-where `source_hash` is the source fingerprint of the implementing library, read at runtime from the
-library's identity symbol. So a node key covers the operator id, the interface shape, the
-implementation's source, the parameters canonicalised to JSON, and whatever the inputs contribute
-through their own keys.
+where `source_hash` is the implementation's fingerprint, read at runtime from the library's identity
+symbol, and what it covers depends on where the implementation lives: a `px_*_op` preset contributes
+that dylib's `PX_SOURCE_HASH`, a `px_local_op!` contributes the graph crate's own fingerprint, and an
+element or recorded instance contributes the **instance content key** (the declaration fingerprint, the
+toolchain hash, each algorithm root's roster, the interface, the normalised body template and the body
+bytes). So a node key covers the operator id, the interface shape, the implementation's source, the
+parameters canonicalised to JSON, and whatever the inputs contribute through their own keys.
 
-⚠ The **toolchain hash is not in a node key** — it enters instance keys only. Nor is the node name,
-the graph name, the parameter directory, the environment, or the artifact bytes.
+⚠ The **toolchain hash has no axis of its own in a node key**, but it is not absent from one either: for
+a node backed by an instance it sits inside `source_hash`, because that is the instance content key,
+which folds the toolchain in. Neither the node name, the graph name, the parameter directory, the
+environment nor the artifact bytes are in a node key — with the one further qualification that a
+`px_local_op!` node's `source_hash` is its graph crate's fingerprint.
 
 An **instance key** (what names a compiled dylib) is a different set, and two things a node key has
 are deliberately absent from it:
@@ -79,8 +85,10 @@ it is not folded in). That has a consequence worth internalizing: **editing a co
 key.** The key is an identity, not a summary of behaviour.
 
 Because the source fingerprint is read from the *loaded library* rather than baked into the graph
-program, an implementation that changed is visible without recompiling the graph — which is what
-makes "changed the implementation but hit the old artifact" impossible.
+program, a rebuilt implementation is visible without recompiling the graph — which is what makes
+"changed the implementation but hit the old artifact" impossible **once the library has been rebuilt**. A
+library whose sources are newer than it is only warned about (`px_graph_schema::ops`' staleness check on
+load), never refused, so until it is rebuilt a stale implementation answers for its key.
 
 Artifacts live in a content-addressed CAS under `target/pcg/ab/<2 hex>/<full hash>.pxart`.
 
