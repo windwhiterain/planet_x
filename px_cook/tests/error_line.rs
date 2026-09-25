@@ -103,3 +103,21 @@ fn prose_that_was_never_classified_does_not_parse() {
     let fallback = fault::line("internal", "", "who knows");
     assert_eq!(parsed_kind(&fallback), Some("internal"));
 }
+
+#[test]
+fn a_gate_that_collects_several_failures_still_starts_with_its_own_line() {
+    // `gate_ready` joins a list, so it is the one place tempted to put prose first — which is exactly
+    // what made the entrance label the whole message `internal` and bury the real kind one level down.
+    let err = px_cook::inst::gate_ready(None, &["px_no_such_operator_library"])
+        .expect_err("a library that cannot be opened must fail the gate");
+    assert_eq!(parsed_kind(&err), Some("library"));
+    assert_eq!(field(&err, "stage"), Some("archive"));
+    assert!(
+        err.contains("lib=px_no_such_operator_library"),
+        "the failing library is named in the detail: {err}"
+    );
+    assert!(
+        fault::is_line(&err),
+        "the first line is the one a caller greps"
+    );
+}

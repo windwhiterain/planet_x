@@ -343,29 +343,42 @@ impl Stage1 {
 ///   back to today's mid-run error, never to a wrong answer.
 pub fn gate_ready(graph: Option<(&str, &BuildGraph)>, libs: &[&'static str]) -> Result<(), String> {
     let mut failures: Vec<String> = Vec::new();
+    let mut incomplete = false;
     if let Some((name, build_graph)) = graph {
         let plan = build_graph.missing();
         if !plan.complete() {
+            incomplete = true;
             failures.push(plan.hint(name));
         }
     }
     for lib in libs {
         if let Err(err) = px_graph_schema::ops::source_hash(lib) {
-            failures.push(format!("{lib}: {err}"));
+            failures.push(crate::fault::line("library", &format!("lib={lib}"), &err));
         }
     }
     if failures.is_empty() {
-        Ok(())
-    } else {
-        Err(format!(
-            "archive gate:{}
-",
-            failures.join(
-                "
-"
-            )
-        ))
+        return Ok(());
     }
+    // The gate's own line comes first, because a caller parses line one: a failure list whose first
+    // line was prose made the entrance label the whole thing `internal` and bury the real kind.
+    let subject = match graph {
+        Some((name, _)) => format!("graph={name} stage=archive"),
+        None => "stage=archive".to_string(),
+    };
+    let kind = if incomplete {
+        "missing-instance"
+    } else {
+        "library"
+    };
+    Err(format!(
+        "{}\n  {}",
+        crate::fault::line(
+            kind,
+            &subject,
+            &format!("入口自检没过（{} 项）", failures.len())
+        ),
+        failures.join("\n  "),
+    ))
 }
 
 pub fn live_keys(graph: &BuildGraph) -> Vec<String> {
