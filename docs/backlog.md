@@ -51,8 +51,11 @@ none of its numbers enters a ledger.
 **The re-cook goes last, after the final source edit of the window.** Inside a window every source
 edit rotates keys again, so a re-cook placed before the last one bakes a superseded key set and has to
 be run twice. Editing a *test* module inside a rostered `src/` file counts as a source edit for this
-purpose (docs/model.md, the whole-text rule). Order the window as: source edits, `cargo build` of the
-libraries the nodes load, re-cook, then the closing `px list`.
+purpose (docs/model.md, the whole-text rule), and so does **`./format.sh`**: it rewrites rostered
+bytes, so a window that formats only to satisfy the commit convention, after its build, rotates every
+key a second time and leaves the plan reading `缺` until it is rebuilt and re-cooked. Order the window
+as: source edits, `./format.sh`, `cargo build` of the libraries the nodes load, re-cook, then the
+closing `px list` — and treat the formatter as part of the edits, not as part of the commit.
 
 ## Awaiting a decision
 
@@ -360,24 +363,9 @@ rather than per cell. `px_field_schema/tests/row_bands.rs` still pins the helper
 
 ## Unconsumed inputs
 
-34 of the 44 scene recipes under `art/scene/` are referenced by no `.rs` or `.ps1` in the tree:
-
-```
-orbit-allmiss            orbit-soft-wind          probe-noshadow-5x
-orbit-bare-shadow        orbit-uranus             probe-ringsun1
-orbit-bound              probe-farsun20           probe-ringsun1-ns
-orbit-nograd             probe-farsun5            probe-ringsun20
-orbit-proxy-fine         probe-hi1                probe-ringsun20-ns
-orbit-proxy-fine-bound   probe-hi1-ns             probe-ringsun5
-orbit-rings              probe-hi5                probe-ringsun5-ns
-orbit-soft-nocloudshadow probe-hi5-ns             probe-vs-center
-orbit-soft-noshadow      probe-hires              soft-e24000
-orbit-soft-plain         probe-hires-ns           soft-e6000
-orbit-soft-proxy         probe-noshadow-1x
-orbit-soft-shell         probe-noshadow-20x
-```
-
-These are single-purpose comparison recipes from earlier measurements. They are inputs, so deleting
-them changes no key, but a measurement someone wants to re-run may depend on one, so this needs a
-decision rather than a silent sweep. The count moves when a recipe gains no consumer: re-derive it by
-listing `art/scene/*.toml` and grepping each stem across the `.rs` and `.ps1` files.
+The 34 scene recipes under `art/scene/` that no `.rs` or `.ps1` referenced have been deleted; the
+names and the contents live in git history, recorded in `FINDINGS.md` #6. Ten files remain: the
+eight content scenes tabulated in [art.md](art.md), plus `orbit-bare-nolight.toml` and
+`soft-e300.toml`, whose stems occur only in `#[cfg(test)]` code. Scene recipes are outside every
+fingerprint roster, so the deletion rotates no key. Re-derive at any time by listing
+`art/scene/*.toml` and grepping each stem across the `.rs` and `.ps1` files.

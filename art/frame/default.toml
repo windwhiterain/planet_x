@@ -33,16 +33,15 @@ format = "depth32float"
 size = "view"
 usage = ["render_attachment", "texture_binding", "copy_src"]
 
-# ---- 点光**虚拟影图**的物理 atlas（§本轮）：**一盏投影灯一个 cube，每面一层** ----
+# ---- 点光**虚拟影图**的物理 atlas：**一盏投影灯一个 cube，每面一层** ----
 #
 # `layers` 写的是**来源**不是数：烘图侧按这一帧的灯表解出来（§133 同一条口径 ——
 # 配方里一个内容值都不写死），文档里落的是解出来的整数。一盏投影的灯都没有时，
 # **这份资源与写它的那些 pass 都不烘**。
 #
-# ⚠ 它替掉了从前的 `point_shadow_textures`（每盏灯一张固定的 1024² cube）：
-# 那一版的"一个 texel 有多少世界大"是 `2d/1024`（d = 到灯的距离）⇒ **太阳拉远影就糊**；
-# 这一版按每个物体的 `shadow_density`（texel / 世界单位）分配，**与灯多远无关**。
-# 详见 `px_render/src/vshadow.rs` 那段模块头。
+# ⚠ 每个物体的分辨率按它的 `shadow_density`（texel / 世界单位）分配，
+# **与灯多远无关**（"一个 texel 有多少世界大"因此不随距离变）。详见
+# `px-scene/src/vshadow.rs` 那段模块头。
 #
 # ⚠ `4096x4096` 是**这一版的上限**，不是实况：物理页只占"真有投影物体落在上面"的那些格
 # （`vshadow::allocate` 按物体算），分配器够不着这个上限时它当场报错，**不降精度**。
@@ -56,14 +55,13 @@ usage = ["render_attachment", "texture_binding", "copy_src"]
 
 # ---- 每级一张 atlas（用户裁决的 (ii)）：级 1..3 各一张 ----
 #
-# ⚠⚠ **名字必须与 `px-scene::vshadow::SHADOW_ATLAS_RESOURCES` 逐字对上**（`frame.rs` 靠
+# ⚠⚠ **名字必须与 `px_scene::vshadow::SHADOW_ATLAS_RESOURCES` 逐字对上**（`frame.rs` 靠
 #    名字认出「这是哪一级的 atlas」）。`size` 那一栏是**上限**，实际边长由分配算出来
 #    （`allocation.atlas_sides[级]`）再覆盖它 ⇒ 纹理正好是 `页格边长 × 128`，
 #    采样侧用 `textureDimensions` 就能反推页格边长 ⇒ 表头一个字都不用加。
 #
 # 为什么每级一张（而不是挤在一张里）：降采样要「读 `atlas[k-1]` 写 `atlas[k]`」，
-# 而 wgpu 不许同一张纹理在一条 pass 里既当（写的）深度附件、又当被绑的资源 ——
-# 与上面那段 `copy_shadow_atlas` 被删掉是**同一颗雷**的两面。
+# 而 wgpu 不许同一张纹理在一条 pass 里既当（写的）深度附件、又当被绑的资源。
 [[resources]]
 name = "point_shadow_atlas_l1"
 format = "depth32float"
@@ -85,18 +83,12 @@ size = "4096x4096"
 layers = "shadow_faces"
 usage = ["render_attachment", "texture_binding", "copy_src"]
 
-# ---- 影子 atlas 的**快照**（§本轮）：给"既要写它、又要采它"的两方各一份 ----
+# ---- 影子 atlas 的**自读**：写它的那条 pass 与采它的那一方各得其所 ----
 #
-# ⚠⚠ **这里原来有一份 `point_shadow_atlas_sample` 与一条 `copy_shadow_atlas`，现已删除。**
-#
-#    它们存在的唯一理由是 wgpu 那条"一张纹理不能在同一条 pass 里既当深度附件又被绑定"：
-#    影子页 pass 写 atlas，而全帧共用的组 0 里绑着它 ⇒ 拿一份拷贝当替身给页 pass 绑。
-#    代价是**整份 atlas 每帧搬一遍**（4096² × 6 层 × 4 B ≈ **400 MB/帧** 的带宽，
-#    不是下面旧注释里写的 24 MB —— 那是页只占 1024² 时留下的数）。
-#
-#    现在页 pass 改绑一张 **1×1 哑图**（`px_render` 里 `Cell::zero_dummy`：同一份材质、
-#    只有组 0 那一格换纹理），冲突从根上没了 ⇒ 采样侧**直接读 `point_shadow_atlas` 自己**。
-#    ⚠ 那条资源的 `usage` 本来就带着 `texture_binding`，所以它一直就能被绑 —— 不需要新资源。
+# ⚠ 页 pass 绑一张 **1×1 哑图**（`px_render/src/render.rs` 里 `Cell` 的 `zero_dummy`：
+#    同一份材质、只有组 0 那一格换纹理）⇒ 它既写 `point_shadow_atlas`，又不与"同一条
+#    pass 里绑定它"冲突，采样侧**直接读 `point_shadow_atlas` 自己**。
+# ⚠ 那条资源的 `usage` 本来就带着 `texture_binding`，所以它一直就能被绑 —— 不需要另立资源。
 
 # ---- 预通道深度的**快照**（§131）：给"既要拿它做深度测试、又要采样它"的那几方各一份 ----
 [[resources]]
@@ -125,7 +117,7 @@ render = "color=none|depth=clear(0)|depth_write=true|compare=greater_equal|windi
 # 一盏投影的灯都没有 ⇒ 一条都不展开。
 #
 # ⚠ **页不是这一栏的展开维**：一层里要画哪几页由 `shadow_density` 与物体的包围球算出来
-# （`px_render::vshadow`），一页一笔 draw 靠 `MaterialInstance` + 动态偏移落在**同一条 pass**
+# （`px_scene::vshadow`），一页一笔 draw 靠 `MaterialInstance` + 动态偏移落在**同一条 pass**
 # 上（见 `EntryFile::shadow_faces` 那段注释）。六面仍然是六条 pass，一条不多。
 #
 # ⚠ **不许**用 multiview 把它"优化"成一条：那是行为差异，不是等价实现（§109.1）。
@@ -150,13 +142,12 @@ render = "color=none|depth=clear(0)|depth_write=true|compare=greater_equal|windi
 # ---- 金字塔降采样（用户裁决的 (ii) 的正身）：级 k 的一页 = 级 k-1 的四个孩子取 **max** ----
 #
 # ⚠⚠ **粗级只由降采样生成**（用户裁决）：几何只画到自己的那一级（`caster_level`），
-#    粗级靠这条链铺满 ⇒ 「要的那一级没页时退到父级」那条回退基本不再走到。
+#    粗级靠这条链铺满 ⇒ 「要的那一级没页时退到父级」那条回退基本走不到。
 # ⚠ **顺序要紧**：`shadow_down_l2` 读的 `atlas_l1` 必须**已经**含 l1 的降采样结果
 #    （否则粗级会漏掉"细级里才看得见的薄几何"）。所以这三条按 l1 → l2 → l3 排，
 #    且都排在 `point_shadow`（几何那一步）之后。
 # ⚠ 读 `point_shadow_atlas_l{k-1}`、写 `point_shadow_atlas_l{k}` —— **两张不同的纹理**，
-#    因为 wgpu 不许同一条 pass 里把一张图既当（写的）深度附件、又当被绑的资源
-#    （与上面那段 `copy_shadow_atlas` 被删掉是同一颗雷的两面）。
+#    因为 wgpu 不许同一条 pass 里把一张图既当（写的）深度附件、又当被绑的资源。
 #    「写谁就不绑谁」：它自己的第 1 格只绑上一级，组 0 那四格挂哑图。
 # ⚠ `frag_depth=true`：深度值由片元写 `@builtin(frag_depth)`（`px_pass` 那一档开关）。
 #    而「取 max」有两级：片元里对四个孩子取一次，硬件的
@@ -289,14 +280,12 @@ name = "skybox"
 shader = "art/frame/skybox.wgsl"
 # ⚠ 入口名是 `fragment`，**不是** `fs_main`：`fs_main` 是全屏 pass 那条约定
 # （`art/shaders/blit.wgsl`），而帧自有材质走的是**材质**那条绑定组构造，
-# 它的入口约定就是 `fragment`（`px_render_wgpu::material::FRAGMENT_ENTRY`）。
-# 这一格原来写错成 `fs_main`，而当时**没有任何一处查过它**（反射只看参数块与贴图格）
-# ⇒ 产物烘得出来、运行期 wgpu 才报"找不到入口"（§136 实测）。
-# 现在烘图时就会拒（`px_graphs::frame::bake_material` 的第 ⑤ 条守卫）。
+# 它的入口约定就是 `fragment`（`px_render::material::FRAGMENT_ENTRY`）。
+# 烘图时就会拒（`px-scene/src/frame.rs` 里 `bake_material` 的第 ⑤ 条守卫）。
 entry = "fragment"
 # ⚠ 参数写的是**来源**，不是值：帧图是六个场景共用的一份，写死一个数就等于把内容
 # 焊进帧策略（§133：六份场景的亮度今天恰好都是 900.0，而内容可以不是 —— 第一份设了
 # 别的亮度的场景会得到整幅背景错的图，且不会有人报错）。
 # 认得的来源只有 `environment.ambient` 与 `environment.skybox_brightness`;
-# 名称/类型对不上在**烘图时**当场拒（`px_graphs::frame::bake_material`）。
+# 名称/类型对不上在**烘图时**当场拒（`px-scene/src/frame.rs` 里 `bake_material`）。
 params = { brightness = "environment.skybox_brightness" }
