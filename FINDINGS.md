@@ -183,7 +183,7 @@ after, i.e. each is invisible to identity while remaining compilable:
 | `src/tests/mod.rs` | directory rule skips the whole subtree, and `mod tests;` resolves there |
 
 The `.wgsl` row is not hypothetical: shaders enter a roster precisely because they are `include_str!`d
-into the binary ([operators.md](docs/operators.md) §3.3), and several live under `src/`. A shader
+into the binary (stated in [operators.md](docs/operators.md)), and several live under `src/`. A shader
 escaping identity is the same "same key, different content" as a Rust file escaping it.
 
 Gated rather than fixed. Hardening `collect_tree` to consult the module tree would edit
@@ -213,7 +213,8 @@ optimisation level agree about the key, by construction.
 
 Two things follow, and they point in opposite directions from what operators.md currently claims:
 
-- operators.md §3.2 justifies excluding `DEBUG`/`opt-level` because they "do not move layout". For the
+- [operators.md](docs/operators.md) justifies excluding `DEBUG`/`opt-level` because they "do not move
+  layout". For the
   *numerical* payload that holds — which is why the CAS can be shared across levels at all. But float
   results are exactly where this bites: `opt-level=2` may reassociate FP ops through
   `RUSTFLAGS`-invisible codegen options, so an "optimized" reading and a "dev" reading of the same key

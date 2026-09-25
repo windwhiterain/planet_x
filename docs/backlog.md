@@ -129,6 +129,43 @@ without either is not a replay candidate. The learned policy's reward counts onl
 startup gate) and the thin dirty set are separate homes — the vocabulary does not belong in either
 file.
 
+## Gates designed, not built (frozen this round)
+
+Each is a check whose absence is currently covered only by convention. All
+three live in `tests/`, so none costs a key rotation; none is implemented yet.
+
+**No operator may read a source its key cannot see.** A payload that depends on
+an environment variable, a process id, a wall clock or an unseeded RNG breaks
+"same key ⇒ same bytes" silently: the second run overwrites the first in the
+CAS and the manifest stays self-consistent. The rule belongs to
+[invariants.md](invariants.md); the gate would scan for those call sites. Scope
+must include what production actually cooks repeatedly — `px_*_op/src`,
+`px_*_alg/src`, **`px_elem/body/*.rs`**, **`art/inst/*.rs`**, and any
+`px_local_op!` body — because the instance bodies sit outside every crate's
+`src/` (that placement is what makes "edit one body, rotate one key" work), so
+scanning only `src/` would watch the least likely place to fail. The deny list
+should be explicit and extensible (`std::env::*`, RNG, `Instant`/`SystemTime`,
+reads of files outside the key, HashMap iteration order that reaches output,
+address/pid/hostname) rather than a phrase like "non-deterministic".
+
+**An `include_str!`/`include_bytes!` target must be inside a roster or on a
+named exception list.** `collect_sources` walks only `src/` and `build.rs`, and
+`collect_tree` accepts only `.rs`/`.wgsl`, so embedded data reaches the binary
+without reaching identity. One case exists today and is deliberate:
+`px_protocol/src/lib.rs:28` includes `../snapshots/protocol.snapshot.json`,
+which drives `protocol_hash()` and therefore the handshake, and is pinned
+byte-exact by a `-text` entry in `.gitattributes`. That is covered by a
+different mechanism, so it is an exception rather than a defect — but
+[operators.md](operators.md) says shaders count *because* they are
+`include_str!`-ed, so an unnamed future case would violate the written rule
+while looking like precedent. The gate names each target and requires either
+roster membership or a listed reason.
+
+**The element parallel banding has no bit-exact gate for the helper production
+uses.** Shipped as `px_field_schema/tests/row_bands.rs`; still open is routing
+`px_elem::fill` through it, which needs a key count first (see Known costs
+above). Recorded here so the remaining half is not mistaken for done.
+
 ## Unconsumed inputs
 
 34 of the 44 scene recipes under `art/scene/` are referenced by no `.rs` or `.ps1` in the tree:
