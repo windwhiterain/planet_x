@@ -277,7 +277,8 @@ op id is refused. The graph knows nothing about specific graph programs.
   workspace (`[workspace]` in the generated manifest; shared intermediate artifacts in
   `target/jit/target`), and the produced dylib is copied to `target/pcg/inst/<key>.dll` next to a
   sidecar `target/pcg/inst/<key>.json` (key, op id, declaration, declaring crate, roots, source,
-  template, toolchain, symbol). Cargo's stdout/stderr is passed through verbatim, and a failure
+  template, toolchain, symbol; strict JSON, so a tool can parse it rather than scan it). Cargo's
+  stdout/stderr is passed through verbatim, and a failure
   leaves the generated crate on disk and writes no library.
 * The generated crate is always package `px_inst`, so the symbol is the compile-time literal
   `px_inst__<name>` on both sides; `px_cook::inst::symbol` is the single place that builds it.

@@ -233,6 +233,13 @@ for the declaration tier) — run cargo against `target/jit/target/`, copy the p
 failed instance's generated sources are left on disk so the compile error can be mapped back to a
 recipe line.
 
+The sidecar is strict JSON (one field per line, no trailing comma) so that tools can read it back:
+the key file name is the identity, and the sidecar's `toolchain` field is the only record of which
+build compiled that library. `px list` reads it to mark a library that came from another build; a
+sidecar that is missing and one that will not parse are reported as different conditions, because
+they call for different reactions (`-Task list` prints `没有 sidecar` for the first and the parse
+error for the second).
+
 Flags:
 
 | Flag | Effect |

@@ -68,8 +68,8 @@ or recording a measurement would invalidate the thing it measured. There is nowh
 the manifest is overwritten by every `finish()`, so it survives only one run; `Art.params` is a
 `BTreeMap<String, f64>`, so a number stored there is indistinguishable from a tuning parameter; and
 the per-instance `.json` sidecar (`px_cook::inst::sidecar_text`) describes compiled code rather than
-cooked output, and nothing reads it back. A cost model needs a store that outlives a run and is keyed
-by node key without feeding it.
+cooked output (`px list` reads it back for its toolchain marker, but it records no measurements). A
+cost model needs a store that outlives a run and is keyed by node key without feeding it.
 
 **A scene document cannot point a material at content.** `ParamKind` covers `F32`, `I32`, `U32`,
 `Vec3`, `Vec4`, and the matching `Value` covers a number, a string, a triple and a quad. There is no

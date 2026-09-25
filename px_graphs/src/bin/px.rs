@@ -42,16 +42,28 @@ fn list() -> Result<(), String> {
     let instances = graph.instances();
     println!("实例 {} 条：", instances.len());
     let mut stale = 0_u32;
+    let mut unreadable = 0_u32;
+    let mut unrecorded = 0_u32;
     for info in instances {
         let key = inst::key_of_info(info);
         let present = Path::new(&info.library).is_file();
         // The toolchain axis is not part of the key: `-Level opt` shares keys with `dev`, so a
         // library on disk can be from another build of the same identity. The sidecar is the only
-        // machine-readable record of which build compiled it, so read it back here.
-        let fresh =
-            present && sidecar_toolchain(&info.library).as_deref() == Some(current_toolchain());
-        if present && !fresh {
+        // record of which build compiled it, so read it back here.
+        let status = if present {
+            sidecar_status(&info.library)
+        } else {
+            Toolchain::NotBuilt
+        };
+        let stale_here = matches!(status, Toolchain::Old { .. } | Toolchain::Invalid { .. });
+        if stale_here {
             stale += 1;
+        }
+        if matches!(status, Toolchain::Invalid { .. }) {
+            unreadable += 1;
+        }
+        if matches!(status, Toolchain::Unrecorded) {
+            unrecorded += 1;
         }
         println!(
             "  {:<20} {:<12} {:<16} {:<18} {} {}{}",
@@ -61,14 +73,43 @@ fn list() -> Result<(), String> {
             info.source,
             short(&key),
             if present { "有" } else { "缺" },
-            if present && !fresh { " !" } else { "" },
+            if stale_here { " !" } else { "" },
         );
+        match status {
+            Toolchain::Current | Toolchain::NotBuilt => {}
+            Toolchain::Old { recorded } => println!(
+                "      ⚠ {} 记着工具链 {}，不是当前这份构建 {} ⇒ 库在盘上，但可能是别的档编的",
+                info.op_id,
+                short(&recorded),
+                short(&current_toolchain().to_string()),
+            ),
+            Toolchain::Unrecorded => println!(
+                "      ⚠ {} 没有 sidecar：库在盘上，但没有任何东西记着它是哪一档编的",
+                info.op_id
+            ),
+            Toolchain::Invalid { why } => println!(
+                "      ✗ {} 的 sidecar 解不开（{why}）⇒ 这一档记不上，别把它当成新鲜库",
+                info.op_id
+            ),
+        }
     }
     if stale > 0 {
+        let broken = if unreadable > 0 {
+            format!("，其中 {unreadable} 条的 sidecar 解不开")
+        } else {
+            String::new()
+        };
+        let absent = if unrecorded > 0 {
+            format!("；另有 {unrecorded} 条没有 sidecar")
+        } else {
+            String::new()
+        };
         println!(
-            "陈旧 {stale} 处（`!`：库在盘上，但不是当前这份构建编的）—— \
+            "陈旧 {stale} 处（`!`：库在盘上，但不是当前这份构建编的）{broken}{absent}—— \
              实例键不含 `-Level`，`opt` 与 `dev` 共用键；要按当前档重编就 `px build`"
         );
+    } else if unrecorded > 0 {
+        println!("{unrecorded} 条没有 sidecar ⇒ 判断不了是不是当前这份构建编的");
     }
     Ok(())
 }
@@ -77,28 +118,49 @@ fn current_toolchain() -> &'static str {
     px_graph_schema::TOOLCHAIN_HASH
 }
 
-/// The `toolchain` field of the sidecar that sits next to a compiled library. `None` means either
-/// no sidecar or no such field, i.e. nothing on disk says which build the library came from.
-/// The `toolchain` field of the sidecar that sits next to a compiled library. `None` means either no
-/// sidecar, no such field, or a value that is not a quoted string.
-///
-/// The sidecar is not strict JSON: `px_cook::inst::sidecar_text` puts a comma after **every** field,
-/// so the object ends `… ,\n}` and a strict parser rejects it (`serde_json` reports `trailing comma
-/// at line 11 column 1`). This is a scanner rather than a `.ok()?` on a strict parse, so the reader
-/// keeps working whatever that writer does next; the field is a short hex string between quotes.
-fn sidecar_toolchain(library: &str) -> Option<String> {
-    let sidecar = Path::new(library).with_extension("json");
-    let text = std::fs::read_to_string(sidecar).ok()?;
-    quoted_field(&text, "toolchain")
+/// What the sidecar next to a compiled library says about the build that wrote it. Three outcomes
+/// that must not collapse into one, because each calls for a different reaction: there is no
+/// sidecar, there is one that will not parse, and there is one from another build.
+enum Toolchain {
+    Current,
+    Old {
+        recorded: String,
+    },
+    /// No library on disk, so there is nothing to ask about.
+    NotBuilt,
+    /// A library on disk with no sidecar beside it.
+    Unrecorded,
+    /// A sidecar is there and `serde_json` rejects it.
+    Invalid {
+        why: String,
+    },
 }
 
-fn quoted_field(text: &str, name: &str) -> Option<String> {
-    let at = text.find(&format!("\"{name}\""))?;
-    let rest = &text[at + name.len() + 2..];
-    let start = rest.find('"')? + 1;
-    let value = &rest[start..];
-    let end = value.find('"')?;
-    Some(value[..end].to_string())
+#[derive(serde::Deserialize)]
+struct Sidecar {
+    toolchain: String,
+}
+
+fn sidecar_status(library: &str) -> Toolchain {
+    let sidecar = Path::new(library).with_extension("json");
+    let text = match std::fs::read_to_string(&sidecar) {
+        Ok(text) => text,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Toolchain::Unrecorded,
+        Err(err) => {
+            return Toolchain::Invalid {
+                why: err.to_string(),
+            };
+        }
+    };
+    match serde_json::from_str::<Sidecar>(&text) {
+        Ok(read) if read.toolchain == current_toolchain() => Toolchain::Current,
+        Ok(read) => Toolchain::Old {
+            recorded: read.toolchain,
+        },
+        Err(err) => Toolchain::Invalid {
+            why: err.to_string(),
+        },
+    }
 }
 
 fn build(flags: &[String]) -> Result<(), String> {

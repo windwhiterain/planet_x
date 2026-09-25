@@ -653,6 +653,9 @@ const BUILD_RS: &str = "//! 实例库自己的身份（源码指纹 + 工具链�
                         \x20   px_fingerprint::cargo_fingerprint_for_crate();\n\
                         }\n";
 
+/// The sidecar is consumed by tools that read it back as JSON (`px list` compares the recorded
+/// `toolchain` against the current build), so it must parse: the comma goes **between** fields and
+/// the closing brace is bare.
 pub fn sidecar_text(info: &InstInfo, key: &str, symbol: &str, codegen: &InstCodegen) -> String {
     let fields = [
         ("key", key.to_string()),
@@ -666,8 +669,9 @@ pub fn sidecar_text(info: &InstInfo, key: &str, symbol: &str, codegen: &InstCode
         ("symbols", symbol.to_string()),
     ];
     let mut out = String::from("{\n");
-    for (name, value) in &fields {
-        out.push_str(&format!("  \"{name}\": {},\n", json_string(value)));
+    for (index, (name, value)) in fields.iter().enumerate() {
+        let comma = if index + 1 == fields.len() { "" } else { "," };
+        out.push_str(&format!("  \"{name}\": {}{comma}\n", json_string(value)));
     }
     out.push_str("}\n");
     out
