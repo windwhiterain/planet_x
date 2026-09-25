@@ -9,7 +9,9 @@ that ships with them.
 identity, the canonical parameter JSON, and the upstream keys; on a hit it decodes the CAS payload,
 on a miss it calls the operator, encodes the payload, and writes it to
 `target/pcg/ab/<first 2 hex>/<64 hex>.pxart`. `Graph::finish()` then writes the graph's
-`target/pcg/<graph>/manifest.json` (node name → key) and `target/pcg/<graph>/params.json`.
+`target/pcg/<graph>/manifest.json` (node name → key), `target/pcg/<graph>/params.json`, and appends
+this run to `target/pcg/<graph>/metrics.jsonl` (see [graph.md](graph.md) for the ledger's fields and
+rotation).
 
 ## The programs
 
@@ -153,7 +155,8 @@ A node's parameter file is `<param_root>/<graph>/<node>.toml`, where `<graph>` i
 to `begin(GraphSpec { name })` and `<node>` is the string passed to `cached(&graph, "<node>", …)`.
 `node_params(&graph, "<node>")` reads it; a missing file is **not** an error, it yields
 `P::default()`. `Graph::finish()` prints how many nodes had no parameter file at all and writes the
-effective values to `target/pcg/<graph>/params.json`.
+effective values to `target/pcg/<graph>/params.json`; it also appends the run's measurements to
+`metrics.jsonl` (a failed append is reported and does not fail the run).
 
 `param_root()` is `art/` unless `PX_ART` is set — either in the environment, or by the `--store
 <dir>` argument, which `px_cook::apply_store_args()` must be called with as the **first line of

@@ -63,13 +63,17 @@ structs, this reads as "fix one node, dirty the whole graph". Splitting the decl
 the data surface, or deriving the interface hash from a structural layout summary instead of a type
 name, would move each of those consequences onto its own axis.
 
-**Cost telemetry has no home that is safe to write to.** Measured timings must not reach a node key,
-or recording a measurement would invalidate the thing it measured. There is nowhere to put them today:
-the manifest is overwritten by every `finish()`, so it survives only one run; `Art.params` is a
-`BTreeMap<String, f64>`, so a number stored there is indistinguishable from a tuning parameter; and
-the per-instance `.json` sidecar (`px_cook::inst::sidecar_text`) describes compiled code rather than
-cooked output (`px list` reads it back for its toolchain marker, but it records no measurements). A
-cost model needs a store that outlives a run and is keyed by node key without feeding it.
+**Cost telemetry writes to a ledger that is not part of identity, and the first machine reader is
+still to be written.** `Graph::finish()` appends one run to `target/pcg/<graph>/metrics.jsonl`: a
+header line (`seq`, `graph`, `started`, `node_count`) followed by one line per node (`seq`, `node`,
+`key`, `hit`, `cook_millis`, `bytes`). `seq` counts runs per graph and is read back from the last line
+already in the file, so it orders the file even when two runs start in the same second; `started` is
+the human-readable anchor only. The file rotates to `metrics.jsonl.1` past 256 KB or 4096 lines, and
+every failure — an unreadable line, a write that does not go through — is reported rather than
+swallowed. Nothing under `target/` is in any roster, so recording a measurement cannot invalidate what
+it measured. What is missing is the consumer: no command reads the ledger yet, so a cost model is
+still a manual exercise over the JSONL.
+
 
 **A scene document cannot point a material at content.** `ParamKind` covers `F32`, `I32`, `U32`,
 `Vec3`, `Vec4`, and the matching `Value` covers a number, a string, a triple and a quad. There is no

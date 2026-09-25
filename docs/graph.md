@@ -251,6 +251,15 @@ node up; the `scene` graph resolves `"<graph>::<node>"` references this way. A r
 manifest leaves artifacts in the CAS with no names attached to them, and the scene side reports
 `图 'shaders' 的清单读不到` / `图 'x' 里没有节点 'y'` (with the list of nodes it does have).
 
+**`metrics.jsonl`** — the measurement ledger, appended once per run by `finish()` and separate from
+the manifest because the manifest is an index that every run overwrites. A run writes a header
+(`seq`, `graph`, `started`, `node_count`) and then one line per node (`seq`, `node`, `key`, `hit`,
+`cook_millis`, `bytes`). `seq` counts runs of that graph and comes back from the last line already in
+the file, so it is the field a reader orders by; `started` is for people. Past 256 KB or 4096 lines
+the file becomes `metrics.jsonl.1` and the sequence keeps counting. A line that will not parse is
+reported and skipped, never treated as "no previous run". Nothing under `target/` is in any
+fingerprint roster, so writing here cannot rotate a key.
+
 `finish()` **overwrites** `target/pcg/<graph>/manifest.json` with this run's entries. A graph that
 wants several runs' entries to coexist merges them itself — the `scene` graph reads the old manifest,
 replaces the entry with the same node name, sorts by node name, and writes it back.

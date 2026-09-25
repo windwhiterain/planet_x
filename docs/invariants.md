@@ -29,6 +29,13 @@ because nothing under `px_graphs/src` uses `px_local_op!` — the only uses are 
 to a shipped graph makes editing a byte of `px_cook` or `px_decls` rotate that node's key.** Do not
 treat them as free.
 
+⚠ **`px_graph` is in the same position, and the four crates that carry it pay for edits to it.**
+`px_graph` / `px_graphs` / `px_cook` / `px_probe` each hold `px_graph`'s sources in their roster, so
+editing `px_graph/src` (the driver, the measurement ledger, the CAS) moves those four crates' own
+`PX_SOURCE_HASH`. No instance key moves — no instance's roots reach `px_graph` — and no node key
+moves either, for the same reason `px_cook` and `px_decls` are free: no shipped graph has a
+`px_local_op!`. It becomes a key rotation the day one does. Free today is not free forever.
+
 Consequence: **a repository-wide comment edit is never free** — count the files first.
 
 **A shader's content includes its `#import` closure.** An entry file whose text did not change is
