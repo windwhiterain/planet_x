@@ -1,11 +1,9 @@
 //! See docs/invariants.md
 //!
-//! The roster recursion follows path dependencies, so `px_graphs`'s roster carries
-//! `px_graph`'s driver even though nothing in a shipped graph uses `px_local_op!`
-//! today. This gate turns that reachability from "read the code and know it" into
-//! "the gate watches it": the first shipped local operator makes every byte of
-//! `px_graph/src/driver.rs` rotate that node's key (same shape as the `px_cook`
-//! / `px_decls` warning).
+//! Two gates over one mechanism: `px_fingerprint::roster()` walks the filesystem rather than the
+//! module tree, so anything it skips by name is compiled when declared yet invisible to identity —
+//! "same key, different content". The skip rules below are copied from `collect_tree` deliberately:
+//! a gate that invents its own stricter list drifts away from the rule it watches.
 
 use std::path::Path;
 
@@ -33,13 +31,25 @@ fn the_graphs_roster_carries_the_driver() {
     }
 }
 
-/// `collect_tree` skips files whose *name* looks like a test file, but it walks the filesystem
-/// rather than the module tree — so such a file under `src/` would be compiled (once declared with
-/// `mod`) while staying invisible to every fingerprint. That is "same key, different content", the
-/// failure mode identity exists to prevent. No such file may exist; see docs/invariants.md and
-/// FINDINGS §12 for why this is gated by name rather than fixed in the collector.
+/// Every shape `collect_tree` skips, applied inside a crate's `src/`: a directory named `tests`
+/// (a `mod tests;` can resolve to `src/tests/mod.rs`), or a source file whose name contains
+/// `_test` / starts with `test_`, for **both** fingerprinted extensions. Measured on this checkout:
+/// all four shapes leave the enclosing roster at the same entry count, i.e. none of them is
+/// visible to identity while remaining compilable.
+fn skipped_by_the_collector(name: &str) -> bool {
+    name == "tests" || name.starts_with('.')
+}
+
+fn test_named_source(name: &str) -> bool {
+    let source = name.ends_with(".rs") || name.ends_with(".wgsl");
+    source && (name.contains("_test") || name.starts_with("test_"))
+}
+
+/// §12, gated instead of fixed: hardening `collect_tree` to consult the module tree would edit a
+/// crate that sits in every roster, so it costs a full-family rotation. This check buys the same
+/// safety at zero key cost, because `tests/` directories are themselves outside every roster.
 #[test]
-fn no_compilable_source_is_named_like_a_test_file() {
+fn no_compilable_source_escapes_the_fingerprint_by_name() {
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("px_fingerprint 住在 workspace 下")
@@ -59,13 +69,22 @@ fn no_compilable_source_is_named_like_a_test_file() {
         while let Some(dir) = stack.pop() {
             for entry in std::fs::read_dir(&dir).expect("读不了目录").flatten() {
                 let path = entry.path();
+                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
                 if path.is_dir() {
-                    stack.push(path);
+                    // A skipped directory hides everything under it, so report the directory
+                    // itself rather than descending to blame its contents.
+                    if skipped_by_the_collector(name) {
+                        offenders.push(format!(
+                            "{}{} (整棵被跳过)",
+                            path.strip_prefix(&workspace).unwrap_or(&path).display(),
+                            std::path::MAIN_SEPARATOR
+                        ));
+                    } else {
+                        stack.push(path);
+                    }
                     continue;
                 }
-                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                let source = name.ends_with(".rs") || name.ends_with(".wgsl");
-                if source && (name.contains("_test") || name.starts_with("test_")) {
+                if test_named_source(name) {
                     offenders.push(
                         path.strip_prefix(&workspace)
                             .unwrap_or(path.as_path())
@@ -78,8 +97,10 @@ fn no_compilable_source_is_named_like_a_test_file() {
     }
     assert!(
         offenders.is_empty(),
-        "这些文件会被 collect_tree 按名字跳过，因而**不进任何指纹名册**：{offenders:?}\n  \
+        "这些路径会被 collect_tree 按名字/目录名跳过，因而**不进任何指纹名册**：{offenders:?}\n  \
          ⇒ 声明它们的模块照样被编译进产物 ⇒ 改它换行为不换键（同键、不同内容）。\n  \
-         判据请放 `tests/` 目录；`*_test.rs` / `test_*.rs` 这个名字的含义是\u{201c}被编译但对身份不可见\u{201d}。"
+         判据请放 crate 根的 `tests/`；在 `src/` 里用 `tests` 目录或 \
+         `*_test.rs` / `test_*.rs` / `*_test.wgsl` / `test_*.wgsl` 这些名字的含意是\
+         \u{201c}被编译但对身份不可见\u{201d}。"
     );
 }
