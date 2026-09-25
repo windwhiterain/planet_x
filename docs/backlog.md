@@ -111,6 +111,24 @@ is safe today. What is undecided is whether the field should keep existing:
 either give it meaning (which would need the bundle to carry it through decode)
 or drop it from the manifest frame.
 
+## Repair vocabulary for the executor's repair loop (designed, not built)
+
+The repair loop assigned to the thin dirty set has two traps that come from the content-defined
+cache itself, not from any scheduler:
+
+* A fixed `fix_hint` replayed from the second round is a cache hit — the same action on the same
+inputs produces the same key, so the loop "learns" nothing while everything looks self-consistent.
+* A learned policy whose reward counts a replayed hit as success drifts toward exactly that
+cheapest-looking path.
+
+The shape that avoids both: every declared `repair_op` carries a `perturb` note (how to vary within
+that knob's safe range so the next attempt hashes differently) and a `force_dirty` set of rule ids
+that may borrow the approved thin dirty set to force a miss without touching inputs. A declaration
+without either is not a replay candidate. The learned policy's reward counts only runs that reach
+`f.render` as attempts; a replayed hit is neither a success nor a cost. Scope: `gate_ready` (the
+startup gate) and the thin dirty set are separate homes — the vocabulary does not belong in either
+file.
+
 ## Unconsumed inputs
 
 34 of the 44 scene recipes under `art/scene/` are referenced by no `.rs` or `.ps1` in the tree:
