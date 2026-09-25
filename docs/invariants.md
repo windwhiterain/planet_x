@@ -66,6 +66,11 @@ artifact reused. Nothing reports it. So an increment or repair loop must vary it
 assert the output differs (a byte count or digest of the produced image is enough), rather than timing
 a repeated action and reading a hit as speed.
 
+**A zero exit code that produced no requested artefact is a failure.** A render client with no
+service running prints how to start one and exits successfully without writing the file it was asked
+to write. Automation that trusts the exit code then consumes whatever the previous run left behind.
+Callers check the artefact exists; instruments that cannot take a reading say so by exiting non-zero.
+
 ⚠ **A GPU-dependent test that prints "no device, skipping" and returns is a policy violation, not a
 convenience.** `px_volume_gpu_op` and `px_nurbs_gpu_op` are default members, so on a machine without
 a GPU the fast chain reports green while the GPU comparisons never executed. Either require the
