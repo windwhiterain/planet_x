@@ -3,6 +3,7 @@ use px_protocol::wire::{Blob, DType, WireError};
 pub use px_protocol::art::Domain as Projection;
 pub use px_protocol::art::{
     CUBE_FACES, cube_direction, cube_face_of, cube_map_extent, direction_at as art_direction_at,
+    direction_at_opt as art_direction_at_opt,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -36,13 +37,14 @@ pub fn cross(one: [f32; 3], two: [f32; 3]) -> [f32; 3] {
     ]
 }
 
+/// 每个方向返回一组右手正交的切向基 `(east, north)`，`north = direction × east`。
+///
+/// 契约：`east` 是**把南极点转到 `direction` 的那次旋转**作用在 `x̂` 上的像
+/// （`(0,-1,0) × direction` 归一化），所以它是方向的连续函数。全空间只有
+/// `direction = (0,-1,0)` 一个方向无定义 —— 极点本身没有切向基；面心落在极点的立方图上
+/// 取不到那个方向（面尺寸 `n` 时最近的面心离极点 `1/(3n²)`）。
 pub fn tangent_frame(direction: [f32; 3]) -> ([f32; 3], [f32; 3]) {
-    let up = if direction[1].abs() > 0.99 {
-        [1.0, 0.0, 0.0]
-    } else {
-        [0.0, 1.0, 0.0]
-    };
-    let east = normalize(cross(up, direction));
+    let east = normalize(cross([0.0, -1.0, 0.0], direction));
     let north = cross(direction, east);
     (east, north)
 }
@@ -109,6 +111,15 @@ impl Field {
 
     pub fn direction(&self, x: u32, y: u32) -> [f32; 3] {
         direction_at(self.width, self.height, self.projection, x, y)
+    }
+
+    /// 同 [`Field::direction`]，但投影没有方向时返回 `None`。
+    ///
+    /// 逐格循环里**必须先探再取**：`Domain::Volume` 没有方向，而逐格去问会 panic ——
+    /// 那个 panic 穿过算子 dylib 边界不可捕获，会直接 abort 进程。不需要方向的逐格算术
+    /// （重映射、混合、掩码）应当用它，拿 `None` 时自己决定怎么办。
+    pub fn direction_probe(&self) -> Option<[f32; 3]> {
+        art_direction_at_opt(self.projection, self.width, self.height, 0, 0)
     }
 
     pub fn sample_direction(&self, direction: [f32; 3]) -> f32 {
@@ -208,5 +219,78 @@ impl Field {
 
     pub fn is_f32_blob(blob: &Blob) -> bool {
         blob.header.dtype == DType::F32 && blob.header.shape.len() == 2
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 切向基必须**连续**：拿 `|direction[1]| == 0.99` 当换轴的门槛会让 `east` 在那条环上
+    /// 整体翻转 —— 本判据扫过它。
+    #[test]
+    fn the_tangent_frame_does_not_reverse_along_the_polar_ring() {
+        let hold = 0.2_f32;
+        let steps = 400;
+        let mut previous: Option<([f32; 3], [f32; 3])> = None;
+        let mut worst = 0.0_f32;
+        for index in 0..=steps {
+            let along = 0.985 + 0.01 * index as f32 / steps as f32;
+            let direction = normalize([hold, hold * along / (1.0 - along * along).sqrt(), 0.0]);
+            let (east, north) = tangent_frame(direction);
+            for axis in [east, north] {
+                assert!(
+                    (axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2] - 1.0).abs() < 1e-4,
+                    "切向基不是单位向量：{axis:?}"
+                );
+                assert!(
+                    (axis[0] * direction[0] + axis[1] * direction[1] + axis[2] * direction[2])
+                        .abs()
+                        < 1e-4,
+                    "{axis:?} 不与方向 {:?} 垂直",
+                    direction
+                );
+            }
+            if let Some((last_east, last_north)) = previous {
+                for (here, last) in [(east, last_east), (north, last_north)] {
+                    let across = cross(here, last);
+                    let sine =
+                        (across[0] * across[0] + across[1] * across[1] + across[2] * across[2])
+                            .sqrt();
+                    let cosine = here[0] * last[0] + here[1] * last[1] + here[2] * last[2];
+                    worst = worst.max(sine.atan2(cosine).to_degrees());
+                }
+            }
+            previous = Some((east, north));
+        }
+        assert!(
+            worst < 0.5,
+            "切向基在这条环上跳了 {worst:.3} 度 ⇒ 换轴的门槛还在"
+        );
+    }
+
+    #[test]
+    fn a_cube_map_shape_must_be_a_whole_number_of_faces() {
+        let whole = crate::params::Shape {
+            width: 256,
+            height: 256 * 6,
+            projection: Projection::CubeMap,
+        };
+        assert_eq!(whole.check(), Ok(()));
+        let truncated = crate::params::Shape {
+            width: 512,
+            height: 256,
+            projection: Projection::CubeMap,
+        };
+        let message = truncated.check().expect_err("缺面的立方图必须被拒");
+        for named in ["width = 512", "height = 256", "3072"] {
+            assert!(message.contains(named), "错误信息没点出 {named}：{message}");
+        }
+        let flat = crate::params::Shape {
+            width: 512,
+            height: 256,
+            projection: Projection::Equirect,
+        };
+        assert_eq!(flat.check(), Ok(()), "2:1 的等距柱状投影是合法形状");
     }
 }

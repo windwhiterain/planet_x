@@ -14,10 +14,7 @@ fn ring(radius: f64) -> Curve {
 fn the_gpu_surface_matches_the_cpu_point_by_point() {
     let ball = ball(2.0);
     let along = 17_u32;
-    let Ok((positions, normals)) = surface_grid(&ball, along, along) else {
-        println!("px_nurbs_gpu_op：没有可用 GPU，跳过");
-        return;
-    };
+    let (positions, normals) = px_gpu::require_gpu(surface_grid(&ball, along, along));
     let ((u0, u1), (v0, v1)) = ball.domain();
     let mut worst_point = 0.0_f32;
     let mut worst_normal = 0.0_f32;
@@ -45,10 +42,7 @@ fn the_gpu_surface_matches_the_cpu_point_by_point() {
 fn the_gpu_curve_matches_the_cpu_point_by_point() {
     let ring = ring(1.5);
     let count = 33_u32;
-    let Ok(points) = curve_points(&ring, count) else {
-        println!("px_nurbs_gpu_op：没有可用 GPU，跳过");
-        return;
-    };
+    let points = px_gpu::require_gpu(curve_points(&ring, count));
     let (low, high) = ring.domain();
     let mut worst = 0.0_f32;
     for index in 0..count as usize {
@@ -71,10 +65,8 @@ fn the_gpu_curve_matches_the_cpu_point_by_point() {
 #[test]
 fn the_same_grid_twice_is_bit_for_bit() {
     let ball = ball(1.0);
-    let (Ok(first), Ok(second)) = (surface_grid(&ball, 9, 9), surface_grid(&ball, 9, 9)) else {
-        println!("px_nurbs_gpu_op：没有可用 GPU，跳过");
-        return;
-    };
+    let first = px_gpu::require_gpu(surface_grid(&ball, 9, 9));
+    let second = px_gpu::require_gpu(surface_grid(&ball, 9, 9));
     assert_eq!(first.0, second.0, "位置不可复现");
     assert_eq!(first.1, second.1, "法线不可复现");
 }
@@ -82,10 +74,7 @@ fn the_same_grid_twice_is_bit_for_bit() {
 #[test]
 fn the_gpu_tessellation_is_watertight_and_on_the_radius() {
     let ball = ball(3.0);
-    let Ok(mesh) = tessellate_surface(&ball, 1e-2, 3, 2) else {
-        println!("px_nurbs_gpu_op：没有可用 GPU，跳过");
-        return;
-    };
+    let mesh = px_gpu::require_gpu(tessellate_surface(&ball, 1e-2, 3, 2));
     assert!(mesh.vertices() > 32, "网格太寒酸了，这个判据没在测东西");
     for vertex in 0..mesh.vertices() {
         let point = &mesh.positions[vertex * 3..vertex * 3 + 3];
@@ -124,10 +113,7 @@ fn the_gpu_tessellation_is_watertight_and_on_the_radius() {
 #[test]
 fn the_gpu_curve_tessellation_closes_on_itself() {
     let ring = ring(1.0);
-    let Ok(line) = tessellate_curve(&ring, 1e-3, 6, 4) else {
-        println!("px_nurbs_gpu_op：没有可用 GPU，跳过");
-        return;
-    };
+    let line = px_gpu::require_gpu(tessellate_curve(&ring, 1e-3, 6, 4));
     assert!(line.vertices() >= 8);
     assert_eq!(line.segments(), line.vertices(), "闭合折线的段数 = 顶点数");
     for vertex in 0..line.vertices() {
@@ -150,10 +136,7 @@ fn the_gpu_follows_the_curve_degree() {
     let circle = curve::circle(1.0, "xy", [0.0; 3]).expect("造圆");
     let higher = curve::elevate_degree(&circle, 4).expect("升阶");
     let count = 25_u32;
-    let Ok(points) = curve_points(&higher, count) else {
-        println!("px_nurbs_gpu_op：没有可用 GPU，跳过");
-        return;
-    };
+    let points = px_gpu::require_gpu(curve_points(&higher, count));
     let (low, high) = higher.domain();
     let mut worst = 0.0_f32;
     for index in 0..count as usize {

@@ -1,18 +1,8 @@
-//! NURBS 域的**端到端判据**：从"装载门"那一侧真叫起算子，一路到网格。
-//!
-//! ⚠ 算子走的是**声明那条真路**（`PxOp::render` → 运行时装载 `px_nurbs_op` → 调它的符号）：
-//!   所以"声明 ↔ 实现"这条线在这里也有实证，而图程序不必链接实现库
-//!   （那是 `tests/crate_graph.rs` 那道门看着的）。
-//!
-//! 靶子是**解析**的（不依赖 CAS 里有没有烘过什么）：圆上的点到圆心距离恒为半径、
-//! 球细分成网格之后每个顶点仍在球面上、闭合网格没有开口边、同一份参数跑两次逐位一样。
-
 use px_graph_schema::{Cooked, PxOp};
 use px_nurbs_schema::ops as nurbs;
 use px_nurbs_schema::params as nurbs_params;
 use px_nurbs_schema::{Curve, PointData, Surface};
 
-/// 一条假键：这里的输入不是缓存里的节点，只是把值包成"已经拿到手的节点"那个形状。
 fn cooked<P>(value: P) -> Cooked<P> {
     Cooked::new([0; 32], value, false, 0, 0)
 }
@@ -43,8 +33,6 @@ fn sphere(radius: f64) -> Surface {
         .expect("造球失败")
 }
 
-/// **一条最小图**：`nurbs.sphere → nurbs.surface.tessellate`，量三件事：
-/// 顶点还在球面上、网格闭合、顶点数不为零。
 #[test]
 fn a_sphere_reaches_a_watertight_mesh_through_the_loading_gate() {
     let ball = sphere(3.0);
@@ -70,7 +58,6 @@ fn a_sphere_reaches_a_watertight_mesh_through_the_loading_gate() {
             "第 {vertex} 个顶点离球心 {radius}（应当是 3）"
         );
     }
-    // 闭合：每条边恰好被两个三角形用到（欧拉数也顺带是 2）。
     let mut edges: std::collections::HashMap<(u32, u32), usize> = std::collections::HashMap::new();
     for triangle in mesh.indices.chunks_exact(3) {
         for pair in 0..3 {
@@ -97,7 +84,6 @@ fn a_sphere_reaches_a_watertight_mesh_through_the_loading_gate() {
     );
 }
 
-/// **另一条最小图**：`nurbs.circle → nurbs.curve.eval` 与 `nurbs.circle → nurbs.curve.tessellate`。
 #[test]
 fn a_circle_evaluates_and_tessellates_through_the_loading_gate() {
     let circle = circle(2.0);
@@ -113,7 +99,6 @@ fn a_circle_evaluates_and_tessellates_through_the_loading_gate() {
             },
         )
         .expect("求值失败");
-    // 四分之一圈处就是 (0, R)。
     assert!(
         point.point[0].abs() < 1e-12 && (point.point[1] - 2.0).abs() < 1e-12,
         "t=0.25 处应当是 (0, 2, 0)，给的是 {:?}",
@@ -143,7 +128,6 @@ fn a_circle_evaluates_and_tessellates_through_the_loading_gate() {
             "第 {vertex} 个顶点离圆心 {radius}（应当是 2）"
         );
     }
-    // 折线的读数：段数 = 顶点数（闭合），最后一段接回第 0 个顶点。
     assert_eq!(line.segments(), line.vertices(), "闭合折线的段数 = 顶点数");
     assert_eq!(
         &line.indices[line.indices.len() - 2..],
@@ -152,7 +136,6 @@ fn a_circle_evaluates_and_tessellates_through_the_loading_gate() {
     );
 }
 
-/// **可复现**：同一份参数跑两次逐位一样（缓存是「键 = 内容」，位置与法线都不许有随机性）。
 #[test]
 fn the_tessellation_is_reproducible() {
     let params = nurbs_params::tessellate::TessellateParams {
@@ -182,12 +165,6 @@ fn the_tessellation_is_reproducible() {
     assert_eq!(first.indices, second.indices);
 }
 
-/// **GPU 那一档也走装载门**：`nurbs.sphere → nurbs.surface.tessellate.gpu`，
-/// 判据与 CPU 那一档**同一条**（顶点在球面上、每条边恰好被两个三角形用到、欧拉数 = 2）
-/// —— 同一个域的两条实现必须交出同一种东西。
-///
-/// ⚠ 没有卡时**跳过**（判据测的是"装载得起来、算得对"，不是"这台机器必须有卡"）；
-///   生产那一侧仍然是**硬失败**（`Err`，不回退 CPU）。
 #[test]
 fn the_gpu_tessellation_reaches_a_watertight_mesh_through_the_loading_gate() {
     let ball = sphere(3.0);

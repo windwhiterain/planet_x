@@ -196,7 +196,7 @@ volume cannot be fed in at all.
 | `mesh.cubesphere::subdivisions` | clamped to `[2, 512]`; the face grid is `(n+1)²` |
 | `mesh.cubesphere` orientation | any vertex with `dot(normal, radial) < 0` is a hard error |
 | `mesh.cubesphere` open edges | printed only — never an error |
-| `mesh.cubesphere` parameters | `#[serde(default)]` **without** `deny_unknown_fields`: a mistyped key in `art/<graph>/<node>.toml` is silently ignored |
+| `mesh.cubesphere` parameters | `#[serde(default, deny_unknown_fields)]`: a mistyped key in `art/<graph>/<node>.toml` is refused |
 | `mesh.proxy::depth` | clamped to `[1, 8]` (`3 .. 257` samples per axis) |
 | `mesh.proxy::weld` | `<= 0` falls back to `1e-4` |
 | `mesh.proxy::offset` | `0` is skipped when serialising, so the parameter is absent from the canonical form unless it is non-zero and the default adds nothing to a node's key |

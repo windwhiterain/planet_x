@@ -1,18 +1,5 @@
-//! **裸值进图**那一档：不缓存的产物（直接调算子拿到的裸值）用 `Cooked::of` 包一下就能当上游。
-//!
-//! 守三件事（都是 2026-09-20 那次"图里只有一个 `cached`"改出来的新性质）：
-//!
-//! 1. 裸值包装出来的键是**内容**键 —— 同一份内容 ⇒ 同一个键，与它是怎么来的无关；
-//! 2. 它真的能当上游：下游照算、照落盘、再跑一次命中；
-//! 3. **内容变了 ⇒ 下游的键就变**（键跟着内容走，不是跟着"上游是哪个节点"走）。
-//!
-//! ⚠ 它**不碰** `art/` 下任何既有图：自己的图名（`bare-value`），缓存落在
-//! `target/pcg/bare-value/`。⚠ 形状参数取 8×4：这一篇判的是机制，不是数值。
-
 use px_cook::{Cooked, Domain, Graph, GraphSpec, begin, cached, field_params, node_params};
 use px_field_schema::field::Field;
-// ⚠ 生成那一档的算子（`field::Constant` 从前那一档）2026-09-27 收成了 element 函数
-//   （`elem::Constant`）—— 类型在图侧（生成物），所以从 `px_graphs::elem` 取。
 use px_graph_schema::{PxKeyed, PxOp};
 use px_graphs::elem;
 
@@ -22,14 +9,11 @@ fn graph() -> Graph {
     })
 }
 
-/// **不缓存**那一档的产物：直接调那个普通函数（`render`），再在脚本里包成可以进图的东西。
-///
-/// ⚠ 尺寸/投影从前由 `graph.grid()` 递进来，现在是**参数**（生成类算子的 `Shape`）。
 fn bare(value: f32) -> Cooked<Field> {
     let params = elem::ConstantParams {
         shape: field_params::Shape {
             width: 8,
-            height: 4,
+            height: 48,
             projection: Domain::CubeMap,
         },
         value,
@@ -40,13 +24,10 @@ fn bare(value: f32) -> Cooked<Field> {
     Cooked::of(raw).expect("裸值应当能包成可进图的包装对象")
 }
 
-/// ⚠ 三组断言合在**一个**测试里：一个测试二进制里的多个测试是并行的，而它们会写
-/// 同一个 `target/pcg/bare-value/manifest.json` —— 分开写会变成一场竞态。
 #[test]
 fn a_bare_value_is_a_content_keyed_input() {
     let graph = graph();
 
-    // 1) 键是**内容**键：同一份内容同一个键；内容不同键就不同。
     assert_eq!(
         bare(0.25).key,
         bare(0.25).key,
@@ -58,7 +39,6 @@ fn a_bare_value_is_a_content_keyed_input() {
         "内容变了，裸值包装出来的键必须跟着变"
     );
 
-    // 2) 它真的能当上游（`elem::RemapInput` 那一栏收的就是 `Cooked<Field>`）。
     let params = || node_params::<elem::RemapParams>(&graph, "shade").expect("参数");
     let first = cached(
         &graph,
@@ -68,9 +48,8 @@ fn a_bare_value_is_a_content_keyed_input() {
         elem::RemapInput { field: bare(0.25) },
     )
     .expect("裸值当上游应当算得出来");
-    assert_eq!((first.value().width, first.value().height), (8, 4));
+    assert_eq!((first.value().width, first.value().height), (8, 48));
 
-    // 3) 再算一次（**重新**造一份同样内容的裸值）⇒ 必须命中：键只由内容决定。
     let again = cached(
         &graph,
         "shade",
@@ -82,7 +61,6 @@ fn a_bare_value_is_a_content_keyed_input() {
     assert!(again.hit, "同一份内容的裸值 ⇒ 下游必须命中");
     assert_eq!(first.key, again.key);
 
-    // 4) 内容换了 ⇒ 下游的键就换（内容寻址那一半）。
     let other = cached(
         &graph,
         "shade_other",
@@ -99,11 +77,6 @@ fn a_bare_value_is_a_content_keyed_input() {
     graph.finish();
 }
 
-/// **包装对象嵌进参数结构里也成立**：`HashField for Cooked<T>` 写的是它的**键**
-/// ⇒ `PxKeyed` 那一套（`#[derive(PxParams)]` 按字段名 + 字段值）对 `Cooked<T>` 字段照样成立，
-/// 而**递归**也就跟着成立（外面那层写的是里面那层的键，不关心里面是什么）。
-///
-/// ⚠ 这条**不碰盘**（纯键），所以与上面那个测试并行跑也不会打架。
 #[test]
 fn a_wrapper_nests_inside_a_params_struct() {
     #[derive(px_derive::PxParams)]

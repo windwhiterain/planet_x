@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use px_field_schema::field::Field;
+use px_field_schema::params::Shape;
 use px_graph_schema::Key;
 use px_protocol::art::{ArtBundle, AssetManifest, MeshData, TextureFormat, TextureShape};
 use px_protocol::payload::PayloadBundle;
@@ -34,6 +35,13 @@ pub fn load_field(path: &str) -> Result<Field, String> {
 
     let mut field = Field::from_blob(blob).map_err(|err| err.to_string())?;
     field.projection = projection;
+    Shape {
+        width: field.width,
+        height: field.height,
+        projection,
+    }
+    .check()
+    .map_err(|err| format!("{path}：{err}"))?;
     Ok(field)
 }
 

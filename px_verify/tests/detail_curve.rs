@@ -1,18 +1,5 @@
-//! 细节噪声那次凹重映射（`sqrt`）的两笔账 —— 都不依赖 GPU 探针：
-//!
-//! 1. **链式法则**：重映射写在 `billows` 里，`shape_of` 的噪声偏导就得跟着乘
-//!    `detail_curve_slope(b)`。这里把参考场的解析梯度（`Dual`）与中心差商对齐，
-//!    再把 `detail_curve_slope` 自己与 `detail_curve` 的差商对齐 —— 因子抄错就会露馅。
-//! 2. **`b` 的正下界**：shader 的解析梯度用的也是同一个因子，若表面上 `b → 0` 那么
-//!    `1/(2√b)` 会把法线打炸。表面上场 > τ ⇒ `√b > τ / coverage_gain` ⇒ `b > (τ/gain)²`；
-//!    这里按 shader 的栅格（壳入射点 + i/steps，绝对锚）实测那个最小值。
-//!
-//! ⚠ 这两条管的是**公式**。WGSL 文本里有没有真的把因子乘上去，由
-//! `px_render/tests/cloud_field.rs` 的文本门管（那份是组装后的 shader 原文）。
-
 use px_verify::cloud_field::{CloudFieldParams, detail_curve, detail_curve_slope};
 
-/// 场景里那一档云（`art/scene/orbit-surface.toml` 的 clouds part）。
 fn scene_cloud() -> CloudFieldParams {
     CloudFieldParams {
         orientation: [0.0, 0.0, 0.0, 1.0],
@@ -33,7 +20,6 @@ fn scene_cloud() -> CloudFieldParams {
 const TAU: f32 = 0.20;
 const STEPS: u32 = 56;
 
-/// 与 `px_graphs::cloud_proxy::scatter_directions` 同一套 xorshift（不引 rand）。
 fn scatter(count: usize) -> Vec<[f32; 3]> {
     let mut state = 0x9e37_79b9_7f4a_7c15_u64 | 1;
     let mut next = move || {
@@ -54,7 +40,6 @@ fn scatter(count: usize) -> Vec<[f32; 3]> {
         .collect()
 }
 
-/// 壳里某个高度上的世界点。
 fn point_at(direction: [f32; 3], altitude: f32, cloud: &CloudFieldParams) -> [f32; 3] {
     let radius = cloud.inner + altitude * cloud.span();
     [
@@ -64,8 +49,6 @@ fn point_at(direction: [f32; 3], altitude: f32, cloud: &CloudFieldParams) -> [f3
     ]
 }
 
-/// 场值（= shader `cloud_field` 里那一串）与重映射前的 `b`：`b = noise²`，
-/// 因为 `noise = √b`。
 fn field_and_b(
     cloud: &CloudFieldParams,
     direction: [f32; 3],
@@ -81,7 +64,6 @@ fn field_and_b(
 
 #[test]
 fn the_slope_helper_is_the_derivative_of_the_remap() {
-    // shader 的解析梯度乘的就是这个数：它必须等于 d√b/db，差一个因子就是错的法线。
     let mut worst = 0.0_f32;
     for b in [0.006, 0.02, 0.1, 0.35, 0.62, 0.9, 1.0] {
         let h = 1e-4_f32;
@@ -97,9 +79,6 @@ fn the_slope_helper_is_the_derivative_of_the_remap() {
 
 #[test]
 fn the_reference_gradient_follows_the_remap_chain_rule() {
-    // 参考场加了凹重映射之后，`Dual` 这条路必须自动带上链式法则（`sqrt` 的导数）。
-    // 抽查壳里贴着阈值的那一层（shader 真正会去做梯度的位置）：重映射漏在值路径上、
-    // 或者差了个因子，都会在这里露馅。
     let cloud = scene_cloud();
     let cover = 0.62_f32;
     let mut worst = 0.0_f32;
@@ -121,7 +100,6 @@ fn the_reference_gradient_follows_the_remap_chain_rule() {
                 (analytic[0] * analytic[0] + analytic[1] * analytic[1] + analytic[2] * analytic[2])
                     .sqrt()
                     .max(1.0) as f32;
-            // 差商步长取几档取最小的那个：h 大了会跨过 clamp 的折点，小了被 f32 的舍入盖住。
             let mut gap = f32::INFINITY;
             for h in [1e-5_f32, 3e-5, 1e-4] {
                 let mut numeric = [0.0_f32; 3];
@@ -166,19 +144,15 @@ fn the_reference_gradient_follows_the_remap_chain_rule() {
 
 #[test]
 fn the_remapped_noise_keeps_a_positive_lower_bound_on_the_surface() {
-    // 表面上场 > τ ⇒ b 有正下界 ⇒ 解析梯度里的 1/(2√b) 有上界。
-    // 栅格与 shader 同锚（相机在壳外 ⇒ 入射点高度 0，采样点在 i/steps）。
     let cloud = scene_cloud();
     let mut worst = f32::INFINITY;
     let mut worst_at = (0.0_f32, 0.0_f32);
     let mut found = 0_usize;
     for direction in scatter(512) {
-        // 覆盖度取几档扫一遍：footprint ≤ cover，所以 cover = 1 是最坏那一档。
         for cover in [0.35_f32, 0.5, 0.7, 0.9, 1.0] {
             for step in 1..=STEPS {
                 let altitude = step as f32 / STEPS as f32;
                 let (value, b) = field_and_b(&cloud, direction, altitude, cover);
-                // 「命中」= 第一个超过阈值的采样点，正是 shader 做梯度的那个点。
                 if value > TAU {
                     found += 1;
                     if b < worst {
@@ -192,7 +166,6 @@ fn the_remapped_noise_keeps_a_positive_lower_bound_on_the_surface() {
     }
     assert!(found > 100, "命中点太少（{found}），这条判据没量到东西");
 
-    // 理论上界：√b > τ / coverage_gain ⇒ b > (τ/gain)²。
     let floor = (TAU / cloud.coverage_gain).powi(2);
     let slope = detail_curve_slope(worst);
     println!(

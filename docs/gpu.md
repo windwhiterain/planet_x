@@ -221,12 +221,14 @@ exports its identity via `px_impl_lib!()` (`:420-426`).
 
 ## Tests
 
-`px_gpu` has one test: a compute round-trip that writes `x * 2` and asserts the readback, skipped
-with a message when `connect()` returns `None` — the covered chain is buffer → bind group →
-dispatch → staging → map, which is the part whose failure would look like "the operator returns
-zeros" (`px_gpu/src/lib.rs:341-382`). The helper crates test GPU against CPU point by point and
-against analytic targets, under the same rule: no device means skip with a message, never a silent
-pass and never a failure (`px_nurbs_gpu_op/src/tests.rs:1-4`).
+`px_gpu` has one test: a compute round-trip that writes `x * 2` and asserts the readback — the
+covered chain is buffer → bind group → dispatch → staging → map, which is the part whose failure
+would look like "the operator returns zeros".
+
+Every GPU-backed check **requires a device** rather than skipping. `px_gpu::require_gpu` is the one
+place that decides; it panics with `this check requires a working GPU` and the underlying error.
+The helper crates test GPU against CPU point by point and against analytic targets under the same
+rule. A machine without a GPU therefore fails these tests instead of reporting them green.
 
 ## Environment variables
 

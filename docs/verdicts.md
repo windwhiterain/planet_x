@@ -349,21 +349,20 @@ bake graphs. `-Level opt` promotes the local crates to `opt-level=2` without tou
 - **Simulation**: `game`'s 84 tests (conservation, boundedness, solubility over long runs). Not a
   default member and not part of the rendering or PCG pipeline.
 
-**Caveat on the GPU-backed tests.** Several tests in default members — `px_gpu`,
-`px_volume_gpu_op`, `px_nurbs_gpu_op` — print `没有可用 GPU，跳过` and return success when no device is
-available. On a machine without a GPU they are `ok` without having run, so a green fast chain does not
-mean the GPU comparisons ran. `px_volume_gpu_op`'s skip-mask comparison is the exception in the same
-crate: it panics instead of skipping. The instruments that never degrade silently are the probes
-(`require_gpu` exits 2) and the host (`px_render::gpu::refuse`, exit 2).
+**GPU-backed tests require a device.** There is no skip path: `px_gpu::require_gpu` panics with
+`this check requires a working GPU` when no device is available, so `px_gpu`, `px_volume_gpu_op` and
+`px_nurbs_gpu_op` fail rather than report green without having run. A machine without a GPU is not a
+valid place to take those verdicts, and it now says so instead of hiding it. The instruments that
+never degrade silently are the probes (`require_gpu` exits 2) and the host
+(`px_render::gpu::refuse`, exit 2).
 
 ## Discipline
 
 - **A skipped check is not a pass.** A probe that cannot get a device exits 2. `run_checks` prints a
   line per check and exits 1 on any failure. Probe checks that need data first assert they have it
   (`rows.len() == POINTS`, "more than N live points", "the sampler covered a free region"), so a
-  pipeline that silently produced nothing cannot read as success. The GPU-backed unit tests that
-  print a skip line instead (see the caveat above) are the one place this discipline is not held, and
-  a machine without a GPU is therefore not a valid place to take those verdicts.
+  pipeline that silently produced nothing cannot read as success. Unit tests that need a device fail
+  loudly for the same reason.
 - **Do not run the full suite out of habit.** Run what the change affects. Do not add redundant tests.
   A check that costs real computation belongs in a probe, not in `cargo test`.
 - **One target, one reader.** When a fixture moves, change the reader in the same commit and run it

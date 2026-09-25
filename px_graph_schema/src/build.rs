@@ -26,6 +26,10 @@ impl Build for TextureData {
     }
 
     fn encode(payload: &Self) -> Result<PayloadBundle, String> {
+        let dtype = match payload.format {
+            TextureFormat::Rgba8Srgb => DType::U8,
+            TextureFormat::Rgba16Float => DType::U16,
+        };
         Ok(PayloadBundle::new(
             BTreeMap::from([
                 ("width".to_string(), f64::from(payload.width)),
@@ -37,11 +41,8 @@ impl Build for TextureData {
             vec![
                 Blob::new(
                     BlobHeader {
-                        dtype: match payload.format {
-                            TextureFormat::Rgba8Srgb => DType::U8,
-                            TextureFormat::Rgba16Float => DType::U16,
-                        },
-                        shape: vec![(payload.bytes.len() / 2) as u32],
+                        dtype,
+                        shape: vec![(payload.bytes.len() / dtype.elem_size()) as u32],
                     },
                     payload.bytes.clone(),
                 )
@@ -201,6 +202,22 @@ mod tests {
         let back = TextureData::decode(&bundle, "sky").expect("解码");
         assert_eq!(back, original);
         assert_eq!(back.bytes, original.bytes, "字节必须逐字相同");
+    }
+
+    #[test]
+    fn an_rgba8_texture_round_trips_byte_for_byte() {
+        let original = TextureData::new(
+            4,
+            4,
+            CUBE_FACES,
+            1,
+            TextureFormat::Rgba8Srgb,
+            (0..384).map(|index| (index % 251) as u8).collect(),
+        );
+        let bundle = TextureData::encode(&original).expect("encode");
+        let back = TextureData::decode(&bundle, "sky").expect("decode");
+        assert_eq!(back, original);
+        assert_eq!(back.bytes, original.bytes, "every byte must survive");
     }
 
     #[test]

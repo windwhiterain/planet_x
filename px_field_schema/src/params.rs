@@ -34,6 +34,25 @@ impl px_graph_schema::HashField for Shape {
 }
 
 impl Shape {
+    /// 立方图必须是**整数张面**：`CubeMap` 要求 `height == 6 · width`，否则行号会越过面数
+    /// 被夹回最后一张面（`direction_at`）或越界（`Field::at`）。`Volume` 的整数层关系由
+    /// [`crate::volume::VolumeShape::of`] 管，这里不看。
+    pub fn check(&self) -> Result<(), String> {
+        if self.projection != Projection::CubeMap {
+            return Ok(());
+        }
+        let faces = px_protocol::art::CUBE_FACES;
+        let wanted = self.width.max(1).saturating_mul(faces);
+        if self.height != wanted {
+            return Err(format!(
+                "立方图的 height 必须是 {faces} · width：width = {}、height = {}，\
+                 但 CubeMap 要求 height = {wanted}",
+                self.width, self.height
+            ));
+        }
+        Ok(())
+    }
+
     pub fn filled(&self, value: f32) -> Field {
         Field::filled_with(self.width, self.height, value, self.projection)
     }

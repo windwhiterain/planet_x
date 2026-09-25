@@ -33,13 +33,11 @@ fn the_volume_blob_round_trips() {
     assert_eq!(restored.layers, volume.layers);
     assert_eq!(restored.data, volume.data);
     assert_eq!(restored.samples(), volume.samples());
-    // 壳半径住在清单参数里，不在载荷里 —— 这里只保证载荷那部分无损。
     assert_eq!(restored.inner, 0.0);
 }
 
 #[test]
 fn the_grid_sampler_hits_the_nodes_exactly() {
-    // res/layers 都是 2 的幂 + 1 ⇒ 节点坐标在 f32 里是精确的，三线性采样必须逐位落回原值。
     let volume = volume(9, 5);
     let grid = VolumeGrid::new(&volume);
     for face in 0..PATCHES {
@@ -64,11 +62,6 @@ fn the_grid_sampler_hits_the_nodes_exactly() {
 
 #[test]
 fn the_cube_sphere_faces_share_their_edges() {
-    // 代理能不能焊成闭合的一张，全押在这一条上：相邻两面在共用的那条棱上给出**同一个**
-    // 方向 ⇒ 两边的采样点、场值、交点位置都一样，按位置焊就能焊上。
-    //
-    // 只保证到浮点级（不保证逐位：两条公式算同一个方向时最后一位可能差 1 ULP），
-    // 所以判据是「每条棱内点恰好有一个搭档，且两者相差远小于焊缝容差 1e-4」。
     let samples = [0.25_f32, 0.5, 0.75];
     let mut edges: Vec<[f32; 3]> = Vec::new();
     for face in 0..PATCHES {
@@ -121,7 +114,6 @@ fn a_face_parameter_maps_to_the_shell() {
 
 #[test]
 fn a_field_can_hold_a_cube_map_mask() {
-    // 判据仪器要拿一张覆盖图当输入；这里只确认 CubeMap 域的取方向是通的。
     let field = Field::with_projection(4, 24, vec![0.0; 96], Projection::CubeMap);
     assert_eq!(field.direction(0, 0).len(), 3);
     assert_eq!(field.sample_direction([0.0, 1.0, 0.0]), 0.0);

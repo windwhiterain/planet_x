@@ -1,12 +1,3 @@
-//! 硬表面外接代理的端到端判据：闭合、包住、可复现。
-//!
-//! 覆盖图是**造**出来的一张小 cube map（不是 `mixed` 那句真场），这样测试不依赖 CAS 里
-//! 有没有烘过 `clouds` 图；真数据上的同一条断言在 `px_graphs --bin clouds` 的 `check` 里跑。
-//!
-//! ⚠ 算子走的是**声明那条真路**（`PxOp::render` → 运行时装载实现库 → 调它的符号）：
-//! 于是"算子真的从 dylib 里被叫起来"在这个测试里也有实证，而图程序不必链接实现库
-//! （那是 `tests/crate_graph.rs` 那道门看着的）。
-
 use std::collections::HashMap;
 
 use px_field_schema::field::{Field, Projection};
@@ -22,11 +13,6 @@ use px_volume_schema::params::{self as volume_params, Params};
 
 const FACE: u32 = 64;
 
-/// 一张**造出来的**覆盖度场。
-///
-/// ⚠ 从前这里调 `px_field_op::noise::fbm_3`（实现库里的函数）—— 现在实现库是运行时装载的，
-///   图侧不再链接它。判据量的是"闭合 / 包住 / 可复现 / 梯度有界"，与覆盖度具体长什么样无关，
-///   所以换成几段不同频率的正弦叠加（粗糙度与 fbm 那一档相当，梯度上界那条判据才有意义）。
 fn coverage() -> Field {
     let mut field = Field::with_projection(
         FACE,
@@ -47,8 +33,6 @@ fn coverage() -> Field {
     field
 }
 
-/// ⚠ 尺寸/投影不再是驱动递进来的画布：体积与网格那一档的**参数里没有它**
-/// （体积算子从上游覆盖场的形状推自己的体网格），算子签名也就不再收。
 fn params() -> Params {
     Params {
         res: 33,
@@ -58,7 +42,6 @@ fn params() -> Params {
 }
 
 fn surface_params() -> mesh_params::proxy::Params {
-    // `offset`（P20 待删的死码）没写在这里 ⇒ 走它的默认 0.0：老路径逐位不变。
     mesh_params::proxy::Params {
         level: 0.0,
         depth: 4,
@@ -68,7 +51,6 @@ fn surface_params() -> mesh_params::proxy::Params {
 }
 
 fn bake(params: &Params, coverage: &Field) -> VolumeData {
-    // ⚠ 一条假键：这里的输入不是缓存里的节点，只是把值包成"已经拿到手的节点"那个形状。
     let input = volume_ops::CloudCoarseInput {
         coverage: Cooked::new([0; 32], coverage.clone(), false, 0, 0),
     };
@@ -123,8 +105,6 @@ fn the_proxy_is_closed() {
 
 #[test]
 fn the_mesh_op_is_reproducible() {
-    // 缓存是「键 = 内容」：同一份参数跑两次必须逐位一样。当初换掉自适应哈希八叉树就是因为
-    // 它拿 HashMap 的遍历序决定顶点位置（同一进程里跑两次都有 8% 的顶点不同）。
     let coverage = coverage();
     let params = params();
     let volume = bake(&params, &coverage);
@@ -165,8 +145,6 @@ fn the_proxy_encloses_the_coarse_field() {
 
 #[test]
 fn the_final_field_makes_a_tighter_proxy() {
-    // 换 `field` 的全部意义：真场 ≤ 粗场 ⇒ 真场的等值面在粗场里面。
-    // 落点变近靠的就是这一条，所以「每个节点的值都不超过粗场」是可直接断言的充分条件。
     let coverage = coverage();
     let coarse_params = params();
     let mut final_params = params();
@@ -194,10 +172,6 @@ fn the_final_field_makes_a_tighter_proxy() {
         total - tighter - higher,
         100.0 * tighter as f64 / total as f64,
     );
-    // 载重的那一条是**上界**：真场 = `shape_of(cover, altitude, √b)` 而粗场取噪声上界 1.0，
-    // 所以一个节点都不许比粗场高。细节噪声加了 `sqrt` 之后 `√b` 变大 ⇒ `lobed` 更容易饱和到
-    // 1（= 与粗场逐位相同的那批），"更低"的占比从原来的 >50% 掉到 ~47% —— 所以下面那条
-    // 只当"不是同一个场"的非空判据，别拿它当上界用。
     assert_eq!(
         higher, 0,
         "真场有 {higher} 个节点比粗场高 ⇒ 粗场不再包住真场（`billows` 的值越过了它的上界）"
@@ -208,7 +182,6 @@ fn the_final_field_makes_a_tighter_proxy() {
         100.0 * tighter as f64 / total as f64,
     );
 
-    // 网格也必须照样闭合：缺几何是硬失败。
     let mesh = surface(&surface_params(), &final_volume);
     let (open, nonmanifold) = audit(&mesh);
     println!(
@@ -221,8 +194,6 @@ fn the_final_field_makes_a_tighter_proxy() {
 
 #[test]
 fn the_gradient_bound_is_above_the_measured_gradient() {
-    // L 只许大不许小：小了自适应八叉树那类提取器的剪枝测试就会漏（网格出洞）。
-    // 量的是一张稀疏网格（几分钟内跑完），真数据上的同一断言在 bin 里（--bound 更密）。
     let coverage = coverage();
     let params = params();
     let cloud = px_verify::proxy::from_volume(&params);

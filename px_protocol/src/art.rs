@@ -627,6 +627,28 @@ pub fn volume_layers(height: u32, res: u32) -> Option<u32> {
 }
 
 pub fn direction_at(domain: Domain, width: u32, height: u32, x: u32, y: u32) -> [f32; 3] {
+    direction_at_opt(domain, width, height, x, y).unwrap_or_else(|| {
+        panic!(
+            "体网格（Domain::Volume）没有「一个方向」这回事：\
+             世界点映射走 px_volume_schema::volume::point_of（它知道 inner/outer/res/layers）；\
+             要「拿不到方向就自己决定怎么办」请用 direction_at_opt（见 docs/field.md）"
+        )
+    })
+}
+
+/// 同 [`direction_at`]，但**不可得时返回 `None` 而不是 panic**。
+///
+/// 需要它的理由：`Domain::Volume` 的格子不对应任何方向，而逐格调用方未必需要方向
+/// （逐格算术、掩码、重映射都不需要）。⚠ 那个 panic 穿过算子 dylib 边界是**不可捕获**的
+/// （`Rust cannot catch foreign exceptions`），会把整个进程带走 —— 所以任何"可能与
+/// Volume 同处一条链"的逐格循环都不该走 [`direction_at`]。
+pub fn direction_at_opt(
+    domain: Domain,
+    width: u32,
+    height: u32,
+    x: u32,
+    y: u32,
+) -> Option<[f32; 3]> {
     let u = (x as f32 + 0.5) / width.max(1) as f32;
     let v = (y as f32 + 0.5) / height.max(1) as f32;
     match domain {
@@ -634,9 +656,9 @@ pub fn direction_at(domain: Domain, width: u32, height: u32, x: u32, y: u32) -> 
             let theta = v.clamp(0.0, 1.0) * std::f32::consts::PI;
             let phi = u * std::f32::consts::TAU;
             let ring = theta.sin();
-            [ring * phi.cos(), theta.cos(), ring * phi.sin()]
+            Some([ring * phi.cos(), theta.cos(), ring * phi.sin()])
         }
-        Domain::Octahedral => octahedral_direction_y_up(u, v),
+        Domain::Octahedral => Some(octahedral_direction_y_up(u, v)),
         Domain::Cube => {
             let cell = cube_cell_size(width).max(1);
             let face_size = cube_face_size(width).max(1);
@@ -644,19 +666,20 @@ pub fn direction_at(domain: Domain, width: u32, height: u32, x: u32, y: u32) -> 
             let face = (y / cell) * CUBE_COLUMNS + (x / cell);
             let s = (x % cell) as f32 + 0.5 - gutter as f32;
             let t = (y % cell) as f32 + 0.5 - gutter as f32;
-            cube_direction(face, s / face_size as f32, t / face_size as f32)
+            Some(cube_direction(
+                face,
+                s / face_size as f32,
+                t / face_size as f32,
+            ))
         }
         Domain::CubeMap => {
             let face_size = width.max(1);
             let face = (y / face_size).min(CUBE_FACES - 1);
             let s = (x as f32 + 0.5) / face_size as f32;
             let t = ((y % face_size) as f32 + 0.5) / face_size as f32;
-            cube_direction(face, s, t)
+            Some(cube_direction(face, s, t))
         }
-        Domain::Volume => panic!(
-            "体网格（Domain::Volume）没有「一个方向」这回事：\
-             世界点映射走 px_field_schema::volume::point_of（它知道 inner/outer/res/layers）"
-        ),
+        Domain::Volume => None,
     }
 }
 

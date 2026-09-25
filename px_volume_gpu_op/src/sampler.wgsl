@@ -515,7 +515,16 @@ fn star_slab_collect(direction: vec3<f32>, t0: f32, t1: f32, support: f32) {
     }
 }
 
-fn march_radiance(direction: vec3<f32>, lane: u32, steps: u32, enter: f32, background: f32) -> f32 {
+fn step_fill(texel: u32, step: u32) -> f32 {
+    var hash = texel * 0x9e3779b9u + step * 0x85ebca6bu;
+    hash = hash ^ (hash >> 15u);
+    hash = hash * 0x2c1b3c6du;
+    hash = hash ^ (hash >> 12u);
+    return f32(hash & 0xffffu) / 65535.0;
+}
+
+fn march_radiance(direction: vec3<f32>, lane: u32, texel: u32, steps: u32, enter: f32, background: f32) -> f32 {
+    let jitter = sky.scalars.x;
     let outer = volume.extent.y;
     let cell = star_meta.space.x;
     let gain = star_meta.light.z;
@@ -543,8 +552,8 @@ fn march_radiance(direction: vec3<f32>, lane: u32, steps: u32, enter: f32, backg
             }
             break;
         }
-        var here = (f32(i) + 0.5) * du;
-        var distance = shell_radius(here);
+        let here = (f32(i) + 0.5) * du;
+        let distance = shell_radius(here);
         var step = shell_radius(f32(i + 1u) * du) - shell_radius(f32(i) * du);
         var samples = 1u;
         var block = 0u;
@@ -584,8 +593,14 @@ fn march_radiance(direction: vec3<f32>, lane: u32, steps: u32, enter: f32, backg
                 let layer = min(block_low + local, max_layer);
                 let low = layer_radius(layer);
                 let high = layer_radius(min(layer + 1u, max_layer));
-                let sample_distance = (low + high) * 0.5;
+                let sample_middle = (low + high) * 0.5;
                 let layer_step = max(high - low, 1e-9);
+                // Jitter stays inside the layer's own radial span, so the occupancy mask and the
+                // sample it guards describe the same cell.
+                let sample_distance = select(
+                    sample_middle,
+                    low + (high - low) * step_fill(texel, i + local),
+                    jitter > 0.0);
                 let sample_point = direction * sample_distance;
                 let sample_emit = sample_volume(sample_point, lane);
                 let sample_sigma = sample_volume(sample_point, lane + 3u);
@@ -634,9 +649,13 @@ fn march_radiance(direction: vec3<f32>, lane: u32, steps: u32, enter: f32, backg
                 slab = slab + cell;
             }
         }
-        let point = direction * distance;
-        let emit = sample_volume(point, lane);
-        let sigma = sample_volume(point, lane + 3u);
+        let sample_distance = select(
+            distance,
+            shell_radius((f32(i) + step_fill(texel, i)) * du),
+            jitter > 0.0);
+        let sample_point = direction * sample_distance;
+        let emit = sample_volume(sample_point, lane);
+        let sigma = sample_volume(sample_point, lane + 3u);
         radiance = radiance + transmittance * emit * step;
         transmittance = transmittance * exp(-sigma * step);
         if (star_on) {
@@ -698,7 +717,7 @@ fn march(@builtin(global_invocation_id) id: vec3<u32>) {
     let steps = sky.counts.x;
     let lane = sky.counts.z;
     let enter = sky.scalars.w;
-    image[index] = march_radiance(direction, lane, steps, enter, pick3(sky.background.xyz, lane));
+    image[index] = march_radiance(direction, lane, index, steps, enter, pick3(sky.background.xyz, lane));
 }
 
 fn pick(v: vec4<f32>, i: u32) -> f32 {
@@ -829,7 +848,7 @@ fn sky_radiance(@builtin(global_invocation_id) id: vec3<u32>) {
 
     var rgb = vec3<f32>(0.0, 0.0, 0.0);
     for (var c = 0u; c < 3u; c = c + 1u) {
-        let radiance = march_radiance(direction, c, steps, enter, pick3(sky.background.xyz, c));
+        let radiance = march_radiance(direction, c, index, steps, enter, pick3(sky.background.xyz, c));
         if (c == 0u) { rgb.x = max(radiance, 0.0); }
         if (c == 1u) { rgb.y = max(radiance, 0.0); }
         if (c == 2u) { rgb.z = max(radiance, 0.0); }

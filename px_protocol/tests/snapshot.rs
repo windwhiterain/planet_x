@@ -7,8 +7,6 @@ use px_protocol::render::{self as render, Lease, Request, Response, Scene};
 use px_protocol::wire::{Blob, BlobHeader, DType};
 use px_protocol::{Handshake, ProtocolId, SCHEMA_VERSION};
 
-/// 资产种类必须**逐个列出**（穷尽匹配）：加一种资产而不动这份快照就编不过 ——
-/// 快照一变 `protocol_hash` 就变，跨进程握手会因此拒绝旧对端，这正是要人看一眼的地方。
 fn asset_kind_name(kind: AssetKind) -> &'static str {
     match kind {
         AssetKind::Field2D => "field2d",
@@ -18,16 +16,10 @@ fn asset_kind_name(kind: AssetKind) -> &'static str {
         AssetKind::Mesh => "mesh",
         AssetKind::Instances => "instances",
         AssetKind::Volume => "volume",
-        // ⚠ 体网格**当一张场**（`Domain::Volume`）：二维 blob、第三维折进 `height`。
-        //   与上面那个 `volume`（立方球体网格、半径住清单参数、四维 blob）不是一回事
-        //   —— 两者同名不同形，所以各有各的资产种类（域必须能从种类唯一还原）。
         AssetKind::VoxelField => "voxel_field",
         AssetKind::Scene => "scene",
         AssetKind::Shader => "shader",
         AssetKind::Texture => "texture",
-        // ⚠ 星场**不是场**：它是世界坐标里的一批点光源 + 一个稀疏三维格（blob 是
-        //   f32 星表 + u32 格键/CSR 两份），借 `field2d` 或 `voxel_field` 都会在读回时
-        //   把形状解错 ⇒ 与 `voxel_field` 同一条理由，必须有自己的种类。
         AssetKind::StarField => "star_field",
     }
 }
@@ -129,7 +121,6 @@ fn canonical() -> String {
         report: "{\"job\":\"perf\"}".to_string(),
         report_path: "target/report.json".to_string(),
     };
-    // 两种活各自的形状（`Job` 是内部 tag 的枚举，两路的 JSON 必须都能被看到）。
     let job_shots = render::Job::Shots;
     let job_perf = render::Job::Perf {
         windows: 4,
@@ -251,7 +242,6 @@ fn canonical() -> String {
             )),
             skybox_brightness: 900.0,
         },
-        // ⚠ 相机留在场景文档里（2026-09-27：相机是**场景脚本**的普通数据，不进图、不进产物）。
         cameras: vec![px_protocol::art::Camera::new(
             [0.0, 1.0, 0.0],
             3.15,
@@ -264,8 +254,6 @@ fn canonical() -> String {
             px_protocol::Light::point("sun", [-4.2, 1.15, 2.35], [1.0, 1.0, 1.0], 7.6e5)
                 .with_shadows(true),
         ],
-        // ⚠ 快照里这一份是**没有影子**的场景骨架 ⇒ `None`（加了它，快照就多两个字节，
-        //    而那正是"协议长了新字段"该在快照里看得见的那一刻）。
         shadow: None,
         objects: vec![
             px_protocol::Object {
@@ -330,9 +318,6 @@ fn canonical() -> String {
                 shadow_density: 0.0,
             },
         ],
-        // 帧自有材质（§135）：这一条夹具**故意留空** —— 空表不落盘，所以快照里
-        // 一个字节都不该因为它变（"加字段是纯加法"这件事在快照里也是看得见的）。
-        // 有内容的那一形状在 `px_protocol` 自己的单测里（`a_frame_material_is_expressible_and_round_trips`）。
         frame_materials: Vec::new(),
         material_instances: Vec::new(),
     };
@@ -344,12 +329,6 @@ fn canonical() -> String {
         exe: "<exe>".to_string(),
     };
 
-    // ---- pass 表的两种形状（§125）--------------------------------------------
-    //
-    // ⚠ 这两条进快照是**故意的**：`PassSpec` 长了新字段，协议形状就变了 ——
-    // 快照变、`protocol_hash` 变、旧对端在握手处被拒。那正是要人看一眼的那一刻。
-    // 注意 `scene::SceneSpec` 那一条**一个字都没动**（它的 `passes` 还是空的）：
-    // "加字段是纯加法"这件事在快照里也是看得见的。
     let pass_fullscreen = px_protocol::scene::PassSpec {
         kind: "fullscreen".to_string(),
         shader: Some(px_protocol::Member::new(
@@ -372,7 +351,6 @@ fn canonical() -> String {
     };
     let pass_geometry = px_protocol::scene::PassSpec {
         kind: "geometry".to_string(),
-        // 几何 pass：片元阶段属于材质（§129）⇒ 这一栏必须是 None。
         shader: None,
         label: "planet".to_string(),
         entry: "fragment".to_string(),
@@ -384,7 +362,6 @@ fn canonical() -> String {
                 geometry: "planet".to_string(),
                 material: "surface".to_string(),
             },
-            // 空材质 = 这一笔没有片元阶段（深度-only 那一笔）。
             px_protocol::scene::DrawSpec {
                 geometry: "stars".to_string(),
                 material: String::new(),
@@ -392,7 +369,6 @@ fn canonical() -> String {
         ],
         vertex_shader: "struct Out { @builtin(position) position: vec4<f32> }\n".to_string(),
         vertex_entry: "vertex".to_string(),
-        // 状态是**文本**：解析器只有一份，住在 `px_pass::RenderState::parse`。
         render:
             "color=clear(0,0,0,0)|depth=clear(0)|depth_write=true|compare=greater_equal|winding=ccw"
                 .to_string(),
@@ -415,7 +391,6 @@ fn canonical() -> String {
     ]
     .map(asset_kind_name)
     .to_vec();
-    // 3D 标量网格（等值面算子的输入）的载荷形状：`[面, 径向层, t, s]`。
     let volume_shape = px_protocol::art::VolumeData {
         res: 65,
         layers: 65,
@@ -461,11 +436,6 @@ fn canonical() -> String {
             "render::Lease": lease,
             "wire::BlobHeader": header,
             "wire::Blob.payload_bytes": blob.bytes.len(),
-            // ⚠ 这一串是**冻结记录**，不许跟着 `stream::Frame` 缩表（它今天只剩 5 种）：
-            // 它进 `protocol_hash()`，改一个字就是换指纹，旧对端在握手处当场被拒。
-            // 八种标签今天分散在三处：`protocol` / `art` / `scene` / `blob` / `refused` 还在
-            // `stream::Frame`，`request` / `response` 在 `px_protocol::frame`，`world`
-            // 那一支随 `game::sim` 搬走（它本来就没有生产者、也没有消费者）。
             "stream::Frame.kinds": [
                 "protocol", "world", "art", "scene", "blob", "request", "response", "refused"
             ],

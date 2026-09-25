@@ -81,9 +81,11 @@ stored payload carries, so renumbering would read old artifacts as another domai
 | `Volume` | `volume` | 4 | `width = res`, `height = res · layers · 6` | not a sphere: the third dimension is folded into `height` |
 
 Inverses: `uv_of` maps a direction back to `(u, v)` per projection (`Equirect` via `acos`/`atan2`,
-`Cube` via `cube_atlas_uv`, `CubeMap` via `[s, (face + t)/6]`). `direction_at` **panics** for
-`Domain::Volume` — a volume cell is not a direction — and `uv_of` for a volume returns the in-face
-`(s, t)`.
+`Cube` via `cube_atlas_uv`, `CubeMap` via `[s, (face + t)/6]`). A volume cell is not a direction:
+`direction_at` **panics** for `Domain::Volume`, and `direction_at_opt` is the same function returning
+`None` instead. Per-cell loops that may meet a volume **must** use the `_opt` form — the panic
+crosses an operator dylib boundary uncatchably and aborts the process. `uv_of` for a volume returns
+the in-face `(s, t)`.
 
 ## CubeMap
 
@@ -116,9 +118,10 @@ map, and `px_graphs` uses it (`const FACE: u32 = 256` ⇒ `256 × 1536`).
   face coordinates, and interpolates by re-deriving the four corner directions through
   `cube_direction` and truncating each to a texel — a bilinear filter that is valid across an edge by
   construction.
-- **The face-size relation is not validated.** Constructing a `CubeMap` field with
-  `height != 6 * width` is accepted; a truncated height either reads only part of the faces
-  (`direction_at` clamps the face index) or panics in `at`.
+- **The face-size relation is validated at the payload boundary.** `Shape::check` refuses a
+  `CubeMap` whose `height != 6 * width`, naming both values and the required one. A truncated height
+  would otherwise be read as "every row past face 0 is face 0" (`direction_at` clamps the face
+  index) — silent corruption rather than a panic.
 
 ## Shape is a parameter
 
@@ -138,8 +141,10 @@ states its shape in its own parameters. Consequences that are load-bearing:
   different keys.
 - `Shape::filled(value)` makes a constant field; `Shape::direction(x, y)` and
   `Shape::volume_shape()` are the other two uses.
-- The default is `512 × 256` with `CubeMap`. That is not a whole cube map (a cube map needs
-  `height = 6 · width`); every graph binary that produces a field sets its shape explicitly, so the
+- The default is `512 × 256` with `CubeMap`, which is vestigial from an equirectangular era
+  (exactly 2:1) and is **not** a valid cube map. It is harmless in practice: every graph binary that
+  produces a field sets its shape explicitly, and `Shape::check` refuses the invalid combination at
+  the payload boundary, so the
   default only shows up when a parameter file is missing and the script does not override it.
 
 Parameters arrive as ordinary Rust values: `node_params(&graph, "<node>")` reads
@@ -247,8 +252,7 @@ Details that the code makes load-bearing:
   `second = offset.sample_direction(probed) − 0.5`. It then displaces
   `direction + east·(first·strength) + north·(second·lateral·strength)`, normalises, and samples
   `field` there. `strength` and `probe` are displacements in unit-direction space, so their unit is
-  an angle, and the pole handling is the one `tangent_frame` provides (the reference axis switches
-  from y to x when `|y| > 0.99`).
+  an angle, and `tangent_frame` provides the basis without any branch: it is the rotation that takes the south pole to `direction`, applied to the x axis. The only degenerate direction is the south pole itself, which no cube-map texel centre reaches.
 - **`field.craters`** takes the upstream as its first input and **adds** to it. Per octave
   (seed `seed ^ octave·0x9e37_79b9`) it takes the cell distance in grid units, then applies one
   profile: inside `radius` a bowl `(1 − d/radius)²` scaled by `−0.5·depth`, from `radius` to

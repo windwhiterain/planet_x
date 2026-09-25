@@ -32,8 +32,7 @@ one operator that emits a texture emits `Rgba16Float`.
 
 ### `mesh.cubesphere` silently ignores unknown parameters
 
-Its parameter struct is the only one without `deny_unknown_fields`, so a typo in a recipe is
-defaulted away instead of reported.
+
 
 ### `Shape::default()` is not a whole cube map
 
@@ -47,11 +46,10 @@ a discontinuity ring that no existing test sweeps.
 
 ## Weakened gates
 
-- GPU-backed tests in two default-member crates print a skip line and **pass** when no device is
-  present, so the fast chain is green while those comparisons never ran.
 - The source-fingerprint test omits the NURBS crates, leaving their build scripts and identity
-  exports ungated.
+  exports ungated. (Being fixed.)
 - The operator-loading test claims to cover every declared operator and covers about two thirds.
+  (Being fixed.)
 
 ## Unconsumed inputs
 

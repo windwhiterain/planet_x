@@ -65,6 +65,13 @@ pub fn connect() -> Option<&'static Gpu> {
     GPU.get_or_init(build).as_ref()
 }
 
+pub fn require_gpu<T>(result: Result<T, String>) -> T {
+    match result {
+        Ok(value) => value,
+        Err(error) => panic!("this check requires a working GPU: {error}"),
+    }
+}
+
 pub enum Binding<'a> {
     Uniform(&'a [u8]),
     Storage(&'a [u8]),
@@ -281,10 +288,7 @@ mod tests {
 
     #[test]
     fn a_compute_pass_round_trips() {
-        let Some(gpu) = connect() else {
-            println!("px_gpu：没有可用设备，跳过冒烟");
-            return;
-        };
+        let gpu = connect().expect("this check requires a working GPU");
         let wgsl = r#"
 @group(0) @binding(0) var<storage, read> src: array<u32>;
 @group(0) @binding(1) var<storage, read_write> dst: array<u32>;

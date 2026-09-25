@@ -246,7 +246,7 @@ direction and depth is free.
 |---|---|---|
 | `face` | 256 | per-face resolution of the output cube (`face × face × 6`) |
 | `steps` | 96 | ray steps; also the unit of the skip path's sample budget (`steps · 16`) |
-| `jitter` | 1.0 | read by the CPU draft marcher to offset a sample inside its cell. **The GPU bake does not read it** (see below) |
+| `jitter` | 1.0 | offsets each sample inside its cell by a per-texel, per-step hash, turning step banding into noise. `0.0` selects the plain cell sample verbatim |
 | `star_gain` | 1.0 | multiplies direct starlight; anchored on the inner wall, i.e. `(inner/r)²` |
 | `star_tint` | `[1,1,1]` | per-channel weights for direct starlight (pairs with `scatter_tint` for the red/blue diagnostic split) |
 | `star_core` | 0.0029 | core radius of a star as a **world length** (not a pixel or a texel count) |
@@ -434,9 +434,10 @@ a star's angular size follows `radius/distance` and a brighter star's visible di
 support radius is `3 · max(core, halo)` in world units and is divided by the slab radius to test
 candidates. Irradiance is `(inner/r)²`, anchored on the inner wall.
 
-The GPU marcher takes **no jitter**: every sample sits at a cell midpoint. `SkyParams::jitter` is read
-only by the CPU draft (`px_volume_alg::raymarch_channel`), so changing it does not change a bake. The
-`Sky.scalars.x` slot in the shader is declared as jitter and is written as `0.0` by the host.
+The GPU marcher reads the jitter from `scalars[0]` and applies it **inside** the occupancy sum: the
+offset moves the sample within its own layer's `[low, high)` span, so it can never leave the cell
+the mask classified. `jitter = 0.0` selects the plain cell sample verbatim rather than adding a zero
+offset, so turning jitter off reproduces the earlier bytes exactly.
 
 ### The whole sky
 

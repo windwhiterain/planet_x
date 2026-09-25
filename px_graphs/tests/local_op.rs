@@ -1,30 +1,14 @@
-//! **图侧现写算子**那一档的真样本：泛型实例落在图程序里，不进任何实现库。
-//!
-//! 这一篇守的是目标里那句「agent 在图侧现写泛型算子」，量三件事：
-//!
-//! 1. 现写的算子**能算**、能落盘、再跑一次能命中（`cached` 那条路对它一视同仁）；
-//! 2. 它的**身份是本图程序**这一份源码（不是某个 dylib 的）；
-//! 3. 同一个图程序里两个现写的算子**互不相同**（id 进键）。
-//!
-//! ⚠ 它**不碰** `art/` 下任何既有图：用的是自己的图名（缓存落在 `target/pcg/local-op/`）
-//! ⇒ "加一个图侧算子"这件事动不到六份冻产物的字节。
-//! ⚠ 「参数改了键就变」那条性质**不在这里验**：参数只从 `art/<图>/<节点>.toml` 来，
-//!   而这一篇不该往 `art/` 写文件。那条性质由 `px_graph/tests/keys.rs`（规范 JSON 进键）
-//!   与三张真图的产物判据看着。
-
 use px_cook::{Domain, Graph, GraphSpec, begin, cached, field_params, node_params, px_local_op};
 use px_field_schema::field::Field;
 use px_graph_schema::PxOp;
 use serde::{Deserialize, Serialize};
 
-/// 现写算子的超参数 —— 图侧自己定义（`PxKeyed` 由 derive 生成 ⇒ 加字段自动进键）。
 #[derive(Debug, Clone, Serialize, Deserialize, px_derive::PxParams)]
 #[serde(default, deny_unknown_fields)]
 struct BandParams {
     frequency: f32,
     gain: f32,
     axis: u32,
-    /// 产出场的**形状参数**（多大、什么投影）—— 生成类算子的尺寸由**参数**给。
     shape: field_params::Shape,
 }
 
@@ -39,11 +23,6 @@ impl Default for BandParams {
     }
 }
 
-/// **图侧的泛型实现**：这个函数对 `F` 单态化，而 `F` 由调用方（图脚本）给。
-///
-/// ⚠ 它就是"泛型算子"那一档的全部机关：泛型参数是**一段现写的代码**，
-///   实例化发生在图程序里 —— 实现库不参与，也不需要知道 `F` 是什么。
-/// ⚠ 形状从**参数**来（从前是驱动递进来的画布），所以它现在是这个函数的一栏入参。
 fn bake<F: Fn([f32; 3]) -> f32>(shape: field_params::Shape, sample: F) -> Field {
     let mut field = shape.filled(0.0);
     for y in 0..shape.height {
@@ -54,17 +33,13 @@ fn bake<F: Fn([f32; 3]) -> f32>(shape: field_params::Shape, sample: F) -> Field 
     field
 }
 
-/// 一个只住在本图程序里的算子：沿参数给的那根轴起波带。
 struct Band;
 
 px_local_op! { Band, "local.band", BandParams, (), Field, |p, _i| bake(p.shape, |d| {
-    // ⚠ 这条闭包捕捉的是**参数**：实例化在图侧，实现库里没有它的任何痕迹。
     let axis = (p.axis as usize).min(2);
     ((d[axis] * p.frequency).sin() * 0.5 + 0.5) * p.gain
 }) }
 
-/// 第二个现写的算子：与 [`Band`] **共用** `bake` 那个泛型函数，但闭包不同
-/// ⇒ 图程序里有两个 `bake` 的单态化实例。
 struct Rings;
 
 px_local_op! { Rings, "local.rings", BandParams, (), Field, |p, _i| bake(p.shape, |d| {
@@ -78,17 +53,11 @@ fn graph() -> Graph {
     })
 }
 
-/// ⚠ 三组断言合在**一个**测试里：一个测试二进制里的多个测试是并行的，而它们会写
-/// 同一个 `target/pcg/local-op/manifest.json` —— 分开写会变成一场竞态。
-///
-/// ⚠ 断言**不许依赖缓存是空的**（测试会重跑，而 CAS 是持久的）：所以下面判的是
-/// "同一份键稳定 ⇒ 第二次必命中"与"闭包真的被用上"，不是"第一次一定重算"。
 #[test]
 fn a_graph_local_operator_is_a_first_class_operator() {
-    // 0) 泛型实现本身：**同一份泛型函数、两个闭包 ⇒ 两个单态化实例**（这是"图侧泛型"的定义）。
     let shape = field_params::Shape {
         width: 8,
-        height: 4,
+        height: 48,
         projection: Domain::CubeMap,
     };
     let one = bake(shape, |_| 1.0).stats().mean;
@@ -100,7 +69,6 @@ fn a_graph_local_operator_is_a_first_class_operator() {
 
     let graph = graph();
 
-    // 1) 能算、能落盘、值不是常数。
     let band = cached(
         &graph,
         "band",
@@ -114,7 +82,7 @@ fn a_graph_local_operator_is_a_first_class_operator() {
     )
     .expect("现写的算子应当能算");
     let value = band.value();
-    assert_eq!((value.width, value.height), (8, 4));
+    assert_eq!((value.width, value.height), (8, 48));
     let stats = value.stats();
     println!(
         "图侧算子：{}×{}｜值域 {:.4}..{:.4}｜均值 {:.4}（命中={}）",
@@ -125,7 +93,6 @@ fn a_graph_local_operator_is_a_first_class_operator() {
         "现写的算子算出了常数场 ⇒ 闭包没被真的调用"
     );
 
-    // 2) 身份 = **本图程序**这一份源码。
     let hash = Band::source_hash().expect("图侧算子应当有身份");
     assert!(Band::LIB.is_empty(), "图侧算子不该宣称自己住在一个实现库里");
     assert_eq!(
@@ -135,7 +102,6 @@ fn a_graph_local_operator_is_a_first_class_operator() {
     );
     assert_eq!(hash.len(), 64);
 
-    // 3) 键稳定（第二次必命中）、两个现写算子互不相同（id 进键）。
     let rings = cached(
         &graph,
         "rings",
@@ -152,7 +118,6 @@ fn a_graph_local_operator_is_a_first_class_operator() {
         &graph,
         "band",
         Band,
-        // ⚠ 与上面那个 `band` **逐字段同一份参数**（键 = 内容）。
         BandParams {
             shape,
             ..node_params(&graph, "band").expect("参数")

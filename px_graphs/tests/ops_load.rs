@@ -1,60 +1,121 @@
-//! **声明 ↔ 实现**那条线的门。
-//!
-//! 病根的形状换过三轮，现在是：声明住 schema（`px_*_schema/src/ops.rs` 里那几行 `px_op!`），
-//! 实现住 `px_*_op` 的 dylib（`px_body!` 导出一个符号，符号名 = `库名__算子名`）。
-//! 编译器**看不住**这条线 —— 它是两个字符串拼出来的：
-//!
-//! * 声明说"去 `px_field_op` 取 `Fbm` 那个符号"
-//! * 实现说"我叫 `px_field_op`，我导出 `Fbm`"
-//!
-//! 只有装载的那一刻才知道对不对得上。所以这道门**真的去装载**：每一个声明过的算子，
-//! 都要能从它那份实现库里取到函数指针（连带把契约握手也走一遍）。
-//!
-//! ⚠ 前提：实现库得先在盘上（`cargo build` / `cargo test`（默认 members）会编它们；
-//! 只 `-p px_graphs` 时不会 —— 那时这道门会给你一句带命令的报错）。
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
 
 use px_graph_schema::PxOp;
 use px_graph_schema::ops;
 
-/// 每一个声明过的算子：从它的库里取符号。取不到就是"声明与实现分了家"。
-#[test]
-fn every_declared_operator_loads_from_its_library() {
-    // ⚠ 一个都不能漏：漏掉的那个正是"改了名字没人发现"的候选。
-    //    ⚠ `field.constant` / `field.mix` / `field.remap` **不在这里**：2026-09-27 起它们是
-    //    element 那一档（`elem::Constant` / `elem::Mix` / `elem::Remap`），实现**不在预置库**
-    //    （`LIB` 是空串、按内容键装载）⇒ 逐个进下面那张表没有意义，它们由
-    //    `tests/elem.rs` 那条端到端判据真的编库 + 真的装载。
-    px_graph_schema::ops::body::<px_field_schema::ops::Fbm>().expect("field.fbm");
-    px_graph_schema::ops::body::<px_field_schema::ops::Ridged>().expect("field.ridged");
-    px_graph_schema::ops::body::<px_field_schema::ops::Gradient>().expect("field.gradient");
-    px_graph_schema::ops::body::<px_field_schema::ops::Warp>().expect("field.warp");
-    px_graph_schema::ops::body::<px_volume_schema::ops::CloudCoarse>().expect("cloud.coarse");
-    px_graph_schema::ops::body::<px_mesh_schema::ops::CubeSphere>().expect("mesh.cubesphere");
-    px_graph_schema::ops::body::<px_mesh_schema::ops::Proxy>().expect("mesh.proxy");
-    px_graph_schema::ops::body::<px_nurbs_schema::ops::Circle>().expect("nurbs.circle");
-    px_graph_schema::ops::body::<px_nurbs_schema::ops::CurveEval>().expect("nurbs.curve.eval");
-    px_graph_schema::ops::body::<px_nurbs_schema::ops::CurveAt>().expect("nurbs.curve.at");
-    px_graph_schema::ops::body::<px_nurbs_schema::ops::CurveHodograph>()
-        .expect("nurbs.curve.hodograph");
-    px_graph_schema::ops::body::<px_nurbs_schema::ops::CurveInsert>().expect("nurbs.curve.insert");
-    px_graph_schema::ops::body::<px_nurbs_schema::ops::CurveElevate>()
-        .expect("nurbs.curve.elevate");
-    px_graph_schema::ops::body::<px_nurbs_schema::ops::CurveTessellate>()
-        .expect("nurbs.curve.tessellate");
-    px_graph_schema::ops::body::<px_nurbs_schema::ops::Sphere>().expect("nurbs.sphere");
-    px_graph_schema::ops::body::<px_nurbs_schema::ops::SurfaceEval>().expect("nurbs.surface.eval");
-    px_graph_schema::ops::body::<px_nurbs_schema::ops::SurfaceAt>().expect("nurbs.surface.at");
-    px_graph_schema::ops::body::<px_nurbs_schema::ops::SurfaceInsert>()
-        .expect("nurbs.surface.insert");
-    px_graph_schema::ops::body::<px_nurbs_schema::ops::SurfaceElevate>()
-        .expect("nurbs.surface.elevate");
-    px_graph_schema::ops::body::<px_nurbs_schema::ops::SurfaceTessellate>()
-        .expect("nurbs.surface.tessellate");
+const DECLARATION_TABLE: &str = "px_decls/src/lib.rs";
+
+fn load<O: PxOp>(loaded: &mut BTreeSet<&'static str>) {
+    let name = type_name_of::<O>();
+    ops::body::<O>().unwrap_or_else(|err| panic!("`{}` ({name}) does not load: {err}", O::ID));
+    loaded.insert(name);
 }
 
-/// **实现的身份是运行期读出来的**（图程序不重编也能看见它换了）。
-///
-/// 这条同时钉住"库里有身份符号"与"指纹形状是十六进制"两件事。
+fn exclude<O: PxOp>(excluded: &mut BTreeSet<&'static str>) {
+    let name = type_name_of::<O>();
+    assert!(
+        ops::body::<O>().is_err(),
+        "`{name}` loads from its library — it must not be in the exclusion list",
+    );
+    excluded.insert(name);
+}
+
+fn type_name_of<O: PxOp>() -> &'static str {
+    ::core::any::type_name::<O>()
+        .rsplit("::")
+        .next()
+        .unwrap_or_default()
+}
+
+fn workspace_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("px_graphs must live under the workspace")
+        .to_path_buf()
+}
+
+fn declaration_table_names() -> BTreeSet<String> {
+    let path = workspace_root().join(DECLARATION_TABLE);
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|err| panic!("cannot read {}: {err}", path.display()));
+    let table = text
+        .split_once("pub const TABLE")
+        .map(|(_, rest)| rest)
+        .unwrap_or_else(|| panic!("{} has no `pub const TABLE`", path.display()));
+    let rows = table
+        .split_once("\n];")
+        .map(|(rows, _)| rows)
+        .unwrap_or(table);
+    let mut names = BTreeSet::new();
+    for row in rows.lines() {
+        let Some(rest) = row.trim_start().strip_prefix("(\"") else {
+            continue;
+        };
+        let Some(close) = rest.find('"') else {
+            continue;
+        };
+        names.insert(rest[..close].to_string());
+    }
+    names
+}
+
+#[test]
+fn every_declared_operator_loads_from_its_library() {
+    let mut loaded = BTreeSet::new();
+    load::<px_field_schema::ops::Fbm>(&mut loaded);
+    load::<px_field_schema::ops::Ridged>(&mut loaded);
+    load::<px_field_schema::ops::Gradient>(&mut loaded);
+    load::<px_field_schema::ops::Warp>(&mut loaded);
+    load::<px_field_schema::ops::Craters>(&mut loaded);
+    load::<px_field_schema::ops::Stamps>(&mut loaded);
+    load::<px_volume_schema::ops::CloudCoarse>(&mut loaded);
+    load::<px_mesh_schema::ops::CubeSphere>(&mut loaded);
+    load::<px_mesh_schema::ops::Proxy>(&mut loaded);
+    load::<px_field_schema::ops::Fbm3>(&mut loaded);
+    load::<px_field_schema::ops::Ridged3>(&mut loaded);
+    load::<px_field_schema::ops::Warp3>(&mut loaded);
+    load::<px_volume_schema::ops::Density>(&mut loaded);
+    load::<px_volume_schema::ops::Emission>(&mut loaded);
+    load::<px_volume_schema::ops::SkyNebula>(&mut loaded);
+    load::<px_volume_schema::ops::Stars>(&mut loaded);
+    load::<px_nurbs_schema::ops::Circle>(&mut loaded);
+    load::<px_nurbs_schema::ops::CurveEval>(&mut loaded);
+    load::<px_nurbs_schema::ops::CurveAt>(&mut loaded);
+    load::<px_nurbs_schema::ops::CurveHodograph>(&mut loaded);
+    load::<px_nurbs_schema::ops::CurveInsert>(&mut loaded);
+    load::<px_nurbs_schema::ops::CurveElevate>(&mut loaded);
+    load::<px_nurbs_schema::ops::CurveTessellate>(&mut loaded);
+    load::<px_nurbs_schema::ops::Sphere>(&mut loaded);
+    load::<px_nurbs_schema::ops::SurfaceEval>(&mut loaded);
+    load::<px_nurbs_schema::ops::SurfaceAt>(&mut loaded);
+    load::<px_nurbs_schema::ops::SurfaceInsert>(&mut loaded);
+    load::<px_nurbs_schema::ops::SurfaceElevate>(&mut loaded);
+    load::<px_nurbs_schema::ops::SurfaceTessellate>(&mut loaded);
+    load::<px_nurbs_schema::ops::SurfaceTessellateGpu>(&mut loaded);
+    load::<px_nurbs_schema::ops::CurveTessellateGpu>(&mut loaded);
+
+    let mut excluded = BTreeSet::new();
+    exclude::<px_field_schema::ops::FieldRemap>(&mut excluded);
+
+    let declared = declaration_table_names();
+    for name in &declared {
+        assert!(
+            loaded.contains(name.as_str()) || excluded.contains(name.as_str()),
+            "declaration `{name}` is neither loaded nor in the counted exclusion list — \
+             a declaration must not slip through this gate",
+        );
+    }
+    assert_eq!(
+        loaded.len() + excluded.len(),
+        declared.len(),
+        "loaded {} + excluded {} != declared {} (`{DECLARATION_TABLE}`)",
+        loaded.len(),
+        excluded.len(),
+        declared.len(),
+    );
+}
+
 #[test]
 fn every_library_reports_its_own_source_hash() {
     for lib in [
@@ -82,12 +143,6 @@ fn every_library_reports_its_own_source_hash() {
     }
 }
 
-/// 五个库的身份**两两不同**：各自的源码指纹覆盖的是各自那份源码。
-///
-/// ⚠ 这一条顺带证明"实现那一半真的进了键"：五个库都链同一份契约，
-///   如果指纹只覆盖契约，这几个值会一模一样。
-/// ⚠ `px_nurbs_gpu_op` 与 `px_nurbs_op` 尤其要紧：**同一个域的两种实现**
-///   （CPU / GPU），身份一样就等于两条路的产物互相覆盖。
 #[test]
 fn the_five_libraries_have_distinct_identities() {
     let names = [

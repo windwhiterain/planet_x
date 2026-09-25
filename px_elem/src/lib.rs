@@ -89,10 +89,18 @@ pub fn fill<F: ElementFn>(
     cell: impl Fn(u32, u32, [f32; 2], [f32; 3]) -> f32,
 ) -> Field {
     let mut out = F::shape(params, inputs).filled(0.0);
+    // 方向逐格是常量映射的输入，但它对 `Domain::Volume` 无定义（体网格没有「一个方向」），
+    // 而逐格去问会在那儿 panic —— 那个 panic 穿过算子 dylib 边界是不可捕获的，整个进程会死。
+    // 所以先探一次：探不出来就交给闭包一个哨兵，由闭包自己决定它要不要方向。
+    let probe = if out.width > 0 && out.height > 0 {
+        out.direction_probe()
+    } else {
+        None
+    };
+    let direction = probe.unwrap_or([0.0; 3]);
     for y in 0..out.height {
         for x in 0..out.width {
             let uv = out.uv(x, y);
-            let direction = out.direction(x, y);
             out.set(x, y, cell(x, y, [uv.0, uv.1], direction));
         }
     }

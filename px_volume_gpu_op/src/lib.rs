@@ -165,10 +165,7 @@ mod tests {
         let (res, layers, faces) = (4_u32, 3_u32, 6_u32);
         let cells = (faces * layers * res * res) as usize;
         let data: Vec<f32> = (0..cells * LANES).map(|index| index as f32).collect();
-        let Ok(gpu_side) = repack(res, layers, faces, &data) else {
-            println!("px_volume_gpu_op：没有可用 GPU，跳过");
-            return;
-        };
+        let gpu_side = px_gpu::require_gpu(repack(res, layers, faces, &data));
         assert_eq!(gpu_side.len(), data.len(), "长度");
 
         let mut index = 0_usize;
@@ -293,11 +290,15 @@ mod sampler_tests {
                 }
             }
         }
-        let Ok(gpu_side) = sample_points(res, layers, inner, outer, &volume.data, &points, 0)
-        else {
-            println!("px_volume_gpu_op：没有可用 GPU，跳过");
-            return;
-        };
+        let gpu_side = px_gpu::require_gpu(sample_points(
+            res,
+            layers,
+            inner,
+            outer,
+            &volume.data,
+            &points,
+            0,
+        ));
         assert_eq!(gpu_side.len(), points.len(), "点数");
         let mut worst = 0.0_f32;
         let mut worst_at = 0;
@@ -322,6 +323,8 @@ mod sampler_tests {
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq)]
+/// Lane-packed scalars: `scalars[0]` is the step jitter in `[0, 1]`, `scalars[3]` is the ray entry
+/// radius. [`SkyUniform::to_bytes`] is the layout `sampler.wgsl`'s `Sky` mirrors.
 pub struct SkyUniform {
     pub counts: [u32; 4],
     pub scalars: [f32; 4],
@@ -686,10 +689,7 @@ mod tone_tests {
         let anchors_in = px_volume_alg::raymarch::TONE_IN;
         let anchors_out = px_volume_alg::raymarch::TONE_OUT;
         let limits = px_volume_alg::TONE_LIMITS;
-        let Ok(gpu_side) = tone_of(&values, anchors_in, anchors_out, limits) else {
-            println!("px_volume_gpu_op：没有可用 GPU，跳过");
-            return;
-        };
+        let gpu_side = px_gpu::require_gpu(tone_of(&values, anchors_in, anchors_out, limits));
         let mut worst = 0.0_f32;
         let mut worst_at = 0usize;
         for (index, value) in values.iter().enumerate() {
@@ -719,6 +719,7 @@ pub fn march(
     face: u32,
     steps: u32,
     lane: u32,
+    jitter: f32,
     enter: f32,
     res: u32,
     layers: u32,
@@ -747,7 +748,7 @@ pub fn march(
     let skip = if occupancy.is_some() { 1 } else { 0 };
     let sky = SkyUniform {
         counts: [steps, face, lane, skip],
-        scalars: [0.0, 0.0, 0.0, enter],
+        scalars: [jitter.clamp(0.0, 1.0), 0.0, 0.0, enter],
         background: [
             extras.background[0],
             extras.background[1],
@@ -842,10 +843,11 @@ mod march_tests {
         let (res, layers) = (8_u32, 4_u32);
         let (inner, outer) = (1.0_f32, 2.0_f32);
         let data = vec![1.0_f32; (6 * layers * res * res * LANES as u32) as usize];
-        let Ok(gpu_side) = march(
+        let gpu_side = px_gpu::require_gpu(march(
             8,
             256,
             0,
+            0.0,
             inner,
             res,
             layers,
@@ -854,10 +856,7 @@ mod march_tests {
             &data,
             &MarchExtras::default(),
             None,
-        ) else {
-            println!("px_volume_gpu_op：没有可用 GPU，跳过");
-            return;
-        };
+        ));
         assert_eq!(gpu_side.len(), 8 * 8 * 6, "texel 数");
         println!(
             "步进读数（前 6 个 / 均值）：{:?} / {}",
@@ -931,10 +930,11 @@ mod crosscheck_tests {
             ..Default::default()
         };
         let reference = px_volume_alg::raymarch_channel(&volume, None, &params, 0);
-        let Ok(gpu_side) = march(
+        let gpu_side = px_gpu::require_gpu(march(
             face,
             steps,
             0,
+            0.0,
             inner,
             res,
             layers,
@@ -943,10 +943,7 @@ mod crosscheck_tests {
             &volume.data,
             &MarchExtras::default(),
             None,
-        ) else {
-            println!("px_volume_gpu_op：没有可用 GPU，跳过");
-            return;
-        };
+        ));
         assert_eq!(gpu_side.len(), reference.data.len(), "texel 数");
         let mut worst = 0.0_f32;
         let mut worst_at = 0usize;
@@ -1017,6 +1014,7 @@ mod crosscheck_tests {
             face,
             steps,
             0,
+            0.0,
             inner,
             res,
             layers,
@@ -1030,6 +1028,7 @@ mod crosscheck_tests {
             face,
             steps,
             0,
+            0.0,
             inner,
             res,
             layers,
@@ -1181,10 +1180,11 @@ mod star_tests {
             star_meta: StarMeta::sky(&grid, &params),
             background: params.background,
         };
-        let Ok(gpu_side) = march(
+        let gpu_side = px_gpu::require_gpu(march(
             params.face,
             params.steps,
             0,
+            0.0,
             inner,
             res,
             layers,
@@ -1193,10 +1193,7 @@ mod star_tests {
             &volume.data,
             &extras,
             None,
-        ) else {
-            println!("px_volume_gpu_op：没有可用 GPU，跳过");
-            return;
-        };
+        ));
         let mut worst = 0.0_f32;
         let mut worst_at = 0usize;
         for (index, value) in gpu_side.iter().enumerate() {
@@ -1289,10 +1286,7 @@ mod hue_tests {
         for extra in [0.0_f32, 0.0279, 0.028, 0.034, 0.058, 0.35, 2.0] {
             keys.push(extra);
         }
-        let Ok(gpu_side) = hue_of(&keys, ramp_luma, ramp_hue_table) else {
-            println!("px_volume_gpu_op：没有可用 GPU，跳过");
-            return;
-        };
+        let gpu_side = px_gpu::require_gpu(hue_of(&keys, ramp_luma, ramp_hue_table));
         let mut worst = 0.0_f32;
         let mut worst_at = 0usize;
         for (index, key) in keys.iter().enumerate() {
@@ -1323,6 +1317,7 @@ mod hue_tests {
 pub fn sky(
     face: u32,
     steps: u32,
+    jitter: f32,
     enter: f32,
     res: u32,
     layers: u32,
@@ -1354,7 +1349,7 @@ pub fn sky(
     let skip = if occupancy.is_some() { 1 } else { 0 };
     let sky_uniform = SkyUniform {
         counts: [steps, face, 0, skip],
-        scalars: [0.0, 0.0, 0.0, enter],
+        scalars: [jitter.clamp(0.0, 1.0), 0.0, 0.0, enter],
         background: [
             extras.background[0],
             extras.background[1],
@@ -1603,9 +1598,10 @@ mod sky_tests {
             star_meta: StarMeta::sky(&grid, &params),
             background: params.background,
         };
-        let Ok(gpu_side) = sky(
+        let gpu_side = px_gpu::require_gpu(sky(
             params.face,
             params.steps,
+            0.0,
             inner,
             res,
             layers,
@@ -1621,10 +1617,7 @@ mod sky_tests {
             (px_volume_alg::raymarch::RAMP_LUMA, ramp_hue_table),
             px_volume_alg::GRADE_STRENGTH,
             None,
-        ) else {
-            println!("px_volume_gpu_op：没有可用 GPU，跳过");
-            return;
-        };
+        ));
         let texels = reference.bytes.len() / 8;
         assert_eq!(gpu_side.len(), texels * 3, "texel 数");
         let mut worst = 0.0_f32;
@@ -1656,6 +1649,76 @@ mod sky_tests {
         println!(
             "px_volume_gpu_op：整链 {} texel 最大相对偏差 {worst:.6}",
             texels
+        );
+    }
+
+    /// 判据是**参数真的换了采样点**：夹具逐层在两档之间取三角波，格内挪动采样点就会换出不同的积分。
+    #[test]
+    fn sky_jitter_moves_the_gpu_samples() {
+        let (res, layers) = (8_u32, 4_u32);
+        let (inner, outer) = (1.0_f32, 2.0_f32);
+        let mut data = vec![0.0_f32; (6 * layers * res * res * LANES as u32) as usize];
+        for layer in 0..layers {
+            let low = layer % 2 == 0;
+            for t in 0..res {
+                for s in 0..res {
+                    for face in 0..6_u32 {
+                        let at = flat_index(res, layers, face, layer, t, s, 0);
+                        for lane in 0..LANES {
+                            data[at + lane] = match lane {
+                                0..=2 => {
+                                    if low {
+                                        0.2 * (s as f32 + 1.0) / res as f32
+                                    } else {
+                                        1.0 - 0.8 * (s as f32 + 1.0) / res as f32
+                                    }
+                                }
+                                _ => 0.0,
+                            };
+                        }
+                    }
+                }
+            }
+        }
+        let volume = VolumeData {
+            lanes: 1,
+            res,
+            layers,
+            inner,
+            outer,
+            data,
+        };
+        let stars = empty_star_field();
+        let params = |jitter: f32| px_volume_schema::params::sky::SkyParams {
+            face: 8,
+            steps: 32,
+            jitter,
+            star_gain: 0.0,
+            ..Default::default()
+        };
+        let straight = match raymarch_sky(&volume, &stars, &params(0.0)) {
+            Ok(texture) => texture,
+            Err(message) => panic!("烘焙失败：{message}"),
+        };
+        let dithered = match raymarch_sky(&volume, &stars, &params(1.0)) {
+            Ok(texture) => texture,
+            Err(message) => panic!("烘焙失败：{message}"),
+        };
+        let moved = straight
+            .bytes
+            .iter()
+            .zip(dithered.bytes.iter())
+            .filter(|(one, two)| one != two)
+            .count();
+        assert!(
+            moved > 0,
+            "`jitter = 1.0` 与 `jitter = 0.0` 烘出了逐字节相同的天空（{} 字节）—— \
+             抖动没有走到着色器",
+            straight.bytes.len()
+        );
+        println!(
+            "px_volume_gpu_op：抖动改变了 {moved} / {} 个字节",
+            straight.bytes.len()
         );
     }
 }
@@ -1733,7 +1796,7 @@ pub fn raymarch_sky(
     );
     let mut uniform = SkyUniform {
         counts: [steps, face, 0, if occupancy.is_some() { 1 } else { 0 }],
-        scalars: [0.0, 0.0, 0.0, emission.inner],
+        scalars: [sky_params.jitter.clamp(0.0, 1.0), 0.0, 0.0, emission.inner],
         background: [
             extras.background[0],
             extras.background[1],
@@ -1852,6 +1915,7 @@ mod size_tests {
             face,
             4,
             0,
+            0.0,
             inner,
             res,
             layers,
@@ -2269,6 +2333,7 @@ mod identity_grade_tests {
         let texture = sky(
             face,
             params.steps,
+            0.0,
             inner,
             res,
             layers,
@@ -2439,6 +2504,7 @@ mod chain_tests {
         let radiance = sky(
             FACE,
             params.steps,
+            0.0,
             INNER,
             RES,
             LAYERS,

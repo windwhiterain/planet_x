@@ -119,11 +119,8 @@ pub fn node_params<P: Serialize + DeserializeOwned + Default>(cache: &dyn Cache,
   therefore indistinguishable from an absent one and silently becomes the default.
 * A **missing field** is not an error either: parameter structs carry `#[serde(default)]`, so absent
   fields keep their default values.
-* An **unknown field is normally an error**: parameter structs also carry
-  `#[serde(deny_unknown_fields)]`, so a typo in a TOML key fails the run with `参数解不开：…` instead
-  of being ignored. One exception is `mesh.cubesphere`'s `Params` (`px_mesh_schema/src/params.rs`),
-  which has only `#[serde(default)]`: for that operator a misspelled key is silently dropped in
-  favour of the default.
+* An **unknown field is an error**: parameter structs carry `#[serde(deny_unknown_fields)]`, so a
+  typo in a TOML key fails the run with `参数解不开：…` instead of being ignored.
 * Because the key is computed from the *parsed value*, comments, spacing, field order, and
   "written out explicitly vs. left at its default" do not change anything.
 * Each call records the node in the parameter index, flagged with whether the file existed;

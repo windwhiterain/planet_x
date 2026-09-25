@@ -1,31 +1,71 @@
-# Findings ledger — documentation rewrite
+# Findings ledger
 
 Verified defects and stale artefacts discovered while rewriting the documentation. Each entry is
-either reproduced or traced to the source line that proves it. Fixes are applied separately; this
-file records what is wrong, not what has been done.
+either reproduced or traced to the source that proves it.
+
+⚠ **Line numbers in this file predate the comment strip**, which removed 15,930 lines from `src/**`
+and shifted almost every one of them. Treat the file and symbol names as authoritative and the line
+numbers as approximate. Re-derive a location with `git grep` before acting on one.
+
+**Status legend:** ✅ fixed · ⬜ open.
+
+## Fixed
+
+| # | Defect | Fix |
+|---|---|---|
+| 0 | `TextureData::encode` broken for `Rgba8Srgb` | divisor is now the format's element size; a round-trip test for rgba8 was added |
+| 0b | `mesh.cubesphere` missing `deny_unknown_fields` | attribute added; all three `surface.toml` recipes checked clean |
+| 1 | element operator on a volume field aborts the process | `direction_at_opt` added; `px_elem::fill` probes once instead of asking per cell |
+| 2 | `px run nebula` cannot start | `art/nebula/density_volume.toml` now uses `res` |
+| 3 | `Shape::default()` is not a whole cube map | `Shape::check` refuses a truncated cube map at both payload loaders |
+| 3 | `sky.jitter` was read by no GPU code | wired through `scalars[0]`; `0.0` reproduces the old bytes exactly |
+| 3 | `tangent_frame` frame reverses at the polar ring | branch-free rotation; measured 162° → 0.13° worst row-to-row turn |
+| 4a | GPU tests skipped and passed with no device | 15 sites now fail loudly through one helper, `px_gpu::require_gpu` |
+| 4b | the source-fingerprint gate omitted 4 of 15 crates | roster is now every crate that calls the fingerprint entry point |
+| 4c | the operator-loading gate covered 20 of 32 declarations | 31 loaded + 1 counted exclusion, asserted to equal the table |
+
+⚠ **Two content consequences, neither re-baked yet:**
+
+- `tangent_frame` changes the values `east`/`north` produce. `field.gradient` is frame-covariant and
+  measured identical to 1.9e-7, but **`field.warp` and the cloud-density bake change** in the
+  affected region (a probe offset that used to reverse). Baked content for `clouds`, `gasgiant` and
+  `desert` is therefore stale.
+- `sky.jitter` now does something. Its default is 1.0, so **the nebula sky bake changes** unless the
+  parameter is set to 0.0.
 
 ## Code defects
 
-### 0. `TextureData::encode` is broken for `Rgba8Srgb`
+### 0. ✅ `TextureData::encode` is broken for `Rgba8Srgb`
 
-`px_graph_schema/src/build.rs:82` writes `shape = [bytes.len()/2]` for **both** texture formats, but
-`Rgba8Srgb` maps to `DType::U8` (element size 1) at `:77`. `Blob::new` therefore computes a byte
-length of `bytes/2` and returns `BadPayloadLength` for every non-empty rgba8 texture. Only
-`rgba16_float` (element size 2) satisfies the check, and the test at `:236-259` covers only that
-format.
+`px_graph_schema/src/build.rs`, `impl Build for TextureData` — the shape was written as
+`bytes.len()/2` for **both** texture formats, but `Rgba8Srgb` maps to `DType::U8` (element size 1).
+`Blob::new` therefore expected `bytes/2` bytes and returned `BadPayloadLength` for every non-empty
+rgba8 texture. Only `rgba16_float` (element size 2) satisfied the check, and the only texture test
+covered exactly that format, which is why this stayed invisible.
 
-Correct form: `bytes.len() / dtype.elem_size()`, as `px_graph/src/generate/store.rs:167` does.
+The working form is `bytes.len() / dtype.elem_size()`, as
+`px_graph/src/generate/store.rs::write_texture` already did.
 
-**Latent today**, which is why nobody has hit it: the only operator emitting `TextureData` is
-`sky.nebula`, and it emits `Rgba16Float` (`px_volume_gpu_op/src/lib.rs:2195-2202`). The `Rgba8Srgb`
-textures go through `write_texture`, which builds the blob itself.
+**Why it stayed latent:** the only operator whose payload is a `TextureData` is `sky.nebula`, and it
+emits `Rgba16Float`. The `Rgba8Srgb` textures are written by `write_texture`, which builds the blob
+itself.
 
-### 0b. `mesh.cubesphere`'s parameter struct is the only one without `deny_unknown_fields`
+### 0b. ✅ `mesh.cubesphere`'s parameter struct was the only one without `deny_unknown_fields`
 
-`px_mesh_schema/src/params.rs:8`. Every sibling parameter struct has it (compare `:34`). The
-consequence is a typo in `art/<graph>/surface.toml` being silently defaulted instead of reported.
+`px_mesh_schema/src/params.rs`, the `cubesphere` module. Every sibling parameter struct had the
+attribute. The consequence was a typo in `art/<graph>/surface.toml` being silently defaulted instead
+of reported. All three `surface.toml` files were checked and carry no stray key.
 
-### 1. Any `elem::*` node on a `Domain::Volume` field aborts the process
+### 1. ✅ Any `elem::*` node on a `Domain::Volume` field aborts the process
+
+`px_elem::fill` asked every cell for its direction, and `px_protocol::art::direction_at` panicked for
+`Domain::Volume` — which has no direction. In the operator path that panic crosses a dylib boundary,
+so it is fatal and uncatchable.
+
+Fix: `direction_at_opt` returns `Option` and is the non-panicking entry; `Field::direction_probe`
+wraps it; `fill` probes once before the loop instead of asking per cell. The four element bodies all
+ignored the direction argument, so no existing operator's output changed.
+
 - **Repro:** `cargo build -p px_graphs --bin nebula`, then
   `target/debug/nebula.exe --face 8 --shape 8 --layers 8`.
 - **Symptom:** stdout stops after `warped` is cached; stderr shows
@@ -41,21 +81,39 @@ consequence is a typo in `art/<graph>/surface.toml` being silently defaulted ins
 - **Why it is invisible:** the graph is currently also broken earlier (see 2), so it only shows up
   when the user passes `--layers`.
 
-### 2. `art/nebula/density_volume.toml` uses a removed field
+### 2. ✅ `art/nebula/density_volume.toml` used a removed field
 
-- `res_ratio = 1.0` while `DensityParams` (`px_volume_schema/src/params.rs:498`) declares `res`
-  and is `deny_unknown_fields`.
-- `nebula.rs::volume_layers()` parses that file directly, so `px run nebula` fails at startup:
+- `res_ratio = 1.0` while `DensityParams` declares `res` and is `deny_unknown_fields`.
+- `nebula.rs::volume_layers()` parses that file directly, so `px run nebula` failed at startup:
   `unknown field res_ratio, expected one of res, layers, inner, outer, reach`.
-- It only appears to work when `--layers` is passed.
+- It only appeared to work when `--layers` was passed.
+- Fixed: the file now sets `res = 64` (an absolute count). The complete graph now runs:
+  19 + 1 nodes, 20.7 s, exit 0.
 
-> **Superseded (this round).** The `src/**` comments described in this section have since been
-> deleted wholesale — every crate now carries a single `//! See docs/<page>.md` line and nothing
-> else. The section is kept because the *defects* it documents (numeric constants that disagree
-> with the code, a parameter no code reads, `bevy_stub` claimed where `wgpu_host_stub` is passed)
-> are still real and still unfixed. Read it for the findings, not as a description of the tree.
+### 3. ✅ The comment contradictions below no longer exist as comments
 
-## Stale comments that contradict the code
+Everything from here to the end of the comment section described live `src/**` comments that stated
+the opposite of the code beneath them. Those comments have since been **deleted wholesale** — every
+crate carries a single `//! See docs/<page>.md` line and nothing else — so the contradictions are
+gone.
+
+The section is kept for one reason: several of the entries record a **defect rather than a stale
+sentence**, and those defects are still open. The ones that mattered:
+
+- numeric constants that disagreed with the code (`SHELL_WALL_FADE` documented as 0.10, actually
+  0.14; the `fbm3` panic message teaching `res² × layers × 6` where the true height is
+  `res × layers × 6`, a form the consumer silently accepts, so obeying the message multiplies the
+  volume layer count by `res`),
+- a live parameter no code reads (`SkyParams::jitter`),
+- `bevy_stub` claimed where `wgpu_host_stub` is passed, in three places, one of which justified a
+  false conclusion about the offline gate,
+- `cube_face_of` warned against as "a different face order" when it is the same table, pinned by a
+  test as the exact inverse of `cube_direction`.
+
+Read the rest for those findings, not as a description of the tree.
+
+## Superseded comment findings
+
 
 ### 3. `px_cook/src/lib.rs:116-117` still describes a "canvas"
 

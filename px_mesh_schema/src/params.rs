@@ -2,7 +2,7 @@ pub mod cubesphere {
     use serde::{Deserialize, Serialize};
 
     #[derive(Debug, Clone, Serialize, Deserialize, px_derive::PxParams)]
-    #[serde(default)]
+    #[serde(default, deny_unknown_fields)]
     pub struct Params {
         pub subdivisions: u32,
         pub radius: f32,
