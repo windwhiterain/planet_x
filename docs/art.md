@@ -144,16 +144,14 @@ The scenes in `art/scene/` fall into groups. The ones that carry the content:
 | `orbit-soft.toml` | the soft-cloud variant of the same shot |
 | `orbit-bare.toml` | the planet and atmosphere without clouds |
 | `orbit-gasgiant.toml` | the banded gas giant with a moon |
-| `orbit-uranus.toml` | the same gas-giant graph with an ice-giant palette |
 | `orbit-moon.toml` | the cratered moon, with a second light standing in for earthshine |
-| `orbit-rings.toml` | the only scene with rings enabled |
 | `orbit-surface.toml` | the surface detail study |
-| `orbit-proxy.toml`, `orbit-proxy-fine.toml`, `orbit-proxy-fine-bound.toml` | cloud-mesh proxy variants |
+| `orbit-proxy.toml` | the cloud-mesh proxy variant |
 | `nebula.toml` | a nebula seen from inside, skybox supplied by a cooked graph |
 
-The remaining files in that directory are single-purpose comparison and probe recipes used to
-isolate one parameter at a time (sun distance, shadow on/off, resolution, cloud extinction). They
-are inputs to specific measurements rather than content.
+Two files sit beside those: `orbit-bare-nolight.toml` and `soft-e300.toml`. The single-purpose
+comparison and probe recipes that used to share the directory were deleted; their names and contents
+live in git history, recorded in [`FINDINGS.md`](../FINDINGS.md) #6.
 
 ## Pass recipes
 
