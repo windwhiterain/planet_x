@@ -11,6 +11,7 @@ fn main() {
         Some("list") => list(),
         Some("build") => build(&args[1..]),
         Some("run") => run(&args[1..]),
+        Some("cost") => cost(&args[1..]),
         Some(other) => Err(px_cook::fault::line(
             "usage",
             "",
@@ -24,11 +25,12 @@ fn main() {
 }
 
 fn usage() -> String {
-    "用法：px <list|build|run>\n  \
+    "用法：px <list|build|run|cost>\n  \
      list                              计划：逐条打印 id / 声明 / 根 / 源 / key / 有|缺\n  \
      build [--gc] [--deep] [--target]  stage 1：编缺的那些（--gc 顺手回收非活实例库）\n  \
      run <图> [--build] [--store <目录>] [图自己的参数…]\n  \
-                                     两个 stage 顺序执行（默认不编：运行只读）"
+                                     两个 stage 顺序执行（默认不编：运行只读）\n  \
+     cost <图> [--runs N]              读数：最近 N 轮（默认 3）的逐节点 hit/miss、cook 毫秒、字节与参数"
         .to_string()
 }
 
@@ -478,6 +480,282 @@ fn graph_exe(name: &str) -> Result<PathBuf, String> {
             ),
         )
     })
+}
+
+#[derive(serde::Deserialize)]
+struct CostNode {
+    seq: u64,
+    node: String,
+    key: String,
+    hit: bool,
+    cook_millis: u64,
+    bytes: u64,
+}
+
+fn parse_cost(args: &[String]) -> Result<(String, usize), String> {
+    let usage = || {
+        "用法：px cost <图> [--runs N]\n  \
+         N 缺省为 3：读最近 N 轮的逐节点 hit/miss、cook 毫秒、字节与参数"
+            .to_string()
+    };
+    let Some(name) = args.first().filter(|arg| !arg.starts_with('-')) else {
+        return Err(px_cook::fault::line("usage", "", &usage()));
+    };
+    let mut runs = 3_usize;
+    let mut index = 1;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--runs" => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err(px_cook::fault::line(
+                        "usage",
+                        "",
+                        &format!("--runs 后面要跟轮数\n{}", usage()),
+                    ));
+                };
+                runs = value.parse().map_err(|_| {
+                    px_cook::fault::line(
+                        "usage",
+                        "",
+                        &format!("轮数不是正整数：{value}\n{}", usage()),
+                    )
+                })?;
+                if runs == 0 {
+                    return Err(px_cook::fault::line(
+                        "usage",
+                        "",
+                        &format!("轮数至少为 1\n{}", usage()),
+                    ));
+                }
+                index += 1;
+            }
+            other if other.starts_with("--runs=") => {
+                runs = other
+                    .strip_prefix("--runs=")
+                    .unwrap_or("")
+                    .parse()
+                    .map_err(|_| {
+                        px_cook::fault::line(
+                            "usage",
+                            "",
+                            &format!("轮数不是正整数：{other}\n{}", usage()),
+                        )
+                    })?;
+                if runs == 0 {
+                    return Err(px_cook::fault::line(
+                        "usage",
+                        "",
+                        &format!("轮数至少为 1\n{}", usage()),
+                    ));
+                }
+            }
+            other => {
+                return Err(px_cook::fault::line(
+                    "usage",
+                    "",
+                    &format!("不认识的参数 `{other}`\n{}", usage()),
+                ));
+            }
+        }
+        index += 1;
+    }
+    Ok((name.clone(), runs))
+}
+
+fn cost(args: &[String]) -> Result<(), String> {
+    let (graph_name, runs) = parse_cost(args)?;
+    let subject = format!("graph={graph_name}");
+    let dir = px_cook::workspace_root()
+        .join("target")
+        .join("pcg")
+        .join(&graph_name);
+    let ledger = dir.join("metrics.jsonl");
+    let text = match std::fs::read_to_string(&ledger) {
+        Ok(text) => text,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            println!(
+                "no ledger for {subject}（{} 不在：此图在此目录下没有烘过）",
+                ledger.display()
+            );
+            return Ok(());
+        }
+        Err(err) => {
+            return Err(px_cook::fault::line(
+                "manifest",
+                &format!("{subject} file=metrics.jsonl"),
+                &format!("账本读不了 {}：{err}", ledger.display()),
+            ));
+        }
+    };
+    if dir.join("metrics.jsonl.1").is_file() {
+        println!("注：上一份轮转账本（metrics.jsonl.1）在，seq 跨文件连续，这里只读当前文件");
+    }
+    let mut nodes: Vec<CostNode> = Vec::new();
+    for (index, line) in text.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let value: serde_json::Value = serde_json::from_str(line).map_err(|err| {
+            px_cook::fault::line(
+                "manifest",
+                &subject,
+                &format!("账本第 {} 行解不开：{err}", index + 1),
+            )
+        })?;
+        if value.get("node").is_none() {
+            continue;
+        }
+        nodes.push(serde_json::from_value(value).map_err(|err| {
+            px_cook::fault::line(
+                "manifest",
+                &subject,
+                &format!("账本第 {} 行不是节点行：{err}", index + 1),
+            )
+        })?);
+    }
+    let mut seqs: Vec<u64> = nodes.iter().map(|node| node.seq).collect();
+    seqs.sort_unstable();
+    seqs.dedup();
+    if seqs.is_empty() {
+        return Err(px_cook::fault::line(
+            "manifest",
+            &subject,
+            &format!("{} 里没有可读的轮次", ledger.display()),
+        ));
+    }
+    let window: Vec<u64> = seqs.iter().rev().take(runs).rev().copied().collect();
+    let manifest_path = dir.join("manifest.json");
+    let manifest: Vec<serde_json::Value> =
+        serde_json::from_str(&std::fs::read_to_string(&manifest_path).map_err(|err| {
+            px_cook::fault::line(
+                "manifest",
+                &subject,
+                &format!("清单读不了 {}：{err}", manifest_path.display()),
+            )
+        })?)
+        .map_err(|err| {
+            px_cook::fault::line(
+                "manifest",
+                &subject,
+                &format!("清单解不开 {}：{err}", manifest_path.display()),
+            )
+        })?;
+    let op_of = |node: &str| {
+        manifest
+            .iter()
+            .find(|entry| entry.get("node").and_then(|name| name.as_str()) == Some(node))
+            .and_then(|entry| entry.get("op"))
+            .and_then(|op| op.as_str())
+            .unwrap_or("?")
+    };
+    let params_path = dir.join("params.json");
+    let params: Option<serde_json::Value> = match std::fs::read_to_string(&params_path) {
+        Ok(text) => Some(serde_json::from_str(&text).map_err(|err| {
+            px_cook::fault::line(
+                "manifest",
+                &subject,
+                &format!("参数索引解不开 {}：{err}", params_path.display()),
+            )
+        })?),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+        Err(err) => {
+            return Err(px_cook::fault::line(
+                "manifest",
+                &subject,
+                &format!("参数索引读不了 {}：{err}", params_path.display()),
+            ));
+        }
+    };
+    if params.is_none() {
+        println!("注：{} 不在，参数列为空", params_path.display());
+    }
+    let param_of = |node: &str| {
+        params
+            .as_ref()
+            .and_then(|index| index.get(node))
+            .and_then(|entry| entry.get("params"))
+            .map(|value| serde_json::to_string(value).unwrap_or_else(|_| value.to_string()))
+            .unwrap_or_else(|| "—".to_string())
+    };
+    println!(
+        "cost {graph_name}：最近 {} 轮（seq {}..{}）",
+        window.len(),
+        window.first().unwrap_or(&0),
+        window.last().unwrap_or(&0),
+    );
+    for seq in &window {
+        let rows: Vec<&CostNode> = nodes.iter().filter(|node| node.seq == *seq).collect();
+        let hits = rows.iter().filter(|node| node.hit).count();
+        let millis: u64 = rows.iter().map(|node| node.cook_millis).sum();
+        let bytes: u64 = rows.iter().map(|node| node.bytes).sum();
+        println!(
+            "  seq={seq} 节点 {}：命中 {hits}、重算 {}，cook {millis} ms，bytes {bytes}",
+            rows.len(),
+            rows.len() - hits
+        );
+        if *seq == *window.last().unwrap_or(&0) {
+            for node in &rows {
+                println!(
+                    "    {:<16} {:<16} {} key={} millis={} bytes={} params={}",
+                    node.node,
+                    op_of(&node.node),
+                    if node.hit { "命中" } else { "重算" },
+                    short(&node.key),
+                    node.cook_millis,
+                    node.bytes,
+                    param_of(&node.node),
+                );
+            }
+        }
+    }
+    for pair in window.windows(2) {
+        let (before, after) = (pair[0], pair[1]);
+        println!("  差分 seq{before}→seq{after}：");
+        let mut changed = 0_usize;
+        for node in nodes.iter().filter(|node| node.seq == after) {
+            match nodes
+                .iter()
+                .find(|prev| prev.seq == before && prev.node == node.node)
+            {
+                Some(prev) => {
+                    let key_mark = if prev.key == node.key {
+                        "键同"
+                    } else {
+                        "键变"
+                    };
+                    if prev.key != node.key {
+                        changed += 1;
+                    }
+                    let delta_millis = node.cook_millis as i64 - prev.cook_millis as i64;
+                    let delta_bytes = node.bytes as i64 - prev.bytes as i64;
+                    println!(
+                        "    {:<16} {key_mark} millis {:+} bytes {:+}",
+                        node.node, delta_millis, delta_bytes,
+                    );
+                }
+                None => {
+                    changed += 1;
+                    println!(
+                        "    {:<16} 新增 millis={} bytes={}",
+                        node.node, node.cook_millis, node.bytes
+                    );
+                }
+            }
+        }
+        for prev in nodes.iter().filter(|node| node.seq == before) {
+            if !nodes
+                .iter()
+                .any(|node| node.seq == after && node.node == prev.node)
+            {
+                changed += 1;
+                println!("    {:<16} 消失", prev.node);
+            }
+        }
+        if changed == 0 {
+            println!("    键与读写全同（全命中且内容不动）");
+        }
+    }
+    Ok(())
 }
 
 fn dir_size(dir: &Path) -> u64 {
