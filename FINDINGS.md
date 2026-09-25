@@ -5,7 +5,11 @@ either reproduced or traced to the source that proves it.
 
 ⚠ **Line numbers in this file predate the comment strip**, which removed 15,930 lines from `src/**`
 and shifted almost every one of them. Treat the file and symbol names as authoritative and the line
-numbers as approximate. Re-derive a location with `git grep` before acting on one.
+numbers as approximate. Re-derive a location with `git grep` before acting on one. Spot check of 6
+cited locations against the blobs (`px_cook/src/lib.rs:116-117`, `px_graph_schema/src/ops.rs:5`,
+`px_protocol/src/art.rs:816`, `px_render/src/serve.rs:41-42`, `px_volume_gpu_op/src/lib.rs:594-598`,
+`px_shader/src/host_stubs.rs:165-167`): none points at the claimed content — five cite comments the
+strip removed, and live code drifted too (the `direction_at` panic now sits near `art.rs:632`).
 
 **Status legend:** ✅ fixed · ⬜ open.
 
