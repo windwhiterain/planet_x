@@ -241,6 +241,10 @@ Per graph, under `target/pcg/<graph>/`:
 | `bytes` | the length of the `.pxart` file |
 | `detail` | a one-line description of the payload, produced by the domain's `Build::detail` |
 
+⚠ `op_version`, `millis` and `bytes` are unsigned (`u64`) and are written as plain JSON numbers, so
+a full interface hash exceeds `i64::MAX` — for example `0x8816a2cef433d993`. Read them as unsigned;
+the fields are for display and cross-checking, not for arithmetic.
+
 Hits are recorded too, and that is load-bearing: the manifest is *the* name → key index for
 downstream consumers. `graph_manifest(graph)` reads it and `manifest_key_of(graph, node)` looks one
 node up; the `scene` graph resolves `"<graph>::<node>"` references this way. A run that never wrote a

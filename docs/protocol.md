@@ -38,6 +38,11 @@ are separate formats with separate encoders and no shared code.
 
 ## The blob encoding
 
+The manifest frame is this file's concern. The **graph manifest** (`target/pcg/<graph>/manifest.json`,
+the run's name → key index) is a separate artifact owned by the driver; it records `u64` fields —
+`op_version` is a full interface hash — as plain JSON numbers, so a reader must treat them as
+unsigned (see [graph.md](graph.md)).
+
 Everything binary travels as a `Blob`: one JSON header line, a `\n`, then the raw payload.
 
 ```text
