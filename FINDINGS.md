@@ -78,6 +78,16 @@ The re-store also had a hidden behaviour: it rewrote the artifact's embedded ass
 back (`Value/Build::decode` takes the caller's node name; `px_render` reads only `params` and blob
 headers from the asset manifest), so the file now stays as first written — first writer wins.
 
+Reachability correction recorded while this was being written up: **`px_graph` *is* inside
+`px_graphs` and its fingerprint roster** - `px_fingerprint/src/lib.rs::collect_crate` recurses into
+every `path_dependencies` entry, and `px_graph = { path = "../px_graph" }` is a live line in
+`px_graphs/Cargo.toml`. The zero-key-rotation property of this fix is therefore *a today-fact*, not
+a structural one: `px_graphs` hash is only the identity of `px_local_op!` nodes, and no shipped
+graph has one yet (the only use is `px_graphs/tests/local_op.rs`, and tests are excluded from the
+roster). The first shipped local operator makes a one-byte edit to `px_graph/src/driver.rs` rotate
+that node key - the same warning AGENTS.md already writes for `px_cook` / `px_decls`. The gate
+`px_fingerprint/tests/roster.rs::the_graphs_roster_carries_the_driver` pins the reachability.
+
 Fix: `Graph::store` writes only on a miss; on a hit it appends the manifest entry with the byte count
 taken from the on-disk file. Measured after the fix on the same workspace: the all-hit `nebula` run
 drops from 0.94–0.96 s to **0.47–0.50 s** wall, and a post-run mtime probe shows **0 of 8** artifacts
