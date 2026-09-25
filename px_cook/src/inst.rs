@@ -504,7 +504,7 @@ pub fn manifest_text(root: &Path, roots: &[String], kind: &InstKind) -> Result<S
     if roots.is_empty() {
         return Err(
             "这条实例没登记任何根（`inst::InstInfo::alg_roots` 是空的）—— 泛型体住哪个 crate？\
-             （那就是 `docs/system/build-graph.md` §183 里的**边**）"
+             （那就是 `docs/operators.md` 里的**边**）"
                 .to_string(),
         );
     }

@@ -55,7 +55,7 @@ pub fn serve(port: u16, pcg_root: PathBuf, width: u32, height: u32) -> Result<()
     println!("租约：{}", lease_path.display());
     println!("渲染管线全部就绪：本宿主是**同步**建管线（没有队列可等），此刻待编 0 条、失败 0 条");
     println!(
-        "尺寸以请求里的为准（--width/--height 是 Bevy 宿主那一路的初始画布，这里只收不用）：{width}×{height}"
+        "尺寸以请求里的为准（--width/--height 只在别的入口有意义，这里只收不用）：{width}×{height}"
     );
 
     spawn_lease_watch(lease_path, lease.pid);
@@ -282,9 +282,9 @@ fn steps_of(request: &Request) -> Result<Vec<Step>, String> {
             "`{}` 那一路不在这一版：它要的是**计时用的帧循环**（逐帧采样 / 丢窗 / 等 K 帧 \
              + 每条 pass 的编码器级 GPU 时间戳），而本宿主现在**按需渲染** —— \
              预览窗口（S7 前半）那个循环只在画面变了时画一帧，给不出逐帧序列、也没有那七段 span。\
-             报告里的 `gpu_ms` / `pair` 因此没有可比对象（Bevy 那几段按 §104 第 4 条切，\
+             报告里的 `gpu_ms` / `pair` 因此没有可比对象（逐条 pass 的编码器级时间戳，\
              与「按需画 N 次」不是同一个量）。要计时读数请走 `--spans 预热,测量`：\
-             它量的是**逐条 pass** 的编码器级时间戳（§153 的 J4 仪器）—— \
+             它量的是**逐条 pass** 的编码器级时间戳—— \
              ⚠ 那个数**不叫** `gpu_ms`，与这一路说的 `gpu_ms` 不是同一个量。",
             request.job.name()
         ));

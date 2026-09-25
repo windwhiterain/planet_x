@@ -2325,7 +2325,7 @@ impl Executor {
                     match &shapes {
                         Some((first, first_shape)) if *first_shape != shape => {
                             return Err(format!(
-                                "pass '{}' 里两笔 draw 的顶点布局不同：'{}' 是 {first_shape}，                                 '{}' 是 {shape} —— 顶点阶段挂在 pass 上，套到另一套布局上就是错的。                                 一条 pass 只能画同一种布局的几何（§129）",
+                                "pass '{}' 里两笔 draw 的顶点布局不同：'{}' 是 {first_shape}，                                 '{}' 是 {shape} —— 顶点阶段挂在 pass 上，套到另一套布局上就是错的。                                 一条 pass 只能画同一种布局的几何",
                                 pass.label, first, draw.geometry
                             ));
                         }

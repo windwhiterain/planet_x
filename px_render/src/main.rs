@@ -42,7 +42,7 @@ fn usage() -> String {
         "      --report 让服务端把结构化报告落到那个路径（同一份也回给调用方）。",
         "  px_render --scene 文档.pxart --out PNG [--width W] [--height H] [--offline] [--stats]",
         "      **离线**出图（要显式写 --offline）：不开服务、不走协议，直接用本进程的设备画一帧。",
-        "      ⚠ 为什么它不是缺省：`--scene --out` 在 bevy 宿主那里的语义是**请求**（交给服务），",
+        "      ⚠ 为什么它不是缺省：`--scene --out` 是**请求**（交给服务），",
         "        而 `tools/` 那套仪器（frame-probe / harness）就是这么调本 exe 的。",
         "        两套语义共用一个写法，等于让'这张图是谁画的'变成一条要靠猜的事。",
         "      --stats：报回读字节的逐通道 min/max 与颜色数（平场那种判据靠它）。",
@@ -52,9 +52,9 @@ fn usage() -> String {
         "        第 2..N 帧（中位）」三段墙钟；落盘的是最后一帧（与不带 --time 的那张逐字节相同）。",
         "      --spans 预热,测量：**逐条 pass 的 GPU 编码器级时间戳**（J4 的仪器）。",
         "        一条保留态会话 + 预热帧 + 测量帧；每条 pass 报两套边界（包络 / pass 内 ——",
-        "        后者与 Bevy 的 `elapsed_gpu` 同一套），另有帧级一条与匹配子集之和。",
+        "        后者是逐条 pass 的编码器级时间戳），另有帧级一条与匹配子集之和。",
         "        ⚠ 两个数都必须显式写（不给缺省）；⚠ 与 --sheet 互斥（槽按单张排）。",
-        "        ⚠ 这个数**不叫** `gpu_ms`：那个名字在 Bevy 那边是七段之和（见 src/spans.rs）。",
+        "        ⚠ 这个数**不叫** `gpu_ms`：那个名字指七段之和（见 src/spans.rs）。",
         "  px_render --scene 文档.pxart --out sheet.png --sheet [--columns N] [--offline]",
         "      **对照图**（J2）：12 格 × 960×640 拼成一张 3840×1920 —— 相机表来自产物",
         "      （`.pxart` 的 `cameras`），格子的排布是渲染器的事（缺省 4 列）。",
@@ -893,8 +893,8 @@ fn run_spans(
     if !missing.is_empty() {
         eprintln!(
             "这一台设备缺 {} ⇒ 逐条 pass 的 GPU 时间戳量不了。\
-             ⚠ 不许退化成「只量包络」那种数：它与 Bevy 的 `elapsed_gpu` 不是同一套边界，\
-             放进同一个字段比没有这个数坏（§147）",
+             ⚠ 不许退化成「只量包络」那种数：它与 `gpu_ms` 不是同一套边界，\
+             放进同一个字段比没有这个数坏",
             missing.join(" / ")
         );
         return 1;
@@ -1044,8 +1044,8 @@ fn run_spans(
         }
     }
     println!(
-        "⚠ 这个数**不是** Bevy 报告里的 `gpu_ms`（那个是 `render/**/elapsed_gpu` 七段之和）：\
-         这里报的是本文档那些 pass 的编码器级 span，同名会让人以为它们是一回事（§147）"
+        "⚠ 这个数**不是** `gpu_ms`（那个是七段之和）：\
+         这里报的是本文档那些 pass 的编码器级 span，同名会让人以为它们是一回事"
     );
     if failed > 0 { 1 } else { 0 }
 }

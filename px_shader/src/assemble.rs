@@ -300,7 +300,7 @@ mod tests {
         }
         assert!(
             HOST_VIEW_STUB.contains("@group(0) @binding(0) var<uniform> view"),
-            "绑定号必须还是 0（§104 第 1 条：绑定号会改像素）"
+            "绑定号必须还是 0（绑定号会改像素）"
         );
     }
 }

@@ -626,7 +626,7 @@ mod tests {
                 closure(&source, &modules).fingerprint(),
                 closure_fingerprint,
                 "{name} 的 include 闭包变了 —— 外部符号的名字也在指纹里，\
-                 而 `px_graph::shader_key` 拿它算产物键（改了它，冻在 art/anchor/frozen 的产物键就跟着变）"
+                 而 `px_graph::shader_key` 拿它算产物键（改了它，既有产物键全部作废）"
             );
             let mut seen = Vec::new();
             let assembled = assemble::render_source(

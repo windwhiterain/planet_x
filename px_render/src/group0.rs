@@ -1075,7 +1075,7 @@ mod tests {
                 GLOBALS_BINDING,
                 DEPTH_PREPASS_BINDING,
             ],
-            "反射出来的 (group, binding) 次序与 §108.3 那张表不一致"
+            "反射出来的 (group, binding) 次序与 `docs/renderer.md` 的组表不一致"
         );
         assert_eq!(
             table[2].1, "storage clustered_lights",
@@ -1131,7 +1131,7 @@ mod tests {
         assert_eq!(
             exposure().to_bits(),
             0x3A83_5274,
-            "view.exposure 的位模式（§110.1：按 f32 表达式算，不是 f64 取整）"
+            "view.exposure 的位模式（按 f32 表达式算，不是 f64 取整）"
         );
         let camera = crate::camera::probe_camera(None, 960.0 / 640.0);
         let view = ViewUniform::from_camera(&camera, [0.0, 0.0, 960.0, 640.0]);
@@ -1257,7 +1257,7 @@ mod tests {
         assert_eq!(
             shadow_normal_bias().to_bits(),
             (0.6f32 * core::f32::consts::SQRT_2).to_bits(),
-            "shadow_normal_bias＝0.6 × √2（**texel 数**，§本轮）"
+            "shadow_normal_bias＝0.6 × √2（**texel 数**）"
         );
     }
 
@@ -1301,7 +1301,7 @@ mod tests {
         assert_eq!(
             packed.light_custom_data,
             [0.0, -1.0, POINT_LIGHT_SHADOW_MAP_NEAR_Z, 0.0],
-            "π/2、aspect 1.0 时它算出来恰好是 (0,-1,near,0)（§109.2）"
+            "π/2、aspect 1.0 时它算出来恰好是 (0,-1,near,0)"
         );
     }
 

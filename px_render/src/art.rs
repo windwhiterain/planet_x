@@ -821,7 +821,7 @@ mod tests {
         assert_eq!(
             digest_of(&crate::icosphere::icosphere(1.0, 64)),
             "B4B37AB464C3A743",
-            "摘要口径必须与 §110.3 那张 oracle 表一致（小端拼 positions → normals → uvs → indices）"
+            "摘要口径必须是「小端拼 positions → normals → uvs → indices」"
         );
         assert_eq!(
             digest_of(atmosphere.geometry.mesh()),

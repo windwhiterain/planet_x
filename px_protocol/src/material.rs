@@ -408,7 +408,7 @@ mod tests {
         assert_eq!(
             texture_slot_of(25),
             None,
-            "第 25 格是加宽之后的第一格**外面**（老的那条「只能是 1/3/5/7」现在不成立，见 §75 的 E7）"
+            "第 25 格是加宽之后的第一格**外面**（槽位表是追加式的，见 `docs/protocol.md`）"
         );
         assert_eq!(TextureDimension::Cube.layers(), 6);
         assert_eq!(

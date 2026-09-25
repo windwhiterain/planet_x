@@ -29,7 +29,7 @@ mod tests {
         );
         assert!(
             !DEPTH_NDC_TO_VIEW_Z.contains("0.1"),
-            "near 不许抄成字面量（§66.1：同一条契约、两个数）"
+            "near 不许抄成字面量：同一条契约、两个数"
         );
 
         let view = "bevy_pbr::mesh_view_bindings::view";
@@ -91,7 +91,7 @@ mod tests {
         assert_eq!(
             stubs(shadow),
             Some(POINT_SHADOW_STUB),
-            "影子走的是本表里那一格（§109 起是真实现）"
+            "影子走的是本表里那一格"
         );
         assert!(
             POINT_SHADOW_STUB.contains("depth < stored"),
@@ -110,7 +110,7 @@ mod tests {
         );
         assert!(
             POINT_SHADOW_STUB.contains("textureLoad("),
-            "虚拟影图改**手动比较**（§本轮）：一页里的某一格只有 `textureLoad` 取得到，\
+            "虚拟影图改**手动比较**：一页里的某一格只有 `textureLoad` 取得到，\
              比较采样器那一档取不到\"这一页里的这一格\""
         );
         assert!(

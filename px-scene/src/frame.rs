@@ -464,7 +464,7 @@ pub fn build(
         if faces != CUBE_FACES {
             return Err(format!(
                 "{at} 的 shadow_faces 是 {faces}：cube 只有 {CUBE_FACES} 面\
-                 （§109.1：Bevy 就是 6 个单层 pass）"
+                 "
             ));
         }
         let allocation = allocation.as_ref().ok_or_else(|| {
@@ -840,7 +840,7 @@ fn bake_material(
             return Err(format!(
                 "{at} 的参数 '{}' 给的是 {value}：参数要说**来源**，不是值 ——\n  \
                  帧图是六个场景共用的一份，写死一个数就等于把内容焊进帧策略\
-                 （§133：六份场景的亮度今天恰好都是 900，而内容可以不是）。\n  \
+                 （亮度这类内容值只有一处真源，帧配方里写死一个数就是错的）。\n  \
                  认得的来源：{}",
                 slot.name,
                 SOURCES.join(" / ")

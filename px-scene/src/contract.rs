@@ -13,7 +13,7 @@ pub fn shader_parts_of(member: &Member, root: &Path) -> Result<(String, Material
     })?;
     let text = schema.ok_or_else(|| {
         format!(
-            "shader 成员 {member} 的产物没有 schema descriptor：那是契约收口（§80）之前烘的。\n  \
+            "shader 成员 {member} 的产物没有 schema descriptor：那是契约收口之前烘的。\n  \
              先重烘：cargo run -p px_graphs --bin shaders"
         )
     })?;

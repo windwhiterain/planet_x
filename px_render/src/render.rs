@@ -1376,7 +1376,7 @@ impl Session {
             }
         }
         audit.push(format!(
-        "组 1（§142 的两类参数）：**super** = 每视图一份 `PassView`（{} 份 × 64 B = {} B：\
+        "组 1（两类参数）：**super** = 每视图一份 `PassView`（{} 份 × 64 B = {} B：\
          相机 **每格一份**（{} 格）+ 影子面 {}）｜**instance** = 全帧**一份**实例数组\
          （{} 个物体 × 112 B = {} B，按 `@builtin(instance_index)` 选格）。拆之前是每 \
          (物体, 视图) 一份 176 B 的 `MeshStage`（{} 份 = {} B）⇒ 数据从 (物体 × 视图) 那一维上下来了",
