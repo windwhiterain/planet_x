@@ -5,12 +5,15 @@ use px_graphs::elem;
 
 type Fault = Box<dyn std::error::Error>;
 
-fn main() -> Result<(), Fault> {
+fn main() {
+    px_cook::fault::graph_main(run);
+}
+
+fn run() -> Result<(), Fault> {
     // 这张图任何分支都可能 `cached` 到的域算子（推导自本文件的 `cached` 调用，
     // 与 schema 每条声明的 `LIB` 对齐），逐条走 `source_hash` 全握手；
     // 名单之外的库回退到首个节点的握手拒绝，与今天等价、不会更糟。
-    px_graphs::insts::gate("moon", &["px_field_op", "px_mesh_op"])
-        .expect("实例库不齐 ⇒ 先 `px build`（stage 1 的正规命令）");
+    px_graphs::insts::gate("moon", &["px_field_op", "px_mesh_op"])?;
     px_cook::apply_store_args()?;
     let graph = begin(GraphSpec {
         name: "moon".to_string(),

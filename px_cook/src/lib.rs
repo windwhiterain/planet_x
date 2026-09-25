@@ -1,5 +1,6 @@
 //! See docs/graph.md
 
+pub mod fault;
 pub mod inst;
 pub mod inst_scan;
 
@@ -54,7 +55,8 @@ where
     cache.record_params(node, O::ID, &params_json, false);
 
     let interface = O::interface();
-    let source_hash = O::source_hash()?;
+    let source_hash = O::source_hash()
+        .map_err(|err| fault::line("library", &format!("node={node} op={}", O::ID), &err))?;
     let base = px_graph_schema::node_key(
         &OpId {
             id: O::ID,
@@ -65,42 +67,51 @@ where
         |hasher| inputs.collect(hasher),
     );
     let key = base;
+    let subject = fault::node_subject(node, O::ID, &key);
 
     if let Some(payload) = cache.fetch(key) {
-        let value = <O::Payload as Build>::decode(&payload, node)?;
+        let value = <O::Payload as Build>::decode(&payload, node)
+            .map_err(|err| fault::line("payload", &subject, &err))?;
         let detail = <O::Payload as Build>::detail(&value);
-        cache.store(
+        cache
+            .store(
+                Report {
+                    node,
+                    op: O::ID,
+                    interface,
+                    key,
+                    hit: true,
+                    millis: 0,
+                    detail,
+                },
+                &payload,
+            )
+            .map_err(|err| fault::line("write", &subject, &err))?;
+        return Ok(Cooked::new(key, value, true, 0, payload.bytes()));
+    }
+
+    let started = Instant::now();
+    let value = f
+        .render(&params, &inputs)
+        .map_err(|err| fault::line("operator", &subject, &err))?;
+    let millis = started.elapsed().as_millis() as u64;
+    let payload = <O::Payload as Build>::encode(&value)
+        .map_err(|err| fault::line("payload", &subject, &err))?;
+    let detail = <O::Payload as Build>::detail(&value);
+    cache
+        .store(
             Report {
                 node,
                 op: O::ID,
                 interface,
                 key,
-                hit: true,
-                millis: 0,
+                hit: false,
+                millis,
                 detail,
             },
             &payload,
-        )?;
-        return Ok(Cooked::new(key, value, true, 0, payload.bytes()));
-    }
-
-    let started = Instant::now();
-    let value = f.render(&params, &inputs)?;
-    let millis = started.elapsed().as_millis() as u64;
-    let payload = <O::Payload as Build>::encode(&value)?;
-    let detail = <O::Payload as Build>::detail(&value);
-    cache.store(
-        Report {
-            node,
-            op: O::ID,
-            interface,
-            key,
-            hit: false,
-            millis,
-            detail,
-        },
-        &payload,
-    )?;
+        )
+        .map_err(|err| fault::line("write", &subject, &err))?;
     Ok(Cooked::new(key, value, false, millis, payload.bytes()))
 }
 
@@ -110,7 +121,8 @@ where
 {
     let text = cache.params_text(node);
     let from_file = text.is_some();
-    let (parsed, json) = canonical_params::<P>(text.as_deref())?;
+    let (parsed, json) = canonical_params::<P>(text.as_deref())
+        .map_err(|err| fault::line("params", &format!("node={node}"), &err))?;
     cache.record_params(node, "", &json, from_file);
     Ok(parsed)
 }

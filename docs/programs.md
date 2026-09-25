@@ -380,6 +380,45 @@ its dylibs. `list`, `build`, and `gc` do not pre-build them — they only touch 
 names `moon`, `nebula`, and `gasgiant` are not task names; they run as
 `-Task run -Graph <graph>` (add `--build` after the graph name when stage 1 is incomplete).
 
+## Failure lines
+
+Every entrance a person or an agent drives — `px` and the thirteen graph programs — prints its
+failure as one stable, greppable first line, with the human sentence after it:
+
+```text
+px-error[<kind>]: <key=value>… | <what>
+```
+
+- `px-error` at the start of the line, then the kind in brackets, then `]: `.
+- `<kind>` comes from a closed set: `params`, `operator`, `missing-instance`, `stale-toolchain`,
+  `missing-graph`, `manifest`, `library`, `symbol`, `payload`, `shape`, `write`, `scene`, `panic`, and
+  `internal` (the label a failure gets when it reached the entrance without having been classified —
+  seeing one is a finding, not a resting place).
+- The subject is `key=value` pairs, space-separated, terminated by ` | `. Which pairs appear follows
+  from what is known at the failure site: a node failure carries `node=` `op=` `key=` (twelve hex
+  digits), a plan failure carries `graph=`, a panic carries `at=<file>:<line>`. A pair never contains
+  spaces or ` | `.
+- Everything after the first line is detail and is free-form, so a caller parses line one and a person
+  reads on.
+
+A caller branches on the kind instead of matching prose, and the collision table is the reason the
+kind has to exist — the same sentence covers different causes:
+
+| sentence | sites | causes it has to cover |
+|---|---|---|
+| `读不了 …` | 16 | a parameter file, a source file, a shader module, an instance sidecar |
+| `第 …` | 13 | a parameter, a pass target, a layer, a frame index |
+| `读不到 …` | 7 | a manifest, an artifact, an operator library |
+| `写不了 …` | 5 | an artifact, a sidecar, a generated file |
+| `建不了 …` | 4 | a directory, a nested workspace, a probe |
+
+Identity is attached where it is known rather than where it is printed: `cached` and `node_params` add
+the node name, the operator id and the key before returning, so a failure from an operator body, a
+payload decode or a store no longer arrives anonymous. A graph program whose body returns `Result` goes
+through `px_cook::fault::graph_main`, which installs the panic hook and reduces whatever comes back to
+that one line; the programs that report by panicking get the hook's `panic` kind instead. The criteria
+for all of it are `px_cook/tests/error_line.rs`.
+
 ## Tests: the fast chain and the full one
 
 `Cargo.toml` lists all crates in `members` and a strict subset in `default-members`. The difference

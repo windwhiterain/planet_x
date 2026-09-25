@@ -4,6 +4,7 @@ use px_graph_schema::PxOp;
 use px_graphs::insts::Band;
 
 fn main() {
+    px_cook::fault::install_panic_hook();
     let op_id = std::env::args()
         .nth(1)
         .unwrap_or_else(|| "cloud.coarse/band".to_string());

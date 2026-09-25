@@ -5,17 +5,21 @@ use px_cook::inst::{self, BuildGraph, InstCodegen};
 use px_graphs::{assert_toolchain_matches, current_toolchain, recorded_toolchain};
 
 fn main() {
+    px_cook::fault::install_panic_hook();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.first().map(String::as_str) {
         Some("list") => list(),
         Some("build") => build(&args[1..]),
         Some("run") => run(&args[1..]),
-        Some(other) => Err(format!("不认识的子命令 `{other}`\n{}", usage())),
-        None => Err(usage()),
+        Some(other) => Err(px_cook::fault::line(
+            "internal",
+            "",
+            &format!("不认识的子命令 `{other}`\n{}", usage()),
+        )),
+        None => Err(px_cook::fault::line("internal", "", &usage())),
     };
     if let Err(err) = result {
-        eprintln!("{err}");
-        std::process::exit(1);
+        px_cook::fault::report(&err);
     }
 }
 
@@ -442,10 +446,14 @@ fn graph_exe(name: &str) -> Result<PathBuf, String> {
     .into_iter()
     .find(|path| path.is_file());
     fallback.ok_or_else(|| {
-        format!(
-            "找不到图 exe `{name}`（找过 {} 与 target/{{debug,release}}/）\
-             \n  ⇒ 先把图程序编出来：cargo build -p px_graphs --bin {name}",
-            dir.display()
+        px_cook::fault::line(
+            "missing-graph",
+            &format!("graph={name}"),
+            &format!(
+                "找不到图 exe（找过 {} 与 target/{{debug,release}}/）\
+                 \n  ⇒ 先把图程序编出来：cargo build -p px_graphs --bin {name}",
+                dir.display()
+            ),
         )
     })
 }

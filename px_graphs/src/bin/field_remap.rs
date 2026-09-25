@@ -5,7 +5,11 @@ use px_graphs::insts::Waves;
 
 type Fault = Box<dyn std::error::Error>;
 
-fn main() -> Result<(), Fault> {
+fn main() {
+    px_cook::fault::graph_main(run);
+}
+
+fn run() -> Result<(), Fault> {
     let graph = begin(GraphSpec {
         name: "field_remap".to_string(),
     });

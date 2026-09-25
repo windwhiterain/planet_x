@@ -2,6 +2,7 @@ use px_field_schema::field::{Field, Projection};
 use px_protocol::stream::{self, Frame};
 
 fn main() {
+    px_cook::fault::install_panic_hook();
     let path = std::env::args()
         .nth(1)
         .expect("用法：field_probe <FIELD.pxart> [投影]");

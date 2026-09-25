@@ -289,11 +289,14 @@ impl Plan {
             .collect();
         let driver = driver_command();
         format!(
-            "缺 {} 条实例库（共 {} 条）：\n  {}\n  \
+            "{}\n  {}\n  \
              ⇒ 编它们（只跑 stage 1）：{driver} build\
              \n     或者两个 stage 连着跑：{driver} run {graph} --build",
-            self.missing.len(),
-            self.total,
+            crate::fault::line(
+                "missing-instance",
+                &format!("graph={graph}"),
+                &format!("缺 {} 条实例库（共 {} 条）", self.missing.len(), self.total),
+            ),
             keys.join("\n  "),
         )
     }
@@ -741,10 +744,16 @@ pub fn cargo_build(dir: &Path) -> Result<(), String> {
 
 pub fn missing_hint(key: &str) -> String {
     format!(
-        "\n  ⚠ 这条实例还没编：`{driver} build`（只编缺的那几条）\
-         \n     实例 key：{key}\n     库：{}",
+        "{}\n     库：{}",
+        crate::fault::line(
+            "missing-instance",
+            &format!("key={key}"),
+            &format!(
+                "这条实例还没编 ⇒ `{driver} build`（只编缺的那几条）",
+                driver = driver_command()
+            ),
+        ),
         library_path(key).display(),
-        driver = driver_command(),
     )
 }
 

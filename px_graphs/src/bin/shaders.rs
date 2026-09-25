@@ -1,4 +1,5 @@
 fn main() {
+    px_cook::fault::install_panic_hook();
     px_cook::apply_store_args().unwrap_or_else(|err| panic!("{err}"));
     let _graph = px_cook::begin(px_cook::GraphSpec {
         name: "shaders".to_string(),

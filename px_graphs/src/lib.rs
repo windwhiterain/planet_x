@@ -70,9 +70,16 @@ pub fn assert_toolchain_matches(instances: &[InstInfo]) -> Result<(), String> {
         return Ok(());
     }
     Err(format!(
-        "盘上有 {} 条实现库不是当前这份构建编的 ⇒ 先 `px build` 按当前档重编它们：\n{}\n\
+        "{}\n{}\n\
          ⚠ 实例键不含 `-Level`，所以键看不出是哪一档编的；这是**拒绝加载**，不是缓存命中。",
-        mismatched.len(),
+        px_cook::fault::line(
+            "stale-toolchain",
+            "",
+            &format!(
+                "盘上有 {} 条实现库不是当前这份构建编的 ⇒ 先 `px build` 按当前档重编它们",
+                mismatched.len()
+            ),
+        ),
         mismatched.join("\n"),
     ))
 }
