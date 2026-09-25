@@ -41,20 +41,64 @@ fn list() -> Result<(), String> {
     let graph = graph();
     let instances = graph.instances();
     println!("实例 {} 条：", instances.len());
+    let mut stale = 0_u32;
     for info in instances {
         let key = inst::key_of_info(info);
         let present = Path::new(&info.library).is_file();
+        // The toolchain axis is not part of the key: `-Level opt` shares keys with `dev`, so a
+        // library on disk can be from another build of the same identity. The sidecar is the only
+        // machine-readable record of which build compiled it, so read it back here.
+        let fresh =
+            present && sidecar_toolchain(&info.library).as_deref() == Some(current_toolchain());
+        if present && !fresh {
+            stale += 1;
+        }
         println!(
-            "  {:<20} {:<12} {:<16} {:<18} {} {}",
+            "  {:<20} {:<12} {:<16} {:<18} {} {}{}",
             info.op_id,
             decl_short(&info.decl_hash),
             info.alg_roots.join(","),
             info.source,
             short(&key),
             if present { "有" } else { "缺" },
+            if present && !fresh { " !" } else { "" },
+        );
+    }
+    if stale > 0 {
+        println!(
+            "陈旧 {stale} 处（`!`：库在盘上，但不是当前这份构建编的）—— \
+             实例键不含 `-Level`，`opt` 与 `dev` 共用键；要按当前档重编就 `px build`"
         );
     }
     Ok(())
+}
+
+fn current_toolchain() -> &'static str {
+    px_graph_schema::TOOLCHAIN_HASH
+}
+
+/// The `toolchain` field of the sidecar that sits next to a compiled library. `None` means either
+/// no sidecar or no such field, i.e. nothing on disk says which build the library came from.
+/// The `toolchain` field of the sidecar that sits next to a compiled library. `None` means either no
+/// sidecar, no such field, or a value that is not a quoted string.
+///
+/// The sidecar is not strict JSON: `px_cook::inst::sidecar_text` puts a comma after **every** field,
+/// so the object ends `… ,\n}` and a strict parser rejects it (`serde_json` reports `trailing comma
+/// at line 11 column 1`). This is a scanner rather than a `.ok()?` on a strict parse, so the reader
+/// keeps working whatever that writer does next; the field is a short hex string between quotes.
+fn sidecar_toolchain(library: &str) -> Option<String> {
+    let sidecar = Path::new(library).with_extension("json");
+    let text = std::fs::read_to_string(sidecar).ok()?;
+    quoted_field(&text, "toolchain")
+}
+
+fn quoted_field(text: &str, name: &str) -> Option<String> {
+    let at = text.find(&format!("\"{name}\""))?;
+    let rest = &text[at + name.len() + 2..];
+    let start = rest.find('"')? + 1;
+    let value = &rest[start..];
+    let end = value.find('"')?;
+    Some(value[..end].to_string())
 }
 
 fn build(flags: &[String]) -> Result<(), String> {

@@ -9,9 +9,10 @@
   「优化程度」由 -Level 选：
     dev      默认。编译最快，跑得最慢。
     opt      只把本地 crate 提到 O2：逐包改 profile.dev，不新建 profile。
-             ⚠ 它**不动**实例键（`PROFILE` 仍是 debug），与 dev 共用实例库 ——
-             这是测量口径要留意的一档（见 FINDINGS.md 里 `-Level` 那一条）。
-    release  全量 O3：跑得最快，第一次编译最贵，且**会转掉全部实例键**（`PROFILE=release`）。
+             ⚠ 它**不动**实例键（`PROFILE` 仍是 debug），与 dev 共用实例库；选这一档会打一行
+             警告。想知道盘上的库是哪一档编的，看 `-Task list` 的陈旧标记载（`!`）。
+    release  全量 O3：跑得最快，第一次编译最贵，且**会转掉全部实例键**（`PROFILE=release`）；
+             选这一档也会打一行警告提醒重编预期。
 
   ⚠ 面向 driver（bin `px`）的那四个 target **就是动词**：`list` / `build` / `gc` / `run`
   （见 docs/programs.md）。它们**不带** `-Level` 的逐包 opt-level 覆盖：
@@ -62,6 +63,18 @@ $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 Push-Location $root
 try {
+    # ⚠ 实例键的工具链轴是 `rustc -vV + TARGET + RUSTFLAGS + PROFILE`。`-Level` 只动其中一样
+    #   （`opt` 逐包改 profile.dev 的 opt-level、`release` 把 PROFILE 换成 release），所以两档
+    #   与实例键的关系完全不同：跑之前先把这一次测量的口径说清楚（进 stderr，不污染 stdout）。
+    if ($Level -eq 'opt') {
+        Write-Warning ('-Level opt：与 `-Level dev` **共用实例键**（PROFILE 仍是 debug，逐包只改 ' +
+            'opt-level）⇒ 盘上那份库是哪一档编的，键看不出来。对比读数请 A/B 两档都跑同一次会话、' +
+            '保持同一档；想知道盘上的库是哪一档编的，用 `-Task list` 看陈旧标记。')
+    } elseif ($Level -eq 'release') {
+        Write-Warning ('-Level release：`PROFILE=release`，**会转掉全部实例键** ⇒ 换到这一档后的 ' +
+            '第一次跑图前要有重编预期（`-Task build` 会编新键那一族；`list` 里显示"缺"是这一次 ' +
+            '轮换的正常形状，不是回归）。')
+    }
     # ⚠ 算子在 dylib 里（`px_*_op`）：`-Level opt` 必须**同时**覆盖它们，
     # 否则 `planet`/`clouds` 的热代码（噪声、等值面、体积烘培）还是 O0。
     $packages = @(

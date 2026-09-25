@@ -123,17 +123,43 @@ Two things follow, and they point in opposite directions from what operators.md 
   trap deepseek measured: switching build environment silently rotates all instance keys with zero
   source edits, and the superseded libraries stay on disk (`target/pcg/inst/` was observed holding two
   generations side by side). Nothing in the key says which level produced a library, and no gate checks
-  it — `sidecar_text` records a `toolchain` field but nothing reads it back (§11's cost-telemetry entry
-  is the same root cause).
+  it — `sidecar_text` records a `toolchain` field and `px list` now reads it back, so a library built by
+  another level is marked `!` (see below); the key itself still cannot say.
+
+The warning half is now in place at zero key cost: `tools/px.ps1` warns on stderr for `-Level opt` and
+`-Level release` (what each does to identity), `-Task list` marks a present library whose sidecar
+`toolchain` differs from the current build, and `docs/programs.md` states both. What remains open is the
+identity question: `opt` and `dev` still share keys, so a library built by either answers for both.
 
 Not fixed here: any change either way touches `px_fingerprint/src/lib.rs` or `px_cook/src/inst.rs`, both
 inside every roster ⇒ full-family rotation, so it belongs in the scheduled batch (§11) or needs a
 decision. Cheap part available now at zero key cost: a `tests/` gate asserting one canonical build
-configuration per measurement session, plus recording which level built each instance library.
+configuration per measurement session.
 
 The convention that costs nothing today and prevents the misreading: **within a batch window or a timing
 session, fix `--release` vs debug and never mix**; treat `-Level opt` as numerically distinct evidence
 even though it shares keys.
+
+### 15. ⬜ The instance sidecar is not strict JSON (a trailing comma on every field)
+
+`px_cook::inst::sidecar_text` (`px_cook/src/inst.rs`) writes each field with a comma and then closes
+the object:
+
+```
+  "toolchain": "b5b4454c…",
+}
+```
+
+so `target/pcg/inst/<key>.json` is accepted by lenient parsers (PowerShell's `ConvertFrom-Json` reads
+it) and rejected by strict ones — `serde_json::from_str` reports `trailing comma at line 11 column 1`.
+Found while giving the sidecar's `toolchain` field its first reader: the reader silently returned
+`None` for all seven libraries, which is the failure shape to worry about, because "no sidecar" and
+"unparseable sidecar" look identical to a caller.
+
+Not urgent — nothing shipped parses this file except the new `px list` marker, which scans for the
+quoted field instead of parsing. Fix: emit the comma between fields rather than after each one. That
+edits `px_cook/src/inst.rs`, which is inside `px_graphs`' roster ⇒ it rotates every instance key and
+needs a rebuild and re-bake, so it belongs in a rotation window.
 
 ### 1. ✅ Any `elem::*` node on a `Domain::Volume` field aborts the process
 
