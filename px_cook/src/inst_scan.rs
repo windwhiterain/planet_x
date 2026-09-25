@@ -23,15 +23,12 @@ impl Invocation {
 
 pub fn scan(dir: &Path) -> Result<Vec<Invocation>, px_graph_schema::Fault> {
     let mut files = Vec::new();
-    collect_rs(dir, &mut files);
+    collect_rs(dir, &mut files)?;
     files.sort();
     let mut found = Vec::new();
     for file in files {
         let text = std::fs::read_to_string(&file).map_err(|err| {
-            px_graph_schema::Fault::new(
-                px_graph_schema::Kind::Operator,
-                format!("读不了 {}：{err}", file.display()),
-            )
+            px_graph_schema::Fault::read(format!("读不了 {}：{err}", file.display()))
         })?;
         for call in find_named(&text, "px_inst!")? {
             found.push(parse_call(&file, &call)?);
@@ -46,15 +43,12 @@ pub fn count(dir: &Path) -> Result<usize, String> {
 
 pub fn count_named(dir: &Path, macro_name: &str) -> Result<usize, px_graph_schema::Fault> {
     let mut files = Vec::new();
-    collect_rs(dir, &mut files);
+    collect_rs(dir, &mut files)?;
     files.sort();
     let mut total = 0;
     for file in files {
         let text = std::fs::read_to_string(&file).map_err(|err| {
-            px_graph_schema::Fault::new(
-                px_graph_schema::Kind::Operator,
-                format!("读不了 {}：{err}", file.display()),
-            )
+            px_graph_schema::Fault::read(format!("读不了 {}：{err}", file.display()))
         })?;
         total += find_named(&text, macro_name)?.len();
     }
@@ -483,25 +477,28 @@ fn unquote(text: &str) -> Option<String> {
     (!inner.contains('"')).then(|| inner.to_string())
 }
 
-pub fn collect_rs(dir: &Path, out: &mut Vec<PathBuf>) {
+/// Collects every `.rs` file under `dir`. A directory that cannot be read is a failure rather than an
+/// empty directory: the caller is gathering the bytes that go into an instance key, so a partial read
+/// would produce a false identity instead of a missing one (FINDINGS.md #17).
+pub fn collect_rs(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), px_graph_schema::Fault> {
     let name = dir
         .file_name()
         .and_then(|value| value.to_str())
         .unwrap_or("");
     if name == "target" || name.starts_with('.') {
-        return;
+        return Ok(());
     }
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
+    let entries = std::fs::read_dir(dir)
+        .map_err(|err| px_graph_schema::Fault::read(format!("读不了 {}：{err}", dir.display())))?;
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
-            collect_rs(&path, out);
+            collect_rs(&path, out)?;
         } else if path.extension().and_then(|value| value.to_str()) == Some("rs") {
             out.push(path);
         }
     }
+    Ok(())
 }
 
 pub fn workspace_members(manifest: &str) -> Vec<String> {
@@ -537,10 +534,7 @@ pub fn declaration_crate(
         files.sort();
         for file in files {
             let text = std::fs::read_to_string(&file).map_err(|err| {
-                px_graph_schema::Fault::new(
-                    px_graph_schema::Kind::Operator,
-                    format!("读不了 {}：{err}", file.display()),
-                )
+                px_graph_schema::Fault::read(format!("读不了 {}：{err}", file.display()))
             })?;
             for call in find_named(&text, "px_op!")? {
                 let first = split_top_level(&strip_leading_comments(&call))
@@ -561,7 +555,7 @@ pub fn declaration_crate(
     Ok(out)
 }
 
-fn walk_crate(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
+fn walk_crate(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), px_graph_schema::Fault> {
     let name = dir
         .file_name()
         .and_then(|value| value.to_str())
@@ -569,10 +563,8 @@ fn walk_crate(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
     if name == "target" || name.starts_with('.') {
         return Ok(());
     }
-    let entries = match std::fs::read_dir(dir) {
-        Ok(entries) => entries,
-        Err(_) => return Ok(()),
-    };
+    let entries = std::fs::read_dir(dir)
+        .map_err(|err| px_graph_schema::Fault::read(format!("读不了 {}：{err}", dir.display())))?;
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {

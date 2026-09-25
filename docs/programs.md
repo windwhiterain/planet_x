@@ -391,11 +391,13 @@ px-error[<kind>]: <key=value>… | <what>
 
 - `px-error` at the start of the line, then the kind in brackets, then `]: `.
 - `<kind>` comes from a closed set: `params`, `operator`, `missing-instance`, `stale-toolchain`,
-  `missing-graph`, `manifest`, `library`, `symbol`, `payload`, `shape`, `write`, `scene`, `panic`,
-  `usage`, and `internal` (the label a failure gets when it reached the entrance without having been
-  classified — seeing one is a finding, not a resting place). `usage` is a mistake in how the entrance
-  was called — an unknown subcommand, an unknown flag, a missing argument, a missing graph name — and it
-  carries no identity fields, because nothing was identified yet.
+  `missing-graph`, `manifest`, `library`, `symbol`, `payload`, `shape`, `write`, `read`, `scene`,
+  `panic`, `usage`, and `internal` (the label a failure gets when it reached the entrance without having
+  been classified — seeing one is a finding, not a resting place). `usage` is a mistake in how the
+  entrance was called — an unknown subcommand, an unknown flag, a missing argument, a missing graph name
+  — and it carries no identity fields, because nothing was identified yet. `read` is the I/O boundary
+  refusing to hand over source or artifact bytes; a failure *inside* bytes that were read is `payload`
+  (they will not decode) or `shape` (they decode and disagree with their declaration).
 - The subject is `key=value` pairs, space-separated, terminated by ` | `. Which pairs appear follows
   from what is known at the failure site: a node failure carries `node=` `op=` `key=` (twelve hex
   digits), a plan failure carries `graph=`, a panic carries `at=<file>:<line>`. A pair never contains

@@ -11,12 +11,8 @@ use px_protocol::stream::{self, Frame};
 use px_protocol::wire::{Blob, BlobHeader, DType};
 
 pub fn load_field(path: &str) -> Result<Field, px_graph_schema::Fault> {
-    let bytes = std::fs::read(path).map_err(|err| {
-        px_graph_schema::Fault::new(
-            px_graph_schema::Kind::Payload,
-            format!("读不到 {path}：{err}"),
-        )
-    })?;
+    let bytes = std::fs::read(path)
+        .map_err(|err| px_graph_schema::Fault::read(format!("读不到 {path}：{err}")))?;
     let frames = stream::read_stream(&mut bytes.as_slice()).map_err(|err| {
         px_graph_schema::Fault::new(px_graph_schema::Kind::Payload, err.to_string())
     })?;

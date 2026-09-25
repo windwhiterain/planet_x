@@ -36,6 +36,8 @@ pub enum Kind {
     Shape,
     /// Writing an artifact, sidecar or index.
     Write,
+    /// Reading source or artifact bytes at the I/O boundary.
+    Read,
     /// Reading a scene document.
     Scene,
     /// A worker panicked where a panic has no route back to the caller.
@@ -60,6 +62,7 @@ impl Kind {
         "payload",
         "shape",
         "write",
+        "read",
         "scene",
         "panic",
         "usage",
@@ -80,6 +83,7 @@ impl Kind {
             Kind::Payload => "payload",
             Kind::Shape => "shape",
             Kind::Write => "write",
+            Kind::Read => "read",
             Kind::Scene => "scene",
             Kind::Panic => "panic",
             Kind::Usage => "usage",
@@ -109,6 +113,7 @@ impl Kind {
         Kind::Payload,
         Kind::Shape,
         Kind::Write,
+        Kind::Read,
         Kind::Scene,
         Kind::Panic,
         Kind::Usage,
@@ -153,6 +158,10 @@ impl Fault {
 
     pub fn usage(message: impl Into<String>) -> Self {
         Self::new(Kind::Usage, message)
+    }
+
+    pub fn read(message: impl Into<String>) -> Self {
+        Self::new(Kind::Read, message)
     }
 
     /// The stable line: `px-error[<kind>]: <message>`. The kind comes first so a caller can grep the

@@ -22,6 +22,13 @@ Two of these are easy to get wrong:
 - **`px_elem` does participate**, through its `build.rs` declaration hash, which enters instance
   keys.
 
+**Touching `px_graph_schema` costs every key.** Its bytes sit in the roster of every instance and of
+every node, so a change that looks like one word still rotates all of them: adding `Kind::Read` to the
+closed set moved all seven instance keys and every node key, left `px list` reading `缺`, and needed
+`px build` plus a re-cook of the whole family to bring the tree back. The shader keys and the scene
+documents did not move, because they fold shader text and scene values rather than Rust crates. Treat
+any edit there as a window-sized event and measure before and after.
+
 ⚠ **`px_cook` and `px_decls` are inside `px_graphs`' roster**, because that roster is taken over
 `[build-dependencies]` and therefore pulls in both crates' sources. They currently reach no key only
 because nothing under `px_graphs/src` uses `px_local_op!` — the only uses are in
