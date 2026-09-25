@@ -219,10 +219,14 @@ identity. Editing a line of WGSL changes the operator's key.
 ## What the helpers add
 
 **`px_volume_gpu_op`** — the volume data layout and the geometry kernels are a single formula
-shared by both languages; the module is explicit that the Rust side and the WGSL side must agree
-element by element (`px_volume_gpu_op/src/lib.rs:1-13`), and a GPU↔CPU test pins the flat index
-(the `the_gpu_agrees_with_the_cpu_on_the_flat_index` test in `px_volume_gpu_op/src/lib.rs`). It
-also packs the occupancy index that lets the marching entry skip empty coarse blocks: the index
+shared by both languages; the Rust side and the WGSL side must agree element by element, and that
+agreement is pinned by a test rather than asserted by a comment: `flat_index` against the
+shader's own index arithmetic, under `the_gpu_agrees_with_the_cpu_on_the_flat_index`
+(`px_volume_gpu_op/src/lib.rs`). The nearest statement of the same agreement that survives in
+the source is `SkyUniform::to_bytes`'s doc, which is the layout `sampler.wgsl`'s `Sky` mirrors.
+Docs here once carried pre-strip line-number anchors, so every coordinate in this file is now
+file + symbol. It also packs the occupancy index that lets the marching entry skip empty coarse
+blocks: the index
 is derived from an already baked emission volume, the parameters and the mask are produced as one
 pair and bound together, and the same WGSL runs both with and without it, so the A/B comparison
 uses one implementation (`raymarch_sky` in `px_volume_gpu_op/src/lib.rs`, where
