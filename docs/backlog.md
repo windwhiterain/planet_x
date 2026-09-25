@@ -101,11 +101,10 @@ server that runs operators must statically link every schema crate — the depen
 library-loading design exists to avoid. The alternative is a typed-shim-per-declaration layer, i.e.
 type erasure for the whole operator surface.
 
-For the loop this was meant to serve, the shell is not the cost: one panel-like cycle (scene + five
-shots through `frame-probe -Phase shot`) is **128.5 s**, while the cook-side shell is 0.68 s and cook
-itself is ~2.9 s — the render side dominates by an order of magnitude. Writing the ledger (§cost
-telemetry, above) is the half that was worth having; the service is the half that is not, until
-someone wants type erasure for its own sake.
+For the loop this was meant to serve, the shell is not the cost: a panel-shaped cycle timed by
+polling the real process stages measures **128.5 s (render-dominated)**, while the cook-side shell is
+0.68 s and cook itself is ~2.9 s. Writing the ledger (§cost telemetry, above) is the half that was
+worth having; the service is the half that is not, until someone wants type erasure for its own sake.
 
 **A scene document cannot point a material at content.** `ParamKind` covers `F32`, `I32`, `U32`,
 `Vec3`, `Vec4`, and the matching `Value` covers a number, a string, a triple and a quad. There is no
