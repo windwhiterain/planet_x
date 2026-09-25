@@ -206,6 +206,84 @@ without either is not a replay candidate. The learned policy's reward counts onl
 startup gate) and the thin dirty set are separate homes — the vocabulary does not belong in either
 file.
 
+## Cache format with mutual references (designed, not built)
+
+`Graph::fetch` answers "is this exact key on disk", so the invalidation unit is the whole node artifact.
+A payload whose natural parts are faces, layers or mip levels could instead be cached as parts and
+referenced from the parent, and then a change to one face re-cooks one face while the parent's own work
+becomes assembly. None of this is a new mechanism: the frame already carries
+`ArtBundle.assets` with `AssetManifest { id, params, blobs, fingerprint }` followed by positional
+`Frame::Blob`s, and a scene document already references other artifacts by key through
+`Member { graph, node, key }` and `cas_path`. The design moves that one reference rule inside an asset,
+rather than inventing a second one.
+
+**Frame shape.** One new field, `AssetManifest.sub: Vec<SubEntry>`, where a `SubEntry` is
+`{ kind, key, fingerprint, blobs }`: `key` is the child's own 64-hex content key (resolved through
+`cas_path`, the same rule `Member` uses), `fingerprint` is the child's own fingerprint so a consumer can
+tell which child moved without reading it, and `blobs` names which of the asset's blobs belong to this
+child. Blob ownership stays an index partition of the asset's one ordered `blobs` list, with a load-time
+invariant that the children's index sets partition `0..blobs.len()` exactly — the alternative, giving
+each `SubEntry` its own `Vec<BlobHeader>`, duplicates the ordering and breaks the positional pairing the
+reader relies on. `kind` is a closed enum (`Face`, `Mip`, `Layer`, and a named form deferred to a later
+milestone), because a free string would put the partition semantics back into prose. **The frame does
+not nest:** a child appears only as a key and is an ordinary artifact in the CAS, which may itself carry
+children, so the structure is a DAG reached through the cache, walked with a visited set and a depth cap
+(a cycle is refused).
+
+**Key axis.** A child is an ordinary node, so `child_key = H(op, interface, source_hash,
+canonical_params including its partition selector, inputs)`, and the parent folds its children's keys
+exactly as it folds upstream keys: `parent_key = H(op, interface, source_hash, canonical_params, inputs,
+children sorted by (kind, key))`. Two consequences are worth stating. Folding child keys does not defeat
+partial invalidation, because the expensive per-part work is each child's own cook, which still hits;
+what the parent redoes is assembly. And child keys cannot be left out of the parent key: doing so would
+let a fresh parent with stale children and a stale parent with fresh children share one key, which breaks
+the rule that a key covers its output.
+
+**What the parent keeps.** Keeping the merged payload beside the references doubles the bytes for the
+case that matters (`coarse_fine` is 24.76 MB, so six 4.13 MB faces plus the merged blob is about 49 MB)
+and still re-encodes the whole merged blob on a one-face change. The parent therefore holds references
+only, and the merged form is assembled by the consumer — which is the ground the reader already stands
+on.
+
+**Store ordering.** Children are written first and the parent last. A crash then leaves orphaned
+children, which are garbage; the reverse order can leave a parent that references children which do not
+exist, which is a poisoned entry whose key is legitimate and whose load must fail. Garbage has a
+collector and corruption does not. Note that `store` writes with a plain `std::fs::write` (no fsync, no
+temporary file and rename), so a torn parent is possible today; closure verification turns that from
+silent garbage into a refused load, which is a net improvement rather than a new risk.
+
+**Closure verification and collection.** At load, every `SubEntry.key` must resolve and the child's
+recorded fingerprint must match; a mismatch is refused by name rather than silently recomputed, because
+recomputing would disguise a broken reference as an ordinary miss. The live set for collection is the
+transitive closure of the manifest's keys through those references, and a parent that cannot be read
+must have its children **kept** — the walk fails closed, never open. Today's `collect_garbage` sweeps
+only `target/pcg/inst/` and, with `--deep`, `target/jit/`; it never sweeps the artifact CAS, so the
+invariant is currently vacuous and becomes load-bearing the moment an artifact collector exists.
+
+**The reader is already in place.** `px_render`'s read path pairs each `AssetManifest` with its own blobs
+positionally, validates every slot, and reports each slot's id, shape and fingerprint, with a gate that
+refuses damage in a slot past the first. The old path read `assets.first()` and the first blob, which
+made a partitioned artifact unreadable rather than wrong. References add one step to that reader —
+resolving each child through `cas_path` and validating it as its own slot — and cost no keys, since
+`px_render` is in no roster, no instance closure and no dependency list.
+
+**When this starts.** Three triggers, any one sufficient: a real per-face or per-layer editing workflow;
+a consumer on the pane or edit side that diffs child fingerprints, which is closer now that the reader
+exposes them; or readings in which the benefit exceeds one full-family rotation plus re-bake. The ceiling
+those readings put on it: `clouds` spends 46,128 ms with 90.7% of it in two nodes, `coarse_fine`
+(25,007 ms, 24.76 MB, face-major `6 x layers x res x res`) divides by six, `proxy_fine` (16,852 ms,
+263k-vertex mesh) has no axis without re-indexing, and `sky.nebula` (48 MB) has one mip level, so
+splitting by mip buys nothing there.
+
+**Scope.** The first milestone is volume and texture by face, a references-only parent, per-child
+consumption in the host, and a single `Face` kind. The second is nested closures, the `Mip`, `Layer` and
+named kinds, and the closure-aware live set. The third is every domain: a field's natural partition is
+row bands, which the parallel row helper already exploits to change wall time without changing what is
+stored, so its benefit is the smallest; a mesh has no axis that does not re-index its vertices, so it may
+never be worth doing. A contract field is what makes the first milestone a batch-window job: measured, a
+single field added to `AssetManifest` rotates every instance key and every node key, because
+`px_protocol` and `px_graph_schema` sit in every roster.
+
 ## Gates shipped, and the one still missing
 
 Three checks that used to be convention only now have a home in `tests/`, so none of them costs a
