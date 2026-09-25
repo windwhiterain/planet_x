@@ -82,6 +82,14 @@ purpose (docs/model.md, the whole-text rule), and so does `./format.sh` (docs/in
 shared-checkout entry). Order the window as: source edits, `./format.sh`, `cargo build` of the
 libraries the nodes load, re-cook, then the closing `px list`.
 
+**A rotation whose source is the contract crate is announced before it is paid, even when nothing is
+frozen.** `px_graph_schema` is inside every roster, so an edit there — a new `Kind`, a new loader rule —
+is a full-family rotation before anything else is true about it (docs/invariants.md, the cost entry).
+When the tree is clean and every colleague is idle, it may be paid in place instead of behind a freeze,
+but the shape goes out first: tree clean, who is idle, that the three-stage readings will be taken, and
+what gets rebuilt and re-cooked. If anyone is working, wait for the window. The point is not permission
+— it is that a decision which rotates every key leaves its trace before it is taken, not after.
+
 ## Awaiting a decision
 
 **Where does an idea go before it is true?** `docs/` states only what holds today. An idea that
