@@ -160,7 +160,7 @@ this checkout via `px_fingerprint::roster`: `px_field_op` (73 entries) and `px_v
 carry `px_protocol/src/rows.rs`. Deleting the dead file rotates every operator key and forces a full
 re-bake, so this cleanup belongs in a scheduled rotation window rather than a zero-cost sweep.
 
-### 12. ⬜ `collect_tree` skips test-named files by filename, so a declared module can be compiled and invisible to identity
+### 12. ⬜ `collect_tree` skips paths by name, so a declared module or shader can be compiled and invisible to identity (gated, rule unchanged)
 
 `px_fingerprint/src/lib.rs::collect_tree` walks the **filesystem**, not the module tree, and applies two
 independent skip rules: a directory named `tests` or starting with `.`, and any file whose name contains
@@ -171,18 +171,31 @@ with `mod something_test;` is compiled into the artifact while being absent from
 editing it changes behaviour without changing any key. That is precisely the failure mode
 [invariants.md](docs/invariants.md) exists to prevent ("same key, different content").
 
-Latent, not current: no such file exists in the tree today (`find` for `*_test.rs` / `test_*.rs` returns
-nothing). Verified the size of the blind spot read-only via `px_fingerprint::roster`: writing
-`px_field_schema/src/hazard_probe_test.rs` leaves that crate's roster at 54 entries before and after, so
-the file is invisible to identity even though a `mod` declaration would compile it. Probe removed; no
-source or build state was left behind.
+Latent, not current: no such path exists in the tree today. Measured read-only via
+`px_fingerprint::roster`, all four shapes leave `px_field_schema`'s roster at 54 entries before and
+after, i.e. each is invisible to identity while remaining compilable:
 
-Two consequences worth stating as convention rather than code: gates belong in `tests/` (free of identity
-cost because the directory rule matches only unreachable-from-the-crate paths), and **naming a compilable
-module `*_test.rs` / `test_*.rs` means "compiled but invisible", not "safe to ignore"**. Hardening the
-rule to "skip only files outside the module tree" would edit `px_fingerprint/src/lib.rs`, which sits in
-every roster — another full-family rotation, so it belongs in the scheduled batch (§11) or is explicitly
-declined.
+| shape | why it escapes |
+|---|---|
+| `src/x_test.rs` | filename rule (`contains "_test"`) |
+| `src/test_x.rs` | filename rule (`starts_with "test_"`) |
+| `src/x_test.wgsl` | filename rule applies after the extension match, which covers `.rs` **and** `.wgsl` |
+| `src/tests/mod.rs` | directory rule skips the whole subtree, and `mod tests;` resolves there |
+
+The `.wgsl` row is not hypothetical: shaders enter a roster precisely because they are `include_str!`d
+into the binary ([operators.md](docs/operators.md) §3.3), and several live under `src/`. A shader
+escaping identity is the same "same key, different content" as a Rust file escaping it.
+
+Gated rather than fixed. Hardening `collect_tree` to consult the module tree would edit
+`px_fingerprint/src/lib.rs`, which sits in every roster — another full-family rotation, so it belongs in
+the scheduled batch (§11) or is declined. The cheaper insurance shipped instead:
+`px_fingerprint/tests/roster.rs::no_compilable_source_escapes_the_fingerprint_by_name` walks every
+crate's `src/**` (including `src/bin/`) and fails on any path matching either skip rule, naming the
+offending directory or file. It copies `collect_tree`'s predicates deliberately rather than inventing a
+stricter list, and because `tests/` is itself outside every roster it costs no keys. Verified in both
+directions: injecting each of the four shapes fails the gate with that exact path listed; removing them
+returns it to green. Convention for anyone adding a check: gates go in a crate-root `tests/` directory —
+inside `src/`, the names `tests/`, `*_test.*`, `test_*.*` mean "compiled but invisible", not "safe".
 
 ### 1. ✅ Any `elem::*` node on a `Domain::Volume` field aborts the process
 
