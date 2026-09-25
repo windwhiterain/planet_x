@@ -51,7 +51,7 @@ fn main() {
     let entry = px_cook::ManifestEntry {
         node: compiled.document.name.clone(),
         op: "scene.document".to_string(),
-        op_version: px_protocol::SCENE_SCHEMA,
+        op_version: u64::from(px_protocol::SCENE_SCHEMA),
         key: px_cook::hex(&key),
         hit: false,
         millis: 0,

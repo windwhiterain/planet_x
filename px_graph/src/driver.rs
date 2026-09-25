@@ -200,12 +200,17 @@ impl Cache for Graph {
     }
 }
 
-fn interface_version(interface: u64) -> u32 {
-    (interface & 0xffff_ffff) as u32
+/// The interface hash is folded into the node key at full width (`keys.rs` hashes
+/// `op.interface.to_le_bytes()`), so the manifest records the same full value: recording half of it
+/// would let two operators with different keys show one `op_version`.
+fn interface_version(interface: u64) -> u64 {
+    interface
 }
 
+/// The same number `interface_version` records, so a tag copied off the run line can be found in the
+/// manifest.
 fn interface_tag(interface: u64) -> String {
-    format!("{:016x}", interface)[..8].to_string()
+    format!("{interface:016x}")
 }
 
 fn key_of_hex(text: &str) -> Key {
@@ -542,7 +547,7 @@ pub fn bake_shader_graph() -> Result<Vec<BakedShader>, String> {
         manifest.push(ManifestEntry {
             node: slot.clone(),
             op: "shader.wgsl".to_string(),
-            op_version: SHADER_VERSION,
+            op_version: u64::from(SHADER_VERSION),
             key: hex(&key),
             hit: false,
             millis: 0,

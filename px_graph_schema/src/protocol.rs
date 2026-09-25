@@ -9,7 +9,7 @@ pub struct GraphSpec {
 pub struct ManifestEntry {
     pub node: String,
     pub op: String,
-    pub op_version: u32,
+    pub op_version: u64,
     pub key: String,
     pub hit: bool,
     pub millis: u64,
