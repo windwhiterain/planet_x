@@ -722,24 +722,6 @@ fn page_label(face_label: &str, level: u32, page_y: u32, page_x: u32) -> String 
     format!("{face_label}_l{level}_p{page_y}_{page_x}")
 }
 
-fn page_clear_pass(template: &PassSpec, window: [u32; 4], label: String) -> PassSpec {
-    let mut pass = template.clone();
-    pass.label = label;
-    pass.draws.clear();
-    pass.render = clear_state(&template.render);
-    pass.viewport = Some([
-        window[0] as f32,
-        window[1] as f32,
-        (window[2] - window[0]) as f32,
-        (window[3] - window[1]) as f32,
-    ]);
-    pass
-}
-
-fn clear_state(render: &str) -> String {
-    swap_depth(render, "depth=clear(0)")
-}
-
 fn load_state(render: &str) -> String {
     swap_depth(render, "depth=load")
 }
