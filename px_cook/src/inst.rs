@@ -111,7 +111,7 @@ pub fn key(inst: &Inst<'_>) -> Result<String, String> {
     let mut roster = px_fingerprint::Roster::new();
     for alg in inst.alg_roots {
         let crate_dir = root.join(alg);
-        let files = px_fingerprint::roster(&crate_dir, &[]);
+        let files = px_fingerprint::roster(&crate_dir);
         if files.is_empty() {
             return Err(format!(
                 "实例 key：{} 里没有可数的源码（recipe 的 `roots` 那一栏把 crate 名字写错了？）",
@@ -650,7 +650,7 @@ pub fn lib_text(root: &Path, codegen: &InstCodegen) -> Result<String, String> {
 
 const BUILD_RS: &str = "//! 实例库自己的身份（源码指纹 + 工具链指纹）—— 与各实现库同一份算法。\n\
                         fn main() {\n\
-                        \x20   px_fingerprint::cargo_fingerprint_for_crate(&[]);\n\
+                        \x20   px_fingerprint::cargo_fingerprint_for_crate();\n\
                         }\n";
 
 pub fn sidecar_text(info: &InstInfo, key: &str, symbol: &str, codegen: &InstCodegen) -> String {

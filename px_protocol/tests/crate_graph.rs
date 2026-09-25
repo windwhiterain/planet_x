@@ -108,7 +108,7 @@ fn consumers_never_depend_on_sim() {
             !matches!(subject, Subject::Present) || scanned.contains(from),
             "禁止边 ({from}, …) 声明了 Subject::Present，但 workspace 里扫不到包 `{from}` \
              —— 它被改名或删掉了？这条边现在**没有主体**，也就是没有人在守。\
-             真删了就把它改成 Subject::Reserved（明账）或换掉主体（§157 的先例）。\
+             真删了就把它改成 Subject::Reserved（明账）或换掉主体。\
              扫到的包：{scanned:?}"
         );
     }

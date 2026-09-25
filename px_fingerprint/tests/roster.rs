@@ -1,16 +1,18 @@
 //! See docs/invariants.md
 //!
-//! Four gates over one mechanism: `px_fingerprint::roster()` walks the filesystem rather than the
-//! module tree, so anything it skips by name is compiled when declared yet invisible to identity —
-//! "same key, different content". The skip rules below are copied from `collect_tree` deliberately:
-//! a gate that invents its own stricter list drifts away from the rule it watches.
+//! Four gates over one mechanism: `px_fingerprint::roster()` is the list identity is computed from,
+//! so anything that is compiled but missing from it is "same key, different content". The list is
+//! built by walking the **module tree** (`mod`, `#[path]`, `include!`) plus every shader under
+//! `src/`; a `.rs` file no declaration reaches is not compiled and is deliberately absent. These
+//! gates hold that line from four sides:
 //!
-//! The third gate watches the other half of identity: a source the key can see is still not the
-//! same as a key that determines its content, so a payload-producing file may not read an input
-//! no key carries (docs/invariants.md, "A node key must determine its content"). The fourth closes
-//! the same hole from the other side: data embedded with `include_str!` / `include_bytes!` reaches
-//! a binary without passing through the module tree, and `collect_tree` accepts only `.rs`/`.wgsl`,
-//! so an embedded JSON or PNG is compiled while no roster names it.
+//! 1. the roster reaches a dependency's sources (`the_graphs_roster_carries_the_driver`);
+//! 2. no `.rs` under `src/` is compiled while missing from the roster
+//!    (`no_compiled_rust_file_escapes_the_fingerprint`);
+//! 3. a payload-producing source reads no input its key cannot see
+//!    (`no_payload_source_reads_an_input_its_key_cannot_see`);
+//! 4. an embedded file is in a roster or on the exception list
+//!    (`every_embedded_file_is_in_a_roster_or_on_the_exception_list`).
 
 use std::path::Path;
 
@@ -24,7 +26,7 @@ fn the_graphs_roster_carries_the_driver() {
         .parent()
         .expect("px_fingerprint 住在 workspace 下")
         .to_path_buf();
-    let roster = px_fingerprint::roster(&workspace.join("px_graphs"), &[]);
+    let roster = px_fingerprint::roster(&workspace.join("px_graphs"));
     for file in ["px_graph/src/driver.rs", "px_graphs/src/lib.rs"] {
         assert!(
             roster.keys().any(|key| slash(key).contains(file)),
@@ -38,60 +40,75 @@ fn the_graphs_roster_carries_the_driver() {
     }
 }
 
-/// Every shape `collect_tree` skips, applied inside a crate's `src/`: a directory named `tests`
-/// (a `mod tests;` can resolve to `src/tests/mod.rs`), or a source file whose name contains
-/// `_test` / starts with `test_`, for **both** fingerprinted extensions. Measured on this checkout:
-/// all four shapes leave the enclosing roster at the same entry count, i.e. none of them is
-/// visible to identity while remaining compilable.
-fn skipped_by_the_collector(name: &str) -> bool {
-    name == "tests" || name.starts_with('.')
+/// The two shapes under `src/` that are allowed to be absent from a roster, because a normal build
+/// does not compile them:
+///
+/// * a `src/tests.rs` or `src/tests/*.rs` tree — the convention pairs it with
+///   `#[cfg(test)] mod tests;`, and the collector deliberately does not evaluate `cfg`, so today it
+///   does pull those files into a roster (over-collection: a key that can only rotate, never a
+///   wrong content);
+/// * a file whose name says test (`*_test.rs` / `test_*.rs`), the shape the old name-based
+///   collector used to skip silently.
+///
+/// The convention is what makes an absence legible: `px_protocol/src/rows.rs` sat in `src/` for a
+/// long time, compiled by nothing, and its name gave no hint.
+fn test_named_source(path: &Path) -> bool {
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    if !name.ends_with(".rs") {
+        return false;
+    }
+    if name.contains("_test") || name.starts_with("test_") {
+        return true;
+    }
+    let under = |dir: &str| {
+        path.parent()
+            .and_then(Path::file_name)
+            .and_then(|name| name.to_str())
+            == Some(dir)
+    };
+    under("tests") || (name == "tests.rs" && under("src"))
 }
 
-fn test_named_source(name: &str) -> bool {
-    let source = name.ends_with(".rs") || name.ends_with(".wgsl");
-    source && (name.contains("_test") || name.starts_with("test_"))
-}
-
-/// §12, gated instead of fixed: hardening `collect_tree` to consult the module tree would edit a
-/// crate that sits in every roster, so it costs a full-family rotation. This check buys the same
-/// safety at zero key cost, because `tests/` directories are themselves outside every roster.
+/// The collector walks the module tree now, so the check is its dual: every `.rs` file under `src/`
+/// either reaches the roster (it is compiled, hence it must be part of identity) or is named like a
+/// test helper (it is not compiled, and the name says so).
+///
+/// ⚠ `.wgsl` is deliberately not checked here: the collector takes every shader under `src/`
+/// whether or not the module tree names it, so a missed shader cannot exist — only an over-collected
+/// one, which costs a key without costing correctness.
 #[test]
-fn no_compilable_source_escapes_the_fingerprint_by_name() {
-    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("px_fingerprint 住在 workspace 下")
-        .to_path_buf();
+fn no_compiled_rust_file_escapes_the_fingerprint() {
+    let workspace = workspace_dir();
     let mut offenders: Vec<String> = Vec::new();
-    for crate_dir in std::fs::read_dir(&workspace)
-        .expect("读不了 workspace")
-        .flatten()
-        .map(|entry| entry.path())
-        .filter(|path| path.join("Cargo.toml").is_file())
-    {
+    for crate_dir in fingerprinting_crates(&workspace) {
         let src = crate_dir.join("src");
         if !src.is_dir() {
             continue;
         }
+        let roster = px_fingerprint::roster(&crate_dir);
+        let tracked: Vec<String> = roster
+            .values()
+            .map(|path| normalized(&slash(&path.to_string_lossy())))
+            .collect();
         let mut stack = vec![src];
         while let Some(dir) = stack.pop() {
             for entry in std::fs::read_dir(&dir).expect("读不了目录").flatten() {
                 let path = entry.path();
                 let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
                 if path.is_dir() {
-                    // A skipped directory hides everything under it, so report the directory
-                    // itself rather than descending to blame its contents.
-                    if skipped_by_the_collector(name) {
-                        offenders.push(format!(
-                            "{}{} (整棵被跳过)",
-                            path.strip_prefix(&workspace).unwrap_or(&path).display(),
-                            std::path::MAIN_SEPARATOR
-                        ));
-                    } else {
-                        stack.push(path);
+                    if name.starts_with('.') {
+                        continue;
                     }
+                    stack.push(path);
                     continue;
                 }
-                if test_named_source(name) {
+                if path.extension().and_then(|e| e.to_str()) != Some("rs")
+                    || test_named_source(&path)
+                {
+                    continue;
+                }
+                let absolute = normalized(&slash(&path.to_string_lossy()));
+                if !tracked.iter().any(|entry| entry == &absolute) {
                     offenders.push(
                         path.strip_prefix(&workspace)
                             .unwrap_or(path.as_path())
@@ -104,11 +121,10 @@ fn no_compilable_source_escapes_the_fingerprint_by_name() {
     }
     assert!(
         offenders.is_empty(),
-        "这些路径会被 collect_tree 按名字/目录名跳过，因而**不进任何指纹名册**：{offenders:?}\n  \
-         ⇒ 声明它们的模块照样被编译进产物 ⇒ 改它换行为不换键（同键、不同内容）。\n  \
-         判据请放 crate 根的 `tests/`；在 `src/` 里用 `tests` 目录或 \
-         `*_test.rs` / `test_*.rs` / `*_test.wgsl` / `test_*.wgsl` 这些名字的含意是\
-         \u{201c}被编译但对身份不可见\u{201d}。"
+        "这些 `.rs` 既没进任何指纹名册、名字又不像测试件：{offenders:?}\n  \
+         ⇒ 要么它被 `mod` / `#[path]` / `include!` 声明着 **却被名册漏掉**（同键、不同内容），\n  \
+         要么它谁都不声明（那它就是 `px_protocol/src/rows.rs` 那种死文件：删掉，或改成\n  \
+         `*_test.rs` / `test_*.rs` 并放进 crate 根的 `tests/`）。"
     );
 }
 
@@ -419,21 +435,93 @@ fn normalized(path: &str) -> String {
 /// The literal path of one `include_str!`/`include_bytes!` in a file, if the macro is given a
 /// literal. A `concat!(env!("OUT_DIR"), …)` form is invisible here by construction: the target is
 /// generated rather than checked in, and rustc records it as a dependency of the crate anyway.
+///
+/// ⚠ The search runs over a copy whose comment bodies and string contents are blanked out. Without
+/// that, this gate's own failure message — which quotes `include_str!` inside a string literal —
+/// reads as a real embed site and the gate reports against itself.
 fn embedded_targets(text: &str) -> Vec<String> {
+    let code = blank_comments_and_strings(text);
     let mut targets = Vec::new();
     for macro_name in ["include_str!", "include_bytes!"] {
         let mut from = 0usize;
-        while let Some(offset) = text[from..].find(macro_name) {
-            let rest = &text[from + offset + macro_name.len()..];
-            if let Some(open) = rest.find('"') {
-                if let Some(close) = rest[open + 1..].find('"') {
-                    targets.push(rest[open + 1..open + 1 + close].to_string());
-                }
+        while let Some(offset) = code[from..].find(macro_name) {
+            let at = from + offset;
+            if let Some(path) = quoted_after(text, at + macro_name.len()) {
+                targets.push(path);
             }
-            from += offset + macro_name.len();
+            from = at + macro_name.len();
         }
     }
     targets
+}
+
+fn quoted_after(text: &str, from: usize) -> Option<String> {
+    let open = text[from..].find('"')?;
+    let tail = &text[from + open + 1..];
+    let close = tail.find('"')?;
+    Some(tail[..close].to_string())
+}
+
+fn blank(out: &mut [u8], at: usize, width: usize) {
+    for byte in out.iter_mut().skip(at).take(width) {
+        *byte = b' ';
+    }
+}
+
+/// A copy of `text` with comment bodies and string/char contents replaced by spaces, keeping the
+/// quote characters themselves so offsets stay usable.
+fn blank_comments_and_strings(text: &str) -> String {
+    let mut out = text.as_bytes().to_vec();
+    let mut index = 0usize;
+    let mut line_comment = false;
+    let mut block_comment = false;
+    let mut string = false;
+    while index < text.len() {
+        let ch = text[index..].chars().next().unwrap_or(' ');
+        let width = ch.len_utf8();
+        let next = text[index + width..].chars().next();
+        if line_comment {
+            if ch == '\n' {
+                line_comment = false;
+            } else {
+                blank(&mut out, index, width);
+            }
+        } else if block_comment {
+            if ch == '*' && next == Some('/') {
+                block_comment = false;
+                blank(&mut out, index, width);
+                blank(&mut out, index + width, 1);
+                index += width + 1;
+                continue;
+            }
+            blank(&mut out, index, width);
+        } else if string {
+            if ch == '\\' {
+                blank(&mut out, index, width);
+                let escaped = next.map_or(1, char::len_utf8);
+                blank(&mut out, index + width, escaped);
+                index += width + escaped;
+                continue;
+            }
+            if ch == '"' {
+                string = false;
+            } else {
+                blank(&mut out, index, width);
+            }
+        } else if ch == '/' && next == Some('/') {
+            line_comment = true;
+            index += width;
+            continue;
+        } else if ch == '/' && next == Some('*') {
+            block_comment = true;
+            index += width;
+            continue;
+        } else if ch == '"' {
+            string = true;
+        }
+        index += width;
+    }
+    String::from_utf8(out).unwrap_or_else(|_| text.to_string())
 }
 
 /// Counts the reads of one symbol over the same files identity is computed from, so the exemption's
@@ -478,7 +566,7 @@ fn every_embedded_file_is_in_a_roster_or_on_the_exception_list() {
         if !crate_dir.join("src").is_dir() {
             continue;
         }
-        let roster = px_fingerprint::roster(&crate_dir, &[]);
+        let roster = px_fingerprint::roster(&crate_dir);
         let tracked: Vec<String> = roster
             .values()
             .map(|path| slash(&path.to_string_lossy()))
