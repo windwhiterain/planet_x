@@ -1,4 +1,4 @@
-// 网格顶点阶段（帧图的几何 pass 用它，§128）。
+// 网格顶点阶段（帧图的几何 pass 用它）。
 //
 // ⚠ 它与内容材质的片元阶段之间的接口是 **`VertexOutput`**，字段/origin/次序必须逐字对上
 // （`px_render_wgpu/src/material.rs` 的 `VERTEX_PROBE` 是同一份契约的另一处转写）：
@@ -10,20 +10,21 @@
 //         @location(2) uv: vec2<f32>,
 //     };
 //
-// ⚠ 第一版这里**只写了 `@builtin(position)`**（§128 的初稿），而 `surface.wgsl` /
+// ⚠ 这里**四个输出都要给**（`@builtin(position)` 之外还有 world_position / world_normal /
+// uv），而 `surface.wgsl` /
 // `atmosphere.wgsl` 的片元读 `in.uv` / `in.world_normal` / `in.world_position` /
 // `in.position` —— wgpu 会当场拒建管线（"Location[0] … is not provided by the
 // previous stage outputs"）。**少写三个输出不是"先简陋一点"，是这条 pass 根本建不起来。**
 //
 // 为什么顶点阶段由宿主给、而不是执行器自带：内容 shader 是**纯片元**的
-// （pxart 那几份没有 `@vertex`），顶点变换是宿主与 Bevy **逐位对齐**的那一段（§110）。
+// （pxart 那几份没有 `@vertex`），顶点变换是宿主与 Bevy **逐位对齐**的那一段。
 //
 // ⚠ 矩阵的**位模式**由宿主负责（`px_render_wgpu/src/mat4.rs` 那几份移植件）：
 // 这里只做乘法，不做任何化简（`view_proj * (world * p)` 的括号也要留住 ——
 // 换成 `(view_proj * world) * p` 就是另一个数）。
 
 // ============================================================================
-// 参数分两处（§本轮，甲方案）：
+// 参数分两处：
 //
 //   **组 1 binding 0  `PassView`** —— 这一条 pass 的 `view_proj`，**一条 pass 一份**。
 //      它现在由**执行器按文档的 pass 参数**绑（`PassPlan::params`），所以：
@@ -37,7 +38,7 @@
 //      靠 `@builtin(instance_index)` 选这一笔画的是哪一格；
 //      下标 = 物体在 `objects[]` 里的次序（宿主与执行器都不认识"物体"，
 //      它们只是把同一个表的两半对上了）。
-//      ⚠ §本轮它从组 1 binding 1 搬到**组 0**：组 1 那一格现在整份归 pass 参数，
+//      ⚠ 它在**组 0**：组 1 那一格整份归 pass 参数，
 //        两样东西抢同一格就是"谁后绑谁赢"，而赢的那一份是错的。
 //
 // ⚠ **为什么能拆**：`world_from_local` 与法线矩阵**与视图无关**（它们是物体的），
@@ -46,7 +47,7 @@
 //    而这不是省字节：是**把"谁在索引它"这件事说清楚了**（super 由 pass 直接给，
 //    instance 由下标选）。
 //
-// ⚠⚠ 实例化**改变绘制调用本身**：它与 §109.1 记的 multiview 同属
+// ⚠⚠ 实例化**改变绘制调用本身**：它与 multiview 同属
 //    「**行为差异，不是等价实现**」⇒ 必须**证明**逐位等价，不许假设它等价。
 //    今天每一笔给的是一格宽的区间 `k..k+1`，于是 `instance_index` 恒为 `k`，
 //    每一个算式与拆之前逐位相同 —— 判据就是那六档整份 PNG 的哈希。
@@ -78,7 +79,7 @@ struct MeshInstance {
 // 两边都是"按 `instance_index` 选一格"，取哪一档地址空间**不改任何一条算术**，
 // 但跟着 oracle 走免得下一次对账时先怀疑这里。
 //
-// ⚠ §本轮搬到**组 0**（binding 21）：组 1 只剩 pass 参数那一格。
+// ⚠ 它在**组 0**（binding 21）：组 1 只剩 pass 参数那一格。
 @group(0) @binding(21) var<storage, read> mesh: array<MeshInstance>;
 
 struct VertexOutput {
@@ -97,12 +98,12 @@ fn vertex(
     //    （所以"per-object = 按下标选一格"这件事只在 shader 里成立，不在执行器的词汇里。）
     @builtin(instance_index) instance_index: u32,
 ) -> VertexOutput {
-    // ⚠ 三处输出与 oracle 的对应关系（§110）：世界位置是 `world_from_local × p`；
+    // ⚠ 三处输出与 oracle 的对应关系：世界位置是 `world_from_local × p`；
     //    世界法线走**法线矩阵**并且**逐顶点归一化**（见下）；`uv` 原样透传。
     let world = mesh[instance_index].world_from_local * vec4<f32>(position, 1.0);
     var out: VertexOutput;
     let clip = pass_view.view_proj * world;
-    // ⚠ 把**面的裁剪坐标映射进这一页**（§本轮）：`clip.xy / clip.w` 是面 NDC 里的
+    // ⚠ 把**面的裁剪坐标映射进这一页**：`clip.xy / clip.w` 是面 NDC 里的
     //    `[-1,1]`，而这一页只占其中 `(中心 ± 半宽)` 那一块 ⇒ 减中心、除半宽。
     //    `w` 不动（透视除法与深度都不受影响）。
     //    ⚠ 相机那一条 pass 的参数是 `(0, 0, 1, 1)` ⇒ 这一步是恒等；而"恒等要真的恒等"
