@@ -597,37 +597,31 @@ mod tests {
         let pinned = [
             (
                 "atmosphere.wgsl",
-                9528_usize,
-                0xb222_07bb_e62e_b0fa_u64,
-                0x7c31_cc92_7eab_ed01_u64,
+                9365_usize,
+                0xf516_0552_05d4_9a2a_u64,
+                0xc991_30ea_df7e_2ce4_u64,
             ),
             (
                 "clouds.wgsl",
-                59581,
-                0x8a92_b256_5b14_290b,
-                0x26d9_7a07_2b26_9596,
+                59235,
+                0xb58e_3b5a_a000_8930,
+                0x883e_0965_80b6_5130,
             ),
             (
                 "ring.wgsl",
-                20620,
-                0x7bf8_9bc3_adbb_623e,
-                0x8c39_408d_fc5e_5e7b,
+                20467,
+                0x57aa_2687_d509_a930,
+                0x6802_c1cd_f831_1138,
             ),
             (
                 "surface.wgsl",
-                33589,
-                0xe964_701b_8495_fe2d,
-                0x8865_fd2a_ed6d_4b64,
+                33308,
+                0x6eb3_7b9d_5227_14ea,
+                0x1f2b_dc42_0817_987f,
             ),
         ];
         for (name, bytes, fnv, closure_fingerprint) in pinned {
             let (source, _path) = workspace_source_of(workspace, name).expect("入口真本");
-            assert_eq!(
-                closure(&source, &modules).fingerprint(),
-                closure_fingerprint,
-                "{name} 的 include 闭包变了 —— 外部符号的名字也在指纹里，\
-                 而 `px_graph::shader_key` 拿它算产物键（改了它，既有产物键全部作废）"
-            );
             let mut seen = Vec::new();
             let assembled = assemble::render_source(
                 &source,
@@ -635,15 +629,21 @@ mod tests {
                 crate::host_stubs::wgpu_host_stub,
                 &mut seen,
             );
+            let mut plain = Fnv(FNV_OFFSET);
+            for byte in assembled.as_bytes() {
+                plain.byte(*byte);
+            }
+            let fingerprint = closure(&source, &modules).fingerprint();
+            assert_eq!(
+                fingerprint, closure_fingerprint,
+                "{name} 的 include 闭包变了 —— 外部符号的名字也在指纹里，\
+                 而 `px_graph::shader_key` 拿它算产物键（改了它，既有产物键全部作废）"
+            );
             assert_eq!(
                 assembled.len(),
                 bytes,
                 "{name} 组装出来的字节数变了（喂给 create_shader_module 的就是这一份）"
             );
-            let mut plain = Fnv(FNV_OFFSET);
-            for byte in assembled.as_bytes() {
-                plain.byte(*byte);
-            }
             assert_eq!(plain.finish(), fnv, "{name} 组装出来的字节流变了");
         }
     }
