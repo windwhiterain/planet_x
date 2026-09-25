@@ -28,10 +28,15 @@ cost.
 **How fine-grained invalidation should get.** `Graph::fetch` answers "is this exact key on disk", so a
 node is either whole-and-cached or whole-and-recomputed. Cube maps, volumes and textures have natural
 divisions (6 faces, face x layer blocks, mip levels) that could each be cached and computed
-separately, which would let a change dirt one face instead of the artifact. The shape would be an
-optional slot index on `Cooked` plus a partition rule each domain's `Build` declares; payloads that
-declare no partition keep using slot 0 and stay byte-for-byte what they are today. This is separate
-from parallelism, which already exists (below).
+separately, which would let a change dirt one face instead of the artifact. Two shapes, and they are
+not the same cost: a slot index carried in the cache identity persists and is readable by the render
+host, but both halves of that live in crates every operator links (`Cooked` in `px_graph_schema`, the
+path rule and whole-payload decode in `px_protocol`), so it rotates every implementation library and
+forces the contract handshake to rebuild them all; a slot kept only inside a resident cook process
+touches no protocol at all, but dies with the service and stays invisible to the renderer. Either way
+a slot is its own key and its own artifact, so partial results depend on a partition rule each
+domain's `Build` declares — not on the existing row-band machinery (below), which changes wall time
+without changing what is stored.
 
 ## Known costs, not defects
 
@@ -54,13 +59,16 @@ the per-instance `.json` sidecar (`px_cook::inst::sidecar_text`) describes compi
 cooked output, and nothing reads it back. A cost model needs a store that outlives a run and is keyed
 by node key without feeding it.
 
-**The hot element path is serial while two cold paths are parallel.** `px_field_schema::parallel::rows`
-partitions a field into row bands over `available_parallelism()` scoped threads, each writing a
-disjoint slice, and is used by exactly two operators: `field.fbm3` and `field.ridged3`. Every element
-operator runs through the single nested loop in `px_elem::fill`, which is serial. So the operators an
-editing loop touches most are the ones that do not use the machinery that exists. Routing `fill`
-through `rows` is a wall-time change only if it stays bit-identical to the serial result, which is the
-gate `rows` was written to and must be tested against before it is adopted more widely.
+**Two row-band parallel helpers exist; the one in use has no bit-exact gate.** `px_protocol::rows`'s
+`fill_rows` splits a buffer into disjoint per-thread chunks and carries the gate that
+`a_parallel_field_is_bit_identical_to_a_serial_one` pins, but nothing outside its own tests calls it.
+`px_field_schema::parallel::rows` returns a fresh `Vec` and is what production uses — `field.fbm3` and
+`field.ridged3` — and it has no such gate. Meanwhile every element operator goes through the single
+nested serial loop in `px_elem::fill`, so the path an editing loop touches most uses neither helper.
+Routing `fill` through `parallel::rows` would move output bytes only if it stays bit-identical, which
+is unproven for that helper today: the gate has to be written for it, not borrowed from `fill_rows`.
+That edit also rotates the whole element instance-key family, because `px_elem/build.rs` fingerprints
+all of `src/` — see [invariants.md](invariants.md).
 
 **A scene document cannot point a material at content.** `ParamKind` covers `F32`, `I32`, `U32`,
 `Vec3`, `Vec4`, and the matching `Value` covers a number, a string, a triple and a quad. There is no
@@ -82,6 +90,16 @@ execution (which is why the `scene` graph merges its own entries rather than rel
 Anything that wants to follow one named node across runs — comparing two bakes of the same design, or
 attributing a violation to the node that caused it — needs an identity ledger beside the keys, not
 derived from them.
+
+**Which asset id a shared artifact should carry.** Several node names can
+legitimately share one key and one CAS slot, and the first writer fixes the
+`id` embedded in that artifact (a hit no longer re-writes it). No reader
+consumes it — `PayloadBundle::from_bytes` recovers params and blobs only,
+`Build::decode` takes the caller's node name, and the render host reads
+`params`, blob headers and the fingerprint, which is opaque to it — so sharing
+is safe today. What is undecided is whether the field should keep existing:
+either give it meaning (which would need the bundle to carry it through decode)
+or drop it from the manifest frame.
 
 ## Unconsumed inputs
 
