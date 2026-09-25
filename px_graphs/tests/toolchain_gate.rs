@@ -1,9 +1,10 @@
 //! See FINDINGS.md §13
 //!
-//! `-Level opt` and `-Level dev` share instance keys: the per-package `opt-level` override reaches
-//! the main workspace, while instance libraries are built in their own nested workspace, so the key
-//! cannot tell the two apart. The recorded toolchain can, and `px run` refuses a plan whose present
-//! libraries were built by another one.
+//! `-Level opt` and `-Level dev` share instance keys and bytes: the per-package `opt-level` override
+//! reaches the main workspace, while instance libraries are built in their own nested workspace, so the
+//! key cannot tell the two apart. What the gate compares is a library's **recorded** build against the
+//! current one, which separates `release` from `debug` and stays quiet across `opt`/`dev`; `px run`
+//! refuses a plan whose present libraries were recorded by another build.
 //!
 //! Four cases, and the fourth is the one an implementation gets wrong: the switch must be *recoverable*
 //! by rebuilding, not a permanent refusal.

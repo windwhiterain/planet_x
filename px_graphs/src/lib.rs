@@ -23,6 +23,10 @@ fn short(hash: &str) -> &str {
 /// A library with no record is not treated as belonging to another build: this gate exists to stop two
 /// **known** builds from being confused, and inventing a mismatch where nothing is recorded would
 /// refuse libraries that were merely compiled before sidecars existed.
+///
+/// The record is a readable copy of the same axis the instance key folds in, not a level name, so the
+/// gate compares builds rather than reading a level: it separates `release` from `debug` and stays quiet
+/// across `opt`/`dev`, which produce the same hash and the same bytes. See FINDINGS.md §13.
 pub fn recorded_toolchain(library: &str) -> Option<String> {
     let sidecar = Path::new(library).with_extension("json");
     let text = std::fs::read_to_string(sidecar).ok()?;
@@ -54,9 +58,12 @@ pub fn toolchain_mismatches(instances: &[InstInfo]) -> Vec<String> {
         .collect()
 }
 
-/// Refuses a plan whose present libraries were compiled by another build. The refusal names both sides
-/// and the command that resolves it, because switching level is recoverable: `px build` rewrites the
+/// Refuses a plan whose present libraries were recorded by another build. The refusal names both sides
+/// and the command that resolves it, because switching build is recoverable: `px build` rewrites the
 /// libraries (and their sidecars) with the current toolchain.
+///
+/// This is a production gate and lives in `src/` so the binaries can call it; its criteria live in
+/// `tests/toolchain_gate.rs`. See FINDINGS.md §13.
 pub fn assert_toolchain_matches(instances: &[InstInfo]) -> Result<(), String> {
     let mismatched = toolchain_mismatches(instances);
     if mismatched.is_empty() {
