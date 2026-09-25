@@ -138,8 +138,8 @@ widens parameter structs, this reads as "fix one node, dirty the whole graph": t
 belongs on is the instance's `decl_hash`/interface, and the crate-wide source fingerprint is what makes
 it wider than that.
 
-**Cost telemetry writes to a ledger that is not part of identity, and the first machine reader is
-still to be written.** `Graph::finish()` appends one run to `target/pcg/<graph>/metrics.jsonl`: a
+**Cost telemetry writes to a ledger that is not part of identity, and the ledger has a reader.**
+`Graph::finish()` appends one run to `target/pcg/<graph>/metrics.jsonl`: a
 header line (`seq`, `graph`, `started`, `node_count`) followed by one line per node (`seq`, `node`,
 `key`, `hit`, `cook_millis`, `bytes`). `seq` counts runs per graph and is read back from the most recent
 line that carries one, so it orders the file even when two runs start in the same second; `started` is
@@ -147,8 +147,9 @@ the human-readable anchor only. The file rotates to `metrics.jsonl.1` past 256 K
 write that does not go through is reported rather than swallowed. Damage older than that most recent
 readable line is outside what this routine reports: the scan stops at the first line that yields a `seq`,
 and when none does the run is recorded as `seq` 1. Nothing under `target/` is in any roster, so recording
-a measurement cannot invalidate what it measured. What is missing is the consumer: no command reads the
-ledger yet, so a cost model is still a manual exercise over the JSONL.
+a measurement cannot invalidate what it measured. The reader is `px cost <graph> [--runs N]`: per-node
+`seq`, hit/miss, `cook_millis`, bytes and latest params with diffs across the most recent runs, for
+pane and designer comparisons.
 
 **A resident cook service is not worth building today; the reading and the reason are below.** The
 idea was a long-lived process holding the operator libraries and the `Graph`, so repeated cooks stop
