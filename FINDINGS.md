@@ -112,6 +112,38 @@ open; the fix, if taken, is to widen `ManifestEntry.op_version` to `u64` in
 `px_graph_schema/src/protocol.rs` ⚠ which rotates every node key (it is inside the fingerprint
 roster), so it must be done together with a deliberate full re-bake, not casually.
 
+### 11. ⬜ `game`'s sources are inside every operator key, through one dev-dependency
+
+`px_protocol/Cargo.toml` carries `game = { path = "../game" }` under `[dev-dependencies]`, so its
+snapshot tests can build fixtures from the real types. `path_dependencies` treats any manifest
+section whose header contains "dependencies" alike (`px_fingerprint/src/lib.rs:176`), so that dev edge
+is followed as if it were a runtime one, and `collect_crate` recurses through it into all 19 of
+`game/src`. Because `px_protocol` is the near-universal dependency, those 19 files land in every
+roster downstream. Measured on this checkout with `px_fingerprint::roster`:
+
+| crate | roster entries | from `game` |
+|---|---|---|
+| `px_field_schema` | 54 | 19 |
+| `px_elem` | 61 | 19 |
+| `px_mesh_op` | 70 | 19 |
+| `px_field_op` | 73 | 19 |
+| `px_nurbs_op` | 72 | 19 |
+| `px_volume_op` | 91 | 19 |
+| `px_graphs` | 137 | 19 |
+
+Consequences: an unrelated edit to the market simulation rotates every node key and forces a full
+re-bake; `game` is roughly **a quarter to a third of what identity is computed from**; and a fingerprint
+now depends on code that never executes in the product (dev-only) — the same "identity should mean
+what actually runs" reasoning behind §10.
+
+The fix has two shapes with very different costs, which is why it needs a decision rather than a
+sweep. Narrowing `path_dependencies` to skip `[dev-dependencies]` fixes it for every crate at once but
+changes fingerprints ⇒ full rotation, so it belongs in the scheduled batch. Alternatively moving the
+fixture elsewhere avoids the semantics change but still touches `px_protocol/src` ⇒ also a rotation.
+Either way this is currently the largest single lever on how much a small edit invalidates, including
+larger than P5's spec/data split, because it removes 19 files from *every* roster instead of moving one
+axis.
+
 ### 10. ⬜ `px_protocol/src/rows.rs` is compiled by nothing and fingerprinted by everything
 
 The file defines `fill_rows` plus two tests (`a_parallel_field_is_bit_identical_to_a_serial_one`,
