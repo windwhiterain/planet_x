@@ -59,6 +59,7 @@ cargo run -p px_probe --bin <name>                 # or: --release
 | `seam_probe` | the C¹ seam across volume face edges: the slope of the **same physical tangential direction** on both sides of every edge | none — it prints ratios (jump ÷ in-face rate of change); a seam is "value continuous, slope discontinuous", so the reading is the verdict | no |
 | `sphere_probe` | a **standard soft-edged sphere** so brightness can only come from starlight; bakes `bake_stars` → `bake_emission` → `raymarch_sky` and writes `target/probe/sphere.png` | none — it prints distributions (emission inside the sphere, image luminance percentiles) | yes |
 | `star_probe` | star position density by volume-equal bands and by octant, index/payload memory, sphere-query cost, and lit-area density per cube-map ring for both a freshly marched and a baked sky | none — it prints each ratio against 1.0 | no |
+| `cook_boundary` | cook-side process-boundary costs: device cold vs warm connect, per-library first-open vs resident re-resolve, and spawn+cold / warm / spawn+open walls | none — it prints ms readings; a reading, not a gate | yes |
 
 Flags: `dual_noise --diagnose` additionally prints the raw data behind its checks (per-axis dual
 gradients, central differences at four step sizes, whether each octave is clamped, the fbm mean) and
@@ -67,9 +68,9 @@ is explicitly **not** a check (it has no assertions, so a `✓` from it would be
 rendering. `seam_probe <VOLUME.pxart> [lane] [条数]` and `star_probe [face] [SKY.pxart]
 [cloud.density.pxart]` take positional arguments.
 
-`seam_probe`, `sphere_probe`, and `star_probe` are **diagnostic instruments**: they report numbers and
+`seam_probe`, `sphere_probe`, `star_probe`, and `cook_boundary` are **diagnostic instruments**: they report numbers and
 have no threshold, so their exit code only reflects "it ran". Treat their output as a reading, not as
-a gate.
+a gate. `cook_boundary [rounds] [spawns]` repeats the warm arms and the alternating spawn pairs.
 
 ## The arbiter
 

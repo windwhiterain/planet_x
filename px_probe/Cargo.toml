@@ -31,6 +31,10 @@ px_volume_schema = { path = "../px_volume_schema" }
 px_volume_alg = { path = "../px_volume_alg" }
 # sphere_probe 用：实验走**GPU**那条路（与图脚本同一份实现，CPU 那份只用于对账）
 px_volume_gpu_op = { path = "../px_volume_gpu_op" }
+# cook_boundary 用：走图侧同一条装载路（`ops::body`）量逐库装载。只见类型、不见实现。
+px_field_schema = { path = "../px_field_schema" }
+px_mesh_schema = { path = "../px_mesh_schema" }
+px_nurbs_schema = { path = "../px_nurbs_schema" }
 # ⚠ `star_probe` 用：统一稀疏格那一份（星场载荷 + 索引）+ **按 `art/*.toml` 读参数**
 #   （探针不许在源码里抄一份星场参数 —— 抄一份就是"量的是另一份星场"）。
 px_sparse = { path = "../px_sparse" }
