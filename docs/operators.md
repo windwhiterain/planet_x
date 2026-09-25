@@ -118,6 +118,12 @@ The one function is `px_cook::inst::key` (`px_cook/src/inst.rs`); everything els
 | 6 | body template | the recipe's `body` text after `normalize_template` (all whitespace removed) |
 | 7 | source file bytes | `<workspace root>/<source>` read raw, with a `u64` length prefix; the **path** is not hashed |
 
+Consequence: **the build environment is part of the identity.** The same source compiled under
+another profile / `TARGET` / `RUSTFLAGS` is a different instance key, so one workspace rebuild can
+rotate every instance key with the sources byte-identical. At load time the mismatch is refused
+(the toolchain table above), so it never answers silently wrong — but the rebuild still costs the
+full re-compile and re-cook.
+
 Text inputs are length-prefixed; the interface is written as raw 8 little-endian bytes. So identity
 is **six content axes plus a domain tag**. The `op_id` and the graph program's own `PX_SOURCE_HASH`
 are **not** in an instance key: they are labels for readings and errors, and two graphs that use the

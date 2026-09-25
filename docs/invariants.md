@@ -39,6 +39,12 @@ comment edit changes every key while every output stays identical. Do not use "t
 evidence that output changed, and do not use "the cache hit" as evidence that it did not — that
 only holds when the dependencies were not rebuilt.
 
+**One rebuild is an identity event.** Instance keys include the toolchain axis (
+`rustc -vV` full text, `TARGET`, `RUSTFLAGS`, `PROFILE`), so recompiling the same sources under
+another profile rotates every instance key with the sources byte-identical — and leaves the old
+libraries on disk under their old names. Inside a measurement or bake window, treat a rebuild as a
+key rotation and re-open the window.
+
 **Nothing that participates in a key may be edited casually.** If it must change, expect a
 repository-wide key rotation: rebuild every operator dylib, and re-cook. A warning sign of a
 half-done rotation: at load time, `…dll is not from the same build as the contract`.

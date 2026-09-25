@@ -7,6 +7,17 @@ Confirmed defects and stale artefacts live in [`FINDINGS.md`](../FINDINGS.md) at
 with a reproduction or a source trace for each. An entry belongs here only while nothing about it is
 true yet: once it is confirmed broken, it moves there.
 
+## Batch window discipline
+
+**What a key-rotation batch window may and may not do.** The batch items only deliver "one
+rotation, one rebuild, one re-cook" if the build environment stays frozen for the window:
+one profile, one `TARGET`, one `RUSTFLAGS`, and no workspace rebuild by anyone (the toolchain axis
+of an instance key rotates on it — docs/operators.md, instance-key section). The window's validity
+is not a promise, it is a reading: a `px list` invocation before opening and before closing leaves
+two key columns; they must be byte-identical, and the most recent run's `manifest.json` key column
+(same instance-key side) is the second half of that check. A window whose columns differ is void —
+none of its numbers enters a ledger.
+
 ## Awaiting a decision
 
 **Where does an idea go before it is true?** `docs/` states only what holds today. An idea that
