@@ -512,9 +512,9 @@ graph "nebulasky"                            sky.nebula ← (the same star field
   `starlight_steps = 24`, `starlight_max = 16`, `extinction = [20, 20, 20]`,
   `dust_bias = 1.7`, `dust_threshold = 0.38`.
 
-That program does not currently run to completion: the two known defects that block it (`elem::*` on a
-`Domain::Volume` field, and `res_ratio` in `density_volume.toml`) are recorded in
-[backlog.md](backlog.md).
+The program runs end to end. An element operator on a `Domain::Volume` field takes its direction from
+a single probe (`px_elem::fill`, `Field::direction_probe`) rather than per cell, because a volume cell
+has no direction, and `art/nebula/density_volume.toml` names its in-face grid `res`.
 
 Its `--face` switch is parsed and printed but drives nothing: the sky resolution is `sky.toml`'s `face`,
 and the volume resolution is `--shape` (with `--layers` overriding the layer count from
