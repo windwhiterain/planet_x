@@ -160,6 +160,30 @@ this checkout via `px_fingerprint::roster`: `px_field_op` (73 entries) and `px_v
 carry `px_protocol/src/rows.rs`. Deleting the dead file rotates every operator key and forces a full
 re-bake, so this cleanup belongs in a scheduled rotation window rather than a zero-cost sweep.
 
+### 12. ⬜ `collect_tree` skips test-named files by filename, so a declared module can be compiled and invisible to identity
+
+`px_fingerprint/src/lib.rs::collect_tree` walks the **filesystem**, not the module tree, and applies two
+independent skip rules: a directory named `tests` or starting with `.`, and any file whose name contains
+`_test` or starts with `test_`.
+
+The second rule is not an exemption, it is a hole. A file placed at `src/<something>_test.rs` and declared
+with `mod something_test;` is compiled into the artifact while being absent from every fingerprint — so
+editing it changes behaviour without changing any key. That is precisely the failure mode
+[invariants.md](docs/invariants.md) exists to prevent ("same key, different content").
+
+Latent, not current: no such file exists in the tree today (`find` for `*_test.rs` / `test_*.rs` returns
+nothing). Verified the size of the blind spot read-only via `px_fingerprint::roster`: writing
+`px_field_schema/src/hazard_probe_test.rs` leaves that crate's roster at 54 entries before and after, so
+the file is invisible to identity even though a `mod` declaration would compile it. Probe removed; no
+source or build state was left behind.
+
+Two consequences worth stating as convention rather than code: gates belong in `tests/` (free of identity
+cost because the directory rule matches only unreachable-from-the-crate paths), and **naming a compilable
+module `*_test.rs` / `test_*.rs` means "compiled but invisible", not "safe to ignore"**. Hardening the
+rule to "skip only files outside the module tree" would edit `px_fingerprint/src/lib.rs`, which sits in
+every roster — another full-family rotation, so it belongs in the scheduled batch (§11) or is explicitly
+declined.
+
 ### 1. ✅ Any `elem::*` node on a `Domain::Volume` field aborts the process
 
 `px_elem::fill` asked every cell for its direction, and `px_protocol::art::direction_at` panicked for
