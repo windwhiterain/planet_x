@@ -46,6 +46,21 @@ service lives on the cook side (host unchanged, device cost paid by the service)
 moves into the host. Nothing is decided until someone measures what the process boundaries actually
 cost.
 
+**Whether to erase operator types.** The declaration surface is 32 preset operators (field 10,
+volume 5, mesh 2, nurbs 15) over a handful of `Body` shapes (inputs times payload domain), plus 4
+element specs sharing one cell-closure shape, 3 instance recipes whose bodies are already template
+strings, and zero shipped `px_local_op!` users. A per-declaration shim table keeps static checking
+but rotates every implementation roster the moment the `px_op!` / `px_body!` expansion changes; a
+`&dyn` body erases the interface (today a hash of three type names), rotating every node and
+instance key and deleting the compiler's input, output and parameter enforcement; skipping costs
+nothing today, because no recurring cost of static dispatch has been measured. The project starts if
+and only if someone measures such a cost larger than one full rotation plus re-bake plus rewriting
+about five gates.
+
+## Known costs, not defects
+
+Each of these is how the engine behaves today and why it costs what it costs. None is a bug.
+
 **How fine-grained invalidation should get.** `Graph::fetch` answers "is this exact key on disk", so a
 node is either whole-and-cached or whole-and-recomputed. Cube maps, volumes and textures have natural
 divisions (6 faces, face x layer blocks, mip levels) that could each be cached and computed separately,
@@ -85,21 +100,6 @@ split would re-index. `sky.nebula` (48 MB) has one mip level, so splitting by mi
 So the producer side starts only if a face-level edit becomes a real workflow, or if a measured benefit
 exceeds one full-family rotation plus re-bake; a slot kept inside a resident cook process stays
 unattractive because that service is itself not being built (see the cost entry below).
-
-**Whether to erase operator types.** The declaration surface is 32 preset operators (field 10,
-volume 5, mesh 2, nurbs 15) over a handful of `Body` shapes (inputs times payload domain), plus 4
-element specs sharing one cell-closure shape, 3 instance recipes whose bodies are already template
-strings, and zero shipped `px_local_op!` users. A per-declaration shim table keeps static checking
-but rotates every implementation roster the moment the `px_op!` / `px_body!` expansion changes; a
-`&dyn` body erases the interface (today a hash of three type names), rotating every node and
-instance key and deleting the compiler's input, output and parameter enforcement; skipping costs
-nothing today, because no recurring cost of static dispatch has been measured. The project starts if
-and only if someone measures such a cost larger than one full rotation plus re-bake plus rewriting
-about five gates.
-
-## Known costs, not defects
-
-Each of these is how the engine behaves today and why it costs what it costs. None is a bug.
 
 **The fingerprint axis is crate-wide, so a signature edit rotates unrelated keys.** `interface_hash`
 folds in `type_name::<Params>()`, so adding one field to a parameter struct changes that node's key —
@@ -167,12 +167,16 @@ still crosses a dylib boundary uncaught where it is not wrapped — the parallel
 back to `expect("行带线程不该 panic")` on a joined worker. A stable set of error codes alongside the
 display text would let a caller branch on the failure instead of reading it.
 
-**A node has no identity that outlives a run.** Node names are deliberately outside every key, and
-`finish()` writes the manifest from this run alone, so a name-to-key index exists only for the last
-execution (which is why the `scene` graph merges its own entries rather than relying on the driver).
-Anything that wants to follow one named node across runs — comparing two bakes of the same design, or
-attributing a violation to the node that caused it — needs an identity ledger beside the keys, not
-derived from them.
+**A node name is outside every key, and its history now lives in two files.** Node names are
+deliberately outside every key, and `finish()` writes the manifest from this run alone, so the
+name-to-key index covers only the last execution (which is why the `scene` graph merges its own entries
+rather than relying on the driver). What is new is that a run is no longer described only by that index:
+`finish()` also appends one line per node to `target/pcg/<graph>/metrics.jsonl`, carrying the node name,
+its key, whether it was a hit, its milliseconds and its bytes, under a per-graph run number. Together the
+two give the minimal surface for following one named node across runs — comparing two bakes of the same
+design, or attributing a violation to the node that caused it. What does not exist is a reader that
+treats them as one volume: the ledger is appended and never queried, so the comparison is still done by
+hand over the JSONL.
 
 **Which asset id a shared artifact should carry.** Several node names can
 legitimately share one key and one CAS slot, and the first writer fixes the
