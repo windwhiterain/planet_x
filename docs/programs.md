@@ -238,10 +238,10 @@ recipe line.
 
 The sidecar is strict JSON (one field per line, no trailing comma) so that tools can read it back:
 the key file name is the identity, and the sidecar's `toolchain` field is the only record of which
-build compiled that library. `px list` reads it to mark a library that came from another build; a
-sidecar that is missing and one that will not parse are reported as different conditions, because
-they call for different reactions (`-Task list` prints `没有 sidecar` for the first and the parse
-error for the second).
+build compiled that library. `px list` reads it to mark a library that came from another build, and
+`px run` reads it to refuse one; a sidecar that is missing and one that will not parse are reported as
+different conditions, because they call for different reactions (`-Task list` prints `没有 sidecar` for
+the first and the parse error for the second).
 
 Flags:
 
@@ -348,19 +348,20 @@ The toolchain axis of an instance key is `rustc -vV` + `TARGET` + `RUSTFLAGS` + 
 non-default levels relate to identity differently and the wrapper warns on stderr when either is
 selected:
 
-- **`-Level opt` shares instance keys with `-Level dev`.** Cargo still reports `PROFILE=debug`; the
-  override only changes a package's `opt-level`. Two builds of the same identity therefore land on
-  the same library, and **whichever built first stays on disk for both** — a reading taken at `opt`
-  can be served by a library built at `dev`. Keep an A/B comparison inside one level, and use
-  `-Task list` to see whether a library on disk came from the current build (a `!` marks one that
-  did not).
+- **`-Level opt` shares instance keys with `-Level dev`.** Cargo still reports `PROFILE=debug`, and the
+  per-package override does not reach an instance library at all: those are built in their own nested
+  workspace under `target/jit/<key>/`, to which only `PROFILE`/`TARGET`/`RUSTFLAGS` are passed. The two
+  levels therefore produce the same instance-library bytes and the same keys.
 - **`-Level release` rotates every instance key**, because `PROFILE` changes. Expect
   `-Task list` to report every instance `缺` on the first run after switching; that is the rotation,
   not a regression, and `-Task build` compiles the new family.
 
-`-Task list` reads the `toolchain` field of the sidecar next to each compiled library
-(`target/pcg/inst/<key>.json`) and marks a library whose recorded toolchain differs from the current
-one, so "built by another level" is visible instead of silent.
+Because the key cannot separate the levels, the recorded toolchain does. `-Task list` reads the
+`toolchain` field of the sidecar next to each compiled library (`target/pcg/inst/<key>.json`) and marks
+a library whose recorded toolchain differs from the current one with `!`; `px run` **refuses** such a
+plan, naming the operator and both hashes, and `px build` treats that library as work to redo. So the
+recovery from a level switch is `build` then `run`, never `run` alone. A library with no sidecar is
+neither marked nor refused — an absent record is not evidence of another build.
 
 The three task names `planet`, `desert`, `clouds` and the `run` task first build
 `px_field_op`, `px_volume_op`, and `px_mesh_op` with the same flags, because the operator

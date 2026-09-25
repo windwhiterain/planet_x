@@ -9,6 +9,15 @@ true yet: once it is confirmed broken, it moves there.
 
 ## Batch window discipline
 
+**The toolchain gate guards the driver's entrances, not the loader.** `px run` refuses a plan whose
+present instance libraries were compiled by another build (FINDINGS.md §13), and `px build` redoes
+them. A graph executable started directly — double-clicked, or run from `target/debug/` — resolves its
+instance libraries by `PROFILE` alone and loads whatever is there, so the gate can be stepped around by
+not using the driver. Moving the check into `px_graph_schema`'s loading entry point would cover every
+caller, at the cost of rotating the whole instance-key family, because that crate is in each root's
+closure. Whether that price is worth paying depends on whether direct invocation is a path anyone uses
+for a measurement; until it is, the driver entrances are where the answer is enforced.
+
 **What a key-rotation batch window may and may not do.** The batch items only deliver "one
 rotation, one rebuild, one re-cook" if the build environment stays frozen for the window:
 one profile, one `TARGET`, one `RUSTFLAGS`, and no workspace rebuild by anyone (the toolchain axis

@@ -102,49 +102,50 @@ drops from 0.94–0.96 s to **0.47–0.50 s** wall, and a post-run mtime probe s
 touched. Pinned by `px_graphs/tests/local_op.rs::a_hit_leaves_the_artifact_untouched`
 (artifact mtime and size must not change across a hit).
 
-### 13. ⬜ `-Level opt` shares instance keys with `-Level dev`, while `-Level release` does not
+### 13. ✅ `-Level opt` shares instance keys with `-Level dev`, while `-Level release` does not
 
 The toolchain fingerprint is `blake3(rustc -vV, TARGET, RUSTFLAGS, PROFILE)`
 (`px_fingerprint/src/lib.rs:70-91`), and an instance key folds it in (`px_cook/src/inst.rs:128`). Cargo
 sets `PROFILE` to only `debug` or `release`, so the axis distinguishes those two and nothing else.
 
-That collides with the documented measurement practice. `px.ps1 -Level opt` appends
-`--config profile.dev.package.<pkg>.opt-level=2` (programs.md) — still `PROFILE=debug`. So **an arbiter
-run at `-Level opt` produces byte-identical keys to a `-Level dev` run of the same source, and whichever
-built first leaves its libraries on disk for both.** The same driver also warns that `-Level` overrides
-are deliberately withheld from `list`/`build`/`gc` because instance libraries form their own workspace
-root under `target/jit/<key>/` that the main config cannot reach — so the very runs that disagree about
-optimisation level agree about the key, by construction.
+**The root cause is not that the key lacks a level field: `-Level opt` never reaches the instance
+libraries at all.** The override is `--config profile.dev.package.<pkg>.opt-level=2`, which applies to
+the main workspace, while each instance library is generated into its own nested workspace under
+`target/jit/<key>/` (its own `[workspace]`, absolute path dependencies) and built by a nested `cargo`
+that is given only `PX_PROFILE` / `PX_TARGET` / `PX_RUSTFLAGS` / `PX_CARGO` (`px_cook/build.rs:19-27`)
+— no `--config` anywhere. So `-Level opt` and `-Level dev` produce **the same instance-library
+bytes**, not merely the same key.
 
-Two things follow, and they point in opposite directions from what operators.md currently claims:
+The real hazard is the other direction: a graph program and the implementation libraries are compiled at
+the main workspace's level, while the search for an instance library goes by `PROFILE`
+(`profile_dir()`), so **changing level changes the directory that is searched while the key stays the
+same** — a library built by another level can be loaded by a binary that never built it.
 
-- [operators.md](docs/operators.md) justifies excluding `DEBUG`/`opt-level` because they "do not move
-  layout". For the
-  *numerical* payload that holds — which is why the CAS can be shared across levels at all. But float
-  results are exactly where this bites: `opt-level=2` may reassociate FP ops through
-  `RUSTFLAGS`-invisible codegen options, so an "optimized" reading and a "dev" reading of the same key
-  can differ in content while sharing identity. The doc's reason is sound for layout and silent about
-  numerics; the gap should be stated rather than inferred.
-- `-Level release` **does** rotate every instance key, since `PROFILE` changes. This is the operational
-  trap deepseek measured: switching build environment silently rotates all instance keys with zero
-  source edits, and the superseded libraries stay on disk (`target/pcg/inst/` was observed holding two
-  generations side by side). Nothing in the key says which level produced a library, and no gate checks
-  it — `sidecar_text` records a `toolchain` field and `px list` now reads it back, so a library built by
-  another level is marked `!` (see below); the key itself still cannot say.
+Measured (same source, `PX_PCG_FRESH=1` so every node re-cooks and rewrites its artifact, one machine,
+`planet` and a small `nebula`):
+- Node identity — `node` / `op` / interface tag / `bytes` / detail — is identical across levels for
+  6/6 `planet` nodes and 20/20 `nebula` rows, and so are the node keys.
+- A full SHA256 snapshot of `target/pcg/ab/**` (426 artifacts after the `planet` pair, 446 after the
+  `nebula` pair) shows **zero byte changes** across a fresh run at either level.
 
-The warning half is now in place at zero key cost: `tools/px.ps1` warns on stderr for `-Level opt` and
-`-Level release` (what each does to identity), `-Task list` marks a present library whose sidecar
-`toolchain` differs from the current build, and `docs/programs.md` states both. What remains open is the
-identity question: `opt` and `dev` still share keys, so a library built by either answers for both.
+`PX_PCG_FRESH=1` is a necessary condition for that reading: it is what makes each node take `store`'s
+miss branch and rewrite its artifact, so a byte difference would appear as a changed file hash. A
+comparison without it degenerates into "the second run hit the cache" and proves nothing. `PX_PCG_FRESH`
+also applies to the graph whose `begin()` runs in that process, not to a whole graph tree: in the
+`nebula` pair the `nebulasky` row is still `hit=true`, which is the expected shape.
 
-Not fixed here: any change either way touches `px_fingerprint/src/lib.rs` or `px_cook/src/inst.rs`, both
-inside every roster ⇒ full-family rotation, so it belongs in the scheduled batch (§11) or needs a
-decision. Cheap part available now at zero key cost: a `tests/` gate asserting one canonical build
-configuration per measurement session.
+The warning half is unchanged: `tools/px.ps1` warns on stderr for `-Level opt` and `-Level release`
+(what each does to identity), and `docs/programs.md` states both. What is new is the gate. Because the
+key cannot separate the levels, the **recorded toolchain** does: `px run` refuses a plan whose present
+libraries were compiled by another build, naming the operator and both hashes; `px build` treats such a
+library as work to redo (it compiles with the current toolchain, so refusing there would leave no way to
+switch level); a library with no sidecar is not a mismatch, since the gate separates two *known* builds.
+The gate lives in `px_graphs/src/lib.rs` and is covered by `px_graphs/tests/toolchain_gate.rs`; the
+change is zero-key, because `px_graphs` and `px_cook` are in no instance root's closure.
 
-The convention that costs nothing today and prevents the misreading: **within a batch window or a timing
-session, fix `--release` vs debug and never mix**; treat `-Level opt` as numerically distinct evidence
-even though it shares keys.
+`-Level release` still rotates every instance key, since `PROFILE` changes, and the superseded libraries
+stay on disk (`target/pcg/inst/` has been observed holding two generations side by side). That remains
+the operational trap it was.
 
 ### 15. ✅ The instance sidecar was not strict JSON (a trailing comma on every field)
 

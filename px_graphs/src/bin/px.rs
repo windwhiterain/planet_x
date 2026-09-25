@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use px_cook::inst::{self, BuildGraph, InstCodegen};
+use px_graphs::{assert_toolchain_matches, current_toolchain, recorded_toolchain};
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -81,7 +82,7 @@ fn list() -> Result<(), String> {
                 "      ⚠ {} 记着工具链 {}，不是当前这份构建 {} ⇒ 库在盘上，但可能是别的档编的",
                 info.op_id,
                 short(&recorded),
-                short(&current_toolchain().to_string()),
+                short(current_toolchain()),
             ),
             Toolchain::Unrecorded => println!(
                 "      ⚠ {} 没有 sidecar：库在盘上，但没有任何东西记着它是哪一档编的",
@@ -112,10 +113,6 @@ fn list() -> Result<(), String> {
         println!("{unrecorded} 条没有 sidecar ⇒ 判断不了是不是当前这份构建编的");
     }
     Ok(())
-}
-
-fn current_toolchain() -> &'static str {
-    px_graph_schema::TOOLCHAIN_HASH
 }
 
 /// What the sidecar next to a compiled library says about the build that wrote it. Three outcomes
@@ -185,13 +182,33 @@ fn build(flags: &[String]) -> Result<(), String> {
 
     let mut built = 0_u32;
     let mut already = 0_u32;
+    let mut stale = 0_u32;
     let mut failed = 0_u32;
     for info in instances {
         let key = inst::key_of_info(info);
-        if Path::new(&info.library).is_file() {
+        let present = Path::new(&info.library).is_file();
+        let recorded = if present {
+            recorded_toolchain(&info.library)
+        } else {
+            None
+        };
+        // A library recorded by another build is *work*, not an error: this is the command that makes
+        // the plan true again. Refusing here would leave no way to switch levels.
+        let stale_here = present && recorded.as_deref() != Some(current_toolchain());
+        if present && !stale_here {
             already += 1;
             println!("已有 {}（{}）", info.op_id, short(&key));
             continue;
+        }
+        if let Some(recorded) = &recorded {
+            stale += 1;
+            println!(
+                "重编 {}（{}）：盘上记着工具链 {}，当前是 {}",
+                info.op_id,
+                short(&key),
+                short(recorded),
+                short(current_toolchain()),
+            );
         }
         let entry: &InstCodegen = catalogue.for_op(&info.op_id)?;
         match inst::compile_one(info, &key, entry) {
@@ -206,7 +223,7 @@ fn build(flags: &[String]) -> Result<(), String> {
         }
     }
     println!(
-        "共 {} 条：已编 {built}、已有 {already}、失败 {failed}",
+        "共 {} 条：已编 {built}（其中换档重编 {stale}）、已有 {already}、失败 {failed}",
         instances.len()
     );
 
@@ -344,6 +361,8 @@ fn run(args: &[String]) -> Result<(), String> {
             return Err(plan.hint(&graph_name));
         }
     }
+    // The plan is complete, which says every library is on disk — not that it came from this build.
+    assert_toolchain_matches(&graph.instances())?;
 
     let exe = graph_exe(&graph_name)?;
     println!("stage 2｜{}", exe.display());
