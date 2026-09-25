@@ -25,21 +25,18 @@ numbers as approximate. Re-derive a location with `git grep` before acting on on
 | 4c | the operator-loading gate covered 20 of 32 declarations | 31 loaded + 1 counted exclusion, asserted to equal the table |
 | 8 | a cache hit re-encoded its artifact and rewrote it (`Graph::store` ran unconditionally) | `store` now skips the write on a hit and reads the on-disk length; doc + `a_hit_leaves_the_artifact_untouched` pin it |
 
-⚠ **Two content consequences. The affected graphs were re-baked; the delta was not measured.**
+⚠ **Two content consequences; both are settled, and the next bake recomputes from source.**
 
-- `tangent_frame` changes the values `east`/`north` produce, so **`field.warp` output changes** in the
-  polar band. The subagent measured the old frame's worst row-to-row rotation at 162° (face 256)
-  against 0.13° for the new one, and measured `field.gradient` as unchanged to 1.9e-7 (it is
-  frame-covariant, so the basis flip cancels). The size of the change in `warp` output — and hence in
-  the cloud density and the `clouds` / `gasgiant` / `desert` bakes — **was not measured.**
+- `tangent_frame` changes the values `east`/`north` produce, so **`field.warp` output changes** in
+  the polar band. Measured one-off at the time of the fix: the old frame's worst row-to-row rotation
+  on face 256 was 162°, the new one 0.13°, and `field.gradient` unchanged to 1.9e-7 (it is
+  frame-covariant, so the basis flip cancels). The band's behaviour is now pinned continuously by
+  `px_graphs/tests/warp_polar.rs`: a 32×16 equirect sweep through the loaded operator, both polar
+  bands at `|direction[1]| > 0.99` (latitudes above 81.89°), seam included — worst neighbour turn
+  must stay under 1° (reading: 0.0010°), displacement must be non-trivial, and the probe includes
+  its negative control (a deliberately reversed sample reads 180°).
 - `sky.jitter` now does something. Its default is 1.0, so **the nebula sky bake changes** unless the
   parameter is set to 0.0, which reproduces the previous bytes exactly.
-
-⚠ Neither consequence needs a decision: every node key has rotated anyway, so the next bake
-recomputes from source regardless. What is open is only whether anyone wants to *verify* the new
-content rather than let it land — and the honest way to do that is a `field.warp` test that sweeps the
-polar band, not a one-off reference implementation. The band is `|direction[1]| > 0.99`, i.e. latitudes
-above 81.89°, about 8° from each pole.
 
 ## Code defects
 
