@@ -178,13 +178,14 @@ fn the_gpu_tessellation_reaches_a_watertight_mesh_through_the_loading_gate() {
             surface: cooked(ball),
         },
     );
+    // A device is required, not optional: `px_graphs` is a default member, so returning here on a
+    // machine without one would report the fast chain green while this comparison never ran
+    // (docs/invariants.md, "A skipped check is not a passing check"). `px_nurbs_op` reports the
+    // stack's message through `-> Result<_, String>`, which is all this side can see — the
+    // implementation library is loaded at runtime, so the graph side cannot link the GPU crate.
     let mesh = match rendered {
         Ok(mesh) => mesh,
-        Err(err) if err.contains("没有可用 GPU") => {
-            println!("nurbs.surface.tessellate.gpu：没有可用 GPU，跳过");
-            return;
-        }
-        Err(err) => panic!("GPU 细分失败：{err}"),
+        Err(err) => panic!("this check requires a working GPU: {err}"),
     };
     assert!(mesh.vertices() > 32, "网格太寒酸了，这个判据没在测东西");
     for vertex in 0..mesh.vertices() {

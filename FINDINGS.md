@@ -459,31 +459,11 @@ which does not exist. `tools/frame-probe.ps1:33` says `-Sweep` is dead, but it w
 
 ## Weakened gates
 
-### Skip-as-pass in the default chain
-
-`px_gpu/src/lib.rs:346-351`, `px_volume_gpu_op/src/lib.rs` (about eight sites) and
-`px_nurbs_gpu_op/src/tests.rs` (seven sites) print `没有可用 GPU，跳过` and **pass**. Both operator
-crates are **default members**, so on a machine without a GPU the fast chain is green while every
-GPU comparison silently never ran. This is exactly the failure the invariants warn about.
-
-The policy is also inconsistent inside one crate: `px_volume_gpu_op/src/lib.rs:1314-1319`
-deliberately panics instead of skipping.
-
 ### A build warning everyone sees
 
 `px_shader/src/host_stubs.rs:165-167` and `:370-372` use a backslash-newline continuation that spans
 a blank line, so rustc reports "multiple lines skipped by escaped newline" on every build. The
 pinned byte test covers the consequence, so it is harmless — but it trains people to ignore warnings.
-
-### Two test gates are weaker than their comments claim
-
-- `px_graph/tests/source_hash.rs`: `FINGERPRINTED_CRATES` (`:30-39`) and
-  `every_implementation_library_exports_an_identity` (`:106-116`) omit the three NURBS crates, so
-  their `build.rs` and `px_impl_lib!()` are ungated.
-- `px_graphs/tests/ops_load.rs`: claims to load every declared operator but covers 20 of 32.
-  Missing: Craters, Stamps, Fbm3, Ridged3, Warp3, Density, Emission, SkyNebula, Stars,
-  SurfaceTessellateGpu, CurveTessellateGpu. (`FieldRemap` is excluded by design — it is declared as
-  `field.remap/inst` and has no preset body.)
 
 ### 4. `px_graphs/src/bin/scene.rs` states a byte-equality claim with no live reader
 
