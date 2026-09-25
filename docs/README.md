@@ -65,6 +65,10 @@ Start with [model.md](model.md) for the end-to-end picture. Before changing anyt
 | verdicts: probes, the arbiter, reference images | [verdicts.md](verdicts.md) |
 | unresolved questions and known defects | [backlog.md](backlog.md) |
 
+Confirmed defects and stale artefacts, each with a reproduction or a source trace, are recorded in
+[`FINDINGS.md`](../FINDINGS.md) at the repository root. This directory states what holds today; that
+file states what is broken.
+
 ## Building and running
 
 ```powershell

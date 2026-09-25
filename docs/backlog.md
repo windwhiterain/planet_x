@@ -1,50 +1,34 @@
-# Open decisions
+# Backlog
 
-Unresolved questions and known work. Nothing here describes current behaviour; the rest of
-`docs/` does that.
+Unresolved questions and known work. The rest of `docs/` describes current behaviour; this file is
+the only place that does not.
+
+Defects discovered while rewriting the documentation are recorded in [`FINDINGS.md`](../FINDINGS.md)
+at the repository root, with a reproduction or a source trace for each.
 
 ## Awaiting a decision
 
-**Where do unresolved design questions and ideas live now?** The rewrite removed the dated round
-notes and the previous backlog. Ideas that cannot yet be stated as a present-tense fact need a home
-that is clearly not a state document — either this file, or an explicitly separated part of the
-repository. Until that is settled, record them here.
+**What is documented, and where does an idea go before it is true?** `docs/` states only what holds
+today. An idea that cannot yet be written as a present-tense fact has no home other than this file.
 
 ## Known defects
-
-Found while rewriting the documentation by reading against the code. Each was reproduced or traced
-to the source.
 
 ### Any element operator on a volume field aborts the process
 
 `px_elem::fill` unconditionally calls `out.direction(x, y)`. For `Projection::Volume` that reaches a
-deliberate panic in `px_protocol::art` (`direction_at`). In the operator path the panic crosses a
-dylib boundary, which is fatal and uncatchable:
-
-```
-panicked at px_protocol/src/art.rs:816
-体网格（Domain::Volume）没有「一个方向」这回事
-fatal runtime error: Rust cannot catch foreign exceptions, aborting
-```
-
-Reproduced with the `nebula` graph, whose node after `warped` is an element `remap` over a volume
-field. Any element operator applied to a volume field hits this.
+deliberate panic, and in the operator path the panic crosses a dylib boundary, which is fatal and
+uncatchable. Reproduced with the `nebula` graph.
 
 ### `px run nebula` cannot start
 
-`art/nebula/density_volume.toml` sets `res_ratio`, which is not a field of `DensityParams`
-(that struct denies unknown fields). The graph parses that file before cooking anything:
-
-```
-unknown field `res_ratio`, expected one of `res`, `layers`, `inner`, `outer`, `reach`
-```
+`art/nebula/density_volume.toml` sets `res_ratio`, which is not a field of `DensityParams`. The
+graph parses that file before cooking anything.
 
 ### `TextureData::encode` is broken for `Rgba8Srgb`
 
 The blob shape is written as `bytes.len()/2` for both texture formats, but `Rgba8Srgb` has an
-element size of 1, so the length self-check rejects every non-empty rgba8 texture. Only
-`rgba16_float` works, and the test covers only that format. Latent: the one operator that emits a
-texture emits `Rgba16Float`.
+element size of 1, so the length self-check rejects every non-empty rgba8 texture. Latent today: the
+one operator that emits a texture emits `Rgba16Float`.
 
 ### `mesh.cubesphere` silently ignores unknown parameters
 
@@ -54,28 +38,23 @@ defaulted away instead of reported.
 ### `Shape::default()` is not a whole cube map
 
 The default is `512 × 256` with a `CubeMap` projection, but a cube map requires `height = 6·width`.
-Nothing validates the relation, so a node that does not set its own shape produces a field whose
-rows all land on one face.
+Nothing validates the relation.
 
 ### `tangent_frame` has a discontinuity
 
-The reference axis switches at `|direction[1]| > 0.99`, so `east` jumps on that ring and
-`field.gradient` and `field.warp` inherit the discontinuity. Existing seam tests only sweep
-mid-latitudes.
+The reference axis switches at `|direction[1]| > 0.99`, so `field.gradient` and `field.warp` inherit
+a discontinuity ring that no existing test sweeps.
 
 ## Weakened gates
 
-- The source-fingerprint test omits the NURBS crates from its list, so their build scripts and
-  identity exports are not gated.
-- The operator-loading test claims to cover every declared operator and covers about two thirds of
-  them.
+- GPU-backed tests in two default-member crates print a skip line and **pass** when no device is
+  present, so the fast chain is green while those comparisons never ran.
+- The source-fingerprint test omits the NURBS crates, leaving their build scripts and identity
+  exports ungated.
+- The operator-loading test claims to cover every declared operator and covers about two thirds.
 
-## Comments that contradict the code
+## Unconsumed inputs
 
-A substantial number of comments across the source cite a deleted renderer, removed types, and
-numbered sections that no longer exist, and several state the opposite of the code beneath them —
-for example a backend default of DX12 where the code defaults to Vulkan, an empty pass list
-described as "main pass only" where it draws nothing, and a group layout described as having two
-empty groups where one is populated. These are worth a sweep, but note the cost: the crates that
-participate in keys require a full key rotation, which means rebuilding every operator library and
-re-cooking every graph.
+25 of the 44 scene recipes under `art/scene/` are referenced by no source file or script. They are
+single-purpose comparison recipes from earlier measurements. They are inputs, so deleting them
+changes no key, but a measurement someone wants to re-run may depend on one.

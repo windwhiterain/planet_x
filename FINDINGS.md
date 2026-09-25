@@ -1,7 +1,8 @@
 # Findings ledger — documentation rewrite
 
-Verified defects and stale artefacts discovered while rewriting `docs/`. Each entry is either
-reproduced or traced to the source line that proves it. Nothing here has been fixed yet.
+Verified defects and stale artefacts discovered while rewriting the documentation. Each entry is
+either reproduced or traced to the source line that proves it. Fixes are applied separately; this
+file records what is wrong, not what has been done.
 
 ## Code defects
 
@@ -47,6 +48,12 @@ consequence is a typo in `art/<graph>/surface.toml` being silently defaulted ins
 - `nebula.rs::volume_layers()` parses that file directly, so `px run nebula` fails at startup:
   `unknown field res_ratio, expected one of res, layers, inner, outer, reach`.
 - It only appears to work when `--layers` is passed.
+
+> **Superseded (this round).** The `src/**` comments described in this section have since been
+> deleted wholesale — every crate now carries a single `//! See docs/<page>.md` line and nothing
+> else. The section is kept because the *defects* it documents (numeric constants that disagree
+> with the code, a parameter no code reads, `bevy_stub` claimed where `wgpu_host_stub` is passed)
+> are still real and still unfixed. Read it for the findings, not as a description of the tree.
 
 ## Stale comments that contradict the code
 
