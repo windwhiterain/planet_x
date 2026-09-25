@@ -63,6 +63,11 @@ half-done rotation: at load time, `…dll is not from the same build as the cont
 **A verdict must be taken on the right instrument.** `cargo check` passing is not a probe passing.
 A low-resolution render measures the floor, not the shader. Operator counts find suspects, they
 are not a score. Read logs in full; tailing the last twelve lines hides the error that matters.
+**Read bytes, not views.** Where a file's text is *assembled* into something else (a WGSL string
+assembled from modules and continuation lines, an include!), the verdict is taken on the source
+blob (`git show <rev>:<path>`, or the file itself) — never on the assembled view, where two
+different sources can concatenate to the same text and a taken-out blank line disappears into an
+adjacent continuation.
 
 **A skipped check is not a passing check.** A probe that cannot get a device exits non-zero. A
 test that cannot find its target must say so loudly — a `skip` line printed among a column of
