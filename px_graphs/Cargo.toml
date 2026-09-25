@@ -56,7 +56,7 @@ px_derive = { path = "../px_derive" }
 #   共用的助手 `px_fingerprint` 用它，与三个实现库、契约层同一个算法。
 px_fingerprint = { path = "../px_fingerprint" }
 # ⚠ **stage 1 的计划段**（`build.rs`）要"声明名 → 类型级事实"那张表：build script 编译不了
-#   算子类型，只能问这个**编译过**它们的小 rlib（`docs/system/codegen-types.md`）。
+#   算子类型，只能问这个**编译过**它们的小 rlib（见 `docs/programs.md` 的 stage 1）。
 #   ⚠ 它**只许住这里**（build-dependencies）：一旦进了 `[dependencies]`，它就进了图程序的名册，
 #   "改声明表 ⇒ 重编图程序"就成了一件正常的事（而它该由本脚本的 `rerun-if-changed` 管）。
 px_decls = { path = "../px_decls" }

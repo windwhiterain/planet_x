@@ -7,7 +7,7 @@ edition = "2024"
 #   体积域的实现库是 `px_volume_op`（dylib，薄壳），它把这门算法链进去。
 #
 # ⚠ 为什么算法要单独一个 crate：泛型实例（`px_inst!`）要**从盘上**算 alg crate 的源码名册
-#   来进 key（`docs/system/generic-instances.md` §177），而名册要的是"这个文件"而不是"编译产物"；
+#   来进 key（见 `docs/programs.md` 的 generic instances），而名册要的是"这个文件"而不是"编译产物"；
 #   算法如果住在 dylib crate 里，图侧就没有一个稳定的目录名册可收。
 
 [dependencies]

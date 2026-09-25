@@ -16,5 +16,6 @@ toml = "0.8"
 
 [build-dependencies]
 # `build.rs` 算**这一份声明**的源码指纹（`SOURCE_HASH`）：它是泛型实例的 key 的一半
-# （`px_op!` 里那句 `DECL_HASH = env!("PX_SOURCE_HASH")`，见 `docs/system/generic-instances.md` §177 / §179.3）。
+# （`px_op!` 里那句 `DECL_HASH = env!("PX_SOURCE_HASH")`，见 `docs/programs.md` 的
+#   generic instances 与 `docs/invariants.md` 的 identity and keys）。
 px_fingerprint = { path = "../px_fingerprint" }
