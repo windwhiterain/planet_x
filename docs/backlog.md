@@ -50,6 +50,17 @@ a slot is its own key and its own artifact, so partial results depend on a parti
 domain's `Build` declares — not on the existing row-band machinery (below), which changes wall time
 without changing what is stored.
 
+**Whether to erase operator types.** The declaration surface is 32 preset operators (field 10,
+volume 5, mesh 2, nurbs 15) over a handful of `Body` shapes (inputs times payload domain), plus 4
+element specs sharing one cell-closure shape, 3 instance recipes whose bodies are already template
+strings, and zero shipped `px_local_op!` users. A per-declaration shim table keeps static checking
+but rotates every implementation roster the moment the `px_op!` / `px_body!` expansion changes; a
+`&dyn` body erases the interface (today a hash of three type names), rotating every node and
+instance key and deleting the compiler's input, output and parameter enforcement; skipping costs
+nothing today, because no recurring cost of static dispatch has been measured. The project starts if
+and only if someone measures such a cost larger than one full rotation plus re-bake plus rewriting
+about five gates.
+
 ## Known costs, not defects
 
 Each of these is how the engine behaves today and why it costs what it costs. None is a bug.
