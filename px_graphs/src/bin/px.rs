@@ -235,7 +235,11 @@ fn build(flags: &[String]) -> Result<(), String> {
         collect_garbage(&graph, deep, target)?;
     }
     if failed > 0 {
-        return Err(format!("{failed} 条实例没编出来"));
+        return Err(px_cook::fault::line(
+            "missing-instance",
+            "stage=build",
+            &format!("{failed} 条实例没编出来（编译报错逐条在上面）"),
+        ));
     }
     Ok(())
 }

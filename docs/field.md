@@ -401,7 +401,11 @@ Concretely:
   propagates. Callers that cannot fail — tests, probes — say `.expect(…)` at the call site.
   Changing that return type is a window operation: it rotates the keys of every crate that calls the
   helper, so the re-cook belongs after the last source edit of the window (docs/backlog.md, batch
-  window discipline).
+  window discipline). The criterion for the `Err` path lives at this tier rather than in the volume
+  banding: a fixture cannot make the volume closure's worker panic (that closure is internal, and the
+  degenerate shapes it could be handed are already clamped), while a closure handed to `rows` directly
+  can be made to panic on purpose — so the volume tier keeps its numeric readings unchanged and the
+  reachable tier carries the error-path criterion.
 
 That is what makes "same parameters, same upstream ⇒ same bytes" true, and therefore what makes a
 cache key over parameters and upstream keys sound.
