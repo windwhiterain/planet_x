@@ -79,7 +79,8 @@ fn lit_by_ring(field: &StarField, params: &SkyParams, face: u32) -> Vec<(f64, f6
         star_halo_gain: 0.0,
         ..params.clone()
     };
-    let plane = px_volume_alg::raymarch_channel(&scene, Some(field), &stars, 0);
+    let plane = px_volume_alg::raymarch_channel(&scene, Some(field), &stars, 0)
+        .expect("探针里行带不该 panic");
     let mut lit = [0.0_f64; 3];
     let mut area = [0.0_f64; 3];
     for face_index in 0..6 {

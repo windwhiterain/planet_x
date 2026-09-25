@@ -140,6 +140,7 @@ mod tests {
             },
             &[],
         )
+        .expect("测试夹具的行带不 panic")
     }
 
     fn source_field(shape: VolumeShape) -> Field {

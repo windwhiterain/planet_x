@@ -104,7 +104,8 @@ fn the_banded_fill_is_bit_identical_to_the_serial_loop() {
         };
         let banded = fill::<Probe>(&params, &(), |x, y, uv, direction| {
             cell(&params, x, y, uv, direction)
-        });
+        })
+        .expect("行带线程不 panic ⇒ 这里是 Ok");
         let expected = serial(&params);
         assert_eq!(
             (banded.width, banded.height, banded.projection),
@@ -139,7 +140,8 @@ fn a_volume_field_gets_the_direction_sentinel_and_does_not_panic() {
     };
     let banded = fill::<Probe>(&params, &(), |x, y, uv, direction| {
         cell(&params, x, y, uv, direction)
-    });
+    })
+    .expect("体积场走哨兵那条 ⇒ 不 panic");
     let expected = serial(&params);
     assert_eq!(banded.data.len(), 32);
     for index in 0..expected.data.len() {

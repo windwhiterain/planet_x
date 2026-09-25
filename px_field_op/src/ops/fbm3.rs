@@ -6,9 +6,9 @@ use px_field_schema::volume::voxel_of;
 
 use crate::noise;
 
-px_graph_schema::px_body! { Fbm3, |p, _i| crate::ops::fbm3::eval(p, &[]) }
+px_graph_schema::px_body! { Fbm3, |p, _i| crate::ops::fbm3::eval(p, &[])? }
 
-pub fn eval(params: &params::Fbm3Params, _inputs: &[&Field]) -> Field {
+pub fn eval(params: &params::Fbm3Params, _inputs: &[&Field]) -> Result<Field, String> {
     let shape = params.shape.volume_shape().unwrap_or_else(|| {
         panic!(
             "field.fbm3 要一张体网格画布（域 volume、行数 = res² × layers × 6），\
@@ -38,8 +38,13 @@ pub fn eval(params: &params::Fbm3Params, _inputs: &[&Field]) -> Field {
                 out[base + x as usize] = noise::fbm_3(voxel, &settings);
             }
         }
-    });
-    Field::with_projection(shape.res, shape.height(), data, params.shape.projection)
+    })?;
+    Ok(Field::with_projection(
+        shape.res,
+        shape.height(),
+        data,
+        params.shape.projection,
+    ))
 }
 
 #[cfg(test)]
@@ -66,6 +71,7 @@ mod tests {
             },
             &[],
         )
+        .expect("测试夹具的行带不 panic")
     }
 
     #[test]

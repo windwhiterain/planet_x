@@ -352,7 +352,7 @@ pub fn raymarch_channel(
     stars: Option<&StarField>,
     params: &SkyParams,
     channel: usize,
-) -> Field {
+) -> Result<Field, String> {
     let face = params.face.max(1);
     let height = face * CUBE_FACES;
     let data =
@@ -369,8 +369,13 @@ pub fn raymarch_channel(
                         march_channel(emission, stars, params, channel, direction, texel);
                 }
             }
-        });
-    Field::with_projection(face, height, data, Projection::CubeMap)
+        })?;
+    Ok(Field::with_projection(
+        face,
+        height,
+        data,
+        Projection::CubeMap,
+    ))
 }
 
 pub const RAMP_LUMA: [f32; 4] = [0.028, 0.034, 0.058, 0.35];
@@ -472,7 +477,7 @@ pub fn raymarch_sky(
 ) -> Result<TextureData, String> {
     let mut planes = Vec::with_capacity(3);
     for channel in 0..3 {
-        let field = raymarch_channel(emission, Some(stars), sky_params, channel);
+        let field = raymarch_channel(emission, Some(stars), sky_params, channel)?;
         planes.push(field.data);
     }
 
@@ -518,6 +523,16 @@ pub fn raymarch_sky(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The banding is fallible now, so a test that only wants the field says so once here.
+    fn channel_field(
+        emission: &VolumeData,
+        stars: Option<&StarField>,
+        params: &SkyParams,
+        channel: usize,
+    ) -> Field {
+        raymarch_channel(emission, stars, params, channel).expect("测试夹具的行带不 panic")
+    }
     use px_field_schema::field::Field;
 
     fn uniform(res: u32, layers: u32, emit: f32, alpha: f32) -> VolumeData {
@@ -613,7 +628,7 @@ mod tests {
     #[test]
     fn an_optically_thin_shell_gives_emission_times_the_chord() {
         let volume = uniform(8, 6, 0.5, 0.0);
-        let field = raymarch_channel(&volume, None, &params(), 0);
+        let field = channel_field(&volume, None, &params(), 0);
         let expected = 0.5 * (volume.outer - volume.inner);
         let mut worst = 0.0_f32;
         for value in &field.data {
@@ -627,8 +642,8 @@ mod tests {
 
     #[test]
     fn more_extinction_gives_a_dimmer_result() {
-        let thin = raymarch_channel(&uniform(8, 6, 0.5, 0.0), None, &params(), 0);
-        let thick = raymarch_channel(&uniform(8, 6, 0.5, 4.0), None, &params(), 0);
+        let thin = channel_field(&uniform(8, 6, 0.5, 0.0), None, &params(), 0);
+        let thick = channel_field(&uniform(8, 6, 0.5, 4.0), None, &params(), 0);
         let mean = |field: &Field| -> f64 {
             field.data.iter().map(|v| *v as f64).sum::<f64>() / field.data.len() as f64
         };
@@ -647,7 +662,7 @@ mod tests {
             background: [0.02, 0.03, 0.04],
             ..params()
         };
-        let field = raymarch_channel(&volume, None, &sky, 0);
+        let field = channel_field(&volume, None, &sky, 0);
         let mut worst = 0.0_f32;
         for value in &field.data {
             worst = worst.max((value - 0.02).abs());
@@ -685,8 +700,8 @@ mod tests {
     #[test]
     fn a_star_behind_extinction_is_dimmer() {
         let stars = star_shell(512, 2.0, 1.0);
-        let clear = raymarch_channel(&uniform(8, 4, 0.0, 0.0), Some(&stars), &params(), 0);
-        let dusty = raymarch_channel(&uniform(8, 4, 0.0, 3.0), Some(&stars), &params(), 0);
+        let clear = channel_field(&uniform(8, 4, 0.0, 0.0), Some(&stars), &params(), 0);
+        let dusty = channel_field(&uniform(8, 4, 0.0, 3.0), Some(&stars), &params(), 0);
         let mean = |field: &Field| -> f64 {
             field.data.iter().map(|v| *v as f64).sum::<f64>() / field.data.len() as f64
         };
@@ -710,7 +725,7 @@ mod tests {
         };
         let vacuum = uniform(8, 4, 0.0, 0.0);
         let stars = star_shell(20000, 2.0, 8.0);
-        let sky = raymarch_channel(&vacuum, Some(&stars), &params, 0);
+        let sky = channel_field(&vacuum, Some(&stars), &params, 0);
         let face = params.face;
         let mut lit = [0.0_f64; 3];
         let mut area = [0.0_f64; 3];
@@ -756,17 +771,17 @@ mod tests {
     #[test]
     fn the_same_parameters_give_the_same_sky() {
         let volume = uniform(8, 5, 0.4, 1.1);
-        let one = raymarch_channel(&volume, None, &params(), 0);
-        let two = raymarch_channel(&volume, None, &params(), 0);
+        let one = channel_field(&volume, None, &params(), 0);
+        let two = channel_field(&volume, None, &params(), 0);
         assert_eq!(one.data, two.data);
     }
 
     #[test]
     fn per_channel_extinction_makes_blue_darker_than_red() {
         let volume = uniform_channels(8, 5, 0.5, [0.2, 1.2, 2.6]);
-        let red = raymarch_channel(&volume, None, &params(), 0);
-        let green = raymarch_channel(&volume, None, &params(), 1);
-        let blue = raymarch_channel(&volume, None, &params(), 2);
+        let red = channel_field(&volume, None, &params(), 0);
+        let green = channel_field(&volume, None, &params(), 1);
+        let blue = channel_field(&volume, None, &params(), 2);
         let mean = |field: &Field| -> f64 {
             field.data.iter().map(|v| *v as f64).sum::<f64>() / field.data.len() as f64
         };
@@ -798,7 +813,7 @@ mod tests {
                 }
             }
         }
-        let field = raymarch_channel(&volume, None, &params(), 0);
+        let field = channel_field(&volume, None, &params(), 0);
         let chord = volume.outer - volume.inner;
         let mut worst_high = 0.0_f32;
         let mut saw_dimmer = false;

@@ -95,11 +95,14 @@ pub fn facts_of<F: ElementFn>() -> ElemFacts {
 /// ignores the direction argument (so one probe for the whole field is the same as asking per cell),
 /// and the body is a pure function of its inputs (a payload may not read a source its key cannot
 /// see).
+///
+/// The result is a `Result` because a band worker's panic comes back as one (`rows` turns it into an
+/// error rather than unwinding into the dylib boundary, where it would abort instead of failing).
 pub fn fill<F: ElementFn>(
     params: &F::Params,
     inputs: &F::Inputs,
     cell: impl Fn(u32, u32, [f32; 2], [f32; 3]) -> f32 + Sync,
-) -> Field {
+) -> Result<Field, String> {
     let shape = F::shape(params, inputs);
     // The direction is a constant map of the cell, but it is undefined for `Domain::Volume` (a
     // volume grid has no single direction), and asking per cell panics there — a panic crossing the
@@ -128,8 +131,13 @@ pub fn fill<F: ElementFn>(
                 }
             }
         },
-    );
-    Field::with_projection(shape.width, shape.height, data, shape.projection)
+    )?;
+    Ok(Field::with_projection(
+        shape.width,
+        shape.height,
+        data,
+        shape.projection,
+    ))
 }
 
 #[macro_export]
@@ -155,7 +163,7 @@ macro_rules! px_elem_specs {
                 const BODY: &'static str = ::core::concat!(
                     "px_elem::fill::<px_elem::specs::",
                     ::core::stringify!($ty),
-                    ">(p, i, |x, y, uv, direction| value(p, i, x, y, uv, direction))"
+                    ">(p, i, |x, y, uv, direction| value(p, i, x, y, uv, direction))?"
                 );
                 fn shape(params: &Self::Params, inputs: &Self::Inputs) -> $crate::Shape {
                     ($shape)(params, inputs)

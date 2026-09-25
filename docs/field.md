@@ -391,10 +391,14 @@ Concretely:
   `unit`, or four 10-bit fields in `field.stamps`), never by rescaling one field;
 - there is no global RNG, no lookup table on disk, and no dependence on thread identity, wall-clock
   time, or iteration order;
-- row-band parallelism (`px_field_schema::parallel::rows`, used by `field.fbm3` and
-  `field.ridged3`) splits by rows, so each thread writes a disjoint slice and every cell's
-  arithmetic is identical to the serial order — the parallel result is bit-for-bit the serial one.
-  Nothing accumulates across cells.
+- row-band parallelism (`px_field_schema::parallel::rows`, used by `field.fbm3`, `field.ridged3`,
+  `px_elem::fill` and the volume banding) splits by rows, so each thread writes a disjoint slice and
+  every cell's arithmetic is identical to the serial order — the parallel result is bit-for-bit the
+  serial one. Nothing accumulates across cells. The helper is fallible: a band worker's panic has no
+  other route back to its caller, and left to unwind it would reach the dylib boundary and abort the
+  process, so `rows` catches it (the scope re-panics at teardown even after a joined handle, which is
+  why catching the join result alone is not enough) and returns it as an error the operator body
+  propagates. Callers that cannot fail — tests, probes — say `.expect(…)` at the call site.
 
 That is what makes "same parameters, same upstream ⇒ same bytes" true, and therefore what makes a
 cache key over parameters and upstream keys sound.

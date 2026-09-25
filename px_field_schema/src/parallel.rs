@@ -1,4 +1,41 @@
-pub fn rows<F>(width: usize, height: usize, band: F) -> Vec<f32>
+/// One band worker's panic, spoken instead of unwound. A panic that unwinds out of an operator body
+/// reaches the dylib boundary, where it aborts the process rather than surfacing as a failure; a band
+/// worker's panic has no other route back to its caller, so it is turned into an error here. The
+/// banding stays bit-for-bit the serial result (`row_bands.rs`), and the cell closure's signature is
+/// unchanged.
+fn band_panic(payload: &(dyn std::any::Any + Send)) -> String {
+    let what = if let Some(text) = payload.downcast_ref::<&str>() {
+        (*text).to_string()
+    } else if let Some(text) = payload.downcast_ref::<String>() {
+        text.clone()
+    } else {
+        "载荷不是文本".to_string()
+    };
+    format!("行带线程 panic：{what}")
+}
+
+pub fn rows<F>(width: usize, height: usize, band: F) -> Result<Vec<f32>, String>
+where
+    F: Fn(usize, usize, &mut [f32]) + Sync,
+{
+    // `thread::scope` panics at teardown when any of its threads panicked, and it does so *after* the
+    // handle was joined — so handling the join result alone is not enough, and the scope re-panic is
+    // caught here. The worker's own message is what the join sees first, so it is kept in preference
+    // to the scope's placeholder.
+    let mut worker: Option<String> = None;
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        band_rows(width, height, &band, &mut worker)
+    }));
+    if let Some(message) = worker {
+        return Err(message);
+    }
+    match outcome {
+        Ok(data) => Ok(data),
+        Err(payload) => Err(band_panic(&*payload)),
+    }
+}
+
+fn band_rows<F>(width: usize, height: usize, band: &F, worker: &mut Option<String>) -> Vec<f32>
 where
     F: Fn(usize, usize, &mut [f32]) + Sync,
 {
@@ -24,7 +61,6 @@ where
         row += base + usize::from(index < extra);
     }
     starts.push(height);
-    let band = &band;
     std::thread::scope(|scope| {
         let mut rest: &mut [f32] = &mut data;
         let mut handles = Vec::with_capacity(threads);
@@ -36,7 +72,11 @@ where
             handles.push(scope.spawn(move || band(first, rows, slice)));
         }
         for handle in handles {
-            handle.join().expect("行带线程不该 panic");
+            if let Err(payload) = handle.join() {
+                if worker.is_none() {
+                    *worker = Some(band_panic(&*payload));
+                }
+            }
         }
     });
     data

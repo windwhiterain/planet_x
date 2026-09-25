@@ -6,9 +6,9 @@ use px_field_schema::volume::voxel_of;
 
 use crate::noise;
 
-px_graph_schema::px_body! { Ridged3, |p, _i| crate::ops::ridged3::eval(p, &[]) }
+px_graph_schema::px_body! { Ridged3, |p, _i| crate::ops::ridged3::eval(p, &[])? }
 
-pub fn eval(params: &params::Ridged3Params, _inputs: &[&Field]) -> Field {
+pub fn eval(params: &params::Ridged3Params, _inputs: &[&Field]) -> Result<Field, String> {
     let shape = params.shape.volume_shape().unwrap_or_else(|| {
         panic!(
             "field.ridged3 要一张体网格画布（域 volume、行数 = res² × layers × 6），\
@@ -38,8 +38,13 @@ pub fn eval(params: &params::Ridged3Params, _inputs: &[&Field]) -> Field {
                 out[base + x as usize] = noise::ridged_3(voxel, &settings, params.sharpness);
             }
         }
-    });
-    Field::with_projection(shape.res, shape.height(), data, params.shape.projection)
+    })?;
+    Ok(Field::with_projection(
+        shape.res,
+        shape.height(),
+        data,
+        params.shape.projection,
+    ))
 }
 
 #[cfg(test)]
@@ -67,7 +72,8 @@ mod tests {
                 ..Default::default()
             },
             &[],
-        );
+        )
+        .expect("测试夹具的行带不 panic");
         let stats = field.stats();
         assert!(stats.min >= 0.0 && stats.max <= 1.0, "{stats:?}");
         assert!(stats.max - stats.min > 0.05, "脊得有起伏：{stats:?}");
@@ -90,7 +96,8 @@ mod tests {
                     ..Default::default()
                 },
                 &[],
-            );
+            )
+            .expect("测试夹具的行带不 panic");
             let high = field.data.iter().filter(|value| **value > 0.5).count();
             high as f64 / field.data.len() as f64
         };

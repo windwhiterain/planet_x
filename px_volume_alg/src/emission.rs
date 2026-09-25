@@ -19,7 +19,7 @@ pub fn bake_emission(
     density: &VolumeData,
     stars: &StarField,
     params: &EmissionParams,
-) -> VolumeData {
+) -> Result<VolumeData, String> {
     let res = density.res.max(2);
     let layers = density.layers.max(2);
     let shell = px_volume_schema::volume::Shell::new(density.inner, density.outer);
@@ -140,16 +140,16 @@ pub fn bake_emission(
                 }
             }
         }
-    });
+    })?;
 
-    VolumeData {
+    Ok(VolumeData {
         lanes: 6,
         res,
         layers,
         inner: density.inner,
         outer: density.outer,
         data,
-    }
+    })
 }
 
 pub fn emit_from_field(
@@ -159,12 +159,17 @@ pub fn emit_from_field(
     density_field: &px_field_schema::field::Field,
 ) -> Result<VolumeData, String> {
     let density = bake_density(density_params, density_field)?;
-    Ok(bake_emission(&density, stars, emission_params))
+    bake_emission(&density, stars, emission_params)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The banding is fallible now, so a test that only wants the value says so once here.
+    fn baked(density: &VolumeData, stars: &StarField, params: &EmissionParams) -> VolumeData {
+        bake_emission(density, stars, params).expect("测试夹具的行带不 panic")
+    }
     use px_field_schema::field::{Field, Projection};
     use px_field_schema::volume::VolumeShape;
 
@@ -249,7 +254,7 @@ mod tests {
             shadow_gain: 3.0,
             ..Default::default()
         };
-        let emission = bake_emission(&density, &no_stars(), &params);
+        let emission = baked(&density, &no_stars(), &params);
         let emit_of = |face: u32| -> f32 {
             let layer = density.layers - 1;
             let mid = density.res / 2;
@@ -268,7 +273,7 @@ mod tests {
 
     #[test]
     fn extinction_grows_with_density() {
-        let thin = bake_emission(
+        let thin = baked(
             &flat_density(8, 6, 0.15),
             &no_stars(),
             &EmissionParams {
@@ -276,7 +281,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        let thick = bake_emission(
+        let thick = baked(
             &flat_density(8, 6, 0.85),
             &no_stars(),
             &EmissionParams {
@@ -306,7 +311,7 @@ mod tests {
             ..Default::default()
         };
         let density = flat_density(8, 4, 0.5);
-        let emission = bake_emission(&density, &no_stars(), &params);
+        let emission = baked(&density, &no_stars(), &params);
         assert!(
             emission.data[3] > 1e-6,
             "格心该读到密度 0.5，σ_R 却是 {}（密度没读到）",
@@ -351,7 +356,7 @@ mod tests {
             ..Default::default()
         };
         let emission_of = |brightness: f32| -> [f64; 3] {
-            let volume = bake_emission(&flat_density(8, 4, 0.6), &one_star(brightness), &params);
+            let volume = baked(&flat_density(8, 4, 0.6), &one_star(brightness), &params);
             let sum = |lane: usize| -> f64 {
                 volume
                     .data
@@ -385,7 +390,7 @@ mod tests {
             shadow_gain: 0.0,
             ..Default::default()
         };
-        let vacuum = bake_emission(&flat_density(8, 4, 0.0), &one_star(32.0), &params);
+        let vacuum = baked(&flat_density(8, 4, 0.0), &one_star(32.0), &params);
         for value in &vacuum.data {
             assert_eq!(*value, 0.0, "真空里不该有星光照出来的光");
         }

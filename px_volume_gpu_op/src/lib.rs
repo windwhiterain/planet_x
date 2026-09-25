@@ -929,7 +929,8 @@ mod crosscheck_tests {
             jitter: 0.0,
             ..Default::default()
         };
-        let reference = px_volume_alg::raymarch_channel(&volume, None, &params, 0);
+        let reference = px_volume_alg::raymarch_channel(&volume, None, &params, 0)
+            .expect("对账用的参考实现不 panic");
         let gpu_side = px_gpu::require_gpu(march(
             face,
             steps,
@@ -1172,7 +1173,8 @@ mod star_tests {
             background: [0.0011, 0.0007, 0.0009],
             ..Default::default()
         };
-        let reference = px_volume_alg::raymarch_channel(&volume, Some(&stars), &params, 0);
+        let reference = px_volume_alg::raymarch_channel(&volume, Some(&stars), &params, 0)
+            .expect("对账用的参考实现不 panic");
         let grid = StarGrid::of(&stars);
         let extras = MarchExtras {
             star_grid: Some(&grid),
@@ -2221,7 +2223,8 @@ mod march_seam_tests {
             star_gain: 0.0,
             ..Default::default()
         };
-        let field = px_volume_alg::raymarch_channel(&volume, None, &params, 0);
+        let field = px_volume_alg::raymarch_channel(&volume, None, &params, 0)
+            .expect("对账用的参考实现不 panic");
         let lum = |x: u32, y: u32| -> f32 { field.at(x, y) };
         let direction = |face_index: u32, x: u32, y: u32| -> [f32; 3] {
             px_volume_schema::direction_of(
@@ -2498,7 +2501,8 @@ mod chain_tests {
             let d = direction(face_index, x, y);
             px_volume_alg::sample_volume(&volume, [d[0] * radius, d[1] * radius, d[2] * radius], 0)
         });
-        let field = px_volume_alg::raymarch_channel(&volume, None, &params, 0);
+        let field = px_volume_alg::raymarch_channel(&volume, None, &params, 0)
+            .expect("对账用的参考实现不 panic");
         let march = ratio_of(&|face_index, x, y| field.at(x, face_index * FACE + y));
         let identity = [0.01_f32, 0.1, 1.0, 10.0];
         let radiance = sky(
@@ -2728,7 +2732,8 @@ mod emission_tests {
                 scatter_tint: [1.0, 0.6, 0.25],
                 ..Default::default()
             };
-            let reference = px_volume_alg::bake_emission(&density, &stars, &params);
+            let reference = px_volume_alg::bake_emission(&density, &stars, &params)
+                .expect("对账用的参考实现不 panic");
             let gpu_side = match bake_emission(&density, &stars, &params) {
                 Ok(volume) => volume,
                 Err(message) => panic!("GPU 发射烘焙失败：{message}"),

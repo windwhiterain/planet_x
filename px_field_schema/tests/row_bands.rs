@@ -56,7 +56,8 @@ fn a_banded_field_is_bit_identical_to_a_serial_one() {
                     out[base + x] = cell(width, y, x);
                 }
             }
-        });
+        })
+        .expect("这一档的体不 panic");
         let expected = serial(width, height);
         assert_eq!(parallel.len(), width * height, "{width}×{height}: 长度不对");
         for index in 0..expected.len() {
@@ -74,7 +75,28 @@ fn a_banded_field_is_bit_identical_to_a_serial_one() {
 #[test]
 fn an_empty_dimension_yields_an_empty_field() {
     for (width, height) in [(0_usize, 0_usize), (0, 16), (16, 0)] {
-        let field = rows(width, height, |_, _, _| unreachable!("空尺寸不该调用闭包"));
+        let field = rows(width, height, |_, _, _| unreachable!("空尺寸不该调用闭包"))
+            .expect("空尺寸不会 panic");
         assert!(field.is_empty(), "{width}×{height} 应当是空场");
     }
+}
+
+/// A band worker's panic has no other route back to the caller: unwinding out of an operator body
+/// reaches the dylib boundary, where it aborts instead of failing. So it comes back as an error that
+/// names the panic.
+#[test]
+fn a_panicking_band_comes_back_as_an_error() {
+    let threads = std::thread::available_parallelism()
+        .map(|count| count.get())
+        .unwrap_or(1);
+    if threads <= 1 || threads.min(8) <= 1 {
+        println!("⚠ 只有 {threads} 个核：`rows` 走串行那条，这一条不适用");
+        return;
+    }
+    let result = rows(4, 8, |_, _, _| panic!("夹具故意 panic"));
+    let err = result.expect_err("worker panic 必须变成 Err");
+    assert!(
+        err.contains("行带线程 panic") && err.contains("夹具故意 panic"),
+        "错误要点名是哪个 panic：{err}"
+    );
 }
