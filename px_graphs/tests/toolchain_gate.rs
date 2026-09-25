@@ -28,8 +28,11 @@ fn scratch(name: &str) -> PathBuf {
 /// sidecar carries `recorded` as its toolchain.
 fn instance(dir: &Path, recorded: &str) -> InstInfo {
     let library = dir.join("px_inst__Test.dll");
-    std::fs::write(&library, b"not a real library; only its presence and its sidecar are read")
-        .expect("写得进");
+    std::fs::write(
+        &library,
+        b"not a real library; only its presence and its sidecar are read",
+    )
+    .expect("写得进");
     std::fs::write(
         library.with_extension("json"),
         format!(
@@ -52,7 +55,10 @@ fn instance(dir: &Path, recorded: &str) -> InstInfo {
 #[test]
 fn a_library_from_another_toolchain_is_refused_by_name() {
     let dir = scratch("mismatch");
-    let info = instance(&dir, "1111111111111111111111111111111111111111111111111111111111111111");
+    let info = instance(
+        &dir,
+        "1111111111111111111111111111111111111111111111111111111111111111",
+    );
     let err = px_graphs::assert_toolchain_matches(&[info]).expect_err("另一档编的库必须被拒");
     assert!(err.contains("field.test"), "要点名是哪个算子：{err}");
     assert!(
@@ -72,7 +78,10 @@ fn a_library_from_this_toolchain_passes() {
 #[test]
 fn a_library_without_a_sidecar_passes() {
     let dir = scratch("no-sidecar");
-    let info = instance(&dir, "2222222222222222222222222222222222222222222222222222222222222222");
+    let info = instance(
+        &dir,
+        "2222222222222222222222222222222222222222222222222222222222222222",
+    );
     std::fs::remove_file(Path::new(&info.library).with_extension("json")).expect("删得掉");
     // Nothing is recorded, so nothing is claimed: the gate stops two *known* builds from being
     // confused, and refusing here would break every library built before sidecars existed.
@@ -82,7 +91,10 @@ fn a_library_without_a_sidecar_passes() {
 #[test]
 fn a_missing_library_is_not_this_gate_s_business() {
     let dir = scratch("absent");
-    let info = instance(&dir, "3333333333333333333333333333333333333333333333333333333333333333");
+    let info = instance(
+        &dir,
+        "3333333333333333333333333333333333333333333333333333333333333333",
+    );
     std::fs::remove_file(&info.library).expect("删得掉");
     // Absence is the plan's business (`stage 1` reports a missing count and `px build` fills it);
     // this gate only speaks about libraries that are there.
@@ -92,7 +104,10 @@ fn a_missing_library_is_not_this_gate_s_business() {
 #[test]
 fn rebuilding_clears_the_refusal() {
     let dir = scratch("recover");
-    let info = instance(&dir, "4444444444444444444444444444444444444444444444444444444444444444");
+    let info = instance(
+        &dir,
+        "4444444444444444444444444444444444444444444444444444444444444444",
+    );
     assert!(
         px_graphs::assert_toolchain_matches(&[info.clone()]).is_err(),
         "先拒"
