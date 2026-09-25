@@ -15,7 +15,8 @@ one profile, one `TARGET`, one `RUSTFLAGS`, and no workspace rebuild by anyone (
 of an instance key rotates on it — docs/operators.md, instance-key section). The window's validity
 is not a promise, it is a reading: a `px list` invocation before opening and before closing leaves
 two key columns; they must be byte-identical, and the most recent run's `manifest.json` key column
-(same instance-key side) is the second half of that check. A window whose columns differ is void —
+(the **node-key** side, complementary to `px list`'s instance-library key column) is the second
+half of that check. A window whose columns differ is void —
 none of its numbers enters a ledger.
 
 ## Awaiting a decision
