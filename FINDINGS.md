@@ -236,6 +236,27 @@ The convention that costs nothing today and prevents the misreading: **within a 
 session, fix `--release` vs debug and never mix**; treat `-Level opt` as numerically distinct evidence
 even though it shares keys.
 
+### 14. ⬜ Thirteen `build.rs` files still cite a deleted `docs/system/` tree
+
+The documentation rewrite removed `docs/system/` entirely, and the comment strip walked `src/**`
+only, so the per-crate pointer comments inside `build.rs` survived to point at files that no longer
+exist — with bare `§` numbers the comment convention forbids. Hit list (13 sites, 12 crates):
+
+`px_field_alg`, `px_graph_schema`, `px_volume_schema`, `px_mesh_schema`, `px_mesh_op`,
+`px_graphs` (three more: `§182`, `§179.1`, a "`§` 目标"), `px_field_schema`, `px_volume_op`,
+`px_nurbs_schema`, `px_cook`, `px_field_op`, `px_volume_alg`.
+
+Each cites `docs/system/generic-instances.md` (`§177` / `§179.3`), `docs/system/codegen-types.md`
+or `docs/system/build-graph.md` (`§187`). The same vintage pointers also sat in ten `Cargo.toml`
+comment blocks; those were cleaned separately because `.toml` is not fingerprinted, and `px list`'s
+key columns did not move after that edit.
+
+The `build.rs` files themselves are different: `collect_sources` walks `crate/build.rs` into every
+roster, so any byte of one of those files is a full-family rotation for every family whose
+`decl_hash` or `roots` reach that crate, and every graph re-bakes. The cleanup therefore belongs
+in the scheduled batch window, folded into the same rotation as the other debt (§10, §11, §12, and
+routing `px_elem::fill` through `rows` — see `docs/backlog.md`, "Known costs").
+
 ### 1. ✅ Any `elem::*` node on a `Domain::Volume` field aborts the process
 
 `px_elem::fill` asked every cell for its direction, and `px_protocol::art::direction_at` panicked for

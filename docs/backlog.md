@@ -78,7 +78,12 @@ field over scoped threads with each thread writing a disjoint slice; it is used 
 banding now lives in `px_field_schema/tests/row_bands.rs` (`tests` dirs are outside every fingerprint
 roster, so adding it rotated no key). Routing `fill` through `rows` is the remaining step, and it is
 not free: `px_elem/build.rs` fingerprints all of `src/`, so that edit rotates the whole element
-instance-key family and must be counted before it is made.
+instance-key family. The cost has been counted (read-only, on this checkout): the edit lands on one
+axis, the `decl_hash`; the four live element instances recompile, while the three non-element
+instances (`cloud.coarse/band`, `field.remap/waves`, `field.remap/latbands`) and the
+`px_field_schema` / `px_volume_schema` families do not — `px_elem` is in neither's path
+dependencies. 56 stale `px_elem` libraries from earlier parameter generations remain on disk under
+`target/pcg/inst/` (a rebuildable cache, not tracked in git).
 
 **A scene document cannot point a material at content.** `ParamKind` covers `F32`, `I32`, `U32`,
 `Vec3`, `Vec4`, and the matching `Value` covers a number, a string, a triple and a quad. There is no
