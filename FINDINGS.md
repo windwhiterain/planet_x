@@ -99,9 +99,13 @@ touched. Pinned by `px_graphs/tests/local_op.rs::a_hit_leaves_the_artifact_untou
 `px_graph/src/driver.rs::interface_version` writes `(interface & 0xffff_ffff) as u32` into the
 manifest entry, while `px_graph_schema/src/keys.rs` folds the **full 64-bit** interface
 (`op.interface.to_le_bytes()`) into the key. Two operators whose interface hashes collide in the low
-32 bits show the same `op_version` (and the same 8-hex `@tag` printed by the run line, which
-`interface_tag` truncates to 8 hex) while having different keys — during a blame pass this looks like
-a key mismatch with no explanation.
+32 bits show the same `op_version` while having different keys. Worse: the two surfaces read
+**disjoint halves** of the same number. `interface_tag` prints the first 8 characters of the padded
+hex, which is the **high** 32 bits, so the `@tag` on the run line and the manifest's `op_version` are
+each the other's missing half — a tag copied from stdout cannot be found in the manifest even for an
+operator that ran correctly, so searching the log reading into `manifest.json` fails by construction
+rather than by collision. Verified numerically: interface `0xDEADBEEF12345678` prints tag `deadbeef`
+and records `op_version` `12345678`.
 
 Not yet reproduced live (needs two ops whose full hashes collide in the low 32 bits), therefore left
 open; the fix, if taken, is to widen `ManifestEntry.op_version` to `u64` in
