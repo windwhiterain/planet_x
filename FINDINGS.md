@@ -23,6 +23,7 @@ numbers as approximate. Re-derive a location with `git grep` before acting on on
 | 4a | GPU tests skipped and passed with no device | 15 sites now fail loudly through one helper, `px_gpu::require_gpu` |
 | 4b | the source-fingerprint gate omitted 4 of 15 crates | roster is now every crate that calls the fingerprint entry point |
 | 4c | the operator-loading gate covered 20 of 32 declarations | 31 loaded + 1 counted exclusion, asserted to equal the table |
+| 8 | a cache hit re-encoded its artifact and rewrote it (`Graph::store` ran unconditionally) | `store` now skips the write on a hit and reads the on-disk length; doc + `a_hit_leaves_the_artifact_untouched` pin it |
 
 ⚠ **Two content consequences. The affected graphs were re-baked; the delta was not measured.**
 
@@ -62,6 +63,40 @@ itself.
 `px_mesh_schema/src/params.rs`, the `cubesphere` module. Every sibling parameter struct had the
 attribute. The consequence was a typo in `art/<graph>/surface.toml` being silently defaulted instead
 of reported. All three `surface.toml` files were checked and carry no stray key.
+
+### 8. ✅ A cache hit re-encoded and rewrote its artifact
+
+`px_cook/src/lib.rs` calls `cache.store(Report { hit: true, … }, &payload)` on a hit, and
+`px_graph/src/driver.rs::Graph::store` unconditionally re-encoded the payload (`PayloadBundle::to_bytes`)
+and `fs::write` it back to the same path it had just read it from. The key is a hash of the payload,
+so the rewritten bytes were identical — measured on this workspace, an all-hit `nebula` run (24 nodes,
+0 recook, 0.94–0.96 s wall) rewrote **~195 MB** of `.pxart` files whose contents did not change
+(probed artifact mtimes all moved; manifest-reported writes 145 MB `nebula` + 50 MB `nebulasky`).
+
+The re-store also had a hidden behaviour: it rewrote the artifact's embedded asset `id` with the
+*current* node's name, so "which node cooked this first" was silently mutable. Nothing reads that id
+back (`Value/Build::decode` takes the caller's node name; `px_render` reads only `params` and blob
+headers from the asset manifest), so the file now stays as first written — first writer wins.
+
+Fix: `Graph::store` writes only on a miss; on a hit it appends the manifest entry with the byte count
+taken from the on-disk file. Measured after the fix on the same workspace: the all-hit `nebula` run
+drops from 0.94–0.96 s to **0.47–0.50 s** wall, and a post-run mtime probe shows **0 of 8** artifacts
+touched. Pinned by `px_graphs/tests/local_op.rs::a_hit_leaves_the_artifact_untouched`
+(artifact mtime and size must not change across a hit).
+
+### 9. ⬜ The manifest records a 32-bit `op_version` against a 64-bit interface hash
+
+`px_graph/src/driver.rs::interface_version` writes `(interface & 0xffff_ffff) as u32` into the
+manifest entry, while `px_graph_schema/src/keys.rs` folds the **full 64-bit** interface
+(`op.interface.to_le_bytes()`) into the key. Two operators whose interface hashes collide in the low
+32 bits show the same `op_version` (and the same 8-hex `@tag` printed by the run line, which
+`interface_tag` truncates to 8 hex) while having different keys — during a blame pass this looks like
+a key mismatch with no explanation.
+
+Not yet reproduced live (needs two ops whose full hashes collide in the low 32 bits), therefore left
+open; the fix, if taken, is to widen `ManifestEntry.op_version` to `u64` in
+`px_graph_schema/src/protocol.rs` ⚠ which rotates every node key (it is inside the fingerprint
+roster), so it must be done together with a deliberate full re-bake, not casually.
 
 ### 1. ✅ Any `elem::*` node on a `Domain::Volume` field aborts the process
 
@@ -324,25 +359,29 @@ Compiled out but never called, producing a warning on every build.
 
 ## Stale inputs
 
-### 6. 25 of the 44 scene recipes in `art/scene/` have no consumer
+### 6. 34 of the 44 scene recipes in `art/scene/` have no consumer
 
 Not referenced by any `.rs` or `.ps1` in the tree:
 
 ```
-orbit-allmiss           orbit-bound             orbit-nograd
-orbit-soft-nocloudshadow  orbit-soft-noshadow   orbit-soft-plain
-orbit-soft-proxy        probe-farsun20          probe-farsun5
-probe-hi1               probe-hi1-ns            probe-hi5
-probe-hi5-ns            probe-hires             probe-hires-ns
-probe-noshadow-1x       probe-noshadow-20x      probe-noshadow-5x
-probe-ringsun1-ns       probe-ringsun20         probe-ringsun20-ns
-probe-ringsun5          probe-ringsun5-ns       soft-e24000
-soft-e6000
+orbit-allmiss            orbit-soft-wind          probe-noshadow-5x
+orbit-bare-shadow        orbit-uranus             probe-ringsun1
+orbit-bound              probe-farsun20           probe-ringsun1-ns
+orbit-nograd             probe-farsun5            probe-ringsun20
+orbit-proxy-fine         probe-hi1                probe-ringsun20-ns
+orbit-proxy-fine-bound   probe-hi1-ns             probe-ringsun5
+orbit-rings              probe-hi5                probe-ringsun5-ns
+orbit-soft-nocloudshadow probe-hi5-ns             probe-vs-center
+orbit-soft-noshadow      probe-hires              soft-e24000
+orbit-soft-plain         probe-hires-ns           soft-e6000
+orbit-soft-proxy         probe-noshadow-1x
+orbit-soft-shell         probe-noshadow-20x
 ```
 
-These are one-off comparison recipes from earlier tuning. They are inputs, so deleting them changes
-no key; but a measurement someone wants to re-run may depend on one, so this needs a decision rather
-than a silent sweep.
+These are single-purpose comparison recipes from earlier measurements. They are inputs, so deleting
+them changes no key, but a measurement someone wants to re-run may depend on one, so this needs a
+decision rather than a silent sweep. The count moves when a recipe gains no consumer: re-derive it by
+listing `art/scene/*.toml` and grepping each stem across the `.rs` and `.ps1` files.
 
 ### 7. `art/frame/default.toml` contains history in its comments
 

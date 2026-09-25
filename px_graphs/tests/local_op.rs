@@ -133,3 +133,53 @@ fn a_graph_local_operator_is_a_first_class_operator() {
 
     graph.finish();
 }
+
+#[test]
+fn a_hit_leaves_the_artifact_untouched() {
+    let shape = field_params::Shape {
+        width: 4,
+        height: 24,
+        projection: Domain::CubeMap,
+    };
+    let graph = graph();
+    let params = BandParams {
+        shape,
+        ..node_params(&graph, "mtime-band").expect("参数")
+    };
+    let first = cached(&graph, "mtime-band", Band, params, ()).expect("第一次现算");
+    let path = px_graph::artifact_path_of(&first.key);
+    std::fs::metadata(&path).expect("第一次现算后产物应在盘上");
+    let before = std::fs::metadata(&path)
+        .and_then(|meta| meta.modified())
+        .expect("产物应在盘上");
+    let bytes = std::fs::metadata(&path)
+        .map(|meta| meta.len())
+        .expect("产物应在盘上");
+
+    let again = cached(
+        &graph,
+        "mtime-band",
+        Band,
+        BandParams {
+            shape,
+            ..node_params(&graph, "mtime-band").expect("参数")
+        },
+        (),
+    )
+    .expect("第二次现算");
+    assert!(again.hit, "同一个节点第二次没命中 ⇒ 键不稳定");
+    let after = std::fs::metadata(&path)
+        .and_then(|meta| meta.modified())
+        .expect("产物应仍在盘上");
+    assert_eq!(
+        before, after,
+        "命中路径重写了产物 ⇒ re-store 的 IO 浪费回来了"
+    );
+    assert_eq!(
+        bytes,
+        std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0),
+        "命中路径改动了产物大小"
+    );
+
+    graph.finish();
+}

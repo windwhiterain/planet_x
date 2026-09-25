@@ -150,16 +150,26 @@ impl Cache for Graph {
     }
 
     fn store(&self, report: Report<'_>, payload: &PayloadBundle) -> Result<(), String> {
-        let bytes = payload
-            .to_bytes(report.node)
-            .map_err(|err| format!("包 {} 的产物失败：{err}", report.node))?;
         let path = artifact_path(&self.cache_root, &report.key);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|err| format!("建目录 {} 失败：{err}", parent.display()))?;
-        }
-        std::fs::write(&path, &bytes)
-            .map_err(|err| format!("写产物 {} 失败：{err}", path.display()))?;
+        let bytes = if report.hit {
+            // A hit must not write: the artifact is already on disk and the key is a
+            // hash of the payload, so re-encoding and rewriting identical bytes is
+            // pure IO (measured: ~195 MB per all-hit nebula run). See docs/graph.md.
+            std::fs::metadata(&path)
+                .map(|meta| meta.len())
+                .unwrap_or_else(|_| payload.bytes() as u64)
+        } else {
+            let bytes = payload
+                .to_bytes(report.node)
+                .map_err(|err| format!("包 {} 的产物失败：{err}", report.node))?;
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|err| format!("建目录 {} 失败：{err}", parent.display()))?;
+            }
+            std::fs::write(&path, &bytes)
+                .map_err(|err| format!("写产物 {} 失败：{err}", path.display()))?;
+            bytes.len() as u64
+        };
 
         let detail = report.detail.clone();
         self.manifest
@@ -172,7 +182,7 @@ impl Cache for Graph {
                 key: hex(&report.key),
                 hit: report.hit,
                 millis: report.millis,
-                bytes: bytes.len() as u64,
+                bytes,
                 detail,
             });
         println!(
@@ -183,7 +193,7 @@ impl Cache for Graph {
             interface_tag(report.interface),
             hex_short(&report.key),
             report.millis,
-            bytes.len(),
+            bytes,
             report.detail,
         );
         Ok(())

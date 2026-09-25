@@ -205,9 +205,11 @@ them does.
 
 Hit and miss:
 
-* A hit decodes the payload, and then **re-stores it**: the artifact is rewritten (with the current
-  node's name as its `id`) and a manifest entry is appended with `hit = true, millis = 0`. Nothing is
-  deleted or evicted on this path.
+* A hit decodes the payload and appends a manifest entry with `hit = true, millis = 0`. It must not
+  write: the artifact is already on disk and the key is a hash of the payload, so re-encoding and
+  rewriting identical bytes is pure IO. The on-disk `id` stays whatever node first cooked the key;
+  nothing reads that id (`Build::decode` takes the caller's node name), which is what makes a
+  first-writer-wins artifact safe to share. Nothing is deleted or evicted on this path.
 * A miss calls the operator, encodes the payload, writes the file (creating
   `ab/<xx>/` as needed), prints the reading, and appends a manifest entry.
 * An artifact that is present but cannot be decoded is **not** trusted: the driver prints a warning
