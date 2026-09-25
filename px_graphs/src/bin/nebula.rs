@@ -88,6 +88,7 @@ fn report(name: &str, field: &Field) {
 }
 
 fn main() -> Result<(), Fault> {
+    px_graphs::insts::gate("nebula").expect("实例库不齐 ⇒ 先 `px build`（stage 1 的正规命令）");
     px_cook::apply_store_args()?;
     let face = face_from_args();
     let shape = shape_from_args();

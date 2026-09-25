@@ -324,6 +324,47 @@ impl Stage1 {
     }
 }
 
+/// The pre-flight hard gate a graph program can call at startup. Callers are the
+/// driver / graph-exe side only: implementation libraries must not reach that
+/// `px_cook` at all, or the gate itself drags `px_cook/src` into every library's
+/// roster and stops being free (same rule as the repair vocabulary, docs/invariants.md).
+///
+/// Two tiers, per docs/graph.md:
+/// * Instance tier: `BuildGraph::missing()` is today's classification = the artifact
+///   exists on disk. "Present but compiled against a different contract" is not
+///   caught yet — that half needs the loader window and lands there.
+/// * Named tier: `source_hash(lib)` is the full `open()` handshake (dlopen +
+///   contract + toolchain), so a stale named library is refused BEFORE the first
+///   cooked node, with the same memoized entry reused when cooking actually loads.
+///   Caller passes the named libraries this graph uses; a library left out falls
+///   back to today's mid-run error, never to a wrong answer.
+pub fn gate_ready(graph: Option<(&str, &BuildGraph)>, libs: &[&'static str]) -> Result<(), String> {
+    let mut failures: Vec<String> = Vec::new();
+    if let Some((name, build_graph)) = graph {
+        let plan = build_graph.missing();
+        if !plan.complete() {
+            failures.push(plan.hint(name));
+        }
+    }
+    for lib in libs {
+        if let Err(err) = px_graph_schema::ops::source_hash(lib) {
+            failures.push(format!("{lib}: {err}"));
+        }
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "archive gate:{}
+",
+            failures.join(
+                "
+"
+            )
+        ))
+    }
+}
+
 pub fn live_keys(graph: &BuildGraph) -> Vec<String> {
     graph
         .instances()

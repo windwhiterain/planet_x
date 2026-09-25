@@ -6,6 +6,7 @@ use px_graphs::elem;
 type Fault = Box<dyn std::error::Error>;
 
 fn main() -> Result<(), Fault> {
+    px_graphs::insts::gate("planet").expect("实例库不齐 ⇒ 先 `px build`（stage 1 的正规命令）");
     px_cook::apply_store_args()?;
     let graph = begin(GraphSpec {
         name: "planet".to_string(),

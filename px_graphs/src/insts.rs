@@ -43,3 +43,15 @@ pub fn codegen() -> &'static px_cook::inst::InstCatalogue {
     static ALL: std::sync::OnceLock<px_cook::inst::InstCatalogue> = std::sync::OnceLock::new();
     ALL.get_or_init(|| px_cook::inst::InstCatalogue::from_generated(catalogue::INST_CODEGEN))
 }
+
+/// The instance tier of the pre-flight gate, for graph exes that run bare (no
+/// `px run` stage 1 in front of them). Whole-graph strictness on purpose: the
+/// seven libraries are compiled as one stage-1 batch, so "some instance I did not
+/// touch is missing" is still a stopped-state this family should refuse loudly
+/// instead of discovering two frames into a bake. Callers are the graph-exe side
+/// only; implementation libraries never reach `px_cook` (docs/invariants.md).
+pub fn gate(graph: &str) -> Result<(), String> {
+    let mut built = px_cook::inst::BuildGraph::new();
+    build(&mut built);
+    px_cook::inst::gate_ready(Some((graph, &built)), &[])
+}

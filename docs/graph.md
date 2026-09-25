@@ -337,6 +337,17 @@ missing it stops and tells you to rebuild instead of compiling anything; `--buil
 request. The node-caching driver never invokes cargo — that happens only in `px build` and
 `px run --build`.
 
+A graph binary run bare (not through `px run`) holds the same line by calling `insts::gate(graph)`
+at startup: it refuses a graph whose instance libraries are not all on disk before the first node
+cooks, names the missing keys, and prints the same `px build` command. The gate lives on the
+driver / graph-exe side only — implementation libraries must not reach `px_cook`, or the gate
+itself stops being free to edit (docs/invariants.md). Two tiers: the instance tier checks the
+artifact file; "present but compiled against a different contract" is *not* caught at startup yet
+— per-node `cached` still walks the loader handshake and refuses it, and a startup handshake needs
+a loader entry point, so that half waits for the loader window. A caller may also pass named
+libraries; each is checked through `source_hash`, which is the full `open()` handshake, so the
+memoized entry the gate builds is reused by the first cooking node.
+
 ## Deliberately absent
 
 * **No global graph state.** `begin` hands back a handle, so two graphs — or two tests running in

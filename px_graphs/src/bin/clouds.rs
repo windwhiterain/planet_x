@@ -10,6 +10,7 @@ const FACE: u32 = 256;
 type Fault = Box<dyn std::error::Error>;
 
 fn main() -> Result<(), Fault> {
+    px_graphs::insts::gate("clouds").expect("实例库不齐 ⇒ 先 `px build`（stage 1 的正规命令）");
     px_cook::apply_store_args()?;
     let (width, height) = cube_map_extent(FACE);
     let graph = begin(GraphSpec {
