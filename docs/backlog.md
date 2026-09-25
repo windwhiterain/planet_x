@@ -23,9 +23,30 @@ The work splits by what a crate's bytes reach, because that is what decides the 
 `px_fingerprint`), no shader key (`px_graph::driver::shader_key` takes the shader text and its include
 closure, nothing else), and no node key today (their contribution to a node's identity is
 `px_graphs`' self-fingerprint, which is the identity of `px_local_op!` nodes and the shipped graphs
-declare none). Their raise points — about a hundred between them — migrate without a window, provided
-the edit changes no behaviour that feeds `shader_key`. That is `px_cook`'s 14 returned errors plus 1
-raising call, `px_graph`'s 16 plus 5, and `px_graphs`' 1 plus 63.
+declare none). Measured: 72 raise points and call sites moved to `Fault` with `px list`, the nine
+shader keys and the five scene keys all byte-identical before and after.
+
+What the pass settled, and what it left:
+
+- **A leaf can move without its callers.** `From<Fault> for String` lets `?` convert on the way out, so
+  a function's error type becomes `Fault` while the functions above it keep returning `String`; the
+  exported operator boundary (`Body`) never moved. Migrate leaves first and the diff stops cascading.
+- **Two shapes resist it, and both are real design facts rather than laziness.** A raise that already
+  composes identity — `fault::line(kind, subject, what)` with `graph=`, `key=` or `node=` — cannot
+  become a `Fault` without losing the subject, because `Fault` has no subject field; those sites stay
+  on the string path, and `fault::line_of` is the direction that exists. And a function that cannot
+  return a `Result` at all (declared in a rostered crate, or a `()` method like `Cache::record_params`)
+  keeps its panic, but panics with a payload that *is* the stable line, which the entrance's hook now
+  passes through unchanged.
+- **`?` on a `String` error inside a `Fault`-returning function downgrades the kind to `internal`.**
+  `From<String> for Fault` is what makes migration cheap, and it is also what silently re-labels a
+  propagated failure as the one label that means "nobody classified this". Where the call returns
+  `String` and the kind is known, write the explicit `.map_err`.
+- **Still on the string path in these three crates**: the raises inside `()`/`&mut Self` methods
+  (`inst_env`'s environment panic, three duplicate-`op id` assertions), the ~65 command-line panics in
+  `px_graphs`' binaries (they are `usage` and assertion shaped, and E1 already labels their entrances),
+  and `gate_ready`'s identity-carrying line. `px_graph/src/driver.rs`'s `record`/`finish` are fallible
+  now, so their poisoned-lock sites report instead of unwinding.
 
 **M2b — the crates inside a roster.** `px_graph_schema`, `px_field_schema`, `px_elem`, `px_volume_alg`,
 `px_field_alg`, `px_volume_gpu_op` and the other fingerprinted crates each rotate the key family whose

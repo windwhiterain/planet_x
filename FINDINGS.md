@@ -246,6 +246,25 @@ sentence**, and those defects are still open. The ones that mattered:
 
 Read the rest for those findings, not as a description of the tree.
 
+### 17. ⬜ A directory that cannot be read is silently treated as empty while collecting key inputs
+
+`px_cook/src/inst_scan.rs` walks a crate to collect the files that go into an instance key. Both walkers
+swallow a failed `read_dir` and return as if the directory were empty:
+
+```rust
+// collect_rs, :494          // walk_crate, :572
+let Ok(entries) = std::fs::read_dir(dir) else { return; };
+let entries = match std::fs::read_dir(dir) { Ok(entries) => entries, Err(_) => return Ok(()) };
+```
+
+An unreadable directory (permissions, a lock, a path that vanished between the walk and the read) is
+therefore indistinguishable from a directory with no sources: the key is computed over the files that
+*were* readable and the run reports success. Since the key's whole job is to identify the source bytes
+a node was built from, a partial read is a false identity, not a missing one — and it is silent, so
+nothing downstream can notice. A raise here cannot be a plain `Result` today (`collect_rs` returns
+`()` and is called from the roster walk), so the fix is to return the failure and let the caller decide
+whether it is fatal; the walker's `Err(_) => Ok(())` arm is the one that has to go.
+
 ## Superseded comment findings
 
 
