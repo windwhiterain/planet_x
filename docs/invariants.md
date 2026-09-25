@@ -175,9 +175,13 @@ back what is already stored unless something real changed.
 
 ## Repository conventions
 
-**Line endings are mixed.** Some files are CRLF on disk and some are LF, and the bytes on disk are
-an input to every key. Before a bulk edit, check per file. Any bulk rewrite must preserve each
-file's line endings exactly.
+**Line endings are mixed.** Some files are CRLF on disk and some are LF, and the
+bytes on disk are an input to every key. Before a bulk edit, check per file. The
+stored side is what keys see: with `core.autocrlf=true` a checkout can be CRLF
+while every blob is LF, so scanning bytes on disk reports endings the repository
+never stores and may look like corruption in a healthy file. Ask git instead —
+`git cat-file -p HEAD:<path>` for the stored form, `git cat-file -p :<path>`
+once staged. Any bulk rewrite must preserve each file's line endings exactly.
 
 **`git status` cannot see line-ending changes.** CRLF and LF clean to the same blob. "Git says I am
 clean" and "the bytes did not change" are different statements.
