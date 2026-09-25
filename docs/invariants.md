@@ -91,8 +91,8 @@ a repeated action and reading a hit as speed.
 **A measurement must assert its own output exists.** Check that the artefact a
 step was asked to produce is there and non-empty, rather than trusting that the
 step ran. A render client with no service running prints how to start one and
-exits 1 (`px_render/src/client.rs::request` -> `std::process::exit`,
-main.rs:789), so the tool itself is honest; what still went wrong is a harness
+exits 1 (`px_render/src/client.rs::request` -> `std::process::exit` in `main`,
+`px_render/src/main.rs`), so the tool itself is honest; what still went wrong is a harness
 that shells out without reading the status. The failing invocation also returns
 quickly, so a harness watching elapsed time can mistake "did nothing" for "got
 faster"; the missing artefact stays invisible until someone opens the image.

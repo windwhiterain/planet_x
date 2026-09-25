@@ -16,8 +16,8 @@ volume bake and the mesh operator to run through the declaration path.
 
 ## The payload: `MeshData`
 
-[px_protocol/src/art.rs](../px_protocol/src/art.rs#L352) defines four parallel arrays plus their blob
-order:
+[`MESH_ATTRIBUTES` and `MeshData` in px_protocol/src/art.rs](../px_protocol/src/art.rs) define
+four parallel arrays plus their blob order:
 
 ```rust
 pub const MESH_ATTRIBUTES: [&str; 4] = ["positions", "normals", "uvs", "indices"];
@@ -44,7 +44,7 @@ pub struct MeshData {
   well-formed payloads.
 * `Build::detail` for a mesh reports the vertex and triangle counts, and `encode` also writes
   `vertices` and `triangles` into the manifest parameters
-  ([px_graph_schema/src/build.rs](../px_graph_schema/src/build.rs#L178)). `decode` ignores those two
+  ([`Build for MeshData` in px_graph_schema/src/build.rs](../px_graph_schema/src/build.rs)). `decode` ignores those two
   manifest entries and rebuilds from the blob headers, so the manifest counts are informational.
 * Thin geometry uses `PolylineData`, not `MeshData`: a polyline has no normals, no area and no
   triangles, so forcing it into this payload would make `triangles()` lie.

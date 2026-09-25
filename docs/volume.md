@@ -14,7 +14,7 @@ crates, and only one of them is allowed to integrate light.
 
 ## The payload: `VolumeData`
 
-[px_protocol/src/art.rs](../px_protocol/src/art.rs#L409) defines it:
+[`VolumeData` in px_protocol/src/art.rs](../px_protocol/src/art.rs) defines it:
 
 ```rust
 pub struct VolumeData {
@@ -63,7 +63,7 @@ payload.
 dimension `lanes` **only when `lanes > 1`** (`VolumeData::blobs`). A four-dimensional shape therefore
 means one lane. `from_blob` reads the optional fifth dimension, defaults to 1, and rejects the payload
 if `data.len() != samples · lanes`. The manifest carries `res`, `layers`, `inner`, `outer`
-([px_graph_schema/src/build.rs](../px_graph_schema/src/build.rs#L139)); on decode, `res`/`layers` come
+([`Build for VolumeData` in px_graph_schema/src/build.rs](../px_graph_schema/src/build.rs)); on decode, `res`/`layers` come
 from the blob shape and `inner`/`outer` from the manifest. The asset kind is `AssetKind::Volume`,
 which is deliberately distinct from `AssetKind::VoxelField` (a volume *as a field*, i.e. the
 `Domain::Volume` layout used upstream in the graph) — a volume is a four-dimensional payload, a voxel
@@ -77,7 +77,8 @@ exact inverses; `px_protocol/tests/cube.rs` pins the round trip). `px_volume_sch
 faces agree bit-for-bit on their shared edge, which is what lets six patches be welded into one closed
 mesh and what keeps a straight ray from seeing a step at a face seam.
 
-The radial law lives in [px_volume_schema/src/volume.rs](../px_volume_schema/src/volume.rs#L34):
+The radial law lives in `Shell`'s `radius_of` / `altitude_of` / `stretch_of`
+([px_volume_schema/src/volume.rs](../px_volume_schema/src/volume.rs)):
 
 ```text
 r(u) = inner · (outer/inner)^u          // geometric in world space, linear in parameter space
