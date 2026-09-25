@@ -112,6 +112,22 @@ open; the fix, if taken, is to widen `ManifestEntry.op_version` to `u64` in
 `px_graph_schema/src/protocol.rs` ⚠ which rotates every node key (it is inside the fingerprint
 roster), so it must be done together with a deliberate full re-bake, not casually.
 
+### 10. ⬜ `px_protocol/src/rows.rs` is compiled by nothing and fingerprinted by everything
+
+The file defines `fill_rows` plus two tests (`a_parallel_field_is_bit_identical_to_a_serial_one`,
+`no_group_is_lost`), but `px_protocol/src/lib.rs` has no `pub mod rows;` and no `#[path]` anywhere in
+the tree names it. It is therefore never parsed: neither test has ever been built or run, which
+`cargo test -p px_protocol` confirms — those names appear in no test list. Per
+[invariants.md](docs/invariants.md) that makes them text rather than a gate, so a claim of the form
+"`fill_rows` carries a bit-exact gate" is false today. The live row-band helper is
+`px_field_schema::parallel::rows`, gated by `px_field_schema/tests/row_bands.rs`.
+
+It still costs keys. `collect_tree` walks every `.rs` under `src/` without consulting module
+declarations, and `px_protocol/src` reaches rosters recursively through `px_graph_schema`. Measured on
+this checkout via `px_fingerprint::roster`: `px_field_op` (73 entries) and `px_volume_op` (91) both
+carry `px_protocol/src/rows.rs`. Deleting the dead file rotates every operator key and forces a full
+re-bake, so this cleanup belongs in a scheduled rotation window rather than a zero-cost sweep.
+
 ### 1. ✅ Any `elem::*` node on a `Domain::Volume` field aborts the process
 
 `px_elem::fill` asked every cell for its direction, and `px_protocol::art::direction_at` panicked for

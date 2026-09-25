@@ -59,16 +59,14 @@ the per-instance `.json` sidecar (`px_cook::inst::sidecar_text`) describes compi
 cooked output, and nothing reads it back. A cost model needs a store that outlives a run and is keyed
 by node key without feeding it.
 
-**Two row-band parallel helpers exist; the one in use has no bit-exact gate.** `px_protocol::rows`'s
-`fill_rows` splits a buffer into disjoint per-thread chunks and carries the gate that
-`a_parallel_field_is_bit_identical_to_a_serial_one` pins, but nothing outside its own tests calls it.
-`px_field_schema::parallel::rows` returns a fresh `Vec` and is what production uses — `field.fbm3` and
-`field.ridged3` — and it has no such gate. Meanwhile every element operator goes through the single
-nested serial loop in `px_elem::fill`, so the path an editing loop touches most uses neither helper.
-Routing `fill` through `parallel::rows` would move output bytes only if it stays bit-identical, which
-is unproven for that helper today: the gate has to be written for it, not borrowed from `fill_rows`.
-That edit also rotates the whole element instance-key family, because `px_elem/build.rs` fingerprints
-all of `src/` — see [invariants.md](invariants.md).
+**The hot element path does not use the parallel machinery.** `px_field_schema::parallel::rows` bands a
+field over scoped threads with each thread writing a disjoint slice; it is used by two operators
+(`field.fbm3`, `field.ridged3`), while every element operator goes through the serial nested loop in
+`px_elem::fill`. So the path an editing loop touches most uses neither. A bit-exact gate for that
+banding now lives in `px_field_schema/tests/row_bands.rs` (`tests` dirs are outside every fingerprint
+roster, so adding it rotated no key). Routing `fill` through `rows` is the remaining step, and it is
+not free: `px_elem/build.rs` fingerprints all of `src/`, so that edit rotates the whole element
+instance-key family and must be counted before it is made.
 
 **A scene document cannot point a material at content.** `ParamKind` covers `F32`, `I32`, `U32`,
 `Vec3`, `Vec4`, and the matching `Value` covers a number, a string, a triple and a quad. There is no
