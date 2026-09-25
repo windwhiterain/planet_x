@@ -48,16 +48,43 @@ cost.
 
 **How fine-grained invalidation should get.** `Graph::fetch` answers "is this exact key on disk", so a
 node is either whole-and-cached or whole-and-recomputed. Cube maps, volumes and textures have natural
-divisions (6 faces, face x layer blocks, mip levels) that could each be cached and computed
-separately, which would let a change dirt one face instead of the artifact. Two shapes, and they are
-not the same cost: a slot index carried in the cache identity persists and is readable by the render
-host, but both halves of that live in crates every operator links (`Cooked` in `px_graph_schema`, the
-path rule and whole-payload decode in `px_protocol`), so it rotates every implementation library and
-forces the contract handshake to rebuild them all; a slot kept only inside a resident cook process
-touches no protocol at all, but dies with the service and stays invisible to the renderer. Either way
-a slot is its own key and its own artifact, so partial results depend on a partition rule each
-domain's `Build` declares — not on the existing row-band machinery (below), which changes wall time
-without changing what is stored.
+divisions (6 faces, face x layer blocks, mip levels) that could each be cached and computed separately,
+which would let a change dirty one face instead of the artifact. A slot is its own key and its own
+artifact, so partial results depend on a partition rule each domain's `Build` declares — not on the
+existing row-band machinery (below), which changes wall time without changing what is stored.
+
+**The cost of a partition is decided by where its rule lives, not by whether a slot index also enters
+the key.** Every payload's `Build` implementation sits either in the contract crate or in a domain
+crate, and both are inside rosters:
+
+| payload | `Build` lives in | so a partition rule change rotates |
+|---|---|---|
+| `VolumeData`, `TextureData`, `MeshData`, `PolylineData` | `px_graph_schema/src/build.rs` | every node key and every instance key (the contract crate is in every roster) |
+| `Field` | `px_field_schema/src/payload.rs` | every instance key (that crate is in each instance root's closure) and every field node key |
+| `Curve`, `Surface`, `PointData` | `px_nurbs_schema/src/payload.rs` | the nurbs family |
+| `StarField` | `px_sparse/src/stars.rs` | the volume family |
+
+Measured, and it is the sharpest form of the rule: **a single comment line added to
+`px_field_schema/src/payload.rs` rotated all seven planned instance keys** (`1d2c7973609a` →
+`7b9be8384554`, `e59875d8f0f3` → `b8f42ee44cad`, …), declaration hashes included, and the same edit was
+visible to an `px list` binary that predated it — the roster is walked at run time
+(`px_cook/src/inst.rs::key`), so no rebuild is needed to see a key move.
+
+The one genuinely zero-key shape is the reader: **the render host now consumes slots.** `px_render`'s
+read path used to take `assets.first()` and the first blob, which made a partitioned artifact
+unreadable rather than wrong; it now pairs each `AssetManifest` with its own blobs positionally,
+validates every slot, and reports each slot's `id`, shape and fingerprint, with a gate that refuses
+damage in a slot past the first. `px_render` is in no roster, no instance closure, and no dependency
+list, so that step rotates nothing.
+
+What remains undecided is whether any **producer** should partition, and the readings say the ceiling
+is low: `clouds` spends 46,128 ms with 90.7% of it in two nodes, of which `coarse_fine` (25,007 ms,
+24.76 MB, a face-major `6 x layers x res x res` volume) divides cleanly by six while `proxy_fine`
+(16,852 ms, a 263k-vertex mesh) has no axis at all — its attribute blobs change together and a spatial
+split would re-index. `sky.nebula` (48 MB) has one mip level, so splitting by mip buys nothing there.
+So the producer side starts only if a face-level edit becomes a real workflow, or if a measured benefit
+exceeds one full-family rotation plus re-bake; a slot kept inside a resident cook process stays
+unattractive because that service is itself not being built (see the cost entry below).
 
 **Whether to erase operator types.** The declaration surface is 32 preset operators (field 10,
 volume 5, mesh 2, nurbs 15) over a handful of `Body` shapes (inputs times payload domain), plus 4
