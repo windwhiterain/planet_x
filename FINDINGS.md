@@ -30,6 +30,7 @@ numbers as approximate. Re-derive a location with `git grep` before acting on on
 | 12 | `collect_tree` skipped paths by name, so a declared module or shader could be compiled and invisible | the collector follows `mod` / `#[path]` / `include!` and takes every `.rs` a declaration reaches plus every `.wgsl` under `src/`; the same gate covers the reverse direction |
 | 14 | 13 comment pointers in 12 `build.rs` files named `docs/system/*.md`, retired pages, and carried `§` numbers | rewritten to name the live pages; every crate's `build.rs` is inside its own roster, so this rode the same window |
 | 15 | the instance sidecar was not strict JSON (a trailing comma on every field), so a strict reader silently saw nothing | the comma sits between fields; `px list` parses it strictly again and separates "no sidecar" from "will not parse"; measured zero key cost |
+| — | backslash-newline continuations spanning blank lines in `px_shader/src/host_stubs.rs` warned on every build | the two blank lines are deleted; the assembled WGSL is byte-identical (the pinned byte test is green) and the build is warning-free |
 
 ⚠ **Two content consequences; both are settled, and the next bake recomputes from source.**
 
@@ -400,11 +401,14 @@ which does not exist. `tools/frame-probe.ps1:33` says `-Sweep` is dead, but it w
 
 ## Weakened gates
 
-### A build warning everyone sees
+### ✅ The backslash-newline continuations no longer span blank lines
 
-`px_shader/src/host_stubs.rs:165-167` and `:370-372` use a backslash-newline continuation that spans
-a blank line, so rustc reports "multiple lines skipped by escaped newline" on every build. The
-pinned byte test covers the consequence, so it is harmless — but it trains people to ignore warnings.
+`px_shader/src/host_stubs.rs` had two continuations that each skipped a blank line, so rustc
+reported "multiple lines skipped by escaped newline" on every build. The two blank lines are
+deleted; the assembled WGSL is byte-identical (the pinned byte test is green), the build is
+warning-free, and the key surface was measured before landing: instance keys identical across
+`px list`, six crate rosters rotate (`px_shader`, `px_graph`, `px_graphs`, `px-scene`,
+`px_render`, `px_probe`), so `shaders` and `scene` were re-baked in the same window.
 
 ### 4. `px_graphs/src/bin/scene.rs` states a byte-equality claim with no live reader
 
