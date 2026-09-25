@@ -458,53 +458,117 @@ pub(crate) fn load_shader(
 fn load_texture(member: &Member, pcg_root: &Path, what: &str) -> Result<LoadedTexture, String> {
     let path = member.resolve(pcg_root)?;
     let bytes = std::fs::read(&path).map_err(|err| format!("读不到 {}：{err}", path.display()))?;
-    let frames = px_protocol::stream::read_stream(&mut bytes.as_slice())
-        .map_err(|err| format!("{what} {member}（{}）不是产物流：{err}", path.display()))?;
-    let manifest = frames
+    let slots = parse_texture_slots(&bytes, what)
+        .map_err(|err| format!("{what} {member}（{}）：{err}", path.display()))?;
+    let Some(first) = slots.into_iter().next() else {
+        return Err(format!(
+            "{what} {member}（{}）里没有清单帧",
+            path.display()
+        ));
+    };
+    let image = decode_base_level(&first.shape, &first.bytes)?;
+    Ok(LoadedTexture {
+        member: member.clone(),
+        shape: first.shape,
+        bytes: first.bytes,
+        image,
+    })
+}
+
+/// One asset inside an artifact: the manifest of a slot, its blob, and the values a reader compares.
+#[derive(Clone, Debug)]
+pub struct TextureSlot {
+    /// The asset's `id`; this is where a partitioned payload records which slot it is.
+    pub id: String,
+    pub shape: TextureShape,
+    pub bytes: Vec<u8>,
+    /// The asset's own fingerprint — what a reader compares to see which slot changed.
+    pub fingerprint: u64,
+}
+
+/// Every asset and blob in an artifact stream, in asset order.
+///
+/// An artifact holds `ArtBundle.assets: Vec<AssetManifest>` followed by blob frames, and the pairing is
+/// positional: blobs come in asset order, each asset's `blobs.len()` saying how many are its own. An
+/// artifact with one asset is what every producer writes today; the list is the place a partitioned
+/// payload would carry its slots, and reading only the first entry would ignore them. See
+/// docs/backlog.md.
+pub fn parse_texture_slots(bytes: &[u8], what: &str) -> Result<Vec<TextureSlot>, String> {
+    let mut reader = bytes;
+    let frames = px_protocol::stream::read_stream(&mut reader)
+        .map_err(|err| format!("{what} 不是产物流：{err}"))?;
+    let mut assets = Vec::new();
+    for frame in &frames {
+        if let px_protocol::stream::Frame::Art(bundle) = frame {
+            assets.extend(bundle.assets.iter().cloned());
+        }
+    }
+    let blobs: Vec<&px_protocol::wire::Blob> = frames
         .iter()
-        .find_map(|frame| match frame {
-            px_protocol::stream::Frame::Art(bundle) => bundle.assets.first(),
-            _ => None,
-        })
-        .ok_or_else(|| format!("{what} {member}（{}）里没有清单帧", path.display()))?;
-    let shape = TextureShape::from_params(&manifest.params)
-        .map_err(|err| format!("{what} {member}：{err}"))?;
-    let blob = frames
-        .iter()
-        .find_map(|frame| match frame {
+        .filter_map(|frame| match frame {
             px_protocol::stream::Frame::Blob(blob) => Some(blob),
             _ => None,
         })
-        .ok_or_else(|| format!("{what} {member}（{}）里没有载荷块", path.display()))?;
-    let expected = match shape.format {
-        TextureFormat::Rgba8Srgb => DType::U8,
-        TextureFormat::Rgba16Float => DType::U16,
-    };
-    if blob.header.dtype != expected {
-        return Err(format!(
-            "{what} {member}：格式是 {} 但载荷位深是 {:?}（应当是 {expected:?}）",
-            shape.format.name(),
-            blob.header.dtype
-        ));
+        .collect();
+    if assets.is_empty() {
+        return Err(format!("{what} 里没有清单帧"));
     }
-    if blob.bytes.len() != shape.chain_bytes() {
-        return Err(format!(
-            "{what} {member}：{}×{}×{} 层 {} 级 mip 应当是 {} 字节，实际 {} 字节",
-            shape.width,
-            shape.height,
-            shape.layers,
-            shape.levels,
-            shape.chain_bytes(),
-            blob.bytes.len()
-        ));
+
+    let mut slots = Vec::with_capacity(assets.len());
+    let mut taken = 0_usize;
+    for (index, asset) in assets.iter().enumerate() {
+        let shape = TextureShape::from_params(&asset.params)
+            .map_err(|err| format!("{what} 第 {} 个槽 '{}'：{err}", index + 1, asset.id))?;
+        let expected = match shape.format {
+            TextureFormat::Rgba8Srgb => DType::U8,
+            TextureFormat::Rgba16Float => DType::U16,
+        };
+        let wanted = asset.blobs.len().max(1);
+        for slot_blob in 0..wanted {
+            let Some(blob) = blobs.get(taken) else {
+                return Err(format!(
+                    "{what} 第 {} 个槽 '{}' 少了载荷块（清单说有 {wanted} 块）",
+                    index + 1,
+                    asset.id
+                ));
+            };
+            taken += 1;
+            if blob.header.dtype != expected {
+                return Err(format!(
+                    "{what} 槽 '{}'：格式是 {} 但载荷位深是 {:?}（应当是 {expected:?}）",
+                    asset.id,
+                    shape.format.name(),
+                    blob.header.dtype
+                ));
+            }
+            if slot_blob == 0 {
+                // Only the first blob of an asset is a whole texture; more than that is a partition
+                // the caller has to understand, not something to validate as one image here.
+                if blob.bytes.len() != shape.chain_bytes() {
+                    return Err(format!(
+                        "{what} 槽 '{}'：{}×{}×{} 层 {} 级 mip 应当是 {} 字节，实际 {} 字节",
+                        asset.id,
+                        shape.width,
+                        shape.height,
+                        shape.layers,
+                        shape.levels,
+                        shape.chain_bytes(),
+                        blob.bytes.len()
+                    ));
+                }
+                slots.push(TextureSlot {
+                    id: asset.id.clone(),
+                    shape: shape.clone(),
+                    bytes: blob.bytes.clone(),
+                    fingerprint: asset.fingerprint,
+                });
+            }
+        }
     }
-    let image = decode_base_level(&shape, &blob.bytes)?;
-    Ok(LoadedTexture {
-        member: member.clone(),
-        shape,
-        bytes: blob.bytes.clone(),
-        image,
-    })
+    if slots.is_empty() {
+        return Err(format!("{what} 里没有可取用的槽"));
+    }
+    Ok(slots)
 }
 
 fn load_geometry(geometry: &Geometry, id: &str, pcg_root: &Path) -> Result<LoadedGeometry, String> {
@@ -981,5 +1045,74 @@ mod tests {
             2,
             "片元那一行与「全部入口」那一行都要有：{err}"
         );
+    }
+
+    /// A cube texture split into one asset per face: what a partitioned payload would look like.
+    /// `bad_face` gives that slot the wrong byte count, to check the reader looks past the first.
+    fn six_face_fixture(bad_face: Option<usize>) -> Vec<u8> {
+        let shape = TextureShape {
+            width: 4,
+            height: 4,
+            layers: 1,
+            levels: 1,
+            format: TextureFormat::Rgba8Srgb,
+        };
+        let face_bytes = shape.chain_bytes();
+        let mut assets = Vec::new();
+        let mut blobs = Vec::new();
+        for face in 0..6_u32 {
+            let pixels = if bad_face == Some(face as usize) {
+                vec![0_u8; face_bytes - 4]
+            } else {
+                vec![face as u8; face_bytes]
+            };
+            let blob = px_protocol::wire::Blob::new(
+                px_protocol::wire::BlobHeader {
+                    dtype: DType::U8,
+                    shape: vec![pixels.len() as u32],
+                },
+                pixels,
+            )
+            .expect("字节数与形状一致");
+            assets.push(px_protocol::art::AssetManifest {
+                id: format!("sky.nebula#face{face}"),
+                params: shape.params(),
+                blobs: vec![blob.header.clone()],
+                fingerprint: 0xF00D_0000 + u64::from(face),
+            });
+            blobs.push(blob);
+        }
+        let mut frames = vec![px_protocol::stream::Frame::Art(
+            px_protocol::art::ArtBundle { assets },
+        )];
+        frames.extend(blobs.into_iter().map(px_protocol::stream::Frame::Blob));
+        let mut out = Vec::new();
+        px_protocol::stream::write_stream(&mut out, &frames).expect("写得出");
+        out
+    }
+
+    #[test]
+    fn every_slot_in_an_artifact_is_read_not_only_the_first() {
+        let bytes = six_face_fixture(None);
+        let slots = parse_texture_slots(&bytes, "天空盒").expect("六个槽都读得到");
+        assert_eq!(slots.len(), 6, "六个面就是六个槽");
+        for (face, slot) in slots.iter().enumerate() {
+            assert_eq!(slot.id, format!("sky.nebula#face{face}"));
+            assert_eq!(slot.fingerprint, 0xF00D_0000 + face as u64);
+            assert_eq!(slot.shape.layers, 1);
+            assert!(!slot.bytes.is_empty());
+        }
+        let fingerprints: std::collections::BTreeSet<u64> =
+            slots.iter().map(|slot| slot.fingerprint).collect();
+        assert_eq!(fingerprints.len(), 6, "每个槽的 fingerprint 都要能单独读出来");
+    }
+
+    #[test]
+    fn a_damaged_slot_past_the_first_is_refused() {
+        // Reading only `assets.first()` (and the first blob) would accept this artifact: the damage is
+        // in the sixth face, and the bytes of the first face are perfectly valid.
+        let bytes = six_face_fixture(Some(5));
+        let err = parse_texture_slots(&bytes, "天空盒").expect_err("第六个槽坏了就要拒");
+        assert!(err.contains("face5"), "要点名坏的是哪个槽：{err}");
     }
 }
