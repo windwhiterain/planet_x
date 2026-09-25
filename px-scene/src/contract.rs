@@ -1,19 +1,8 @@
-//! 配方词汇 → shader 词汇：**这一份是两条烘图路（`scene` 与 `passes`）共用的那一半**。
-//!
-//! 这里的两个函数原来住在 `bin/scene.rs` 里：材质那条路走通之后，pass 那条路要的是**同一件事**
-//! ——「配方里写了一个名字，这份 shader 声明了它吗？声明的是哪一档？」。
-//! 抄第二份就是第二个会漂开的真相（§66 的病根），所以搬到这里。
-
 use std::path::Path;
 
 use px_protocol::material::{MaterialLayout, ParamKind, ParamSlot};
 use px_protocol::scene::{Member, Value};
 
-/// 一份 shader 成员产物里的**两半**：组装前的 WGSL 文本 + 它的契约。
-///
-/// 为什么要一次读两半：`--bin passes` 要拿 WGSL 去验「配方写的入口名在不在这份 shader 里」
-/// （`bad_entry` 那条判据），而契约也要按它校验参数。分两次读就是两次磁盘往返 + 两处
-/// "读哪个文件"的知识。
 pub fn shader_parts_of(member: &Member, root: &Path) -> Result<(String, MaterialLayout), String> {
     let path = px_protocol::scene::cas_path(root, &member.key)?;
     let (source, schema) = px_protocol::art::read_shader_parts(&path).map_err(|err| {
@@ -33,16 +22,10 @@ pub fn shader_parts_of(member: &Member, root: &Path) -> Result<(String, Material
     Ok((source, layout))
 }
 
-/// 一份 shader 成员的**契约**：从它的产物里读 schema descriptor（第二个 blob，`docs/render/renderer.md` §80.2）。
-///
-/// 为什么不现反射：产物里那份就是**装载时会被拿来对账的那一份** —— 烘图侧要校验的是
-/// 「这份产物说它要什么」，不是「现在这份 WGSL 会反射出什么」。两者不一致时装载会拒，
-/// 那时候再报错就晚了（而且报的是渲染器的错，不是作者写错了配方）。
 pub fn schema_of(member: &Member, root: &Path) -> Result<MaterialLayout, String> {
     Ok(shader_parts_of(member, root)?.1)
 }
 
-/// TOML 里的一个值 → 产物里的值，**按 shader 声明的那一档**。
 pub fn coerce_value(slot: &ParamSlot, value: &toml::Value) -> Result<Value, String> {
     let label = slot.kind.name();
     match slot.kind {
@@ -79,16 +62,6 @@ pub fn coerce_value(slot: &ParamSlot, value: &toml::Value) -> Result<Value, Stri
     }
 }
 
-/// 按名字透传 + 烘图时按契约校验一遍。
-///
-/// 三档，逐条都当场说清楚（§79 的 W1：原来「配方里能写什么」是一张写死的白名单，
-/// 加一个 shader 参数就得改那张表 —— 也就是改 Rust）：
-/// · 名字在 `structural` 里 ⇒ 编译器自己要用它，**不进** shader 的参数表；
-/// · 名字在这份 shader 的参数表里 ⇒ 按它声明的类型透传（**这就是「加一个参数不用改 Rust」**）；
-/// · 两边都不是 ⇒ 报错，并把两张表都列出来。
-///
-/// 最后一步 `pack` 是烘图时的**完整性**校验：shader 声明了而没人给值 ⇒ 这里就红，
-/// 不会烘出一份装载时必被拒的产物。
 pub fn merge_named(
     what: &str,
     given: &std::collections::BTreeMap<String, toml::Value>,

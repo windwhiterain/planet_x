@@ -1,12 +1,3 @@
-//! `field.fbm3`：**体网格上的分形噪声**（采样点是体素坐标，不是球面方向）。
-//!
-//! ⚠ 与 `ops::fbm`（球面那一档）的分工见 `px_field_schema::params::Fbm3Params` 的文档：
-//!   那一档按 `direction` 取噪声（**没有径向**，出来的是贴在球面上的一层皮），
-//!   这一档按 `(s, t, altitude)` 取 ⇒ 云里前中后三层各自不同。
-//!
-//! ⚠ 采样点由 `px_field_schema::volume::voxel_of` 给（**布局只有那一处真源**）：
-//!   面内格心 + 归一化径向高度 + 每面一个固定偏移。
-
 use px_field_schema::field::Field;
 use px_field_schema::noise::FbmSettings;
 use px_field_schema::ops::Fbm3;
@@ -32,8 +23,6 @@ pub fn eval(params: &params::Fbm3Params, _inputs: &[&Field]) -> Field {
         gain: params.gain,
         seed: params.seed,
     };
-    // ⚠ **按行带并行**（见 [`crate::parallel`]）：逐格结果与串行逐位相同。
-    //   这一档是图里最贵的几处之一（体网格上 6~7 个八度的三维噪声）。
     let width = shape.res as usize;
     let height = shape.height() as usize;
     let data = crate::parallel::rows(width, height, |first, count, out| {
@@ -43,8 +32,6 @@ pub fn eval(params: &params::Fbm3Params, _inputs: &[&Field]) -> Field {
             let base = row * width;
             for x in 0..shape.res {
                 let mut voxel = voxel_of(&shape, face, x, y);
-                // `zonal` 只动**径向**：采样点是"方向 × 半径" ⇒ 整体乘一个系数就是沿径向
-                // 拉长／压扁（切向不受影响），`1.0` = 各向同性。
                 for axis in 0..3 {
                     voxel[axis] *= params.zonal;
                 }
@@ -63,7 +50,6 @@ mod tests {
     use px_field_schema::params::Shape;
     use px_field_schema::volume::VolumeShape;
 
-    /// 体网格那一档的形状参数（`width = res`、`height = res × layers × 6`）。
     fn shape_of(res: u32, layers: u32) -> Shape {
         Shape {
             width: res,
@@ -82,7 +68,6 @@ mod tests {
         )
     }
 
-    /// **形状跟着参数走**，而且值落在 `[0,1]`（fbm 是归一化过的和）。
     #[test]
     fn the_field_takes_the_shape_params_and_stays_normalised() {
         let shape = shape_of(8, 4);
@@ -94,10 +79,6 @@ mod tests {
         assert!(stats.max - stats.min > 0.05, "噪声得有起伏：{stats:?}");
     }
 
-    /// **径向真的有变化**：同一个面内位置，不同层的值必须不同。
-    ///
-    /// ⚠ 这条判的就是"体网格与球面场的差别"：球面档按 `direction` 取噪声 ⇒ 同一列上
-    ///   所有层的值**完全相同**（那是一层皮）。这一档要是也那样，体渲染就白做了。
     #[test]
     fn the_column_changes_with_the_layer() {
         let shape = VolumeShape { res: 8, layers: 6 };
@@ -123,7 +104,6 @@ mod tests {
         );
     }
 
-    /// **六面不一样**：同一行同一列在六面上取到的值不该相同（否则出来是六块复制的云）。
     #[test]
     fn the_six_faces_are_not_copies_of_each_other() {
         let shape = VolumeShape { res: 6, layers: 3 };
@@ -142,7 +122,6 @@ mod tests {
         assert_eq!(equal, 0, "六面里有 {equal} 格与面 0 完全相同");
     }
 
-    /// **纯函数**：同样的参数跑两遍逐点相同（缓存键与"可复现"都靠它）。
     #[test]
     fn the_same_parameters_give_the_same_field() {
         let shape = shape_of(6, 3);

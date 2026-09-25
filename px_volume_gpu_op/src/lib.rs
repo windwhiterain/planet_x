@@ -1,72 +1,5 @@
-//! **体网格在 GPU 上的摊平下标**：一处公式、两侧共用。
-//!
-//! 布局与 `VolumeData::data` 逐字相同（`px_protocol::art::VolumeData`）：
-//!
-//! ```text
-//!   data[((((face * layers + layer) * res + t) * res + s) * LANES) + lane]
-//! ```
-//!
-//! ⚠⚠ 为什么这一层要单独存在、还要配 GPU↔CPU 判据：天空立方贴图那道**竖缝**的成因，
-//!   就是两处"从世界点反查格点"的实现里有一处把八个角**困在本面内**（`wrap_cell` +
-//!   面号写死）。搬到 WGSL 之后，"同一套下标"这件事又要在两种语言里各写一遍 ——
-//!   这里把它压成一条判据：GPU 按 WGSL 的公式重排一遍数组，Rust 按本文件的公式算期望，
-//!   逐元素必须相等。**先钉死下标，再谈光线步进。**
+//! See docs/volume.md
 
-//! # 移植规格：CPU 的 sample_at → WGSL（逐字对齐，别自由发挥）
-//!
-//! 这一段是把 px_volume_alg::raymarch::sample_at 的**语义**原样记下来（真源在那边，
-//! 改那边必须改这里）。WGSL 侧必须**逐步照做**，否则会重现那道竖缝或引入新边。
-//!
-//! `	ext
-//! 输入：世界点 p；体积 (res, layers, inner, outer)
-//!  1. r = |p|；span = outer - inner
-//!     容差 tolerance = |span|.max(1) * 1e-5
-//!     若 r < inner - tol 或 r > outer + tol 或 |span| <= eps ⇒ 壳外（读出 0）
-//!  2. dir = p / r  ⇒  (face, s, t) = cube_face_of(dir)          // 见下
-//!  3. altitude = clamp((r - inner) / span, 0, 1)
-//!     sz = altitude * (layers - 1)
-//!     layer0 = (|sz - round(sz)| < 1e-3) ? round(sz) : floor(sz)   // ⚠ 1e-3 的贴齐
-//!     tz = snap(sz - layer0)
-//!     la = clamp(layer0, 0, layers-1)；lb = clamp(layer0 + 1, 0, layers-1)
-//!  4. sx = s * res - 0.5；sy = t * res - 0.5
-//!     x0 = floor(sx)；y0 = floor(sy)；tx = snap(sx - x0)；ty = snap(sy - y0)
-//!     snap(f) = f < 1e-4 ? 0 : (f > 1-1e-4 ? 1 : f)
-//!  5. ⚠⚠ **八个角逐个跨面反查**（不能在本面里 wrap/clamp）：
-//!       corner_slot(cs, ct, layer):
-//!         s = (cs + 0.5) / res；t = (ct + 0.5) / res
-//!         (nf, ns, nt) = cube_face_of(cube_direction(face, s, t))
-//!         cs' = min(u32(ns * res), res-1)；ct' = min(u32(nt * res), res-1)
-//!         slot = (((nf * layers + min(layer, layers-1)) * res + ct') * res + cs') * 6
-//!       八个角 = {(x0|y0|la), (x0+1|y0|la), (x0|y0+1|la), (x0+1|y0+1|la),
-//!                 (x0|y0|lb), (x0+1|y0|lb), (x0|y0+1|lb), (x0+1|y0+1|lb)}
-//!  6. 三线性权重：(wx, wy) = (1 - tx, 1 - ty)；wz、以及 8 个权重按 x/y/z 组合
-//!     gather(lane) = Σ w[i] * data[corners[i] + lane]
-//! `
-//!
-//! 两个几何核（px_protocol::art，真源在那边）：
-//!
-//! `	ext
-//! cube_direction(face, s, t): a = 2s-1, b = 2t-1
-//!   face 0 => ( 1, -b, -a) | 1 => (-1, -b,  a) | 2 => (a,  1,  b)
-//!   face 3 => ( a, -1, -b) | 4 => ( a, -b,  1) | 5 => (-a, -b, -1)
-//!   再归一化（长度为 0 时返回 (0,1,0)）
-//!
-//! cube_face_of(d): (ax, ay, az) = (|x|, |y|, |z|)
-//!   face = (ax >= ay && ax >= az) ? (x > 0 ? 0 : 1)
-//!        : (ay >= az)            ? (y > 0 ? 2 : 3)
-//!        :                         (z > 0 ? 4 : 5)
-//!   major = (face in {0,1}) ? ax : (face in {2,3}) ? ay : az；再 max(eps)
-//!   (a, b) = face 0 => (-z,-y) | 1 => (z,-y) | 2 => (x, z)
-//!          | face 3 => ( x,-z) | 4 => (x,-y) | 5 => (-x,-y)
-//!   s = (a/major)*0.5 + 0.5；t = (b/major)*0.5 + 0.5；两者 clamp 到 [0,1]
-//! `
-
-/// **跨面三线性采样核**（WGSL 源与 crate 同住：src/sampler.wgsl）。
-///
-/// 语义与 px_volume_alg::raymarch::sample_at 逐条对齐（规格见本文件的"移植规格"一节）。
-/// ⚠ 它现在只是"随 crate 一起装运的源"：**接上判据那一刻**才会被 GPU 真正编译，
-///   所以在那之前 cargo test 不会替它把关 —— 下一轮的第一件事就是给它配
-///   GPU↔CPU 逐点等价判据（多方向 + 棱上取点）。
 pub const SAMPLER_WGSL: &str = include_str!("sampler.wgsl");
 
 use px_gpu::{Binding, connect, dispatch};
@@ -74,25 +7,16 @@ use px_gpu::{Binding, connect, dispatch};
 pub mod occupancy;
 pub use occupancy::Occupancy;
 
-/// 每个体素几条通道：`[发射 R, G, B, σ_R, σ_G, σ_B]`。
 pub const LANES: usize = 6;
 
-/// **占用索引**的只读参数块（与 WGSL 的 `struct Occupancy` 逐字段对齐）。
-///
-/// ⚠⚠ `skip` 那一格是**空跳开关**：`0` ⇒ 步进与"没有这份索引"时逐位相同。
-///   判据 `the_skip_matches_the_reference_march` 就是靠同一份 WGSL 的这两档对账 ——
-///   不另写一份参考实现（用户 2026-09-25 的口径：参考也用同一份 WGSL）。
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct OccupancyUniform {
-    /// (res, layers, blocks_per_face, skip)
     pub extra: [u32; 4],
-    /// (ratio = ln(outer/inner)（inner ≤ 0 时 0）, 未用 x3)
     pub scalars: [f32; 4],
 }
 
 impl OccupancyUniform {
-    /// **不跳**的那一档（`skip = 0`）：绑定照样给，让两个入口的绑定布局一致。
     pub fn none() -> Self {
         Self {
             extra: [0, 0, 0, 0],
@@ -100,10 +24,6 @@ impl OccupancyUniform {
         }
     }
 
-    /// **要跳**的那一档：参数块 + 掩码字节**成对**产出（两块必须同源，错一个就是"全跳掉"）。
-    ///
-    /// ⚠⚠ 两块必须一起绑：只给参数块、掩码给 4 个字节的空缓冲 ⇒ 着色器越界读掩码 ⇒
-    ///   每个块都判成空 ⇒ **整幅图全黑**（实测踩过：判据报"最大偏差 0.363"，而根因不在步进）。
     pub fn packed(occupancy: &Occupancy, inner: f32, outer: f32) -> (Self, Vec<u8>) {
         let ratio = if inner > 0.0 {
             (outer / inner).ln()
@@ -119,8 +39,6 @@ impl OccupancyUniform {
                     occupancy.blocks_per_face(),
                     1,
                 ],
-                // ⚠ `scalars.z` = L1 区的**字数**：着色器靠它把 L1 位号与 L2 下标分开
-                //   （缓冲区是 `[L1 位][L2 掩码]` 两段，不是"一字一块"）。
                 scalars: [ratio, 0.0, occupancy.l1_words() as f32, 0.0],
             },
             u32_bytes(&words),
@@ -139,9 +57,6 @@ impl OccupancyUniform {
     }
 }
 
-/// 占用索引的字节：`(uniform, words)`。
-///
-/// ⚠ 索引从**已经烘好的发射体积**派生（打包上传，不产辐射）—— 见 `occupancy` 模块的文件头。
 fn occupancy_bytes(
     occupancy: Option<&Occupancy>,
     res: u32,
@@ -153,7 +68,6 @@ fn occupancy_bytes(
         Some(occupancy) => OccupancyUniform::packed(occupancy, inner, outer),
         None => (
             OccupancyUniform {
-                // ⚠ 即使不跳也要报**真实的形状**：着色器拿它算块号（不跳时不用，但形状不能是 0）。
                 extra: [res, layers, 0, 0],
                 scalars: [0.0; 4],
             },
@@ -162,10 +76,6 @@ fn occupancy_bytes(
     }
 }
 
-/// 体素的**摊平下标**（世界点 → 数据那一格）。
-///
-/// ⚠ 参数顺序与 WGSL 侧一致（`face, layer, t, s, lane`）：两侧签名不一样时，
-///   "哪一个是 s、哪一个是 t"这种错会在画面上只表现为"云位置不对"，归因极远。
 pub fn flat_index(
     res: u32,
     layers: u32,
@@ -178,8 +88,6 @@ pub fn flat_index(
     (((((face * layers + layer) * res + t) * res + s) * LANES as u32) + lane) as usize
 }
 
-/// **重排核**：`dst[i] = src[flat_index_of(i)]`，其中 `i` 按
-/// `(face, layer, t, s, lane)` 的字典序遍历。GPU 侧用 WGSL 里的同一套公式算。
 pub const REPACK_WGSL: &str = r#"
 struct Shape {
     res: u32,
@@ -209,12 +117,6 @@ fn repack(@builtin(global_invocation_id) id: vec3<u32>) {
 }
 "#;
 
-/// 派发尺寸：每块 64 个线程，与 WGSL 的 `workgroup_size` 一致。
-///
-/// ⚠⚠ x 方向**必须切在 65535 以内**（`max_compute_workgroups_per_dimension`，WebGPU 规范常数）：
-///   天穹 face 1024 要 98304 个工作组，一维派发会越界 —— 症状是烘图报 wgpu 校验错、
-///   panic 穿过算子的 dylib 边界、整个烘焙进程 abort，且**没有任何可读信息**（实测踩过）。
-///   WGSL 侧用同一把尺子（`flat_index_of` 里的 `WG_X`）把 (x, y) 摊平。
 pub fn workgroups(threads: usize) -> (u32, u32, u32) {
     const WG_X: usize = 65535;
     let blocks = threads.div_ceil(64).max(1);
@@ -223,7 +125,6 @@ pub fn workgroups(threads: usize) -> (u32, u32, u32) {
     (x as u32, y as u32, 1)
 }
 
-/// 跑一遍重排核；返回 GPU 写出的数组。
 pub fn repack(res: u32, layers: u32, faces: u32, data: &[f32]) -> Result<Vec<f32>, String> {
     let Some(gpu) = connect() else {
         return Err("没有可用 GPU".to_string());
@@ -259,12 +160,6 @@ pub fn repack(res: u32, layers: u32, faces: u32, data: &[f32]) -> Result<Vec<f32
 mod tests {
     use super::*;
 
-    /// ⚠⚠ **GPU 与 CPU 必须对同一套摊平下标**。这一条是"缝"那一类错误的守门判据：
-    ///   数组里放"每格都不一样的可逆编码"（就是它自己的下标），GPU 按 WGSL 的公式重排，
-    ///   Rust 按 [`flat_index`] 算期望 —— 逐元素相等才算过。差一点点都会在成图上表现为
-    ///   "云的位置不对"或"面上有一道边"，而两者都归因不到下标。
-    ///
-    /// ⚠ 没有可用设备时**跳过**（不是失败）：判据测的是映射，不是必须有卡。
     #[test]
     fn the_gpu_agrees_with_the_cpu_on_the_flat_index() {
         let (res, layers, faces) = (4_u32, 3_u32, 6_u32);
@@ -276,7 +171,6 @@ mod tests {
         };
         assert_eq!(gpu_side.len(), data.len(), "长度");
 
-        // Rust 侧的期望：按 (face, layer, t, s, lane) 字典序把**那个格子自己的值**排出来。
         let mut index = 0_usize;
         for face in 0..faces {
             for layer in 0..layers {
@@ -299,7 +193,6 @@ mod tests {
     }
 }
 
-/// 跑一遍采样核：points 是 [x, y, z] 一串，返回每个点在第 lane 条通道上的值。
 pub fn sample_points(
     res: u32,
     layers: u32,
@@ -350,7 +243,6 @@ mod sampler_tests {
     use super::*;
     use px_volume_schema::VolumeData;
 
-    /// 一份**光滑**的体：值只随"格心方向"变（三线性插值才有意义），六条通道同值。
     fn smooth_volume(res: u32, layers: u32, inner: f32, outer: f32) -> VolumeData {
         let mut data = vec![0.0_f32; (6 * layers * res * res * LANES as u32) as usize];
         for face in 0..6_u32 {
@@ -385,20 +277,12 @@ mod sampler_tests {
         }
     }
 
-    /// ⚠⚠ **GPU 的采样必须与 CPU 逐点一致**（容差内）。
-    ///
-    /// 取点刻意分成三档，因为它们的错法各不相同：
-    ///  * **面内一般点** —— 三线性权重、ltitude → layer0 的错法；
-    ///  * **面棱上的点**（s = 0 / 	 = 0 那一列）—— 这正是那道竖缝的现场：
-    ///    八个角里有一半必须落到**相邻面**上去；
-    ///  * **壳壁附近**（inner / outer 一个纹素之内）—— 边界容差与 clamp 的错法。
     #[test]
     fn the_gpu_sampler_agrees_with_the_cpu_point_by_point() {
         let (res, layers) = (8_u32, 4_u32);
         let (inner, outer) = (1.0_f32, 2.0_f32);
         let volume = smooth_volume(res, layers, inner, outer);
         let mut points: Vec<[f32; 3]> = Vec::new();
-        // 面内一般点 + 棱上取点：扫一遍方向，其中 s/t 取 0 与 1 就是棱。
         for face in 0..6_u32 {
             for &s in &[0.0_f32, 0.13, 0.5, 0.87, 1.0] {
                 for &t in &[0.0_f32, 0.13, 0.5, 0.87, 1.0] {
@@ -436,41 +320,20 @@ mod sampler_tests {
     }
 }
 
-// ------------------------- 天空那一档的只读参数块 -------------------------
-//
-// 分级表与调参常量只有一处真源（Rust）：WGSL 只读这一块，不复制任何手调数字。
-// 否则「改了色相却只改了 CPU 那份」会表现为「GPU 与 CPU 出图不同」，而归因不到常量。
-// 布局按 uniform 的 16 字节规矩排（每 4 个 f32/u32 一组一个 vec4），
-// size_of 与 to_bytes().len() 必须相等，并且有判据钉住。
-
-/// raymarch_channel 的步进参数 + raymarch_sky 的分级表。
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SkyUniform {
-    /// (steps, face, 未用, 未用)
     pub counts: [u32; 4],
-    /// (jitter, 未用, 未用, enter) —— enter 是壳的内半径（步进起点）。
-    ///
-    /// ⚠ 星点的旋钮（轮廓、增益）**不在这里**：它们与格、星表同住 [`StarMeta`]
-    ///   （`star_gain` 与 `starlight_gain` 是"同一个增益的两个调用点" ⇒ 两处各存一份
-    ///   迟早会漂开，而症状只是"天上与气里的星不一样"）。
     pub scalars: [f32; 4],
-    /// 太空底色（rgb + 未用）。
     pub background: [f32; 4],
-    /// 响应曲线的输入锚点（本次烘焙实测的输入分位）。
     pub tone_in: [f32; 4],
-    /// 响应曲线的输出锚点（参考图的分位）。
     pub tone_out: [f32; 4],
-    /// 逐格分级的档位亮度（4 档）。
     pub ramp_luma: [f32; 4],
-    /// 逐格分级的档位色相（4 x rgb + 未用）。
     pub ramp_hue: [[f32; 4]; 4],
-    /// 响应曲线的软肩起点与上限（`(shoulder, ceil, 未用, 未用)`）。
     pub limits: [f32; 4],
 }
 
 impl SkyUniform {
-    /// 按内存布局导出：WGSL 那边的 struct 必须逐字段对上（判据钉住字节数）。
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(std::mem::size_of::<Self>());
         for value in self.counts {
@@ -500,8 +363,6 @@ impl SkyUniform {
 mod uniform_tests {
     use super::*;
 
-    /// 布局判据：uniform 的 16 字节规矩 + Rust 与 WGSL 两侧字段一处不差。
-    /// 错法的症状是「画面整体错位/花屏」，根因在字节排布 —— 归因极远。
     #[test]
     fn the_sky_uniform_layout_is_pinned() {
         let value = SkyUniform {
@@ -538,11 +399,6 @@ mod uniform_tests {
         );
     }
 
-    /// 布局判据：星场那一块 uniform 的 16 字节规矩 + 字段次序。
-    ///
-    /// ⚠ 次序就是 WGSL 里 `struct StarMeta` 的**声明次序**（u32 与 f32 交错）：
-    ///   差一格就是"星的参数整片错位"（增益跑到原点、步数跑到段起点上），
-    ///   而画面上的症状只是"星辉不对" —— 归因不到 uniform。
     #[test]
     fn the_star_meta_layout_is_pinned() {
         let value = StarMeta {
@@ -565,7 +421,6 @@ mod uniform_tests {
             96,
             "字段变了就要同步 WGSL 的 struct StarMeta（现为 6 个 vec4）"
         );
-        // 字段次序：第 4 个 u32 是 counts.w，第 5 个是 space.x（不是 segments_a.x）。
         assert_eq!(u32::from_le_bytes(bytes[12..16].try_into().unwrap()), 48);
         assert_eq!(f32::from_le_bytes(bytes[16..20].try_into().unwrap()), 0.05);
         assert_eq!(u32::from_le_bytes(bytes[32..36].try_into().unwrap()), 0);
@@ -576,61 +431,16 @@ mod uniform_tests {
     }
 }
 
-// --------------------- 移植路线上的两个硬约束（WGSL 语言层面） ---------------------
-//
-// 记在这里是因为它们不是风格问题，而是会让人反复撞墙的机制：
-//
-// 1. **WGSL 没有 include**。采样那套函数（cube_direction / cube_face_of / snap /
-//    corner_slot / gather_at / sample_volume）要在两个入口之间共用，只能靠 Rust 侧
-//    concat!(include_str!(...)) 把「只有函数的文件」拼进各个入口模块。
-//    复制一份进每个入口是错的：那份副本不会跟着真源走。
-//
-// 2. **一个模块里同一 binding 号只能有一种类型**。采样入口用
-//    0=体积 uniform，1=体数据，2=点表，3=输出；步进入口要的是
-//    0=体积 uniform，1=体数据，2=天空参数 uniform，3=图。binding 2/3 的类型冲突，
-//    而 wgpu 的管线布局是按入口实际用到的绑定建的 —— 于是入口必须分模块，
-//    函数共用的部分单独一个文件。
-//
-// 因此文件结构定为：
-//   sampler_fn.wgsl   只有函数（无绑定、无入口）
-//   sample_points.wgsl  入口 + 绑定（判据已绿：450 点与 CPU 逐点一致）
-//   march.wgsl          入口 + 绑定（下一步）
-//   lib.rs 用 concat! 拼出两个模块，绑定的**类型**只在各入口里声明一次。
-//
-// 步进入口的第一条判据打算走**解析解**而不是 CPU 对照：常发射 e、常消光 s、路径长 L 时
-// 行进结果应当收敛到 (e/s)(1 - exp(-s*L))。它不依赖任何 CPU 实现，因而能先把
-// 「步长约定 / 透过率递推 / 起点 enter」这三件事单独钉死；等这一条绿了，
-// 再拿真体积与 px_volume_alg::raymarch_channel 对账。
-
-/// **GPU 那一侧的星场索引**：五段 u32 拼成**一个** storage buffer + 星表 + 元数据。
-///
-/// ⚠⚠ 五段为什么要拼成一个 buffer：天空那一档的入口现在已经有 **5 个** storage 绑定
-///   （体数据 / 图 / 星表 / 索引 / 溢出计数），而把五段拆成五个绑定就是 **9 个** ——
-///   越过 WebGPU 的 `maxStorageBuffersPerShaderStage = 8`（默认下限）。症状是"某些设备上
-///   这个入口直接起不来"，而归因不到"是星场那几个绑定"。段的起点走 uniform
-///   （[`StarMeta::segments_a`] / [`StarMeta::segments_b`]），shader 按偏移寻址。
-///
-/// ⚠ 五段的次序与 `px_sparse::Grid` 的字段次序一致：
-///   `chunk_start ‖ brick_slot ‖ brick_mask ‖ brick_sub ‖ sub_start`。
-///   ⚠ 拼接按 **u32 元素**（不是字节）：`starts` 是元素下标，WGSL 那一侧
-///   `array<u32>` 按下标读就够 —— 两侧不必各自再换算一次字节偏移。
 pub struct StarGrid {
-    /// 五段拼起来的索引。
     pub index: Vec<u32>,
-    /// 五段各自的起点（`starts[i]` = 第 `i` 段在 `index` 里的第一个下标）。
     pub starts: [u32; 5],
-    /// 细格边长（世界单位）。
     pub cell: f32,
-    /// 格 `(0,0,0)` 的近角。
     pub origin: [f32; 3],
-    /// 每轴细格数（`CHUNK_CELLS` 的整数倍）。
     pub dims: [u32; 3],
-    /// 星数（点表的项数）。
     pub count: u32,
 }
 
 impl StarGrid {
-    /// 从星场拼出 GPU 那一侧的索引。
     pub fn of(field: &px_sparse::StarField) -> Self {
         let grid = &field.grid;
         let mut index: Vec<u32> = Vec::with_capacity(
@@ -665,32 +475,18 @@ impl StarGrid {
     }
 }
 
-/// 星场那一档的 **uniform 参数块**：格的形状 + 五段起点 + 两个调用点各自的旋钮。
-///
-/// ⚠ 布局按 uniform 的 16 字节规矩排（每 4 个数一个 `vec4`）：`to_bytes().len()` 必须等于
-///   `size_of`，而 WGSL 那边的 `struct StarMeta` 必须逐字段对上（判据钉着）。
-///
-/// ⚠ `light[2]`（增益）是**两个调用点共用**的一格：天空填 `star_gain`、发射填
-///   `starlight_gain`（它们本来就同名同义，各存一份就是迟早漂开）。
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Default)]
 pub struct StarMeta {
-    /// (星数, dims.x, dims.y, dims.z)。
     pub counts: [u32; 4],
-    /// (细格边长, origin.x, origin.y, origin.z)。
     pub space: [f32; 4],
-    /// 前四段起点：chunk_start / brick_slot / brick_mask / brick_sub。
     pub segments_a: [u32; 4],
-    /// (sub_start 起点, 逐星阴影步数, 每体素最多吃几颗星, 未用)。
     pub segments_b: [u32; 4],
-    /// 星光球（发射那一档）：(查询半径, 软化半径, 增益, 未用)。
     pub light: [f32; 4],
-    /// 星点轮廓（天空那一档）：(核, 晕, 晕权重, 支持域)。
     pub profile: [f32; 4],
 }
 
 impl StarMeta {
-    /// 与格有关的那几格（两个调用点共用）。
     fn of(grid: &StarGrid) -> Self {
         Self {
             counts: [grid.count, grid.dims[0], grid.dims[1], grid.dims[2]],
@@ -707,10 +503,6 @@ impl StarMeta {
         }
     }
 
-    /// 天空那一档：轮廓与支持域读 [`SkyParams`]，增益走 `star_gain`。
-    ///
-    /// ⚠ `core` / `halo` 的 `max(1e-6)`、`support` 的 `3 × max(core, halo)` 全部**在宿主上**
-    ///   按 CPU 那一份算好（`star_support` 就是它的真源）⇒ WGSL 里只做 `exp`，不重算阈值。
     pub fn sky(grid: &StarGrid, params: &px_volume_schema::params::sky::SkyParams) -> Self {
         Self {
             segments_b: [grid.starts[4], 0, 0, 0],
@@ -725,7 +517,6 @@ impl StarMeta {
         }
     }
 
-    /// 发射那一档：星光球读 `starlight_*`，增益走 `starlight_gain`。
     pub fn emission(
         grid: &StarGrid,
         params: &px_volume_schema::params::emission::EmissionParams,
@@ -747,10 +538,6 @@ impl StarMeta {
         }
     }
 
-    /// 按内存布局导出：WGSL 那边的 struct 必须逐字段对上（判据钉住字节数）。
-    ///
-    /// ⚠ 次序就是 WGSL 里 `struct StarMeta` 的**声明次序**（u32 与 f32 交错）：
-    ///   两边的字段次序只要差一格，症状是"星的参数整片错位"，而归因不到 uniform 上。
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(std::mem::size_of::<Self>());
         for value in self.counts {
@@ -775,30 +562,16 @@ impl StarMeta {
     }
 }
 
-/// ⚠⚠ **星光球的定长表上限**：WGSL 没有变长数组，`star_light` 的"前几名"表是定长的
-///   （`StarMeta::segments_b.z` = `starlight_max`）。超过它就**没有**忠实的镜像 ——
-///   与其静默按 32 截断（那是"两边的气亮度差一点点"，最难看出来的一类分叉），
-///   不如在派发之前当场报错。
 pub const STAR_KEEP_MAX: u32 = 32;
 
-/// 步进的**可选**输入（星场与底色）：与分级表一样，参数只有一处真源。
 #[derive(Default, Clone, Copy)]
 pub struct MarchExtras<'a> {
-    /// R3 星场的索引（`None` = 这一档没有星）。
     pub star_grid: Option<&'a StarGrid>,
-    /// 星表（每颗 `StarField::STRIDE` 个 f32）；`star_grid` 是 `None` 时忽略。
     pub star_table: &'a [f32],
-    /// 星场参数块（两个调用点各填自己那一份）。
     pub star_meta: StarMeta,
-    /// 太空底色（`SkyParams::background`）。
     pub background: [f32; 3],
 }
 
-/// `f32` 一串 → 小端字节。
-///
-/// ⚠ 空的那一份给 4 个字节：storage buffer 的绑定**不能是 0 字节**（wgpu 的
-///   `create_buffer` 会拿到 0，而 shader 里 `arrayLength` 与读一次都要有地方落）。
-///   星数为 0 时那几条路一次都不进，读不到这 4 个字节。
 fn f32_bytes(values: &[f32]) -> Vec<u8> {
     if values.is_empty() {
         return vec![0_u8; 4];
@@ -809,7 +582,6 @@ fn f32_bytes(values: &[f32]) -> Vec<u8> {
         .collect()
 }
 
-/// `u32` 一串 → 小端字节（空的理由见 [`f32_bytes`]）。
 fn u32_bytes(values: &[u32]) -> Vec<u8> {
     if values.is_empty() {
         return vec![0_u8; 4];
@@ -820,10 +592,6 @@ fn u32_bytes(values: &[u32]) -> Vec<u8> {
         .collect()
 }
 
-/// 星场那三个绑定（星表 / 索引 / 参数块）的字节。
-///
-/// ⚠ 三份**永远都绑**（哪怕没有星）：`march` / `sky_radiance` / `bake_emission` 三个入口
-///   的代码里都引用了它们，管线的绑定布局要求"入口用到的每一条都在"。
 pub struct StarSlots {
     pub table: Vec<u8>,
     pub index: Vec<u8>,
@@ -847,10 +615,6 @@ impl StarSlots {
     }
 }
 
-/// 溢出计数（`star_overflow[0]`）非零 ⇒ 天空那一档的定长队列装不下某一层的星。
-///
-/// ⚠⚠ 不报的话症状是"某几条视线上少了几颗星"—— 画面**看起来只是暗一点**，
-///   归因不到队列容量。宁可当场 Err。
 fn check_star_overflow(readback: &[u8]) -> Result<(), String> {
     let count = u32::from_le_bytes(readback[0..4].try_into().unwrap());
     if count > 0 {
@@ -861,7 +625,6 @@ fn check_star_overflow(readback: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
-/// 跑一遍响应曲线（逐格，就地）：输入 luma 数组，输出同一长度。
 pub fn tone_of(
     values: &[f32],
     tone_in: [f32; 4],
@@ -908,12 +671,9 @@ pub fn tone_of(
 mod tone_tests {
     use super::*;
 
-    /// **响应曲线**：GPU 与 CPU 在同一组锚点上必须一致。
-    /// 取点覆盖四段（两端外推 + 中间两段）与软肩折点附近 —— 每一段的错法都不同。
     #[test]
     fn the_gpu_tone_matches_the_cpu() {
         let mut values: Vec<f32> = Vec::new();
-        // 对数扫：1e-5 .. 2.0，覆盖两端外推与三段插值。
         let mut l = 1e-5_f32;
         while l < 2.0 {
             values.push(l);
@@ -955,10 +715,6 @@ mod tone_tests {
     }
 }
 
-/// 跑一遍步进核（单通道）；返回 面 x 面 x 6 个 texel 的辐射，布局 row = 面 * face + y。
-///
-/// ⚠ 起点约定（与 CPU 那份对齐前先自己说清）：中点取样，第 i 步在
-/// enter + (i + 0.5) * h，h = (outer - enter) / steps。先有这条约定，才谈得上对账。
 pub fn march(
     face: u32,
     steps: u32,
@@ -986,7 +742,6 @@ pub fn march(
         0.0_f32.to_le_bytes(),
     ]
     .concat();
-    // ⚠ `skip` 走 uniform（不是编译期开关）：同一份 WGSL 的两档就是判据要的对账参考。
     let (occupancy_uniform, occupancy_words) =
         occupancy_bytes(occupancy, res, layers, inner, outer);
     let skip = if occupancy.is_some() { 1 } else { 0 };
@@ -1082,15 +837,10 @@ pub fn march(
 mod march_tests {
     use super::*;
 
-    /// 步进入口的第一条判据走**解析解**：常发射 e、常消光 s、路径 L = outer - enter 时
-    /// 积分应当收敛到 (e/s)(1 - exp(-s*L))。它不依赖任何 CPU 实现，因而能把
-    /// 「步长约定 / 透过率递推 / 起点 enter」这三件事**单独**钉死。
-    /// 中点黎曼和的误差是 O(h^2)，256 步时远小于容差。
     #[test]
     fn the_march_converges_to_the_analytic_solution() {
         let (res, layers) = (8_u32, 4_u32);
         let (inner, outer) = (1.0_f32, 2.0_f32);
-        // e = s = 1（六条通道同值），于是解析值是 1 - 1/e。
         let data = vec![1.0_f32; (6 * layers * res * res * LANES as u32) as usize];
         let Ok(gpu_side) = march(
             8,
@@ -1132,8 +882,6 @@ mod crosscheck_tests {
     use super::*;
     use px_volume_schema::VolumeData;
 
-    /// 一份发射与消光**各自不同**的体：让透过率递推真正参与进来（常值体测不出递推）。
-    /// 六条通道都填：lane 0..2 发射、3..5 消光。
     fn varying_volume(res: u32, layers: u32, inner: f32, outer: f32) -> VolumeData {
         let mut data = vec![0.0_f32; (6 * layers * res * res * LANES as u32) as usize];
         for face in 0..6_u32 {
@@ -1169,11 +917,6 @@ mod crosscheck_tests {
         }
     }
 
-    /// 真体积上与 CPU 对账：同一步进参数下，GPU 与 `raymarch_channel` 必须一致。
-    ///
-    /// 这条判据的价值在于它**同时**校验四件事：方向参数化（`art_direction_at` 对
-    /// `cube_direction`）、格点布局、跨面采样、以及步进的起点/步长约定。
-    /// 前三条已各自单测过，这里是它们合起来的结果。
     #[test]
     fn the_gpu_march_matches_the_cpu_channel_on_a_real_volume() {
         let (res, layers) = (8_u32, 4_u32);
@@ -1226,10 +969,6 @@ mod crosscheck_tests {
         );
     }
 
-    /// 一份**成块**的体积：只有粗块 `(cs = 0...1, cl = 1, ct = 0...1)` 里有值，其余精确 0。
-    ///
-    /// ⚠ 空区必须**整块**空（见 `occupancy::tests` 那条同款说明）：按高度带给的夹具
-    ///   与 `8³` 的块只部分相交 ⇒ 每个块都被标成活 ⇒ 空跳一次都不发生、判据测了个空。
     fn blocky_volume(res: u32, layers: u32, inner: f32, outer: f32) -> VolumeData {
         let mut data = vec![0.0_f32; (6 * layers * res * res * LANES as u32) as usize];
         for face in 0..6_u32 {
@@ -1257,15 +996,6 @@ mod crosscheck_tests {
         }
     }
 
-    /// **空跳的开/关必须给出同一个数**（同一份 WGSL 的两档，唯一的差别是 `skip`）。
-    ///
-    /// ⚠ 这条是这一档的**主判据**，它同时钉三件事：
-    ///   1. 空块真的**没有贡献**（里面的发射与消光精确 0 ⇒ 跳过它是恒等变换）；
-    ///   2. 有内容的块里那 `k` 个样本**落在与原步进同一条尺子上**（`k = 块跨度 / 步长`）；
-    ///   3. 绑定与 uniform 接对了（错了就是画面整体错位，而不是"差一点点"）。
-    ///
-    /// ⚠ 参考档就是**同一份 WGSL 关掉开关**（用户 2026-09-25 的口径：参考也用同一份实现），
-    ///   不另写一份 CPU 版本。
     #[test]
     fn the_skip_matches_the_dense_march_on_a_blocky_volume() {
         let (res, layers) = (16_u32, 24_u32);
@@ -1311,7 +1041,6 @@ mod crosscheck_tests {
         );
         let (dense, skipped) = match (dense, skipped) {
             (Ok(dense), Ok(skipped)) => (dense, skipped),
-            // ⚠ **不跳过**：没有 GPU 与"着色器编不过"是两件事，后者是这一轮的产物本身坏了。
             (Err(err), _) | (_, Err(err)) => {
                 panic!(
                     "步进派发失败（没有 GPU 与着色器编不过都走到这里，先看上一行的 px_gpu 报错）：{err}"
@@ -1331,12 +1060,6 @@ mod crosscheck_tests {
         }
         dense_mean /= dense.len() as f64;
         assert!(dense_mean > 0.0, "夹具一片黑 ⇒ 这条判据什么都没测");
-        // ⚠ 容差不是 0：空跳档在**有内容的块里逐层中点取样**（`samples = 块内层数`），
-        //   与密集档的 `shell_radius((i+0.5)·du)` 是同一族、但不是同一个点集 ⇒ 对同一个积分
-        //   各有各的 quadrature 误差。实测（本夹具、steps=96）最大 Δ = 0.0142、相对 3.9%。
-        //   这条判据管的是"**空块被跳过 = 恒等变换**"与"有内容的块确实积上了"，
-        //   于是判它 < 2e-2（比上面的实测留一倍余量）；真要压到 1e-3 得让空跳档逐层对齐
-        //   密集档的取样点，那是另一档的事（见 notes）。
         assert!(
             worst < 2e-2,
             "空跳与密集步进的最大偏差 {worst:.6}（第 {worst_at} 个 texel：{} 对 {}）—— \
@@ -1351,8 +1074,6 @@ mod crosscheck_tests {
     }
 }
 
-/// 判据用的**空星场**：没有星 ⇒ 星点与星光两条路都必须一个字都不产生
-/// （（空星场）与（没有星场）等价 —— 那是 `starlight_gain` 能与别的档共存的理由）。
 #[cfg(test)]
 fn empty_star_field() -> px_sparse::StarField {
     let block = px_sparse::CHUNK_CELLS;
@@ -1369,11 +1090,6 @@ fn empty_star_field() -> px_sparse::StarField {
     .expect("造空星场")
 }
 
-/// 判据用的星场：壳 `[inner, outer]` 里按**体积**撒 `count` 颗（Fibonacci 方向 + `r³` 半径），
-/// 亮度给常数、色温掺两种 ⇒ CPU 与 GPU 两侧读的是同一张表（真源是同一个 `StarField`）。
-///
-/// ⚠ 半径**要散开**（不是一层壳）：天空那一档的候选是按半径分层归属的，全挤在一层上就测不到
-///   "同一颗星只被收一次"和"按半径升序消费"这两条。
 #[cfg(test)]
 fn fixture_star_field(
     count: usize,
@@ -1428,23 +1144,6 @@ mod star_tests {
     use super::*;
     use px_volume_schema::VolumeData;
 
-    /// **星点 + 底色**也要与 CPU 一致：这一条把"加性部分"（星点乘透射率、底色）与已对上的
-    /// 步进语义分开钉住。
-    ///
-    /// ⚠⚠ 现在星点是 **R3 星场里的点**（不是一张立方图）⇒ 这一条同时钉住三件事：
-    ///   ① 五段索引的寻址（块 → brick → 掩码 → 子 CSR）；② 半径分层归属（每颗只收一次）；
-    ///   ③ 按半径升序消费（每颗用它**自己那一步**的透过率）。
-    ///
-    /// ⚠⚠ **这里不可能逐位相同，而且原因是 CPU 那份公式自己的病**：
-    ///   `sin θ = √(1 − cos²θ)` 在**星正落在视线上**时是灾难性抵消 —— 实测那一条视线上
-    ///   `cos = 1.000000000`（`1 − cos²` 正好 0），而 `cos` 差 1 个 ulp 就让 `sin` 从 0 跳到
-    ///   ~5e-4，再被 `exp(−(sin/core)²)` 的陡坡放大成**星点那一笔差 3.9%**。
-    ///   两侧的 `cos` 差 1 个 ulp 是**跨语言必然**的（Rust 不做 FMA 收缩，HLSL/DXC 会做），
-    ///   要逐位相同就得改 CPU 的公式 —— 那是"另一件事"。
-    ///   实测分布（face 8 / 1500 颗星）：384 个 texel 里 4 个的相对偏差 > 1e-4、
-    ///   只有 1 个 > 1e-2（就是那个正轴上的星），其余 380 个在 1e-6 量级。
-    ///   ⇒ 判据取**相对口径**（地板 1e-2，与 `sky_tests` 同一条约定）+ 3e-2 的阈值：
-    ///   真正的语义分叉（少一颗星 = 星点那一笔整个不见）是 60% 量级，这条仍然抓得住。
     #[test]
     fn the_gpu_march_matches_the_cpu_with_stars_and_background() {
         let (res, layers) = (8_u32, 4_u32);
@@ -1516,7 +1215,6 @@ mod star_tests {
     }
 }
 
-/// 跑一遍档位色相：入参是**键**（每格一个亮度），出参是每个键的目标色相（3 个 f32 一组）。
 pub fn hue_of(
     keys: &[f32],
     ramp_luma: [f32; 4],
@@ -1572,8 +1270,6 @@ pub fn hue_of(
 mod hue_tests {
     use super::*;
 
-    /// **档位色相**：GPU 与 CPU 在同一张档位表上必须一致。
-    /// 取点铺满四档与三段过渡的**收窄带**，含 0.0279/0.028/0.034/0.058/0.35 这些边界值。
     #[test]
     fn the_gpu_hue_ramp_matches_the_cpu() {
         let ramp_luma = px_volume_alg::raymarch::RAMP_LUMA;
@@ -1623,8 +1319,6 @@ mod hue_tests {
     }
 }
 
-/// 跑一遍**整条天空**（GPU 版 `raymarch_sky` 的辐射+分级部分）：
-/// 返回每个 texel 三个 f32（分级后的线性 RGB，尚未打包成 Rgba16Float）。
 #[allow(clippy::too_many_arguments)]
 pub fn sky(
     face: u32,
@@ -1733,7 +1427,6 @@ pub fn sky(
     grade_pixels(gpu, &radiance, &sky_uniform)
 }
 
-/// 分级那一趟（就地）：拿 `sky_radiance` 的输出再走一遍响应曲线 + 色相斜坡。
 fn grade_pixels(
     gpu: &px_gpu::Gpu,
     radiance: &[f32],
@@ -1762,11 +1455,6 @@ fn grade_pixels(
         .collect())
 }
 
-/// **烘焙时量出来的输入锚点**：辐射亮度的分位（对数分箱直方图）。
-///
-/// ⚠ 锚点的定义就是"本次烘焙的输入分位 -> 参考的输出分位" ⇒ 只有**量**出来才与分辨率、
-///   面数、体积解耦；写死一组常数的话，换分辨率就得回来重拟（实测：192^3/face 4096 时
-///   p50 从 0.0194 漂到 0.0246）。
 pub fn anchors_from_radiance(
     gpu: &px_gpu::Gpu,
     radiance: &[f32],
@@ -1820,9 +1508,6 @@ pub fn anchors_from_radiance(
             *value = 1e-4;
         }
     }
-    // ⚠⚠ 分位**撞进同一个箱**时锚点会相等 ⇒ 响应曲线里 `log(hi/lo) = 0` ⇒ 斜率除零 ⇒
-    //   那一段的输出变成 NaN/∞（症状是画面上一块突然错开，而不是"暗一点"）。
-    //   这里强制**严格递增**并留最小间隔。
     for index in 1..4 {
         let floor = anchors[index - 1] * 1.06;
         if anchors[index] < floor {
@@ -1837,8 +1522,6 @@ mod sky_tests {
     use super::*;
     use px_volume_schema::VolumeData;
 
-    /// 标准 IEEE-754 binary16 -> f32（**判据侧自带**：`px_volume_alg::half` 只有编码口，
-    /// 而这里要读回它产出的 `Rgba16Float`。格式是公开标准，与被测逻辑无关）。
     fn f32_from_half(bits: u16) -> f32 {
         let sign = if bits & 0x8000 != 0 { -1.0_f32 } else { 1.0 };
         let exponent = ((bits >> 10) & 0x1f) as i32;
@@ -1891,12 +1574,6 @@ mod sky_tests {
         }
     }
 
-    /// **整条天空逐 texel 对账**：三条通道的步进 + 星点/底色 + 亮度响应 + 色相分级，
-    /// 合起来必须与 CPU 的 `raymarch_sky` 一致（容差取半精度的量级：参考图那一侧是
-    /// `Rgba16Float`，有效位就那么多）。
-    ///
-    /// ⚠ 星场是 **R3 稀疏格**（星点按世界半径分层归属、按半径升序消费）—— 这一条同时钉住
-    ///   索引寻址、分层归属与消费次序；三条通道各收一遍候选，与 CPU 的三趟逐字对应。
     #[test]
     fn the_gpu_sky_matches_the_cpu_end_to_end() {
         let (res, layers) = (8_u32, 4_u32);
@@ -1948,7 +1625,6 @@ mod sky_tests {
             println!("px_volume_gpu_op：没有可用 GPU，跳过");
             return;
         };
-        // 参考是 Rgba16Float：每 texel 8 字节（前三个 half 是 RGB，第四个是 1.0）。
         let texels = reference.bytes.len() / 8;
         assert_eq!(gpu_side.len(), texels * 3, "texel 数");
         let mut worst = 0.0_f32;
@@ -1984,35 +1660,6 @@ mod sky_tests {
     }
 }
 
-/// **GPU 版整条天空**：与 `px_volume_alg::raymarch_sky` 同一签名 —— 图脚本那一行不用改，
-/// 换的只是这一档背后的实现。
-///
-/// 三个阶段（都是 GPU 上的独立派发）：
-/// 1. `sky_radiance`：三条通道各积一遍，得到**未分级**的辐射；
-/// 2. `bin_luma` + `anchors_from_radiance`：**量出本次烘焙的输入分位**当响应曲线的锚点
-///    （锚点的定义就是"本次输入分位 -> 参考输出分位"，所以必须量、不能写死）；
-/// 3. `grade_pixels`：亮度响应 + 色相斜坡，逐格亮度守恒。
-///
-/// ⚠ 分级表与参考分位仍取自 `px_volume_alg`（唯一真源那一份）；半精度打包复用同一份
-///   `half_from_f32` —— 格式只写一次。
-/// ---- 设计决策（第 70 轮，用户拍板）----
-///
-/// 用户原话："球体坐标作为储存方式能很好地平衡近处和远处的分辨率，但**噪声场的定义应当
-/// 定义在世界三维坐标**，用一个 projection 把噪声投影到球体坐标。"
-///
-/// ⇒ 两条结论：
-/// 1. **存储不动**（六面立方球是刻意的：面内格密、径向格疏，近远分辨率平衡）。
-///    我先前"改成统一三维格"的提法是错的方向。
-/// 2. 折痕的根因在**重建**这一侧：场是世界定义的没错（`voxel_of` 就是那个 projection，
-///    把存储格投到世界点再取噪声），但**三线性重建是按面各做一份**的 ——
-///    跨棱时格架朝向切换 ⇒ 插值导数跳变（C¹ 折痕）。用户的原话"真实统一的世界场不会这样"
-///    说的就是这个：**重建要跨面一致**。
-///
-/// ⇒ 下一个动作（R71）：在**两侧**（CPU 的 `sample_volume` 与 WGSL 的 `sample_volume`）
-///   把"跨棱"的格子改成**多面混合**：只对落在面棱附近一个格宽内的采样点，
-///   同时用相邻各面的格架各算一次三线性，按平滑权重混合 ⇒ C¹ 连续，折痕消失。
-///   ⚠ 必须两侧同时改：`the_gpu_sampler_matches_the_cpu` 那条判据就是用来钉住它们一致的。
-///   ⚠ 混合权重必须**随离棱距离平滑到 0**（否则把折痕换成一条更软的带）。
 pub fn raymarch_sky(
     emission: &px_volume_schema::VolumeData,
     stars: &px_sparse::StarField,
@@ -2020,14 +1667,12 @@ pub fn raymarch_sky(
 ) -> Result<px_volume_schema::TextureData, String> {
     let face = sky_params.face.max(1);
     let steps = sky_params.steps.max(1);
-    // ⚠ 占用索引从**这一份发射体积**派生（纯打包：不产辐射、不改写盘格式）。
     let occupancy = Occupancy::from_flat(
         emission.res,
         emission.layers,
         emission.lanes(),
         &emission.data,
     );
-    // 空跳的收益要落在数上：活块比 = 这一份掩码的实际形状（`PX_SKIP_REPORT=1` 时打一行）。
     if std::env::var("PX_SKIP_REPORT").is_ok() {
         let total = occupancy.sidecar().len();
         let live = occupancy
@@ -2045,16 +1690,12 @@ pub fn raymarch_sky(
             (total - live) as f64 * 100.0 / total as f64
         );
     }
-    // ⚠ **对账用的开关**（`PX_SKIP_OFF=1` 关掉空跳，其余逐字不变）：
-    //   同一个 exe、同一份 WGSL 的两档，A/B 的差异只可能来自这一项。
     let occupancy = if std::env::var("PX_SKIP_OFF").is_ok() {
         None
     } else {
         Some(occupancy)
     };
     let occupancy = occupancy.as_ref();
-    // ⚠ 星场是 **R3 稀疏格**（不是一张立方图）：索引拼成一个 buffer、参数走 uniform，
-    //   与 `bake_emission` 那一档共用同一份 WGSL（星的查询那几条只有一处实现）。
     let star_grid = StarGrid::of(stars);
     let extras = MarchExtras {
         star_grid: Some(&star_grid),
@@ -2115,7 +1756,6 @@ pub fn raymarch_sky(
     let texels = (face * face * 6) as usize;
     let star_slots = StarSlots::of(&extras);
 
-    // 1) 辐射。
     let out = px_gpu::dispatch_slots(
         gpu,
         SAMPLER_WGSL,
@@ -2170,10 +1810,8 @@ pub fn raymarch_sky(
         .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap()))
         .collect();
 
-    // 2) 量输入分位 ⇒ 响应曲线的锚点。
     uniform.tone_in = anchors_from_radiance(gpu, &radiance, &uniform)?;
 
-    // 3) 分级（响应 + 色相斜坡）。
     let graded = grade_pixels(gpu, &radiance, &uniform)?;
     if graded.len() != texels * 3 {
         return Err(format!(
@@ -2182,7 +1820,6 @@ pub fn raymarch_sky(
             texels * 3
         ));
     }
-    // 打包成 Rgba16Float：alpha = 1（与 CPU 那一侧逐字一致）。
     let mut packed = Vec::with_capacity(texels * 8);
     for index in 0..texels {
         for channel in 0..3 {
@@ -2206,9 +1843,6 @@ pub fn raymarch_sky(
 mod size_tests {
     use super::*;
 
-    /// **真实尺寸**（shape 128 的体积 = 6 面 x 128^2 x 128 层 x 6 通道 x 4 B = 302 MB）
-    /// 必须能派发。烘焙里那一档就是这个尺寸 —— 小尺寸的判据全绿也说明不了它。
-    /// 失败时把 wgpu 的原文打出来（而不是让进程消失）。
     #[test]
     fn a_real_size_volume_goes_through() {
         let (res, layers, face) = (128_u32, 128_u32, 1024_u32);
@@ -2259,35 +1893,11 @@ mod seam_tests {
         }
     }
 
-    /// **面棱两侧的连续性**（烘焙侧的决定性判据）。
-    ///
-    /// ⚠ 为什么必须关掉抖动：抖动是**逐 texel 的哈希**（按方向取种子），棱两侧的抖动模式
-    ///   本来就互不相关 ⇒ 每个 texel 都带一份独立噪声，会把"结构性错配"淹掉。
-    ///   `jitter = 0` 之后，棱两侧的差只可能来自**采样/布局/面序**。
-    ///
-    /// 判法：每条棱上的 texel，找**另一面**上方向最接近的那一格，比它们的差；
-    /// 再拿同面内相邻 texel 的差当基准。棱上的差若显著大于面内基准 ⇒ 烘焙侧有缝。
-    /// ⚠⚠ **已知失败**（这条判据现在红着，故意的）。实测：
-    /// * 面棱上的差 **0.04767** = 面内基准 **0.00789** 的 **6.04 倍**（最大 0.16117）；
-    /// * 形状是**系统性**的：六个面一致（0.040~0.051）、沿整条棱均匀（分段 0.032~0.059）
-    ///   ⇒ 不是面序/朝向错（那会按面、按棱给出不同图案），而是**每一条棱都发生**的东西。
-    /// * 它同时存在于 GPU 与 CPU 两条路（GPU 那份与 CPU 逐 texel 只差 0.000482，
-    ///   是有意对账过的）⇒ **两边同源**，所以"GPU 对 CPU"这类判据抓不到它。
-    /// * 细密噪声那几版在成图上被纹理掩盖；尺度改大（基频 1.4）后一眼可见 —— 说明它一直在。
-    ///
-    /// 下一轮从这里二分：先做**采样器级**的连续性判据（同一份逐格随机夹具，直接比
-    /// `sample_volume` 在棱两侧的点），把"采样语义"与"光线步进"分开；
-    /// 再查 `sample_at` 的角点约定（主格用 `floor(s*res - 0.5)`，角点却用
-    /// `u32(ns*res)` 截断 —— 两者差半个纹素的可能就在这儿）。
     #[test]
     fn the_baked_sky_is_continuous_across_face_edges() {
         let (res, layers) = (8_u32, 4_u32);
         let (inner, outer) = (1.0_f32, 2.0_f32);
         let mut data = vec![0.0_f32; (6 * layers * res * res * LANES as u32) as usize];
-        // ⚠⚠ 夹具必须**无偏**：`index % 97` 那种在摊平下标上平滑的图案，会让"面内相邻格"
-        //   共享相位、而"跨棱相邻格"不共享 ⇒ 人为造出 2x 的比值（实测：采样器 1.99x、
-        //   步进 2.08x），再被分级放大成 6x ⇒ 看起来像烘焙侧的缝，其实是夹具的伪影。
-        //   哈希随机夹具下面内与跨棱的相关性同样弱，比值才有意义（实测 1.06x）。
         for (index, value) in data.iter_mut().enumerate() {
             *value = ((index.wrapping_mul(2654435761)) % 1000) as f32 / 1000.0;
         }
@@ -2299,7 +1909,6 @@ mod seam_tests {
             outer,
             data,
         };
-        // 空星场 + `star_gain = 0`：这一条只测"面棱两侧连不连续"，星点会盖掉结构性的错配。
         let stars = empty_star_field();
         let params = px_volume_schema::params::sky::SkyParams {
             face: 32,
@@ -2327,7 +1936,6 @@ mod seam_tests {
                 (y as f32 + 0.5) / face as f32,
             )
         };
-        // 面内基准：同一面里左右相邻 texel 的平均差。
         let mut interior = 0.0_f32;
         let mut interior_count = 0.0_f32;
         for _face_index in 0..6_u32 {
@@ -2339,7 +1947,6 @@ mod seam_tests {
             }
         }
         let interior = interior / interior_count;
-        // 棱上：每一面 s=0 那一列的 texel，找另一面上方向最接近的 texel。
         let mut edge = 0.0_f32;
         let mut edge_count = 0.0_f32;
         let mut worst = 0.0_f32;
@@ -2372,7 +1979,6 @@ mod seam_tests {
         }
         let edge = edge / edge_count;
         let ratio = edge / interior.max(1e-6);
-        // 先看**形状**：逐面、以及棱上 t 的分布（两端 = 角点，中间 = 棱身）。
         let mut per_face = [0.0_f32; 6];
         let mut per_band = [0.0_f32; 4];
         let mut per_band_count = [0.0_f32; 4];
@@ -2403,8 +2009,6 @@ mod seam_tests {
                 per_band_count[band] += 1.0;
             }
         }
-        // ⚠ 先量**角度距离**：跨棱找到的"最近格"若比面内相邻格更远，那 6 倍就只是
-        //   色相过渡段把更大的角度差放大出来的，不是不连续。
         let mut edge_angle = 0.0_f32;
         let mut edge_angle_count = 0.0_f32;
         for face_index in 0..6_u32 {
@@ -2429,7 +2033,6 @@ mod seam_tests {
                 edge_angle_count += 1.0;
             }
         }
-        // 面内相邻格的角度距离（同一面里左右相邻）。
         let a0 = direction(0, 0, 5);
         let a1 = direction(0, 1, 5);
         let interior_angle = 1.0 - (a0[0] * a1[0] + a0[1] * a1[1] + a0[2] * a1[2]);
@@ -2468,21 +2071,10 @@ mod sampler_seam_tests {
     use super::*;
     use px_volume_schema::VolumeData;
 
-    /// **采样器级连续性**：把"采样语义"与"光线步进"分开。
-    ///
-    /// 法：同一半径上取两组点，组内两点都相差**一个纹素**的角度 ——
-    /// * 跨棱组：`s = +0.5/res` 与 `s = -0.5/res`（后者落到相邻面上去，
-    ///   因为 `cube_direction` 是线性映射，`s` 越界就是越过棱）；
-    /// * 面内组：`s = +0.5/res` 与 `s = +1.5/res`。
-    /// 采样是连续的话，两组的差应当**同量级**；跨棱那组显著更大 ⇒ 缝在采样语义里。
-    ///
-    /// ⚠ 这条只跑 CPU 的 `sample_volume`（GPU 那份已被证明与它逐点一致到 1e-6 ⇒
-    ///   同源问题两边都有，跑一边就够，也快得多）。
     #[test]
     fn the_sampler_is_continuous_across_a_face_edge() {
         let (res, layers) = (8_u32, 4_u32);
         let (inner, outer) = (1.0_f32, 2.0_f32);
-        // 逐格随机（不是光滑场）：任何"取错格"都会立刻显形。
         let mut data = vec![0.0_f32; (6 * layers * res * res * LANES as u32) as usize];
         for (index, value) in data.iter_mut().enumerate() {
             *value = ((index * 2654435761usize) % 1000) as f32 / 1000.0;
@@ -2495,7 +2087,6 @@ mod sampler_seam_tests {
             outer,
             data,
         };
-        // 多半径扫描：缝若只在某些半径上出现，就能直接指到"层/高度"那一层的约定。
         let mut worst = (0.0_f32, 0.0_f32, 0.0_f32);
         for step_index in 0..16 {
             let radius = inner + (outer - inner) * (step_index as f32 + 0.5) / 16.0;
@@ -2542,11 +2133,6 @@ mod march_seam_tests {
     use super::*;
     use px_volume_schema::VolumeData;
 
-    /// **步进级连续性**（不含分级）：CPU 的 `raymarch_channel` 出的就是辐射，没有响应曲线
-    /// 也没有色相斜坡 ⇒ 拿它一比，就能把"步进"与"分级"分开。
-    ///
-    /// 测法：同一张天空纹理上，取每面 `x = 0`（棱）那一列的 texel，与**另一面**上方向最接近的
-    /// texel 比；面内相邻 texel 的差当基准。`jitter = 0`（抖动是逐 texel 哈希，会把结构性错配淹掉）。
     #[test]
     fn the_march_is_continuous_across_a_face_edge() {
         let (res, layers) = (8_u32, 4_u32);
@@ -2655,10 +2241,6 @@ mod identity_grade_tests {
         }
     }
 
-    /// **恒等分级下，辐射本身在棱上连不连续？**
-    ///
-    /// 把响应设成恒等（`tone_in == tone_out`、肩推到无穷）且色相强度 0 ⇒ 出来的就是**原始辐射**。
-    /// 缝若消失 ⇒ 病在**分级**；若仍在 ⇒ 病在**步进**（GPU 那一侧，CPU 步进已证连续）。
     #[test]
     fn the_radiance_is_continuous_under_an_identity_grade() {
         let (res, layers) = (8_u32, 4_u32);
@@ -2708,7 +2290,6 @@ mod identity_grade_tests {
             None,
         )
         .expect("恒等分级下出图");
-        // `sky()` 回来的是 f32 的分级结果（每 texel 三个）⇒ 直接取 R 通道。
         let lum = |x: u32, y: u32| -> f32 { texture[((y * face + x) * 3) as usize] };
         let direction = |face_index: u32, x: u32, y: u32| -> [f32; 3] {
             px_volume_schema::direction_of(
@@ -2773,7 +2354,6 @@ mod chain_tests {
     const OUTER: f32 = 2.0;
     const FACE: u32 = 32;
 
-    /// **缝判据用的那一份夹具**（`index % 97`）。⚠ 上一轮的错误就是拿别的夹具下结论。
     fn fixture() -> VolumeData {
         let mut data = vec![0.0_f32; (6 * LAYERS * RES * RES * LANES as u32) as usize];
         for (index, value) in data.iter_mut().enumerate() {
@@ -2797,7 +2377,6 @@ mod chain_tests {
         )
     }
 
-    /// 跨棱差 / 面内差的比值（与缝判据同一套量法）。
     fn ratio_of(sample: &dyn Fn(u32, u32, u32) -> f32) -> f32 {
         let mut interior = 0.0_f32;
         let mut interior_count = 0.0_f32;
@@ -2839,7 +2418,6 @@ mod chain_tests {
         (edge / count) / interior.max(1e-6)
     }
 
-    /// **同一份夹具上的二分链**：采样 -> 步进(CPU) -> 辐射(GPU) -> 整链(带分级)。
     #[test]
     fn the_seam_appears_at_one_specific_stage() {
         let volume = fixture();
@@ -2850,19 +2428,13 @@ mod chain_tests {
             star_gain: 0.0,
             ..Default::default()
         };
-        // 1) 采样器（半径取壳中）
-        // ⚠ "壳中"是**参数空间中点**（`u = 0.5`）⇒ 世界半径是几何平均 `√(inner·outer)`，
-        //   不是算术平均：径向律改了之后算术平均落在 `u = 0.585` 上，这一条量的
-        //   "跨棱噪声 / 面内噪声"会跟着换一层（阈值 2.0 就在边上）。
         let radius = (INNER * OUTER).sqrt();
         let sampler = ratio_of(&|face_index, x, y| {
             let d = direction(face_index, x, y);
             px_volume_alg::sample_volume(&volume, [d[0] * radius, d[1] * radius, d[2] * radius], 0)
         });
-        // 2) 步进（CPU，无分级）
         let field = px_volume_alg::raymarch_channel(&volume, None, &params, 0);
         let march = ratio_of(&|face_index, x, y| field.at(x, face_index * FACE + y));
-        // 3) GPU 辐射（恒等分级）
         let identity = [0.01_f32, 0.1, 1.0, 10.0];
         let radiance = sky(
             FACE,
@@ -2891,7 +2463,6 @@ mod chain_tests {
         let gpu_radiance = ratio_of(&|face_index, x, y| {
             radiance[((face_index * FACE + y) * FACE + x) as usize * 3]
         });
-        // 4) 整链（自动分位 + 真分级）
         let stars = empty_star_field();
         let texture = raymarch_sky(&volume, &stars, &params).expect("整链");
         let full = ratio_of(&|face_index, x, y| {
@@ -2918,14 +2489,6 @@ mod chain_tests {
     }
 }
 
-/// **GPU 版发射烘焙**：与 `px_volume_alg::bake_emission` 同一入参/产物。
-///
-/// ⚠ 为什么值得搬：这是体积链上最贵的一处（每体素一次阴影行进 + 星光球那一趟），
-///   而且逐体素独立。
-///
-/// ⚠⚠ `starlight_max > STAR_KEEP_MAX` 当场拒：WGSL 那一侧的"亮度前几名"是定长表
-///   （见 [`STAR_KEEP_MAX`]）。静默按 32 截断就是"两边的气亮度差一点点"——
-///   那是最难看出来的一类分叉，所以宁可让它在这里失败。
 #[allow(clippy::too_many_arguments)]
 pub fn bake_emission(
     density: &px_volume_schema::VolumeData,
@@ -2942,11 +2505,6 @@ pub fn bake_emission(
         return Err("没有可用 GPU".to_string());
     };
     let (res, layers) = (density.res, density.layers);
-    // ⚠⚠ **密度体积是单通道**（`px_protocol::art::VolumeData::at` 里有
-    //   `debug_assert_eq!(lanes, 1)`），而 WGSL 那套采样器把通道数编成了常量 6
-    //   （它服务的是**六通道**的发射体积）。这里把单通道补成六通道：只读 lane 0
-    //   ⇒ 其余填 0。代价是临时的 6 倍内存（shape 192 下约 300 MB），换来的是
-    //   **不动那份已经逐点验过的采样器** —— 这个取舍在"搬 GPU"这一轮的性价比最高。
     let samples = (6 * layers * res * res) as usize;
     let wanted = if density.data.len() == samples {
         let mut widened = vec![0.0_f32; samples * LANES];
@@ -2968,10 +2526,6 @@ pub fn bake_emission(
         0.0_f32.to_le_bytes(),
     ]
     .concat();
-    // ⚠ 七个 `vec4<f32>` + 一个 `vec4<u32>`：`scatter_tint` 是**后加**的一格（分色诊断），
-    //   它必须与 WGSL 那一边的 `struct EmissionUniform` **逐字段同序** —— 差一格就是
-    //   "消光跑进颜色里"那一类静默错位。`cluster_*` 那一对**已经删掉**（星团现在是星表里
-    //   真实的星，走 `star_meta`）。
     let uniform = [
         params.light_radius,
         params.shadow_gain,
@@ -3013,9 +2567,6 @@ pub fn bake_emission(
     let voxels = (6 * layers * res * res) as usize;
     let bytes =
         |values: &[f32]| -> Vec<u8> { values.iter().flat_map(|v| v.to_le_bytes()).collect() };
-    // ⚠⚠ 星光照气体那一档**恢复了**（2026-09-25 晚：星云不许自发光，亮度只能来自星光的散射）
-    //   ⇒ 这里喂**真星场**（不再是那一份占位空表）。星表/索引/参数块三个绑定与 `sky_radiance`
-    //   那一档共用同一套 WGSL（星的球查询只有一处实现）。
     let star_grid = StarGrid::of(stars);
     let star_meta = StarMeta::emission(&star_grid, params);
     let star_slots = StarSlots::of(&MarchExtras {
@@ -3079,22 +2630,10 @@ mod emission_tests {
     use super::*;
     use px_volume_schema::VolumeData;
 
-    /// **发射烘焙：GPU 与 CPU 逐体素一致**（含星光球那一趟）。
-    /// 小体积即可 —— 这里验的是语义，不是性能。
-    ///
-    /// ⚠⚠ 三个 `starlight_max` 各跑一遍不是冗余：CPU 的 `brightest_near` 有**三条路**
-    ///   —— `0`（不封顶、不排序，直接按遍历次序）／候选不多于 `keep`（遍历次序）／
-    ///   候选多于 `keep`（稳定降序）—— 而求和是浮点加法 ⇒ 只跑一档就有两条没人看着。
-    ///
-    /// ⚠ 判据是**相对**口径：星光照是 `亮度 / (d² + soft²)`，一颗贴到体素上的星能让那一格
-    ///   到 1e3 量级（实测最亮 1663），绝对容差在这里没有可比性（旧的 5e-4 绝对阈值是
-    ///   "值域 O(1)" 那一版留下的）。实测最大相对偏差 **1.5e-6**（两侧的 `exp`/`pow`
-    ///   差一两个 ulp），阈值留到 5e-4。
     #[test]
     fn the_gpu_emission_matches_the_cpu() {
         let (res, layers) = (8_u32, 4_u32);
         let (inner, outer) = (1.0_f32, 2.0_f32);
-        // ⚠ **单通道**：密度体积就是这个形状（CPU 的 `at()` 会断言 lanes == 1）。
         let mut data = vec![0.0_f32; (6 * layers * res * res) as usize];
         for (index, value) in data.iter_mut().enumerate() {
             *value = ((index.wrapping_mul(2654435761)) % 1000) as f32 / 1000.0;
@@ -3107,7 +2646,6 @@ mod emission_tests {
             outer,
             data,
         };
-        // 星场够密（中心 0.2 的球里平均二十来颗）⇒ 两档各自的路径都被走到。
         let stars = fixture_star_field(20_000, 0.1, inner, outer, 2.0);
         for keep in [32_u32, 2, 0] {
             let params = px_volume_schema::params::emission::EmissionParams {
@@ -3120,8 +2658,6 @@ mod emission_tests {
                 starlight_radius: 0.2,
                 starlight_steps: 4,
                 starlight_max: keep,
-                // ⚠ 两份配比都给**非平凡**的值：`glow_tint` 与 `scatter_tint` 是后加的 uniform
-                //   格子，给 `[1,1,1]` 的话"消光跑进颜色里"那类错位测不出来。
                 glow_tint: [0.85, 0.30, 0.55],
                 scatter_tint: [1.0, 0.6, 0.25],
                 ..Default::default()

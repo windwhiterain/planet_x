@@ -1,7 +1,3 @@
-//! 场域的数值抽象与噪声设置。**算法不在这里**（`px_field_op` 的 `noise`），
-//! 但 `Scalar` / `FbmSettings` 是**约定**：`px_verify` 给它的 `Dual` 实现这个 trait，
-//! 于是同一份参照场能在 f32 与对偶数上各跑一遍。
-
 use std::ops::{Add, Div, Mul, Sub};
 
 pub trait Scalar:

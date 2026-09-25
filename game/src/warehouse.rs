@@ -10,30 +10,23 @@ pub struct Warehouses {
     pub price_curvature: f32,
     pub price_inertia: f32,
     pub target_rate: f32,
-    /// index 地方 × 商品：当轮挂价的最小值
     pub ask: Vec<Vec<f32>>,
-    /// index 地方 × 商品：当轮挂价的最大值
     pub bid: Vec<Vec<f32>>,
 }
 
-/// index with [`crate::market::Trader`]
 pub struct Warehouse {
     pub stocks: Vec<Stock>,
-    /// 价格水平的计量基准（常数）
     pub reference: Vec<f32>,
     pub locality: usize,
 }
 
-/// index with [`crate::market::Merchandise`]
 pub struct Stock {
     pub volume: f32,
     pub target_volume: f32,
     pub target_floor: f32,
     pub price: f32,
     pub price_base: f32,
-    /// 部门本轮在货架不受限时会取走的量
     pub wanted: f32,
-    /// 部门本轮实际取走的量
     pub taken: f32,
 }
 
@@ -72,7 +65,6 @@ impl Warehouses {
         };
     }
 
-    /// 银河指数 = 各仓库挂价的几何平均。只用于报表，任何决策都不读它。
     pub fn quoted_index(&self, goods: usize) -> Vec<f32> {
         let mut index = vec![0.0f32; goods];
         for (k, slot) in index.iter_mut().enumerate() {
@@ -98,7 +90,6 @@ impl Warehouses {
         index
     }
 
-    /// 某个地方每种商品的挂价相对指数的比值
     pub fn local_ratios(&self, index: &[f32]) -> Vec<Vec<f32>> {
         let localities = self
             .warehouses

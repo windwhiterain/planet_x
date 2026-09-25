@@ -7,10 +7,6 @@ px_graph_schema::px_body! {
     |p, i| crate::ops::curve_at::eval(p, i.curve.value(), i.point.value())?
 }
 
-/// **在别的节点给的参数上求值**（"在哪求值"因此可以由别的节点算出来）。
-///
-/// ⚠ 只读上游那个 `PointData` 的 `uv[0]`：它是"参数"这一档的载体，别的栏不管
-///   （所以"沿曲线撒样点"只要接一条参数序列进来）。
 pub fn eval(
     params: &params::eval::EvalParams,
     curve: &px_nurbs_schema::Curve,

@@ -1,38 +1,18 @@
-//! **场景词汇**：那些"编译器自己消化"的结构键、它们的缺省值，以及量纲上的新类型。
-//!
-//! 这里的东西有两个来源，别混：
-//!
-//! 1. **结构键**（[`PLANET_KEYS`] / [`CLOUDS_KEYS`] / [`ATMOSPHERE_KEYS`]）：编译器自己要用
-//!    它们（半径、色板、灯、形状档……）⇒ 它们**不进**材质参数表。
-//!    ⚠ 这三张表**不是白名单**（§80 第 2 步拆掉的那堵墙）：名字只要在这份 shader 的契约里
-//!    就按名字透传；两边都不是才报错（见 [`crate::contract::merge_named`]）。
-//! 2. **量纲**（[`Radius`] / [`Spin`] / [`SeaLevel`] / …）：新类型只为了一件事 ——
-//!    `radius` 与 `spin` 与 `sea_level` 都是 `f32`，而把它们互相传错在旧形状里是**静默**的。
-//!    ⚠ 新类型的**值**就是原来的 `f32`（`.0`）：不引入任何换算，所以逐字节判据不受影响。
-
 use std::collections::BTreeMap;
 
 use px_protocol::scene::Value;
 
-/// 场景倾斜：局部系 → 世界系。**只在这里出现一次**（渲染器里没有这个常数了）。
 pub const SYSTEM_TILT: f32 = 0.34;
-/// 点光源的射程系数（`|position| × 2.5`）。原来是渲染器的 `SUN_RANGE_FACTOR`。
 pub const SUN_RANGE_FACTOR: f32 = 2.5;
-/// 天空盒亮度。原来是渲染器的 `SKYBOX_BRIGHTNESS`。
 pub const SKYBOX_BRIGHTNESS: f32 = 900.0;
-/// 云影的"有多不透明"（覆盖度 1 处压掉约 86% 直接光）与"指定高度"缺省。
 pub const CLOUD_SHADOW_GAIN: f32 = 2.0;
 pub const CLOUD_SHADOW_HEIGHT: f32 = 0.5;
-/// 云壳的缺省内/外半径因子（× 行星半径）。原来是 `px_render::clouds` 里的两个常数。
 pub const CLOUD_BASE: f32 = 1.01;
 pub const CLOUD_TOP: f32 = 1.06;
-/// 天空盒的面尺寸。原来是渲染器里写死的 512。
 pub const STARS_FACE: u32 = 512;
-/// 环的段数与环带贴图尺寸。原来是渲染器里写死的 384 / 1024×4。
 pub const RING_SEGMENTS: u32 = 384;
 pub const RING_BAND: (u32, u32) = (1024, 4);
 
-/// 一条量纲新类型。⚠ 它**不做换算、不做 clamp** —— 值就是原来那个数。
 macro_rules! quantity {
     ($($name:ident, $doc:literal);* $(;)?) => {
         $(
@@ -78,21 +58,8 @@ quantity! {
     Softness,    "大气软化量。";
 }
 
-/// **缺省阴影密度**（texel / 世界单位）：配方写了 `shadows = 1` 而**没写** `shadow_density`
-/// 时就用它 —— "要影"这件事一旦说了，就不该因为忘了一个旋钮而**一点影都没有**。
-///
-/// ⚠ 而没写 `shadows`（缺省 0）的 part 拿到的是 **0**：影是**要来的**。
-/// 那一条是这一轮有意保留的：`orbit-uranus` 那类配方自己写着 `shadows = 0`，
-/// 而"没要求影子"与"要求了影子但没给密度"是两件事，混成一件会让每个旧场景突然长出
-/// 一整套虚拟影图来。
-///
-/// ⚠ 这个数是"每 1 世界单位至少分到 256 个影图 texel"。行星半径 1.0 时一个 texel
-/// ≈ 0.004 世界单位（半径的 0.4%）；旧的全局 1024² cube 在太阳距离 4.92 时约 0.0096
-/// （`px_render::group0::POINT_LIGHT_SHADOW_MAP_SIZE` 那条口径），细一倍多，而
-/// **这个数不随光源拉远变大** —— 那正是虚拟影图要买的东西。要更清就单独给大一点的密度。
 pub const DEFAULT_SHADOW_DENSITY: f32 = 256.0;
 
-/// 云壳的分段数：形状档里的整数档。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct RaySteps(pub u32);
 
@@ -106,11 +73,6 @@ impl RaySteps {
     }
 }
 
-/// **编译器自己消化的结构键**（行星）：半径 / 色板 / 灯 / 消融档这些是拿来**造场景**的，
-/// 不是材质参数。
-///
-/// ⚠ `subdivisions`（2026-09-20 追加）只在 `primitive = "icosphere"` 那一支用：它是**内建球
-/// 的细分数**，与材质无关 ⇒ 必须是结构键，否则会被当成"shader 没声明的参数"当场拒。
 pub const PLANET_KEYS: [&str; 17] = [
     "palette",
     "displace",
@@ -131,17 +93,6 @@ pub const PLANET_KEYS: [&str; 17] = [
     "subdivisions",
 ];
 
-/// **编译器自己消化的结构键**（卫星 part，2026-09-20 第 7 轮加）。
-///
-/// ⚠ 为什么要有 `kind = "moon"` 这个 part：场景编译器从前只认 planet / clouds / atmosphere，
-///   "天上还有一颗小球"这件事**根本写不出来**（参考图上那颗凌日的卫星就是它）。
-///   `radius` / `subdivisions` 进几何，`position` 进变换，`spin` 与行星同口径（`orientation()`）；
-///   其余一律交给本 part 那份 shader 的契约去判（与 planet 同一条口径）。
-/// **灯**（`kind = "light"`）的结构键：位置 / 颜色 / 强度 / 射程 / 要不要投影。
-///
-/// ⚠ 2026-09-20 加：在这之前编译器**只建那一盏太阳**（`lights: vec![sun]`）—— 于是
-/// "行星把光反照到月球暗面"（地球反照）这种**第二光源**在场景里根本没法表达。
-/// ⚠ 它**没有 shader**：灯不是物体（`PartFile.shader` 因此是可选字段）。
 pub const LIGHT_KEYS: [&str; 5] = ["position", "color", "intensity", "range", "shadows"];
 
 pub const MOON_KEYS: [&str; 5] = [
@@ -152,7 +103,6 @@ pub const MOON_KEYS: [&str; 5] = [
     "shadow_density",
 ];
 
-/// **编译器自己消化的结构键**（云）：形状档、消融档、风 —— 这些要么进几何、要么与云影同口径。
 pub const CLOUDS_KEYS: [&str; 24] = [
     "inner",
     "outer",
@@ -180,11 +130,8 @@ pub const CLOUDS_KEYS: [&str; 24] = [
     "tint",
 ];
 
-/// **编译器自己消化的结构键**（大气）：内半径要跟行星半径对账、外半径是因子、密度要乘行星的
-/// `atmo`、色要扩成四元数 —— 所以这四个由编译器算。
 pub const ATMOSPHERE_KEYS: [&str; 5] = ["inner", "outer", "density", "softness", "tint"];
 
-/// 云的形状档：原来是 `px_render::clouds::CloudShape`（渲染器侧）。缺省值逐项照抄。
 #[derive(Clone, Copy)]
 pub struct CloudShape {
     pub coverage: f32,
@@ -234,7 +181,6 @@ impl Default for CloudShape {
     }
 }
 
-/// 消融档：仪器档的名字 → 码（`clouds.wgsl` 里的 `ABLATE_*`）。
 pub fn ablate_code(name: &str) -> Result<u32, String> {
     match name {
         "none" => Ok(0),
@@ -250,8 +196,6 @@ pub fn ablate_code(name: &str) -> Result<u32, String> {
     }
 }
 
-/// 云的参数块：**逐项就是 `clouds.wgsl` 里 `CloudParams` 的那 25 格**（顺序无所谓，
-/// 渲染器按名字反射打包）。这里放的是值，不是布局。
 pub fn cloud_params(
     shape: CloudShape,
     ablate: u32,
@@ -321,7 +265,6 @@ pub fn cloud_params(
 mod tests {
     use super::*;
 
-    /// 消融档的名字是**内容**，码是 shader 定的；两边对不上就等于切了个不存在的档。
     #[test]
     fn the_ablation_names_map_to_the_codes_the_shader_knows() {
         assert_eq!(ablate_code("none").unwrap(), 0);

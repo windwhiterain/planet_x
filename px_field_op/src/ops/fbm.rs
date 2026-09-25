@@ -20,8 +20,6 @@ pub fn eval(params: &params::fbm::Params, _inputs: &[&Field]) -> Field {
         for x in 0..params.shape.width {
             let (u, v) = field.uv(x, y);
             let value = if params.spherical {
-                // ⚠ `zonal` 只动采样点的**纬度分量**：噪声在经度方向被拉长 `zonal` 倍
-                //   （`1.0` 时这一行就是原样，逐字节等价于没有这一栏）。
                 let direction = field.direction(x, y);
                 noise::fbm_3(
                     [direction[0], direction[1] * params.zonal, direction[2]],
@@ -42,7 +40,6 @@ mod tests {
     use px_field_schema::field::Projection;
     use px_field_schema::params::Shape;
 
-    /// 在球面档上量"沿经度 vs 沿纬度"的平均 |Δ|（同一份 CubeMap 形状参数）。
     fn anisotropy(zonal: f32) -> f32 {
         let params = params::fbm::Params {
             frequency: 3.0,
@@ -67,9 +64,6 @@ mod tests {
         (along_lon / along_lat) as f32
     }
 
-    /// **`zonal` 让噪声沿经度拉长**：同一份形状参数上，沿经度的平均变化必须**明显小于**沿纬度的。
-    ///
-    /// ⚠ 判的是**方向**（比值），不是幅度 —— 幅度随频率/种子都在变，方向才是这一栏的语义。
     #[test]
     fn zonal_stretches_the_noise_along_longitude() {
         let isotropic = anisotropy(1.0);
@@ -84,10 +78,8 @@ mod tests {
         );
     }
 
-    /// **默认不许动既有产物**：`zonal = 1.0` 时必须与"没有这一栏"逐点相同（这正是它默认值的意义）。
     #[test]
     fn zonal_one_is_the_old_behaviour_point_by_point() {
-        // ⚠ 尺寸走**参数**（这一档是生成类算子，上游给不了形状）。
         let shape = Shape {
             width: 64,
             height: 384,
@@ -101,7 +93,6 @@ mod tests {
             },
             &[],
         );
-        // 手算一遍"没有这一栏"的那条路（与改动前那一行等价）。
         let settings = FbmSettings {
             frequency: params::fbm::Params::default().frequency,
             octaves: params::fbm::Params::default().octaves,

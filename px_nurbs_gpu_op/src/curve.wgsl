@@ -1,11 +1,3 @@
-// NURBS 曲线在一串参数上的求值（位置）。
-//
-// 与 `surface.wgsl` 同一套基函数算法，只是少一个方向：
-// `A = Σ N_{i,p}(t) · P_i`（齐次），除权得点。
-//
-// ⚠ 参数是**格点**（`u0 + u_step · (i + u_offset)`）而不是一整串任意参数：
-//   细分那一侧要的正是"等分的那一套"，而等分让派发变得平凡（一个 invocation 一个点）。
-//   任意参数求值在 CPU 那一侧（`nurbs.curve.eval`），它不是热点。
 
 const MAXD: u32 = 8u;
 const WIDTH: u32 = 10u;

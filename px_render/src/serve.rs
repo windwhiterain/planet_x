@@ -1,28 +1,3 @@
-//! `--serve`：**租约 + `ProtocolId` 握手 + 批量请求**。
-//!
-//! 这一半的逻辑**逐字照搬** Bevy 宿主（`px_render/src/main.rs`：`serve` :1139、
-//! `spawn_listener` :1253、`watch_lease` :1449、`accept_jobs` 里的出图结算 :2500-2557）。
-//! 不另发明一份协议（§102）：`tools/harness.ps1` / `tools/frame-probe.ps1` 那整套仪器
-//! 认的就是 `px_protocol` 那一份，换一个字节它们就全废。
-//!
-//! ## 与 Bevy 宿主的**形状差别**（只有一处，而它是本宿主的性质，不是偷工）
-//!
-//! Bevy 那边是"主世界发任务 → 渲染世界逐帧推进"的两段式：一条请求会被摊到好几帧上
-//! （等管线、等资产、等 K 帧），所以必须有 `Job` 队列、`ActiveJob` 与"到哪一步了"的状态机。
-//! 本宿主**没有渲染世界**：`create_render_pipeline` 是同步的（§104 第 5 条），一帧在一次
-//! `render::run` 里从头画到尾。于是：
-//!
-//! - **没有队列**：一次请求在**一个函数调用**里跑完（`execute`），跑完就回话；
-//! - **没有"瞬时就绪断言"要等**：管线编不出来就**当场拒这一条请求**，而不是排队等它——
-//!   §104 第 5 条那条判据（"坏管线当场拒、不静默出缺材质的图"）在这里是**结构性**成立的，
-//!   不是靠一个 gate 兜的；
-//! - **没有跨请求的保留状态**：每一条请求自己 `render::run`（读文档 → 建计划 → 画 → 回读）。
-//!   ⚠ 这条是**故意的**，而且它正是判据要的：Bevy 宿主"渲染相位常驻"⇒ 拿同一个服务连着出
-//!   几份文档，后一份会被前一份的残留污染（起新服务才干净）。本宿主按构造就没有这个污染源，
-//!   所以 J3 的 **R｜不重启**（一个 pid 吃下 4 份文档 + 2 份坏的）不必靠"每次都重启"来保证
-//!   干净 —— 但**代价**是没有管线缓存，每一条请求都要重编一次它的管线。那一笔账属于计时
-//!   那一档（J4/S7），不属于这里。
-
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -38,33 +13,18 @@ use crate::render;
 use crate::report;
 use crate::shot;
 
-/// 租约自查的间隔。Bevy 那边是"每 120 帧看一次"（60 Hz ⇒ 约 2 s），口径是
-/// **删掉租约 ⇒ 4 秒内自查退出**（§104 第 10 条）。这里没有帧循环，所以直接按秒给。
 const LEASE_CHECK_INTERVAL: Duration = Duration::from_secs(2);
 
-/// 一条请求的读/写超时（Bevy 的 `spawn_listener` 给的是 300 s，同一档）。
 const IO_TIMEOUT: Duration = Duration::from_secs(300);
 
-/// 经济世界（`Scene::World`）那条路的拒词。**一份真本、两处引用**：服务端对协议客户端拒它，
-/// 客户端在没有 `--scene` 时也用它 —— 抄成两份措辞就会漂开，而漂开的那一天读的人会被指向
-/// 错的原因（"没有在跑的渲染服务" ≠ "这条路本宿主没有"）。
 pub const WORLD_REFUSAL: &str = "经济世界（`Scene::World` / `--stream`）那一路没有搬到这个宿主：\
      它画的是 sim 的世界视图，不是渲染文档（`.pxart`）";
 
-/// 常驻服务：一台设备 + 一个 CAS 根。**没有别的状态**（见模块头那段）。
 pub struct Server {
     gpu: Gpu,
     pcg_root: PathBuf,
 }
 
-/// 起服务：绑端口 → 建设备 → 写租约 → 等请求。
-///
-/// ⚠ **次序与 Bevy 宿主相反，而理由是硬的**：Bevy 那边是"先写租约、后起 app"，
-/// 于是 app 启动期的断言失败（非 Vulkan ⇒ `exit(2)`）必须**清掉自己那份租约**
-/// （`clear_own_lease`，§104 第 9 条；否则下一次合法启动会被单例闸拦成假故障）。
-/// 本宿主的设备是在**一个函数调用**里建的，把它放在写租约**之前**，那条"写完租约才可能
-/// 硬退出"的窗口就**不存在** —— 不需要清理代码，因为不存在要清理的东西。
-/// （`gpu::connect` 失败时打的是 `后端断言失败` 前缀并 `exit(2)`，此刻租约还没落盘。）
 pub fn serve(port: u16, pcg_root: PathBuf, width: u32, height: u32) -> Result<(), String> {
     let listener =
         TcpListener::bind(("127.0.0.1", port)).map_err(|err| format!("绑定端口失败：{err}"))?;
@@ -93,12 +53,7 @@ pub fn serve(port: u16, pcg_root: PathBuf, width: u32, height: u32) -> Result<()
         id.protocol_hash, id.git_rev, lease.pid,
     );
     println!("租约：{}", lease_path.display());
-    // ⚠ 这一行**必须在**：`tools/harness.ps1::Start-RenderServer` 等的就是它
-    // （`Select-String -Pattern '渲染管线全部就绪'`）。措辞里的"共 0 条"不是省事：
-    // 本宿主此刻确实一条待编的管线都没有，而"编不出来"这件事在请求里当场就拒了。
     println!("渲染管线全部就绪：本宿主是**同步**建管线（没有队列可等），此刻待编 0 条、失败 0 条");
-    // 尺寸这一栏在本宿主里**不参与出图**（每条请求自带 width/height）。与其让它变成一个
-    // 谁也不看的旗标，不如当场说清：§106 那条"文档里写着的命令必须真的被跑过一次"。
     println!(
         "尺寸以请求里的为准（--width/--height 是 Bevy 宿主那一路的初始画布，这里只收不用）：{width}×{height}"
     );
@@ -110,18 +65,11 @@ pub fn serve(port: u16, pcg_root: PathBuf, width: u32, height: u32) -> Result<()
         let Ok(stream) = connection else {
             continue;
         };
-        // 串行服务：**同一时刻只有一个渲染循环**（§104 第 10 条）——
-        // 两个并列的循环会让双方的读数都作废，所以这里连线程都不开。
         serve_connection(&mut server, stream);
     }
     Ok(())
 }
 
-/// 租约没了 / 易主 ⇒ 自己退出。
-///
-/// ⚠ 为什么是**另一个线程**而不是主循环里的一步：本宿主的主循环会**阻塞**在一条请求上
-/// （最长一次 `render::run` 几秒）。塞在循环里的话，"删掉租约"要等这条请求跑完才生效，
-/// 而那正是仪器收尾时要等的东西。Bevy 那边不存在这个问题（它的 Update 每帧都跑）。
 fn spawn_lease_watch(path: PathBuf, pid: u32) {
     std::thread::spawn(move || {
         loop {
@@ -137,7 +85,6 @@ fn spawn_lease_watch(path: PathBuf, pid: u32) {
     });
 }
 
-/// 一条连接：握手 → 收请求 → 出图/拒绝 → 回话。整个进程**只在这里**碰 GPU。
 fn serve_connection(server: &mut Server, mut stream: TcpStream) {
     let _ = stream.set_read_timeout(Some(IO_TIMEOUT));
     let _ = stream.set_write_timeout(Some(IO_TIMEOUT));
@@ -186,7 +133,6 @@ fn serve_connection(server: &mut Server, mut stream: TcpStream) {
         }
     };
 
-    // 拒绝**不杀服务**：这是 R｜不重启 那条判据的一半（一个 pid 吃下 4 份好文档 + 2 份坏的）。
     let frame = match server.execute(&request) {
         Ok(response) => Frame::Response(response),
         Err(reason) => {
@@ -197,30 +143,20 @@ fn serve_connection(server: &mut Server, mut stream: TcpStream) {
     let _ = frame::write_frame(&mut stream, &frame);
 }
 
-/// 请求里的一步：渲哪一份文档、存哪儿、从哪个角度看。
-///
-/// 与 Bevy 的 `Step` 是同一件事（那边还有 `StepScene::World` 那一支，本宿主没有）。
 #[derive(Debug)]
 struct Step {
     scene: String,
     out: String,
-    /// 这一步**怎么看**：`--cam` 那一台，或者产物自带的相机表（`--sheet` / J2）。
-    ///
-    /// ⚠ 它是 `render::Views`，不是 `Option<[f32; 3]>`：对照图不是"另一台相机"，
-    /// 而是"12 台相机 + 12 块格子"（格子的排布是渲染器的事，见 `SheetCell` 的注释）。
     views: render::Views,
 }
 
 impl Server {
-    /// 一次请求：翻成若干步 → 逐步出图 → 落报告 → 回话。
     fn execute(&mut self, request: &Request) -> Result<Response, String> {
         let started = Instant::now();
         let steps = steps_of(request)?;
 
         let mut shot_reports: Vec<ShotReport> = Vec::with_capacity(steps.len());
         let mut shots: Vec<String> = Vec::with_capacity(steps.len());
-        // 这一批第一张图的网格（`diff_vs_ref_grid` 的参考）。**按顺序**取第一张，
-        // 与 Bevy 一致：调用方按约定把无云档放第一个（`ShotReport` 的文档注释）。
         let mut reference: Option<Vec<u64>> = None;
         let mut last = (String::new(), 0_u32, 0_u32, 0_u64);
 
@@ -238,8 +174,6 @@ impl Server {
                 println!("{line}");
             }
             let label = rendered.audit.join("\n");
-            // ⚠ 三个读数从**回读出来的字节**算，尺寸也要用**画出来的那张**的
-            //    （对照图是 3840×1920，而请求给的 960×640 只是**一格**的大小）。
             let width = rendered.width;
             let height = rendered.height;
 
@@ -278,8 +212,6 @@ impl Server {
 
             shots.push(out.display().to_string());
             shot_reports.push(ShotReport {
-                // ⚠ 与 Bevy 一致：`ShotReport.scene` 是**路径**、`label` 是那一串说明。
-                // （`Response.scene` 恰好相反 —— 那里放的是 label。两处别"理顺"。）
                 scene: step.scene.clone(),
                 label: label.clone(),
                 out: out.display().to_string(),
@@ -302,19 +234,15 @@ impl Server {
             );
         }
 
-        // 报告：与落盘那份**逐字节相同**（落盘多一个换行，与 Bevy 的 `write` 一样）。
         let protocol = ProtocolId::local();
         let report = Report {
             schema_version: protocol.schema_version,
             protocol_hash: format!("{:016x}", protocol.protocol_hash),
             job: request.job.name().to_string(),
-            // 宽高说的是**最后一张**（Bevy 的 `build_report` 取 `shot_reports.last()`）。
             width: last.1,
             height: last.2,
             millis: started.elapsed().as_millis() as u64,
             shots: shot_reports,
-            // 性能那两路不在这一版（见 [`steps_of`] 之前那段）：报告里这两栏因此是空的，
-            // 而不是"填了但没有可比对象"。
             perf: Vec::new(),
             pair: None,
         };
@@ -340,10 +268,6 @@ impl Server {
             height: last.2,
             bytes: last.3,
             millis: started.elapsed().as_millis() as u64,
-            // ⚠ 恒 `true`，而这不是"填一个缺省值"：这个字段的口径是"回话那一刻还有没有
-            // **待编**的管线"（Bevy 那边 = `ready.get() == PIPELINES_READY`）。本宿主的管线
-            // 是在这条请求里**同步**建完的，建不出来就已经回 `Refused` 了 ⇒ 能走到这里，
-            // "待编 0 条"按构造成立。给它写 `false` 才会是一句假话（客户端会打成"服务刚起"）。
             warm: true,
             shots,
             report: text,
@@ -352,24 +276,6 @@ impl Server {
     }
 }
 
-/// 把一次请求摊成一队「要出的图」，并把**能力之外**的东西当场拒掉。
-///
-/// 一条拒词的理由要说对（§146.3 ③：「拦住了不等于说对了」）：
-///
-/// - **性能那两路**（`Perf` / `Stable`）：它们要的是**计时用的帧循环**——逐帧采样、丢窗、等
-///   "重建后已渲染 K 帧"，外加**每条 pass 的编码器级 GPU 时间戳**。本宿主现在**按需渲染**
-///   （一条请求画一帧就回话），而 S7 前半那个预览窗口的循环是**交互循环**：画面变了才画一帧
-///   （相机一动、场景一换），它给不出逐帧序列，也没有那七段 span。
-///   ⇒ `gpu_ms` / `pair` 这两个量**没有可比对象**：
-///   Bevy 那边的 `gpu_ms` 是 `main_opaque_pass_3d` / `main_transparent_pass_3d` /
-///   `prepass` / mip / tonemapping / upscaling 那几条编码器级 span 的**求和**（§104 第 4 条），
-///   而 app 逐帧毫秒是"GPU 在飞 4 帧"那条流水线的周期。在按需渲染上凑一个同名的数
-///   = 一个数放进一个语义不同的字段里，比没有这个数坏。
-///
-/// ⚠ `view.sheet`（对照图）**不再是拒词**（J2 那一档已经落地）：它现在是**一步怎么看**
-/// 的一档，等价于 Bevy 那边 `View { sheet, columns }` —— 相机表住在产物里（`.pxart`），
-/// 格子的排布是渲染器的事（`SheetCell` 的注释）。产物没带相机表时由
-/// `render::placements` 当场拒，而且那句话说的是"这一步没带相机表"（与 Bevy 逐字同一条）。
 fn steps_of(request: &Request) -> Result<Vec<Step>, String> {
     if !matches!(request.job, Job::Shots) {
         return Err(format!(
@@ -416,7 +322,6 @@ fn steps_of(request: &Request) -> Result<Vec<Step>, String> {
                 steps.push(Step {
                     scene: shot.scene.clone(),
                     out: shot.out.clone(),
-                    // 这一步给了相机就用它的，没给就沿用请求上那一档（Bevy 的 `ActiveJob::steps`）。
                     views: views_of(request, shot.cam.or(request.view.cam)),
                 });
             }
@@ -426,11 +331,6 @@ fn steps_of(request: &Request) -> Result<Vec<Step>, String> {
     }
 }
 
-/// 这一次请求**怎么看**：`--sheet` 那一档优先（它本来就是"用产物自带的相机表"，
-/// 所以两步都不会带 `cam` —— 客户端那一侧已经在本地拒了 `--cam` + `--sheet`）。
-///
-/// ⚠ `columns` 在这里**不兜底**：0 交给 `render::placements` 按 Bevy 同一条 `.max(1)` 处理，
-/// 两处各兜一次就是"同一个数两个来源"。
 fn views_of(request: &Request, cam: Option<[f32; 3]>) -> render::Views {
     if request.view.sheet {
         render::Views::Sheet {
@@ -458,7 +358,6 @@ mod tests {
         }
     }
 
-    /// 批量：每一步各自给 `out`，没给相机的沿用请求上那一档。
     #[test]
     fn a_batch_keeps_step_order_and_inherits_the_camera() {
         let mut request = request(
@@ -495,9 +394,6 @@ mod tests {
         );
     }
 
-    /// `--sheet` 从**拒词**变成了**一档怎么看**：它落到每一步上是 `Views::Sheet`，
-    /// 而且**吞掉 `cam`** —— 产物自带的相机表与 `--cam` 是两处会漂开的真相
-    /// （客户端那一侧已经在本地拒了同时给两个，服务端这一侧不能"cam 赢"或者"sheet 赢"）。
     #[test]
     fn a_sheet_request_becomes_the_artifact_camera_table() {
         let sheet = Request {
@@ -521,12 +417,6 @@ mod tests {
         );
     }
 
-    /// 能力拒词钉的是"理由对不对"，不是"有没有拒"：性能那两路要说的必须是
-    /// "需要帧循环"、并且指路 S7。
-    ///
-    /// ⚠ S8-a 补一条：拒词**不许再指路一个已经不存在的宿主**。它原来收在
-    /// "要计时读数请走 Bevy 宿主" —— 而 `px_render` 已经删了，那句话会把人指进空处。
-    /// 现在它指向本宿主真有的那件仪器（`--spans`），这条断言就是不让死指针长回来。
     #[test]
     fn the_capability_refusals_name_the_real_reason() {
         let perf = Request {
@@ -551,7 +441,6 @@ mod tests {
         );
     }
 
-    /// 一次都没有的批量、少 `out` 的一步、0 尺寸：三条都是**当场拒**，不是"画一半"。
     #[test]
     fn malformed_batches_are_refused_before_anything_is_drawn() {
         let empty = request(Scene::Sequence { shots: Vec::new() }, "a.png");

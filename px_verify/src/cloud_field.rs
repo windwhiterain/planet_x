@@ -40,16 +40,10 @@ fn mix<S: Scalar>(low: S, high: S, blend: S) -> S {
     low + (high - low) * blend
 }
 
-/// 细节噪声的凹重映射，与 WGSL 的 `detail_curve` 逐字对应。原场的值压在低位、峰很窄 ⇒
-/// 阈值以上只剩零星峰，硬表面的离散步长会整个跨过去。开平方根把低位抬起来、峰变宽。
-/// `1.0` 是不动点 ⇒ `shape_of(cover, altitude, 1.0)` 那条粗场上界不受影响。
 pub fn detail_curve<S: Scalar>(value: S) -> S {
     value.sqrt()
 }
 
-/// `detail_curve` 的斜率，解析梯度走链式法则时乘上去（`d sqrt(b)/db`）。
-/// 表面上场 > τ ⇒ `sqrt(b) > τ / coverage_gain` ⇒ `b` 有正下界，这里没有奇点；
-/// 底下那个 `max` 只是别让 0 附近的调用给出 inf。
 pub fn detail_curve_slope(value: f32) -> f32 {
     0.5 / f32::max(value.sqrt(), 1e-4)
 }
@@ -142,8 +136,6 @@ impl CloudFieldParams {
         )
     }
 
-    /// 细节场 = 两个 fbm 的混合再过一次凹重映射（见 `detail_curve`）。梯度那条路不用改：
-    /// `Dual::sqrt` 自己带链式法则 ⇒ `gradient()` 拿到的就是重映射后的场的导数。
     pub fn billows<S: Scalar>(&self, direction: [S; 3], altitude: S) -> S {
         let tower = self.sampled_noise(direction, altitude, self.detail_scale * 0.35, 3, self.seed);
         let skin = self.sampled_noise(

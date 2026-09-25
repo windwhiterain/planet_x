@@ -1,9 +1,3 @@
-//! 渲染服务的客户端那一半（读租约 → 连端口 → 握手 → 发请求），原 `px_protocol::client`。
-//!
-//! ⚠ 与 `render` 同一条理由：租约里写着 `ProtocolId`，而作业请求是宿主自己的形状 ——
-//! 它留在 `px_protocol` 就是宿主 ⇄ 协议的循环依赖。**跨进程的握手本身没有搬**：
-//! `ProtocolId` / `Frame::Protocol` / 信封长度前缀仍然来自 `px_protocol`。
-
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};

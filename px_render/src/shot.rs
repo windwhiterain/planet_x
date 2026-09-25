@@ -1,18 +1,3 @@
-//! 渲染目标 → 回读 → PNG。**这条路径是判据的一部分，不是一个工具函数。**
-//!
-//! 三条硬约束，每一条都付过代价（§104）：
-//!
-//! - **第 13 条：不许读交换链。** surface 只保证 `Bgra8Unorm(Srgb)` 且只保证
-//!   `RENDER_ATTACHMENT` ⇒ 渲到**自己的** `Rgba8UnormSrgb`（`RENDER_ATTACHMENT | COPY_SRC`）
-//!   再回读。BGRA 喂给 RGBA 的 PNG 会把红蓝换掉，而 `view_formats` 只切 sRGB、不换通道序。
-//!   离线那条路根本不需要 surface。
-//! - **第 3 条：PNG 必须走 `image` 的同一行代码。** Bevy 的 `save_to_disk` 做的是
-//!   `try_into_dynamic()` → `to_rgb8()`（丢掉 alpha）→ `save_with_format(Png)`；
-//!   实测产物是 8 位 / 颜色类型 2 / 单个 IDAT / 无辅助块。少一句就是另一份 PNG，
-//!   而判据是哈希。
-//! - 回读的行距必须按 `COPY_BYTES_PER_ROW_ALIGNMENT` 补齐（960 宽刚好整除，别的宽度不）。
-
-/// 一块离屏颜色目标。判据要的每一个像素都从这里来。
 pub struct Target {
     pub texture: wgpu::Texture,
     pub view: wgpu::TextureView,
@@ -46,13 +31,8 @@ impl Target {
     }
 }
 
-/// 判据的颜色格式，**只有这一个**：与 Bevy 的截图读回同一种。
 pub const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
 
-/// 只清屏、不画东西的一条 pass。
-///
-/// 留成显式的一条（而不是 `LoadOp::Clear` 顺手写进别处）是因为 S0 的判据就是它：
-/// 纯色能不能原样走到 PNG 上，是这条路径唯一能被单独验的机会。
 pub fn clear(device: &wgpu::Device, queue: &wgpu::Queue, target: &Target, color: wgpu::Color) {
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("px_render clear"),
@@ -78,7 +58,6 @@ pub fn clear(device: &wgpu::Device, queue: &wgpu::Queue, target: &Target, color:
     queue.submit(Some(encoder.finish()));
 }
 
-/// 把目标回读成**紧凑的** RGBA8（每行 `width * 4`，没有补齐）。
 pub fn read_back(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -148,7 +127,6 @@ pub fn read_back(
     Ok(out)
 }
 
-/// 紧凑 RGBA8 → PNG。句子顺序就是 Bevy `save_to_disk` 的顺序（§104 第 3 条）。
 pub fn write_png(
     path: &std::path::Path,
     width: u32,

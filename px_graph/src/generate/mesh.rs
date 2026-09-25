@@ -1,18 +1,7 @@
-//! 几何：环网格（`ring_mesh`）。
-//!
-//! 边界：这一档只出顶点/法线/UV/索引，**不碰字节**——顶点数据的展平在 `super::texture`
-//! 的 `flatten2`（与二维 UV 共用），落盘在 `super::store`。
-//! 现在的 `flatten3` 只有这里用，所以留在本模块私有。
-
 use px_protocol::art::MeshData;
 
 use super::texture::flatten2;
 
-// ---------------------------------------------------------------------------
-// 环：网格
-// ---------------------------------------------------------------------------
-
-/// 环网格（从 `ring_mesh` 逐字搬）。
 pub fn ring_mesh(inner: f32, outer: f32, segments: u32) -> MeshData {
     let mut positions = Vec::with_capacity((segments as usize + 1) * 2);
     let mut normals = Vec::with_capacity((segments as usize + 1) * 2);

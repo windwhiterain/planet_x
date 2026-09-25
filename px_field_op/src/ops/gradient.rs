@@ -54,7 +54,6 @@ mod tests {
 
     const FACE: u32 = 64;
 
-    /// 一张 CubeMap 场 —— ⚠ 过滤类算子不收形状，形状只有"上游"这一个来源。
     fn cube_field(value: f32) -> Field {
         Field::filled_with(FACE, FACE * 6, value, Projection::CubeMap)
     }

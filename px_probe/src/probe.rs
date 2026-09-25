@@ -400,8 +400,6 @@ pub fn run(points: &[[f32; 3]], params: &CloudParams, sweep: [f32; STEPS], mask:
 
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("probe"),
-        // 5 格会超：探针设备是 downlevel_defaults（max_bind_groups = 4）⇒ 只能给 4 个布局。
-        // 材质组按契约在 3；探针自己的 job/out 放 1（0 是 Bevy 的视图组，2 空着）。
         bind_group_layouts: &[None, Some(&job_layout), None, Some(&material)],
         immediate_size: 0,
     });

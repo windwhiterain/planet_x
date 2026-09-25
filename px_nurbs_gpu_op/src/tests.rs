@@ -1,13 +1,7 @@
-//! `px_nurbs_gpu_op` 的判据：**GPU ↔ CPU 对账** + 解析靶子 + 可复现。
-//!
-//! ⚠ 没有可用设备时**跳过**（不是失败）：判据测的是"两侧算的是不是同一个东西"，
-//!   不是"这台机器必须有卡"（与 `px_volume_gpu_op` 同一条口径）。
-
 use super::*;
 use px_nurbs_schema::curve;
 use px_nurbs_schema::surface;
 
-/// 造一份球：`rings = 2` 时 v 向正好是 北极→赤道→南极。
 fn ball(radius: f64) -> Surface {
     surface::sphere(radius, [0.0, 0.0, 0.0], 2).expect("造球")
 }
@@ -16,10 +10,6 @@ fn ring(radius: f64) -> Curve {
     curve::circle(radius, "xy", [0.0; 3]).expect("造圆")
 }
 
-/// **曲面格点逐点对账**：GPU 的位置/法线与 CPU 的 `Surface::patch` 必须一致。
-///
-/// ⚠ 容差按 `f32` 定：CPU 那一侧是 `f64`，GPU 是 `f32`，两边不是同一种算术。
-///   这一条同时校验四件事：基函数、齐次混合、商法则、以及参数网格的映射。
 #[test]
 fn the_gpu_surface_matches_the_cpu_point_by_point() {
     let ball = ball(2.0);
@@ -51,7 +41,6 @@ fn the_gpu_surface_matches_the_cpu_point_by_point() {
     assert!(worst_normal < 1e-4, "法线最大偏差 {worst_normal}");
 }
 
-/// **曲线格点逐点对账**：GPU 的点与 `Curve::point` 必须一致，而且落在圆上。
 #[test]
 fn the_gpu_curve_matches_the_cpu_point_by_point() {
     let ring = ring(1.5);
@@ -79,8 +68,6 @@ fn the_gpu_curve_matches_the_cpu_point_by_point() {
     assert!(worst < 1e-5, "曲线最大偏差 {worst}");
 }
 
-/// **同一次派发跑两遍逐位相同**：GPU 上的算术顺序在这一档里是确定的
-/// （同一台机器、同一个驱动、同一份输入）。
 #[test]
 fn the_same_grid_twice_is_bit_for_bit() {
     let ball = ball(1.0);
@@ -92,8 +79,6 @@ fn the_same_grid_twice_is_bit_for_bit() {
     assert_eq!(first.1, second.1, "法线不可复现");
 }
 
-/// **细分出来的网格**：顶点在球面上、每条边恰好被两个三角形用到、欧拉数 = 2
-/// —— 与 CPU 那一侧**同一套判据**（装配也是同一个函数）。
 #[test]
 fn the_gpu_tessellation_is_watertight_and_on_the_radius() {
     let ball = ball(3.0);
@@ -136,7 +121,6 @@ fn the_gpu_tessellation_is_watertight_and_on_the_radius() {
     );
 }
 
-/// **曲线细分**：折线落在圆上、段数 = 顶点数（闭合）、最后一段接回第 0 个。
 #[test]
 fn the_gpu_curve_tessellation_closes_on_itself() {
     let ring = ring(1.0);
@@ -161,7 +145,6 @@ fn the_gpu_curve_tessellation_closes_on_itself() {
     );
 }
 
-/// **两个基数的曲面**也对得上（次数不是写死的 2）：升阶到 4 次之后 GPU 与 CPU 仍一致。
 #[test]
 fn the_gpu_follows_the_curve_degree() {
     let circle = curve::circle(1.0, "xy", [0.0; 3]).expect("造圆");

@@ -1,25 +1,3 @@
-//! `Mat4::inverse()`，与 `glam 0.32.1` 在 x86_64 上**逐位一致**。**故意不用 `glam`。**
-//!
-//! x86_64-windows 上 glam 走的是 **SSE2** 后端（`src/f32/sse2/mat4.rs`）。SSE2 没有 FMA，
-//! 所以只要**照抄操作数顺序**与**每一处 `a*b - c*d` 的结合**，标量转写就是逐位相同的。
-//! 下面 `inverse()` 是 `src/f32/sse2/mat4.rs:697` 的 `inverse_checked::<false>`
-//! （由 `:857` 的 `inverse()` 调用）的逐句转写：`fac0..fac5`、`sign_a/sign_b`、
-//! `vec0..vec3`、`inv0..inv3`、`dot4` 取行列式、最后一次 `_mm_set1_ps(dot0.recip())`
-//! 与四列 `_mm_mul_ps` —— **全部照原顺序**。
-//!
-//! 唯一替身是那几个 SSE 内建：`_mm_shuffle_ps(a, b, imm)` = `[a[imm&3], a[(imm>>2)&3],
-//! b[(imm>>4)&3], b[(imm>>6)&3]]`，`_mm_set_ps` **参数是反的**（`set_ps(e3,e2,e1,e0)`）。
-//!
-//! 判据见 `target/oracle/bevy-view-vectors.txt`：6 个输入矩阵（刚体、带缩放、
-//! 非正交都有），每个的 16 个位模式都要对上。
-//!
-//! ⚠ 这个模块还没有接进 `--device`/`--shot` 那条主路径，所以 `cargo build` 会报几条
-//! dead-code —— `mesh.rs` / `vec.rs` / `icosphere.rs` 处在**同一阶段**，一样报
-//! （`cargo test` 那条路是干净的，因为这些测试就是调用者）。
-//! **故意不在这里加 `#![allow(dead_code)]`**：那会把"还没接线"与"真的写多了"
-//! 一起盖掉，而后者正是要看得见的东西。S2 的渲染路径一接上，这些警告自己就没了。
-
-/// `Vec4`：与 `glam::Vec4` 同样的四个 `f32`。
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Vec4 {
     pub x: f32,
@@ -35,7 +13,6 @@ impl Vec4 {
     }
 }
 
-/// 列主序的 4x4 矩阵，与 `glam::Mat4` 同布局。
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Mat4 {
     pub x_axis: Vec4,
@@ -45,7 +22,6 @@ pub struct Mat4 {
 }
 
 impl Mat4 {
-    /// `glam 0.32.1` `src/f32/sse2/mat4.rs:114`。
     #[inline(always)]
     pub const fn from_cols(x_axis: Vec4, y_axis: Vec4, z_axis: Vec4, w_axis: Vec4) -> Self {
         Self {
@@ -56,12 +32,8 @@ impl Mat4 {
         }
     }
 
-    /// `glam 0.32.1` `src/f32/sse2/mat4.rs:857` -> `:697`（`CHECKED = false`）。
-    ///
-    /// 行列式为零时不检查（`glam_assert!` 在 release 里是编掉的），结果按 glam 一样是无效矩阵。
     #[must_use]
     pub fn inverse(&self) -> Self {
-        /// `_mm_shuffle_ps(a, b, imm)`
         #[inline(always)]
         fn sh(a: [f32; 4], b: [f32; 4], imm: u32) -> [f32; 4] {
             [
@@ -71,32 +43,26 @@ impl Mat4 {
                 b[((imm >> 6) & 3) as usize],
             ]
         }
-        /// `_mm_mul_ps`
         #[inline(always)]
         fn mul(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
             [a[0] * b[0], a[1] * b[1], a[2] * b[2], a[3] * b[3]]
         }
-        /// `_mm_sub_ps`
         #[inline(always)]
         fn sub(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
             [a[0] - b[0], a[1] - b[1], a[2] - b[2], a[3] - b[3]]
         }
-        /// `_mm_add_ps`
         #[inline(always)]
         fn add(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
             [a[0] + b[0], a[1] + b[1], a[2] + b[2], a[3] + b[3]]
         }
-        /// `_mm_set_ps(e3, e2, e1, e0)` —— 参数反着来。
         #[inline(always)]
         const fn set_ps(e3: f32, e2: f32, e1: f32, e0: f32) -> [f32; 4] {
             [e0, e1, e2, e3]
         }
-        /// `_mm_set1_ps`
         #[inline(always)]
         const fn set1_ps(v: f32) -> [f32; 4] {
             [v, v, v, v]
         }
-        /// glam `src/sse2.rs:72`：`(x*x' + z*z') + (y*y' + w*w')`。
         #[inline(always)]
         fn dot4(lhs: [f32; 4], rhs: [f32; 4]) -> f32 {
             let x2_y2_z2_w2 = mul(lhs, rhs);
@@ -258,10 +224,6 @@ impl Mat4 {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Vec3 —— `glam 0.32.1` `src/f32/vec3.rs`（非 SIMD 的普通类型）
-// ---------------------------------------------------------------------------
-
 #[derive(Clone, Copy, Debug, PartialEq, Default)]
 pub struct Vec3 {
     pub x: f32,
@@ -275,9 +237,6 @@ impl Vec3 {
     pub const X: Self = Self::new(1.0, 0.0, 0.0);
     pub const Y: Self = Self::new(0.0, 1.0, 0.0);
     pub const Z: Self = Self::new(0.0, 0.0, 1.0);
-    // ⚠ glam 那边 `NEG_X` 是**字面量** `-1.0`，不是"取负"（`src/f32/vec3.rs`）：
-    //    `Vec3::ZERO - Vec3::X` 与 `Vec3::NEG_X` 在 `-0.0` 上不是同一个位模式，
-    //    而 cube 那六面的 target/up 正是照字面量抄过来的（§109.2）。
     pub const NEG_X: Self = Self::new(-1.0, 0.0, 0.0);
     pub const NEG_Y: Self = Self::new(0.0, -1.0, 0.0);
     pub const NEG_Z: Self = Self::new(0.0, 0.0, -1.0);
@@ -306,14 +265,12 @@ impl Vec3 {
         [self.x, self.y, self.z]
     }
 
-    /// `glam` `src/f32/vec3.rs:250`：`(x*x') + (y*y') + (z*z')`，左结合。
     #[inline]
     #[must_use]
     pub fn dot(self, rhs: Self) -> f32 {
         (self.x * rhs.x) + (self.y * rhs.y) + (self.z * rhs.z)
     }
 
-    /// `glam` `src/f32/vec3.rs:264`
     #[inline]
     #[must_use]
     pub fn cross(self, rhs: Self) -> Self {
@@ -324,28 +281,24 @@ impl Vec3 {
         }
     }
 
-    /// `glam` `src/f32/vec3.rs:554`
     #[inline]
     #[must_use]
     pub fn length(self) -> f32 {
         f32::sqrt(self.dot(self))
     }
 
-    /// `glam` `src/f32/vec3.rs:573`
     #[inline]
     #[must_use]
     pub fn length_recip(self) -> f32 {
         self.length().recip()
     }
 
-    /// `glam` `src/f32/vec3.rs:626`
     #[inline]
     #[must_use]
     pub fn normalize(self) -> Self {
         self.mul(self.length_recip())
     }
 
-    /// `glam` `src/f32/vec3.rs:657`
     #[inline]
     #[must_use]
     pub fn normalize_or_zero(self) -> Self {
@@ -357,7 +310,6 @@ impl Vec3 {
         }
     }
 
-    /// `glam` `src/f32/vec3.rs:641`（`try_normalize`，`look_to` 用它）
     #[inline]
     #[must_use]
     pub fn try_normalize(self) -> Option<Self> {
@@ -430,10 +382,6 @@ impl core::ops::Neg for Vec3 {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Mat3 —— `glam 0.32.1` `src/f32/mat3.rs`
-// ---------------------------------------------------------------------------
-
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Mat3 {
     pub x_axis: Vec3,
@@ -453,8 +401,6 @@ impl Mat3 {
         }
     }
 
-    /// `glam` `src/f32/mat3.rs:212`（与 `src/f32/sse2/mat3a.rs:278` 的
-    /// `Mat3A::from_quat` 是同一串算式）
     #[inline]
     #[must_use]
     pub fn from_quat(rotation: Quat) -> Self {
@@ -478,7 +424,6 @@ impl Mat3 {
         )
     }
 
-    /// `glam` `src/f32/mat3.rs:493`
     #[inline]
     #[must_use]
     pub fn transpose(&self) -> Self {
@@ -489,7 +434,6 @@ impl Mat3 {
         }
     }
 
-    /// `glam` `src/f32/mat3.rs:677`
     #[inline]
     #[must_use]
     pub fn mul_vec3(&self, rhs: Vec3) -> Vec3 {
@@ -499,7 +443,6 @@ impl Mat3 {
         res
     }
 
-    /// `glam` `src/f32/mat3.rs:930`（`impl Mul for Mat3`，逐列 `mul_vec3`）
     #[inline]
     #[must_use]
     pub fn mul_mat3(&self, rhs: &Mat3) -> Mat3 {
@@ -510,10 +453,6 @@ impl Mat3 {
         )
     }
 }
-
-// ---------------------------------------------------------------------------
-// Quat —— `glam 0.32.1` `src/f32/sse2/quat.rs`
-// ---------------------------------------------------------------------------
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Quat {
@@ -531,7 +470,6 @@ impl Quat {
         Self { x, y, z, w }
     }
 
-    /// `glam` `src/f32/sse2/quat.rs:178`
     #[inline]
     #[must_use]
     pub fn from_rotation_y(angle: f32) -> Self {
@@ -539,16 +477,12 @@ impl Quat {
         Self::from_xyzw(0.0, s, 0.0, c)
     }
 
-    /// `glam` `src/f32/sse2/quat.rs:277`
     #[inline]
     #[must_use]
     pub fn from_mat3(mat: &Mat3) -> Self {
         Self::from_rotation_axes(mat.x_axis, mat.y_axis, mat.z_axis)
     }
 
-    /// `glam` `src/f32/sse2/quat.rs:208` `from_rotation_axes`（Shepperd /
-    /// DirectXMath `XMQuaternionRotationMatrix`）：分支条件、四个 `four_*sq`、
-    /// 每个分支自己的 `inv4* = 0.5 / sqrt(four_*sq)` 与分量顺序都照抄。
     #[inline]
     #[must_use]
     pub fn from_rotation_axes(x_axis: Vec3, y_axis: Vec3, z_axis: Vec3) -> Self {
@@ -556,11 +490,9 @@ impl Quat {
         let (m10, m11, m12) = (y_axis.x, y_axis.y, y_axis.z);
         let (m20, m21, m22) = (z_axis.x, z_axis.y, z_axis.z);
         if m22 <= 0.0 {
-            // x^2 + y^2 >= z^2 + w^2
             let dif10 = m11 - m00;
             let omm22 = 1.0 - m22;
             if dif10 <= 0.0 {
-                // x^2 >= y^2
                 let four_xsq = omm22 - dif10;
                 let inv4x = 0.5 / f32::sqrt(four_xsq);
                 Self::from_xyzw(
@@ -570,7 +502,6 @@ impl Quat {
                     (m12 - m21) * inv4x,
                 )
             } else {
-                // y^2 >= x^2
                 let four_ysq = omm22 + dif10;
                 let inv4y = 0.5 / f32::sqrt(four_ysq);
                 Self::from_xyzw(
@@ -581,11 +512,9 @@ impl Quat {
                 )
             }
         } else {
-            // z^2 + w^2 >= x^2 + y^2
             let sum10 = m11 + m00;
             let opm22 = 1.0 + m22;
             if sum10 <= 0.0 {
-                // z^2 >= w^2
                 let four_zsq = opm22 - sum10;
                 let inv4z = 0.5 / f32::sqrt(four_zsq);
                 Self::from_xyzw(
@@ -595,7 +524,6 @@ impl Quat {
                     (m01 - m10) * inv4z,
                 )
             } else {
-                // w^2 >= z^2
                 let four_wsq = opm22 + sum10;
                 let inv4w = 0.5 / f32::sqrt(four_wsq);
                 Self::from_xyzw(
@@ -610,9 +538,6 @@ impl Quat {
 }
 
 impl Mat4 {
-    /// `glam` `src/f32/sse2/mat4.rs:192` `quat_to_axes` —— 与
-    /// `Mat3A::from_quat`（`src/f32/sse2/mat3a.rs:278`）同一串算式，只是列是 `Vec4`
-    /// 且 `w = 0.0`。
     #[inline]
     #[must_use]
     fn quat_to_axes(rotation: Quat) -> (Vec4, Vec4, Vec4) {
@@ -637,7 +562,6 @@ impl Mat4 {
         )
     }
 
-    /// `glam` `src/f32/sse2/mat4.rs:246`
     #[inline]
     #[must_use]
     pub fn from_rotation_translation(rotation: Quat, translation: Vec3) -> Self {
@@ -650,8 +574,6 @@ impl Mat4 {
         )
     }
 
-    /// `glam` `src/f32/sse2/mat4.rs:226`（等价于 `Affine3A::from_scale_rotation_translation`
-    /// `src/f32/affine3a.rs:253` + `From<Affine3A> for Mat4` `src/f32/affine3a.rs:691`）
     #[inline]
     #[must_use]
     pub fn from_scale_rotation_translation(scale: Vec3, rotation: Quat, translation: Vec3) -> Self {
@@ -664,25 +586,9 @@ impl Mat4 {
         )
     }
 
-    /// **法线矩阵**：`Affine3A::from(world_from_local).inverse().matrix3.transpose()`。
-    ///
-    /// 逐行移植自 Bevy 那条路（原文行号）：
-    /// - `bevy_pbr-0.19.1/src/render/mesh.rs:664` 调 `world_from_local.inverse_transpose_3x3()`；
-    /// - 那是 `bevy_math-0.19.1/src/affine3.rs:37-43` 的扩展 trait：
-    ///   `Affine3A::from(self).inverse().matrix3.transpose()`；
-    /// - `glam 0.32.1` `src/f32/affine3a.rs:470-479`（`Affine3A::inverse` 取 `matrix3.inverse()`）
-    ///   + `src/f32/sse2/mat3a.rs:631`（`Mat3A::inverse` → `inverse_checked::<false>`，`:597-620`）。
-    ///
-    /// ⚠ 为什么不能拿 `world_from_local` 的 3×3 凑合（本仓库原先就是这么写的）：
-    /// **数学等价、浮点不等价** —— 均匀缩放 1.0 时 `inv(M)ᵀ == M` 成立，但两条算术路径
-    /// （一个走 `Mat3A::inverse`，一个只是取列）给出的是**不同的末位**。这一族在本仓库
-    /// 已经现形四次（§110.1.1 / §116 / §118 / §132），第五次就是它。
-    ///
-    /// 返回**三列**（列主序），与 WGSL 的 `mat3x3<f32>` 同序：着色器算 `normalize(M * n)`。
     #[inline]
     #[must_use]
     pub fn normal_matrix_3x3(&self) -> [Vec3; 3] {
-        // `Mat3A::inverse_checked::<false>`：三个叉积 + 行列式 + 每个分量乘 `det.recip()`。
         let (x, y, z) = (
             Vec3::new(self.x_axis.x, self.x_axis.y, self.x_axis.z),
             Vec3::new(self.y_axis.x, self.y_axis.y, self.y_axis.z),
@@ -692,16 +598,10 @@ impl Mat4 {
         let tmp1 = z.cross(x);
         let tmp2 = x.cross(y);
         let det = z.dot(tmp2);
-        // `Vec3A::splat(det.recip())`：`recip()` 就是 `1.0 / x`（f32 除法）。
         let inv_det = 1.0 / det;
-        // ⚠ 这里**不再转置**：`Mat3A::inverse_checked` 内部已经 `.transpose()` 过一次
-        //    （`src/f32/sse2/mat3a.rs:617` 那句 `…from_cols(…).transpose()`），而 Bevy 那一行
-        //    （`bevy_math-0.19.1/src/affine3.rs:38`）又 `.matrix3.transpose()` 一次 ——
-        //    两次转置抵消 ⇒ 给出去的就是这三列。判据（真 glam 的**那条表达式**）钉着这一点。
         [tmp0.mul(inv_det), tmp1.mul(inv_det), tmp2.mul(inv_det)]
     }
 
-    /// `glam` `src/f32/sse2/mat4.rs:1408`
     #[inline]
     #[must_use]
     pub fn mul_vec4(&self, rhs: Vec4) -> Vec4 {
@@ -712,7 +612,6 @@ impl Mat4 {
         res
     }
 
-    /// `glam` `src/f32/sse2/mat4.rs:1431` -> `:1671`
     #[inline]
     #[must_use]
     pub fn mul_mat4(&self, rhs: &Mat4) -> Mat4 {
@@ -724,7 +623,6 @@ impl Mat4 {
         )
     }
 
-    /// `glam` `src/f32/sse2/mat4.rs:1197`（`math::tan` = `f32::tan`）
     #[inline]
     #[must_use]
     pub fn perspective_infinite_reverse_rh(
@@ -743,7 +641,6 @@ impl Mat4 {
 }
 
 impl Vec4 {
-    /// `glam` `src/f32/sse2/vec4.rs`：`impl Add for Vec4`（`_mm_add_ps`）
     #[inline]
     #[must_use]
     pub fn add(self, rhs: Self) -> Self {
@@ -755,7 +652,6 @@ impl Vec4 {
         )
     }
 
-    /// `glam` `src/f32/sse2/vec4.rs`：`impl Mul<f32> for Vec4`
     #[inline]
     #[must_use]
     pub fn mul(self, rhs: f32) -> Self {
@@ -767,7 +663,6 @@ impl Vec4 {
 mod tests {
     use super::{Mat4, Vec4};
 
-    /// `target/oracle/bevy-view-vectors.txt` 的 6 个用例，(输入位模式, 期望位模式)，列主序。
     const CASES: [(&str, &str); 6] = [
         (
             "3F800000 00000000 00000000 00000000 00000000 3F7C2F4D BE302108 00000000 \
@@ -864,22 +759,10 @@ mod tests {
         assert!(failed.is_empty(), "cases failed: {failed:?}");
     }
 
-    /// **`world_from_local` 那条路**（`Quat::from_xyzw` + `Mat4::from_scale_rotation_translation`
-    /// + `Mat4::mul_mat4`）与**真的 glam** 逐位相同。
-    ///
-    /// 为什么单列这一条：`inverse` 早就有逐位判据，而"物体变换"这条路只有**逐行移植的注释**
-    /// 没有判据。它一旦差一个末位，症状是**盘内散落的 ±1**（法线/位置各偏一丝 ⇒ 着色偏一丝
-    /// ⇒ 只有恰好压在舍入边界上的那些像素翻一格），而轮廓、矩阵、贴图、采样器**全都是对的**
-    /// —— 这一族本仓库已经踩过四次（§110.1.1 / §116 / §118 / §132），每次都是"数学等价、
-    /// 浮点不等价"。
-    ///
-    /// ⚠ 比的是**真的 glam crate**（只在 dev-dependencies 里），不是把同一段公式再抄一遍：
-    /// 抄一遍只能证明"我抄得跟我抄的一样"。
     #[test]
     fn the_object_transform_matches_glam_bit_for_bit() {
         use crate::mat4::{Mat4, Quat, Vec3};
         let rotations = [
-            // 文档里那一颗（`orbit-bare-nolight` 的 planet）：
             [0.16918235_f32, 0.0, 0.0, 0.9855848],
             [0.0, 0.0, 0.0, 1.0],
             [0.70710677, 0.0, 0.0, 0.70710677],
@@ -924,7 +807,6 @@ mod tests {
         );
     }
 
-    /// 同一件事再来一遍：**列相乘**（`clip_from_world = clip_from_view × view_from_world`）    /// 也要与 glam 逐位相同。它是组 1 binding 0 那份 `PassView::view_proj` 那颗数。
     #[test]
     fn the_matrix_product_matches_glam_bit_for_bit() {
         use crate::mat4::{Mat4, Quat, Vec3};
@@ -966,11 +848,6 @@ mod tests {
         );
     }
 
-    /// **法线矩阵**与 Bevy 那条路逐位相同：`Affine3A::from(m).inverse().matrix3.transpose()`。
-    ///
-    /// ⚠ 判据里比的必须是**这条表达式**（用真 glam 写成 Bevy 那一行），不能比"我认为等价的
-    /// 另一条"：`world_from_local` 的 3×3 在均匀缩放下数学上就等于它，而**浮点上不等**
-    /// —— 这一条判据存在的全部理由就是把这两者分开。
     #[test]
     fn the_normal_matrix_matches_bevys_expression_bit_for_bit() {
         use crate::mat4::{Mat4, Quat, Vec3};
@@ -996,7 +873,6 @@ mod tests {
                         glam::Quat::from_xyzw(rotation[0], rotation[1], rotation[2], rotation[3]),
                         glam::Vec3::new(translation[0], translation[1], translation[2]),
                     );
-                    // Bevy 那一行（`bevy_math-0.19.1/src/affine3.rs:37-43`）：
                     let theirs = glam::Affine3A::from_mat4(theirs_matrix)
                         .inverse()
                         .matrix3
@@ -1032,9 +908,6 @@ mod tests {
 }
 
 impl Mat4 {
-    /// 全零矩阵。`camera.rs` 的测试拿它当「没算出来」的哨兵。
-    /// 用结构体字面量而不是 `Vec4::new(..)`：这样 `const` 一定成立，
-    /// 不必去猜 `Vec4::new` 是不是 `const fn`。
     pub const ZERO: Self = Self {
         x_axis: Vec4 {
             x: 0.0,

@@ -1,25 +1,3 @@
-//! 探针相机：**逐位**复刻 Bevy 那条路造出来的 `world_from_view` / `clip_from_world`。
-//!
-//! 语义照抄，不做"改进"：
-//!
-//! - `looking_at(target, up)` = `look_to(target - translation, up)`（`bevy_transform-0.19.1`
-//!   `src/components/transform.rs:462`）。
-//! - `look_to(direction, up)`（同文件 `:475`）：
-//!   `back = -normalize(direction)`；`right = normalize(up.cross(back))`；
-//!   `up2 = back.cross(right)`；`rotation = Quat::from_mat3(&Mat3::from_cols(right, up2, back))`。
-//! - `world_from_view = Mat4::from_scale_rotation_translation(scale, rotation, translation)`
-//!   （glam 在 x86_64 走 SSE2：`src/f32/sse2/mat4.rs:226`，等价于 `Affine3A` 那条）。
-//! - `clip_from_view = Mat4::perspective_infinite_reverse_rh(PI/4, aspect, 0.1)`。
-//! - `view_from_world = world_from_view.inverse()`；
-//!   `clip_from_world = clip_from_view.mul_mat4(&view_from_world)`。
-//!
-//! ⚠ `Mat3 → Quat → Mat3` **不是**逐位恒等（4 个相机位姿实测过），所以两个方向都必须是
-//! 忠实转写；这里 `from_mat3` 抄的是 Shepperd 分支，`from_quat` 抄的是 `quat_to_axes`。
-//!
-//! ⚠ 两条**逆矩阵**（`view_from_world` 与 `view_from_clip`）都走 `mat4::inverse` 那个
-//! **逐位移植的通用逆**（§110.1.1：解析逆差 1–2 ulp）。这不是"省事的写法"能换的：
-//! 刚体明明有 `[Rᵀ | −Rᵀt]` 这条更省事的解析逆，实测与 glam 的余子式逆**不是同一个数**。
-
 #![allow(dead_code)]
 
 use crate::mat4::{Mat3, Mat4, Quat, Vec3, Vec4};
@@ -29,15 +7,10 @@ pub struct Camera {
     pub world_from_view: Mat4,
     pub view_from_world: Mat4,
     pub clip_from_view: Mat4,
-    /// `clip_from_view` 的**通用逆**（天空盒的片元阶段用它把片元坐标还原成视线方向）。
-    ///
-    /// ⚠ 它是**这一帧唯一的**求逆点：宿主算一次、进 `view` uniform，shader 那边只做乘法 ——
-    /// 在 shader 里求逆既慢又是另一条算术路径（§110.1.1，逐位判据下"等价"不算等价）。
     pub view_from_clip: Mat4,
     pub clip_from_world: Mat4,
 }
 
-/// `None` = 命令行没给 `--cam`（固定的探针机位）；`Some([yaw, pitch, distance])` 是那条路。
 pub fn probe_camera(cam: Option<[f32; 3]>, aspect: f32) -> Camera {
     let (translation, rotation) = match cam {
         None => {
@@ -61,26 +34,6 @@ pub fn probe_camera(cam: Option<[f32; 3]>, aspect: f32) -> Camera {
     from_pose(translation, rotation, aspect)
 }
 
-/// 产物自带的**评审相机** → 一台相机：`px_render::scene::camera_for` 的逐字转写。
-///
-/// 那一边是：
-/// ```ignore
-/// let direction = Vec3::from_array(camera.direction);
-/// let direction = if direction.length_squared() > 1e-12 { direction.normalize() } else { Vec3::Z };
-/// Transform::from_translation(direction * camera.distance.max(1e-3)).looking_at(Vec3::ZERO, Vec3::Y)
-/// ```
-///
-/// ⚠ 三处**不许"理顺"**：
-///
-/// 1. `normalize()` 是 glam 那条（乘 `length().recip()`），**不是**除法 ——
-///    本文件下面 `dir3()` 那一条（Bevy 的 `Dir3::new`）才是除法。两个函数长得像、
-///    结果差 1 ulp，而这里差 1 ulp 就是"相机位置差 1 ulp"⇒ 顶点裁剪坐标差 1 ulp ⇒ 逐字节判据红。
-/// 2. 退化判定用的是 `length_squared() > 1e-12`（**平方**，不是长度），兜底方向是 `Vec3::Z`。
-///    `NaN > 1e-12` 是 false ⇒ 非有限方向也走兜底 —— 那是 Bevy 的行为，不是一个巧合。
-/// 3. 距离的保底 `max(1e-3)` 在**乘法之前**：`direction * distance.max(1e-3)`。
-///
-/// 方向在产物里是**世界系**的（烘图侧已经把倾斜乘进去了，见 `px_scene::cameras`），
-/// 所以这里一个渲染器常数都不需要 —— 与 `camera_for` 的注释同一条口径。
 pub fn review_camera(camera: &px_protocol::art::Camera, aspect: f32) -> Camera {
     let direction = Vec3::from_array(camera.direction);
     let direction = if direction.dot(direction) > 1e-12 {
@@ -93,20 +46,12 @@ pub fn review_camera(camera: &px_protocol::art::Camera, aspect: f32) -> Camera {
     from_pose(translation, rotation, aspect)
 }
 
-/// 位姿（平移 + 旋转）+ 长宽比 → 相机。
-///
-/// ⚠ 两条路（探针机位 / 产物相机）**共用这一段**：矩阵链只要有一份，
-/// "另一个方向也算一遍"这种漂移就不可能发生（`probe_camera` 与 `review_camera` 的差别
-/// 只允许是"位姿怎么来的"）。
 fn from_pose(translation: Vec3, rotation: Quat, aspect: f32) -> Camera {
     let world_from_view =
         Mat4::from_scale_rotation_translation(Vec3::splat(1.0), rotation, translation);
     let clip_from_view =
         Mat4::perspective_infinite_reverse_rh(core::f32::consts::PI / 4.0, aspect, 0.1);
     let view_from_world = world_from_view.inverse();
-    // 天空盒要的那条逆：Bevy 那边是 `let view_from_clip = clip_from_view.inverse();`
-    // （`bevy_render-0.19.1/src/view/mod.rs:1048`）—— 同一个函数、同一个顺序，
-    // 所以这里也是宿主算、shader 只乘。
     let view_from_clip = clip_from_view.inverse();
     let clip_from_world = clip_from_view.mul_mat4(&view_from_world);
 
@@ -120,22 +65,10 @@ fn from_pose(translation: Vec3, rotation: Quat, aspect: f32) -> Camera {
     }
 }
 
-/// Bevy `Transform::look_at` -> `look_to`。
 fn looking_at(translation: Vec3, target: Vec3, up: Vec3) -> Quat {
     look_to(target - translation, up)
 }
 
-/// 点光 cube 的**六面朝向**：`bevy_camera-0.19.1/src/primitives.rs:347-378` 的
-/// `CUBE_MAP_FACES`，次序 `+X −X +Y −Y +Z −Z`。
-///
-/// ⚠ 次序**不是**随便排的：它同时定了两件事 —— 烘图侧那个 `face` 数（`px_scene::frame::
-/// FACE_NAMES` 与它同序）与这里算矩阵用的 target/up。两处不一致 ⇒ 影子贴到别的面上，
-/// 而"贴错面"在画面上常常看着像"影子有点歪"。宿主拿到的 `face` 与 `layer` 是一起进来的
-/// （`PassSpec::cube_face`），对账那条算式（`layer == light×6 + face`）就是这条一致性的门。
-///
-/// ⚠ `+Z` / `−Z` 两面的 target 是**反**的（`+Z` 用 `NEG_Z`、`−Z` 用 `+Z`）：cube 的坐标系是
-/// **左手 y-up**，而 Bevy 的世界是右手 y-up（`primitives.rs:341-346` 的注释），
-/// 所以"哪一面"要在两套约定之间翻一次。照抄，不要"理顺"。
 pub const CUBE_MAP_FACES: [(Vec3, Vec3); 6] = [
     (Vec3::X, Vec3::Y),
     (Vec3::NEG_X, Vec3::Y),
@@ -145,28 +78,9 @@ pub const CUBE_MAP_FACES: [(Vec3, Vec3); 6] = [
     (Vec3::Z, Vec3::Y),
 ];
 
-/// 点光 cube 的**某一面**当相机：`light.rs:2061-2123` 那条路。
-///
-/// ⚠⚠ 两处**不许化简**（§109.2）：
-///
-/// 1. `world_from_view = GlobalTransform::from_translation(灯位) × Transform::looking_at(...)`
-///    —— 那是**两个仿射矩阵相乘**（`Affine3A * Affine3A` ⇒ `matrix3.mul_mat3` 与
-///    `matrix3.mul_vec3(t) + t`），**不是**"拿四元数直接拼一个 `[R|t]`"。
-///    两种写法数学等价、浮点不等价（±0.0 与 1 ulp 那一族），而这里差一个末位就会
-///    让影子边缘的 8 个比较采样里有一个翻符号。所以照抄乘法链。
-/// 2. 投影是 `perspective_infinite_reverse_rh(FRAC_PI_2, 1.0, near_z)` —— **90°、宽高比 1**、
-///    近平面来自 `PointLight::shadow_map_near_z`（0.1）。那是 §109 里"最大的绝对轴就是
-///    世界深度"那条推导的前提（45° 的视锥面）。
-///
-/// `near_z` 由调用方给（它住在 group 0 那一份策略常量里）。
 pub fn face_view(light_position: Vec3, face: u32, near_z: f32) -> Camera {
     let (target, up) = CUBE_MAP_FACES[face as usize];
-    // `Transform::IDENTITY.looking_at(target, up)`（`light.rs:1095-1098` 预先把六面算好）。
     let rotation = looking_at(Vec3::ZERO, target, up);
-    // ---- `GlobalTransform::from_translation(灯位) * Transform::from_rotation(...)` ----
-    //
-    // 左边：单位矩阵 + 平移；右边：`Mat3::from_quat` + 零平移。
-    // `Affine3A * Affine3A` = `matrix3: a.m3 * b.m3`、`translation: a.m3 * b.t + a.t`。
     let left = Mat3::IDENTITY;
     let right = Mat3::from_quat(rotation);
     let matrix3 = left.mul_mat3(&right);
@@ -192,11 +106,6 @@ pub fn face_view(light_position: Vec3, face: u32, near_z: f32) -> Camera {
     }
 }
 
-/// `bevy_transform-0.19.1` `src/components/transform.rs:475-484`。
-///
-/// ⚠ `direction.try_into()` / `up.try_into()` 走的是 `Dir3::new` = `value / length`
-/// （`bevy_math-0.19.1/src/direction.rs:587-594`，**除法**），而**不是** glam 的
-/// `try_normalize`（乘 `1/length`）—— 这两条差 1 个 ulp，`right` 用的是后者。
 fn look_to(direction: Vec3, up: Vec3) -> Quat {
     let back = -dir3(direction, Vec3::Z);
     let up = dir3(up, Vec3::Y);
@@ -205,7 +114,6 @@ fn look_to(direction: Vec3, up: Vec3) -> Quat {
     Quat::from_mat3(&Mat3::from_cols(right, up, back))
 }
 
-/// `bevy_math-0.19.1/src/direction.rs:563-594`：`value / length`；失败时退到 `fallback`。
 fn dir3(value: Vec3, fallback: Vec3) -> Vec3 {
     let length = value.length();
     if length.is_finite() && length > 0.0 {
@@ -270,12 +178,6 @@ mod tests {
         0x0000_0000,
     ];
 
-    /// `world_from_view.inverse()` —— **不是**解析逆（§110.1.1）。
-    ///
-    /// 摘自 `target/oracle/bevy-view-vectors.txt` 的 `case 0` `out`：那 6 组向量的第一组
-    /// 就是默认相机（`case 0` 的 `in` 正是上面那个 `WORLD`），而它期望的 `out` 是
-    /// **glam 的通用余子式逆**。⚠ 解析刚体逆 `[Rᵀ | −Rᵀt]` 在这里给的是
-    /// `c1.y = 3F7C2F4D`（与位姿同值）、`c3.z = C04CA662` —— 差 1–2 ulp，**不是**这个常量。
     const VIEW_FROM_WORLD: [u32; 16] = [
         0x3F80_0000,
         0x8000_0000,
@@ -295,12 +197,6 @@ mod tests {
         0x3F80_0000,
     ];
 
-    /// `clip_from_view.inverse()`（天空盒的片元阶段用它还原视线方向）。
-    ///
-    /// 摘自 `px_render/tests/view_oracle.rs::dump_the_default_camera_matrices` 这一次的
-    /// 实测读数（`bevy_render-0.19.1/src/view/mod.rs:1048` 那一行就是它的出处）。
-    /// ⚠ 这一格**盖不到**上面那 6 组向量：那批的输入是位姿/一般矩阵，而投影矩阵不是刚体 ——
-    /// `[Rᵀ | −Rᵀt]` 这条解析路在这儿连形式都不成立。所以它只能对着 Bevy 的读数钉。
     const VIEW_FROM_CLIP: [u32; 16] = [
         0x3F1F_0EDA,
         0x8000_0000,
@@ -357,8 +253,6 @@ mod tests {
             );
         }
 
-        // 两条逆矩阵（§135）：一条给内容 shader 的透明排序/裁剪坐标那条路，
-        // 一条给天空盒重建视线方向。⚠ 都由**通用逆**产出 —— 解析逆在这两格上都不是这个数。
         for (what, matrix, expected) in [
             ("view_from_world", &cam.view_from_world, VIEW_FROM_WORLD),
             ("view_from_clip", &cam.view_from_clip, VIEW_FROM_CLIP),
@@ -385,17 +279,9 @@ mod tests {
         assert!(cam.position.y.is_finite());
         assert!(cam.position.z.is_finite());
         assert!(cam.clip_from_world.w_axis.w.is_finite());
-        // yaw=35°, pitch=20°, distance=8 → z = cos(20°)cos(35°)*8 > 0
         assert!(cam.position.z > 0.0);
     }
 
-    /// **"格子 = 单独渲一张"这条等式的另一半**：产物那台 `[0,0,1] × 3.15` 的评审相机
-    /// 与 `--cam 0,0,3.15` 的探针机位必须是**逐位**同一台。
-    ///
-    /// 为什么钉这一格：J2（`--sheet`）的 oracle 实验就是靠它成立的 —— 12 格全填这台相机，
-    /// 再拿 `--cam 0,0,3.15` 单独渲一张比。要是两台相机的矩阵差 1 ulp，那条实验量到的
-    /// 就不是"格子与单张的差别"，而是"两台相机本来就不同"（§131.2 那一族：仪器先说清自己量的是什么）。
-    /// `[0,0,1]` 的 `normalize()` 精确（长度恰好 1）、乘 3.15 也精确 ⇒ 两条路必须逐位相等。
     #[test]
     fn the_review_camera_at_the_probe_pose_is_bit_identical_to_the_probe_camera() {
         let aspect = 960.0f32 / 640.0f32;
@@ -440,13 +326,10 @@ mod tests {
         }
     }
 
-    /// 退化方向走 Bevy 的兜底：`length_squared() > 1e-12` **不成立** ⇒ `Vec3::Z`；
-    /// 距离的保底是 `max(1e-3)`。⚠ 判的是**平方**：`1e-7` 这种长度（平方 1e-14）也走兜底。
     #[test]
     fn a_degenerate_direction_falls_back_to_z_and_the_distance_has_a_floor() {
         let degenerate = review_camera(
             &px_protocol::art::Camera::raw([0.0, 0.0, 0.0], 0.0, "degenerate"),
-            // `direction` 全零；距离 0 ⇒ 保底 1e-3
             1.0,
         );
         assert_eq!(degenerate.position.to_array(), [0.0, 0.0, 1e-3]);
@@ -460,18 +343,9 @@ mod tests {
             "平方 1e-14 不够 1e-12"
         );
     }
-    /// **六面的基**（用户裁决的那条契约）：`px_protocol::scene::SHADOW_FACE_BASIS` 必须
-    /// 与 `CUBE_MAP_FACES` 经 `looking_at` 展开出来的基**逐位相同**。
-    ///
-    /// ⚠ 为什么必须有一条判据把它钉住：这条契约从前有三份转写（渲染器的 `CUBE_MAP_FACES`
-    /// / 烘图侧的 `face_uv` / 着色器的面选择），而它们**漂开过一次** —— 第 4/5 面朝向反了、
-    /// v 轴在六个面上还不自洽，症状是"影子贴到别的面上"或整颗行星被判成全在影里。
-    /// 现在烘图侧把这张表落进文档、着色器只读它，而"这张表本身对不对"就靠这一条。
     #[test]
     fn the_protocols_six_face_basis_is_the_one_these_cameras_use() {
         for (index, (target, up)) in CUBE_MAP_FACES.iter().enumerate() {
-            // Bevy 的 `looking_at`：`back = −target`、`right = normalize(up × back)`、
-            // `up2 = back × right`（`primitives.rs:341-346`）。
             let back = target.mul(-1.0);
             let right = up.cross(back).normalize();
             let up2 = back.cross(right);
@@ -484,7 +358,6 @@ mod tests {
                     "第 {index} 面（{}）的第 {slot} 条基向量：协议那张表是 {have:?}，\
                      而这六台相机用的是 {want:?} —— 两处不一致 ⇒ 烘图侧会把页分到\"不是\
                      渲染器画的那一面\"上，而着色器照着协议查页 ⇒ 影子贴错面",
-                    // ⚠ 名字逐字照 `px_scene::frame::FACE_NAMES`（次序：`+x -x +y -y -z +z`）。
                     ["+x", "-x", "+y", "-y", "-z", "+z"][index]
                 );
             }

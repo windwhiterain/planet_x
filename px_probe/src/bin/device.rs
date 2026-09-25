@@ -1,6 +1,3 @@
-//! 无窗口设备冒烟：只要「wgpu 设备能起来、compute workgroup >= 64」。
-//! 原 `px_render/tests/headless_gpu.rs`；现在是 bin，退出码就是判据。
-
 fn check() {
     let gpu = px_probe::common::require_gpu();
     let info = gpu.adapter.get_info();

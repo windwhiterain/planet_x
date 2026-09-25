@@ -1,33 +1,11 @@
-//! 卫星 / 无大气天体：**基础地形 + 三层陨坑** ⇒ 高度场 + 立方球网格。
-//!
-//! 与 `planet.rs` / `desert.rs` 同形（普通 Rust，每一步走 `px_cook::cached` 的缓存函数），
-//! 差别只在词汇：三层都是 **`field.stamps`**（盖章式打坑）—— 每枚印章有自己的随机半径与
-//! 年龄，按年龄序**挖掘**（年轻坑挖掉老坑的坑缘），密度由上游场当遮罩。
-//! 球面档按 `direction` 取格点（没有接缝、两极不挤）。
-//!
-//! ⚠ 三层坑**不是一个节点里的三个 octave**：三个节点各自的 TOML 给频率 / 半径分布 / 深度
-//!   ⇒ 大盆地、中坑、小坑可以分开调，而且调一层只重算它自己与下游（上游照命中）。
-//!   这正是"节点 = 一次算子调用 + 一份参数"该有的粒度。
-//! ⚠ 上游那张场（`terra` 的 fbm）**同时是密度遮罩**：`mask_lo..mask_hi` 那一栏把"这里该不该
-//!   长坑"交给图去表达 —— 今天的参数是"亮处长、暗处稀"，换一份上游就换一套地貌。
-//!
-//! ⚠ 收口那次值域映射走 **element 那一档**（`elem::Remap`，一条内容寻址的实例库）：它已经是
-//!   纯 pointwise 的算子，与 `field.stamps` 那三条**空间核**各归各的档（2026-09-27 的收口）。
-//!
-//! 渲染：`px run scene orbit-moon`（配方在 `art/scene/orbit-moon.toml`）。
-
 use px_cook::{
     Domain, GraphSpec, artifact_path_of, begin, cached, field, field_params, mesh, node_params,
 };
-// ⚠ element 那一档（`elem::Remap`）**不从 `px_cook` 那一扇门出去**：那一档的算子类型由图侧的
-//   生成物给（`px_graphs/build.rs` 写 `OUT_DIR/elem_gen.rs`），而 `px_cook` 是"各域算子表 +
-//   缓存路径"那一扇门，两者不是一回事。
 use px_graphs::elem;
 
 type Fault = Box<dyn std::error::Error>;
 
 fn main() -> Result<(), Fault> {
-    // ⚠ **第一行**：`--store <目录>` 要在任何 `begin` / `node_params` 之前落成 `PX_ART`。
     px_cook::apply_store_args()?;
     let graph = begin(GraphSpec {
         name: "moon".to_string(),
@@ -39,7 +17,6 @@ fn main() -> Result<(), Fault> {
         projection: Domain::Cube,
     };
 
-    // 基础地形：比行星更平（卫星没有板块运动，起伏靠撞击）。
     let terra = cached(
         &graph,
         "terra",
@@ -50,7 +27,6 @@ fn main() -> Result<(), Fault> {
         },
         (),
     )?;
-    // 三层印章：`base` 是"被打的那张场"（也当密度遮罩），每一层往上面挖。
     let basins = cached(
         &graph,
         "basins",
@@ -78,7 +54,6 @@ fn main() -> Result<(), Fault> {
             base: craters.clone(),
         },
     )?;
-    // 收口：把高度压回 [0,1]（`Craters` 不钳制 —— 值域是图的事）。
     let height = cached(
         &graph,
         "height",

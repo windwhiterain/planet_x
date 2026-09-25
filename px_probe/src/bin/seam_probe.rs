@@ -1,19 +1,3 @@
-//! **跨面折痕（C¹ 折痕）的单点探针**：取一份烘好的体网格 `.pxart`，在每条面棱的两侧量
-//! **同一个物理切向**的斜率，看它跨棱跳不跳 —— 折痕的定义就是"值连续、斜率不连续"。
-//!
-//! 用法：
-//!
-//! ```text
-//! cargo run --release -p px_probe --bin seam_probe -- <VOLUME.pxart> [lane] [条数]
-//! ```
-//!
-//! ⚠ 两侧必须用**同一个三维切向**去差分：两面的面内参数标度不一样（`cube_direction` 里
-//!   `u` 方向是 `2/major`，而 `major` 沿棱在变），拿参数差分直接相减量到的是标度差。
-//!   做法：在本面棱上取一点，算出"朝面内"的三维单位方向，**两个面都用它**去采样。
-//!
-//! ⚠ 为什么 C⁰ 判据抓不到它：`the_baked_sky_is_continuous_across_face_edges` 量的是**值**，
-//!   而逐格随机夹具下共享角点让两侧插值逐位相同 ⇒ 值天生连续（实测跨棱/面内 1.06x）。
-
 use px_protocol::art::cube_direction;
 use px_protocol::stream::{self, Frame};
 use px_volume_schema::VolumeData;
@@ -34,12 +18,10 @@ fn scale(a: [f32; 3], k: f32) -> [f32; 3] {
     [a[0] * k, a[1] * k, a[2] * k]
 }
 
-/// 面内参数 → 单位方向。
 fn direction(face: u32, u: f32, v: f32) -> [f32; 3] {
     cube_direction(face, u, v)
 }
 
-/// 在 `(face, u, v)` 处**沿棱**（沿 `v`）走的三维单位切向；`u` 端点上不能沿 `u` 走。
 fn along_edge_tangent(face: u32, u: f32, v: f32, h: f32) -> [f32; 3] {
     let back = direction(face, u, (v - h).clamp(0.0, 1.0));
     let fwd = direction(face, u, (v + h).clamp(0.0, 1.0));
@@ -47,7 +29,6 @@ fn along_edge_tangent(face: u32, u: f32, v: f32, h: f32) -> [f32; 3] {
     scale(step, 1.0 / norm(step).max(1e-20))
 }
 
-/// 在棱点处**朝面内**的三维单位切向：`u` 朝面内走（`v` 不动）。
 fn inward_tangent(face: u32, edge: f32, v: f32, h: f32) -> [f32; 3] {
     let du = if edge < 0.5 { 1.0 } else { -1.0 };
     let du = if (edge + du * h).clamp(0.0, 1.0) != edge + du * h {
@@ -61,7 +42,6 @@ fn inward_tangent(face: u32, edge: f32, v: f32, h: f32) -> [f32; 3] {
     scale(step, 1.0 / norm(step).max(1e-20))
 }
 
-/// 把单位方向沿切向挪 `step`，再归一化回单位方向。
 fn offset_dir(base: [f32; 3], tangent: [f32; 3], step: f32) -> [f32; 3] {
     let d = [
         base[0] + tangent[0] * step,
@@ -72,7 +52,6 @@ fn offset_dir(base: [f32; 3], tangent: [f32; 3], step: f32) -> [f32; 3] {
     [d[0] / n, d[1] / n, d[2] / n]
 }
 
-/// 在这一侧**沿三维切向**的采样值：`k` 是以弧长为单位的偏移（相对半径）。
 fn sample_along(
     volume: &VolumeData,
     base: [f32; 3],
@@ -91,7 +70,6 @@ fn sample_along(
     px_volume_alg::sample_volume(volume, p, lane)
 }
 
-/// 四阶单侧差分（`h` 与 `h/2` 各一次再 Richardson），`h` 是**弧长**步长。
 fn slope4(
     volume: &VolumeData,
     base: [f32; 3],
@@ -108,7 +86,6 @@ fn slope4(
     (4.0 * d(h * 0.5) - d(h)) / 3.0
 }
 
-/// `face` 的 `u = edge`（`v` 固定）这条棱的伙伴面 + 伙伴面上**物理重合**的参数点。
 fn partner(face: u32, edge: f32, v: f32) -> Option<(u32, f32, f32, f32)> {
     let here = direction(face, edge, v);
     let mut best = (f32::MAX, None, 0.0_f32, 0.0_f32);
@@ -127,7 +104,6 @@ fn partner(face: u32, edge: f32, v: f32) -> Option<(u32, f32, f32, f32)> {
         }
     }
     let (gap, other, u, t) = best;
-    // 棱上两侧应当逐位同值（实测最大方向间隙 1.19e-7）；差一个纹素就不算棱。
     if gap < 1e-6 {
         Some((other?, u, t, gap))
     } else {
@@ -178,7 +154,6 @@ fn main() {
         volume.lanes()
     );
 
-    // 弧长步长：面内一个纹素 ≈ (2/res)/√3 的弧度（面心处 major≈1）。取一个纹素量级。
     let h = 1.0 / (res as f32 * 4.0);
     println!("\n== 同一物理切向的斜率：棱两侧（C¹） ==");
     println!(
@@ -201,9 +176,6 @@ fn main() {
                 let mut count = 0.0_f32;
                 for row in 0..rows {
                     let v = 0.2 + 0.6 * row as f32 / (rows.max(2) - 1) as f32;
-                    // ⚠ 两侧可比的那个量是**沿棱**的斜率：两个面的"朝面内"方向在棱上互相垂直
-                    //   （本面朝内 = 伙伴面的沿棱），所以拿"朝面内"的两侧相减没有意义。
-                    //   沿棱的三维方向只有一个 ⇒ 两侧量的是同一个物理量。
                     let Some((other, pu, pv, _)) = partner(face, edge, v) else {
                         continue;
                     };
@@ -212,11 +184,10 @@ fn main() {
                     let along_a = along_edge_tangent(face, edge, v, h);
                     let along_b = along_edge_tangent(other, pu, pv, h);
                     if dot(along_a, along_b).abs() < 0.999 {
-                        continue; // 两侧的"沿棱"方向没对上（角点附近），不算
+                        continue;
                     }
                     let sa = slope4(&volume, base_a, along_a, h, radius, lane);
                     let sb = slope4(&volume, base_b, along_b, h, radius, lane);
-                    // 分母：面内、离棱三个纹素处的**同一个沿棱方向**的斜率
                     let far = 6.0 * h;
                     let inner_tan = inward_tangent(face, edge, v, h);
                     let mid = offset_dir(base_a, inner_tan, far);

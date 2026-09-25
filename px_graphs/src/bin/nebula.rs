@@ -1,66 +1,15 @@
-//! 星云背景：**一张图，从形状到天空**。
-//!
-//! ```text
-//! 图 nebula（画布 = 体网格）            图 nebulasky（画布 = 立方贴图）
-//! ─────────────────────────            ──────────────────────────────
-//! field.fbm3 / ridged3 / warp3           sky.stars
-//!         │                                     │
-//!         ▼  cloud.density                      │
-//!     VolumeData                                │
-//!         │                                     │
-//!         ▼  cloud.emission ◀── sky.stars       │
-//!     VolumeData（RGB 发射 + A 消光）            │
-//!         └──────────────┬──────────────────────┘
-//!                        ▼  sky.nebula ×3      沿视线积分，一条通道一张 CubeMap 场
-//!                   3 × Field
-//!                        │
-//!                        ▼  color_cube + write_texture   拼成 HDR 立方贴图 → CAS
-//! ```
-//!
-//! ⚠ **必须是两张图**：体积那一条链要**体网格**画布（`res × res²·layers·6`），
-//!   而天空要**立方贴图**画布（`res × res·6`）。两种画布的"行数"含义不同，
-//!   `VolumeShape::of` 会把 `32×192` 解成 `layers = 1/6` 那样的非整数而拒掉
-//!   （实测：`field.fbm3 要一张体网格画布…拿到的是 CubeMap 32×192`）。
-//!   ⚠ 两张图**不能同名** —— 名字决定 `art/<名字>/*.toml` 与清单落点，同名会撞键。
-//!
-//! ⚠⚠ **星场在两张图里各挂一次，而且必须是同一个节点名、同一份参数**
-//!   （2026-09-25）：星不再只是一张天空上的图，它同时是**照亮气体的光源**
-//!   ⇒ `cloud.emission`（体积图）与 `sky.nebula`（天空图）都要它。
-//!   两份参数的来源**只有一处**（`art/nebulasky/stars.toml`，下面手工读一次再喂给两个
-//!   节点）：`sky.stars` 的产物与画布无关（`RESOLUTION_IS_CANVAS = false`）
-//!   ⇒ 同参同上游 ⇒ **同一个键**，CAS 里只存一份、只烘一次。
-//!   ⚠ 两处各抄一份 toml 是这一档最容易出的错（两边差一个数就变成两份星场，
-//!     而症状只是"气体被照亮的那些星与天上的星对不上"）。
-//!
-//! ⚠ `--face` 是**两个**面分辨率：体积那边是 `cloud.density` 的画布宽度，
-//!   天空那边是 `sky.*.toml` 的 `face`（两边不一致会在形状检查那里当场报）。
-//!
-//! 用法：
-//! ```text
-//! cargo run --release -p px_graphs --bin nebula -- --face 64    # 快速迭代
-//! ```
-
 use std::time::Instant;
 
 use px_cook::{
     Domain, GraphSpec, begin, cached, field, field_params, node_params, volume, volume_params,
 };
-// ⚠ element 那一档（`elem::Constant` / `elem::Mix` / `elem::Remap`）**不从 `px_cook` 那一扇门
-//   出去**：那一档的算子类型由图侧的生成物给（`px_graphs/build.rs` 写 `OUT_DIR/elem_gen.rs`），
-//   而 `px_cook` 是"各域算子表 + 缓存路径"那一扇门，两者不是一回事。
 use px_field_schema::field::Field;
 use px_field_schema::volume::VolumeShape;
 use px_graphs::elem;
 use px_volume_schema::params::stars::StarsParams;
 
-/// 图侧对错误的统一态度：**当场失败**，不静默跳过。
 type Fault = Box<dyn std::error::Error>;
 
-/// 命令行给的面分辨率（`--face <n>`）。
-///
-/// ⚠ 参数读的是 [`px_cook::args_without_store`]（不是 `std::env::args()`）：那两份
-///   只差 `--store <目录>` 那一对，而三个 `*_from_args` 都从这里取 —— 一处读错，
-///   三个旋钮一起错。索引从 **0** 起（那一份已经把 argv[0] 摘掉了）。
 fn face_from_args() -> u32 {
     let args: Vec<String> = px_cook::args_without_store().unwrap_or_default();
     let mut face = 64_u32;
@@ -76,16 +25,6 @@ fn face_from_args() -> u32 {
     face.max(8)
 }
 
-/// **形状那一半的分辨率**（`--shape <n>`）。
-///
-/// ⚠ 它与天空贴图的分辨率**各是一个旋钮**，这不是留白而是必须的：
-///   三维场的格数是 `res² × layers × 6`（体网格布局），而 `layers` 是独立参数
-///   ⇒ 形状的分辨率涨一倍，场的格数涨**四倍**，而每个格都要算 7 个倍频的三维噪声。
-///   实测形状 80 要 **394 秒**，而压到 64 时同一张图只要几十秒。
-///
-/// ⚠ 更要紧的是：**这两件事本来无关**。天空贴图的分辨率决定"星点有多锐"，
-///   形状的分辨率决定"云和丝有多细"。把它们绑在一起，就只能用"云更细"来换"星更锐"
-///   —— 而星的锐度根本不需要更细的场（星是**点**，不是场的结构）。
 fn shape_from_args() -> u32 {
     let args: Vec<String> = px_cook::args_without_store().unwrap_or_default();
     let mut shape = 64_u32;
@@ -101,12 +40,6 @@ fn shape_from_args() -> u32 {
     shape.max(8)
 }
 
-/// **径向层数**（`--layers <n>`）：不给就用 `art/nebula/density_volume.toml` 里那一份。
-///
-/// ⚠ 单独给这个开关是因为**径向是体网格上最粗的那一维**：`layers = 64` 要覆盖
-///   1.0~3.0 的壳厚 ⇒ 每层 0.031 世界单位，而一条视线穿过壳要走 2.0
-///   ⇒ 径向的细节被三线性平均得最狠。而它比 `--shape` **便宜**：
-///   格数是 `res² × layers`，径向翻倍只让格数翻倍（面内翻倍是四倍）。
 fn layers_from_args() -> Option<u32> {
     let args: Vec<String> = px_cook::args_without_store().unwrap_or_default();
     let mut index = 0;
@@ -124,10 +57,6 @@ fn layers_from_args() -> Option<u32> {
     None
 }
 
-/// `art/nebula/density_volume.toml` 里写的层数（读不到/解不开就 `Err`，不猜）。
-///
-/// ⚠ 必须读**文件里那一份**，不能用 `DensityParams::default()`：两者不一致时
-///   `cloud.density` 会走"重采样"那条路（允许，但白花一次采样），而症状只是"变慢"。
 fn volume_layers() -> Result<u32, Fault> {
     let path = px_graph::workspace_root()
         .join("art")
@@ -140,12 +69,6 @@ fn volume_layers() -> Result<u32, Fault> {
     Ok(params.layers)
 }
 
-/// `art/nebulasky/stars.toml` 里那一份星场参数（读不到/解不开就 `Err`，不猜）。
-///
-/// ⚠ **两张图只有这一处星场参数来源**：体积图要给 `cloud.emission` 喂星（照亮气体），
-///   天空图要给 `sky.nebula` 喂星（画星点）。两处各抄一份 toml 的后果不是"报错"，
-///   而是**两份不同的星场** —— 天上的星与被气照亮的那批星对不上，而画面看起来
-///   "只是有点怪"。同一个节点名 + 同一份参数 ⇒ 同一个键 ⇒ 只烘一次。
 fn star_params() -> Result<StarsParams, Fault> {
     let path = px_graph::workspace_root()
         .join("art")
@@ -156,7 +79,6 @@ fn star_params() -> Result<StarsParams, Fault> {
     Ok(toml::from_str(&text).map_err(|err| format!("{} 解不开：{err}", path.display()))?)
 }
 
-/// 打印一张场的读数（形状对不对、值域有没有塌掉，一眼就能看出来）。
 fn report(name: &str, field: &Field) {
     let stats = field.stats();
     println!(
@@ -166,20 +88,11 @@ fn report(name: &str, field: &Field) {
 }
 
 fn main() -> Result<(), Fault> {
-    // ⚠ **第一行**：`--store <目录>` 要在任何 `begin` / `node_params` 之前落成 `PX_ART`
-    //   （参数目录不是节点键的一部分，见 `px_graph::driver` 的模块文档）。
-    //   本程序另外那几个手写开关（`--face` / `--shape` / `--layers`）的循环会把
-    //   不认识的参数原样跳过，所以 `--store` 与它们共存不会打架。
     px_cook::apply_store_args()?;
     let face = face_from_args();
     let shape = shape_from_args();
     let started = Instant::now();
 
-    // ── 图一：形状 → 密度体积 → 发射体积（画布是**体网格**）────────────────
-    // ⚠ 画布的形状必须与 `cloud.density` 拿到的参数**逐字一致**：只有"同网格"时它才走
-    //   纯搬运，不同网格会按体素坐标重采样（允许，但白花一次采样）。
-    //   ⇒ 默认层数从 `art/nebula/density_volume.toml` 读（不用 `Default`）；
-    //   `--layers` 给的则同时**覆盖那份 toml 里的值**（见下面 `params_override`）。
     let layers = match layers_from_args() {
         Some(given) => given,
         None => volume_layers()?,
@@ -189,9 +102,6 @@ fn main() -> Result<(), Fault> {
         name: "nebula".to_string(),
     });
 
-    // ⚠ **形状是参数**（没有画布了）：体网格场的形状由 `res × res × layers × 6` 推，
-    //   而 `cloud.density` 的 `res` 也是**绝对值** ⇒ 用**同一个** `shape` 变量喂两边，
-    //   "两处必须一致"这件事因此在脚本里看得见。
     let volume_shape = VolumeShape { res: shape, layers };
     let field_shape = field_params::Shape {
         width: volume_shape.res,
@@ -250,7 +160,6 @@ fn main() -> Result<(), Fault> {
         (),
     )?;
 
-    // 三轴扭曲：三个上游各管一个轴。⚠ 顺序上**先叠结构、最后扭曲**：反过来会把脊搅散。
     let warped = cached(
         &shape_graph,
         "warped",
@@ -263,21 +172,6 @@ fn main() -> Result<(), Fault> {
             offset_c: flow_third,
         },
     )?;
-    // ⚠⚠ **打破球对称的那一刀**（这一条是量出来的，不是风格偏好）。
-    //
-    // `cloud.emission` 的壳是**均匀包住观察者**的 ⇒ 每条视线都穿过等量的气
-    // ⇒ 画面上每一处都有底噪，**黑色不存在**。实测：
-    //
-    // | | p10 | p50 | p90 | p90/p50 |
-    // |---|---|---|---|---|
-    // | 参考 | 0.0051 | 0.0171 | 0.0972 | **5.7** |
-    // | 只有均匀壳 | 0.0110 | 0.0199 | 0.0341 | **1.7** |
-    //
-    // 两边"亮于 0.02 的面积"都是 ~45%（总能量相当），差的是**动态范围**：
-    // 我的暗部亮一倍、亮部暗三倍。⇒ 需要一大块**真正空掉的**方向，
-    // 气只聚在**一片**里（参考图正是"一团云 + 大片黑"）。
-    //
-    // 这一档把低频的团块场**二值化**成"有气 / 没气"，再乘进密度里。
     let extent = cached(
         &shape_graph,
         "extent",
@@ -307,9 +201,6 @@ fn main() -> Result<(), Fault> {
             mask: weight,
         },
     )?;
-    // ⚠ 密度 × 包络 ⇒ 包络为 0 的地方**连消光都是 0**（那才是真空），
-    //   不只是"暗一点" —— 这一条决定了暗部能不能真的压到 0 附近。
-    //   常数 0 走 `vacuum.toml`（`elem::ConstantParams` 的参数只有 `shape` 与 `value`）。
     let vacuum = cached(
         &shape_graph,
         "vacuum",
@@ -333,13 +224,6 @@ fn main() -> Result<(), Fault> {
     )?;
     report("shaped", shaped.value());
 
-    // ── **大尺度包络**（构图那一层）────────────────────────────────────────
-    //
-    // ⚠ 用户原话："每一面的 pattern 都是一样的，只是亮度不同"。量下来六面**不是**同一张图
-    //   （各自归一去均值后方差后相关 0.23~0.56），但**性格一样** —— 因为 `extent` 与密度
-    //   **同频**：掩码跟着同一批斑块走 ⇒ 换哪个方向都是"同一类云换个亮度"（统计均匀）。
-    //   这一层用**低频**场（0.35 对 blobs 的 1.4）当权重：`mix(真空, shaped, 权重)`
-    //   = `shaped × 权重` ⇒ 星云收进一片，并给出核心到边缘的落差。
     let envelope = cached(
         &shape_graph,
         "envelope",
@@ -370,22 +254,6 @@ fn main() -> Result<(), Fault> {
     )?;
     report("shaped2", shaped2.value());
 
-    // ── **暗尘带**：沿脊线雕细缝（参考图的"暗尘埃柱与暗带"）──────────────────
-    //
-    // ⚠⚠ 与上一轮失败那版（独立的 `filaments` 高频场）的差别就是这一刀的全部要点：
-    //   失败版 `mix(0, shaped, 门)` = `shaped × 门`，而门的均值在 0.5 附近
-    //   ⇒ **整片密度被砍半**（实测均值 0.055 → 0.021，局域对比反而掉）。
-    //   这一版 `mix(shaped, 0, 脊)` = `shaped × (1 − 脊)`，而脊**又细又稀**
-    //   （只取 ridged 场的顶部）⇒ 处处保持原样、只在脊线上开缝。
-    //   ⇒ "乘（稀疏的 1−x）"与"乘（稠密的 x）"是两回事：前者不动平均，后者必然砍一半。
-    //
-    // ⚠ 复用**已有的** `wisps`（ridged 场），不另造高频场：
-    //   1. 省掉一趟最贵的噪声（上一版 `filaments` 白花了 90 秒级的烘图开销，
-    //      而且它算完之后**根本没接进管线**（`density_volume` 一直吃的是 `shaped`）
-    //      —— 死重量不是无害的，它每次烘图都在收钱）；
-    //   2. 上一版 `frequency = 18` 超出 64³ 网格的奈奎斯特（≈32），
-    //      **那层细节根本产生不出来** —— 这是它的第二个败因。
-    //   `wisps` 频率 11 ⇒ 脊宽约 1 格、间距约 6 格，正是"尘带"的尺度。
     let carved = cached(
         &shape_graph,
         "carved",
@@ -393,9 +261,6 @@ fn main() -> Result<(), Fault> {
         node_params(&shape_graph, "carved")?,
         elem::RemapInput { field: wisps },
     )?;
-    // ⚠ `mix(a, b, mask) = a×(1−mask) + b×mask` ⇒ `mix(shaped, 真空, 脊)`
-    //   就是"沿脊线把密度雕低"。`carved.toml` 的 `out_max = 0.8` ⇒ 缝里留 20% 的气
-    //   —— 留一点消光，挡住缝后面的星点（雕到 0 会像"破洞"，星会透出来）。
     let textured = cached(
         &shape_graph,
         "textured",
@@ -419,13 +284,6 @@ fn main() -> Result<(), Fault> {
         },
         volume::DensityInput { density: textured },
     )?;
-    // ⚠⚠ **顺序在这里是有约束的**（2026-09-25 晚恢复"星光照亮气体"之后）：
-    //   依赖方向是 `density → stars → emission → sky` —— 星先烘（吃**密度**），
-    //   发射后烘（吃密度 + 星场，见 `EmissionInput::stars`）。
-    //   ⚠ 反过来（发射吃星、星又吃发射）就成环，图侧当场拒。
-    //   ⚠ 星场吃的是**密度**（不是发射）：发射是六通道交错，而星那一侧的 `sample_world`
-    //     按单通道索引 ⇒ 喂发射会读到错位数据（踩过的坑：星团落到没有红光的暗处 ✗）。
-    //   ⚠ 星场只在**体积图**里解析；天空图直接用这里的句柄（与 `volume` 同一条路）。
     let shape_stars = cached(
         &shape_graph,
         "stars",
@@ -446,13 +304,9 @@ fn main() -> Result<(), Fault> {
         },
     )?;
 
-    // ── 图二：整张天空（画布是立方贴图）──────────────────────────────────
     let sky_graph = begin(GraphSpec {
         name: "nebulasky".to_string(),
     });
-    // ⚠ **一个节点交出一整张天空贴图**（三条通道在算子内部各积一遍）。
-    //   `sky` 就是场景文档要引用的那个节点名（`nebulasky::sky`），而它是一条
-    //   **正常的图成员** —— 驱动照常进键、落盘、登记清单，这里不必手工拼贴图。
     let sky = cached(
         &sky_graph,
         "sky",
@@ -468,9 +322,6 @@ fn main() -> Result<(), Fault> {
         px_graph_schema::payload::Build::detail(sky.value())
     );
 
-    // ⚠ **必须收尾**：清单（`target/pcg/<图名>/manifest.json`）是 `finish()` 写出去的
-    //   —— 场景文档按 `"图名::节点名"` 取成员键走的就是它。不收尾的话产物**在 CAS 里**
-    //   但**没有名字**，场景那边会报"图里没有节点"。
     shape_graph.finish();
     sky_graph.finish();
     println!("共 {:.1} 秒", started.elapsed().as_secs_f64());

@@ -1,19 +1,3 @@
-// NURBS 曲面在规则格点上的求值：位置 + 法线。
-//
-// 语义逐条对齐 `px_nurbs_schema`（CPU 那一侧是真源，改那边必须改这里）：
-//
-//   * `span_of` ↔ `knot::span`：最后一个 ≤ t 的节点；**右端点取最后一段**
-//     （用 `degree` 那一段算出来的基函数全是 0 ⇒ 端点会求出原点）；
-//   * `basis_of` ↔ `knot::basis`：逐层 Cox-de Boor。第 0 层那一格在局部第 `degree` 个
-//     （窗口是 `[span−degree, span]`，右端点在闭区间上就是最后一格）；
-//     值那一层用**上一层的值**，导数那一层也是用**上一层的值**乘 `level` 的系数；
-//   * 混合与商法则 ↔ `Surface::patch`：`A00/A10/A01` 都是齐次量的加权和，
-//     除权得到点与两个偏导，法线是 `∂u × ∂v` 归一化。
-//
-// ⚠ 次数上限 `MAXD` 是**编译期**的：WGSL 不许变长数组、也不许从函数返回数组。
-//   超了在 Rust 那一侧当场拒（`MAX_DEGREE`），不会静默算错。
-// ⚠ 宽度是 `MAXD + 2`：多出来的那一格是**恒为 0 的哨兵**，这样 `previous[j + 1]`
-//   在 `j = degree` 上不必特判（CPU 那边是靠"行比窗口宽"达到同一件事）。
 
 const MAXD: u32 = 8u;
 const WIDTH: u32 = 10u;
@@ -34,7 +18,6 @@ struct Shape {
 };
 
 @group(0) @binding(0) var<uniform> shape: Shape;
-// 齐次控制点：`(w·x, w·y, w·z, w)` 四格一个，行主序 `u * nv + v`。
 @group(0) @binding(1) var<storage, read> hom: array<f32>;
 @group(0) @binding(2) var<storage, read> knots_u: array<f32>;
 @group(0) @binding(3) var<storage, read> knots_v: array<f32>;
@@ -48,7 +31,6 @@ fn knot_at(use_u: bool, index: u32) -> f32 {
     return knots_v[index];
 }
 
-// 参数 `t` 落在哪一段。
 fn span_of(use_u: bool, degree: u32, count: u32, t: f32) -> u32 {
     if (t >= knot_at(use_u, count)) {
         return count - 1u;
@@ -65,7 +47,6 @@ fn span_of(use_u: bool, degree: u32, count: u32, t: f32) -> u32 {
     return span;
 }
 
-// 那一层基函数（`values`）与它的一阶导（`slopes`），窗口 `[span−degree, span]` 按局部下标。
 fn basis_of(
     use_u: bool,
     t: f32,
@@ -112,10 +93,6 @@ fn surface_grid(@builtin(global_invocation_id) id: vec3<u32>) {
     if (id.x >= shape.out_u * shape.out_v) {
         return;
     }
-    // ⚠ **行主序 `i · out_v + j`**（`i` 沿 u、是外层）：装配那一侧
-    //   （`px_nurbs_schema::mesh::grid_mesh`）用的正是这一条。反过来写（`j · out_u + i`）
-    //   在正方形的格子上不会报错，只会把 uv 与顶点对调 —— 实测：17×17 的球面格点与
-    //   CPU 对账最大偏差 4（半径是 2）。
     let i = id.x / shape.out_v;
     let j = id.x % shape.out_v;
     let u = shape.u0 + shape.u_step * (f32(i) + shape.u_offset);

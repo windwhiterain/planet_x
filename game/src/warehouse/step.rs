@@ -41,7 +41,6 @@ fn update_price(stock: &mut Stock, reference: f32, curvature: f32, inertia: f32)
     }
 }
 
-/// 逐地方的挂价区间：ask = 最小挂价，bid = 最大挂价。当轮挂价的纯函数。
 fn local_quotes(warehouses: &[Warehouse], goods: usize) -> (Vec<Vec<f32>>, Vec<Vec<f32>>) {
     let localities = warehouses
         .iter()

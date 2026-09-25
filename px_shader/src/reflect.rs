@@ -1,37 +1,8 @@
-//! 材质契约的**反射**：从组装好的 WGSL 里读出参数块的布局与贴图格。
-//!
-//! 为什么是**读 shader**而不是再写一张 Rust 侧的表：Bevy 的绑定布局是编译期的
-//! （`Material::fragment_shader()` 是静态函数），产物能决定的只有槽里的源码。
-//! 那么「参数怎么排」这件事只能有**一个**来源 —— 就是那份源码。写第二张表
-//! 就是第二个会漂开的默认值。
-//!
-//! 为什么住在这个叶子 crate：烘图侧（`px_graphs` / `px_graph`）也要在**烘图时**反射一次
-//! （schema descriptor 进产物、配方参数在烘图时就校验），而 `px_render` 拖着 bevy 进不去。
-//! ⚠ 那个 `px_render` 是**已删的 Bevy 宿主**（§154）；§157 起同一个名字归 wgpu 宿主，
-//! 而它对今天那支同样成立（拖整棵 wgpu 树）。
-//!
-//! ⚠ **S8-c 标注：那条理由的历史形态已经没了**（§154 把 `px_render` 连 bevy 一起删了）。
-//! 今天这条约束仍然成立、而且更简单：**烘图侧要轻**（§100 的用户口径）⇒ 反射不能住进拖 wgpu
-//! 的宿主 crate。运行期那一侧今天用这份反射的是 `px_render`（§157 起的新义：那支裸 wgpu 宿主）。
-//! `px_protocol` 那边则被依赖门钉死只有 serde（`px_protocol/tests/crate_graph.rs`），
-//! naga 同样进不去 ⇒ 反射只能住这里，契约的**类型**（[`MaterialLayout`] 等）住 `px_protocol::material`。
-
 use px_protocol::material::{
     MATERIAL_BIND_GROUP, MAX_PARAMS_BYTES, MaterialLayout, PARAMS_ALIGN, PARAMS_BINDING, ParamKind,
     ParamSlot, TextureDimension, TextureSlot, texture_bindings, texture_slot_of,
 };
 
-/// 组装好的 WGSL 里**有哪些入口**：`(名字, 阶段)`，阶段取 `"vertex"` / `"fragment"` / `"compute"`。
-///
-/// ⚠ 为什么要有它：配方里的 `entry` 是一个**名字**，而"这个名字指不到东西"这件事
-/// 反射本身**看不见**（它只读参数块与贴图格）。代价付过（§136 实测）：
-/// `art/frame/default.toml` 写的是 `entry = "fs_main"`（全屏 pass 那条约定），
-/// 而它自己的 WGSL 里那个函数叫 `fragment` —— 那份产物一路烘到运行期，
-/// wgpu 才报"找不到入口"，而报错离病因（配方里一个词）已经很远。
-///
-/// ⇒ 这一条让烘图侧能**在烘的时候**问一句"这个入口在不在"，并把**实际的入口列出来**。
-/// 名字 → 阶段那一格用字符串而不是 `naga::ShaderStage`：naga 是这一层的私事，
-/// 烘图侧（`px_graphs`）不该为了问一句"有没有这个入口"而拖进 naga 的类型。
 pub fn entry_points(assembled: &str, name: &str) -> Result<Vec<(String, &'static str)>, String> {
     let module = naga::front::wgsl::parse_str(assembled)
         .map_err(|error| format!("{name} 解析失败：{}", error.emit_to_string(assembled)))?;
@@ -43,10 +14,6 @@ pub fn entry_points(assembled: &str, name: &str) -> Result<Vec<(String, &'static
                 naga::ShaderStage::Vertex => "vertex",
                 naga::ShaderStage::Fragment => "fragment",
                 naga::ShaderStage::Compute => "compute",
-                // ⚠ `ShaderStage` 是 `#[non_exhaustive]`（naga 29 里后面还有 Task / Mesh /
-                // 光追那几档，WGSL 前端解不出来）。这一格不该出现 —— 但它**不许 panic、
-                // 也不许被悄悄咽掉**：真出现了，"这一份 WGSL 有哪几个入口"这条读数必须
-                // 仍然说得清（§104 第 12 条那条口径：不可用就降级，不做替代读数）。
                 _ => "其它（这一版不认识的阶段）",
             };
             (point.name.clone(), stage)
@@ -54,10 +21,6 @@ pub fn entry_points(assembled: &str, name: &str) -> Result<Vec<(String, &'static
         .collect())
 }
 
-/// 反射：从组装好的 WGSL 里读出材质契约。
-///
-/// `assembled` 必须是**组装过的**文本（`#import` 展开、bevy 外部符号换成桩），
-/// 也就是 [`crate::assemble::render_source`] 的产物 —— 没组装过的入口连解析都过不去。
 pub fn reflect_assembled(assembled: &str, name: &str) -> Result<MaterialLayout, String> {
     let module = naga::front::wgsl::parse_str(assembled)
         .map_err(|error| format!("{name} 解析失败：{}", error.emit_to_string(assembled)))?;
@@ -122,9 +85,6 @@ pub fn reflect_assembled(assembled: &str, name: &str) -> Result<MaterialLayout, 
                 let dimension = match (dim, arrayed) {
                     (naga::ImageDimension::D2, false) => TextureDimension::D2,
                     (naga::ImageDimension::Cube, false) => TextureDimension::Cube,
-                    // 每级一张影子 atlas（金字塔降采样）：`texture_depth_2d_array`（每面一层）。
-                    // ⚠ `px_pass::Dimension::D2Array` 早就有（`Slot::depth` 那一刀），
-                    //    反射这层校验当时没跟上 ⇒ 它把降采样挡在门外。
                     (naga::ImageDimension::D2, true) => TextureDimension::D2Array,
                     _ => {
                         return Err(format!(
@@ -137,7 +97,6 @@ pub fn reflect_assembled(assembled: &str, name: &str) -> Result<MaterialLayout, 
                 textures.push(TextureSlot {
                     binding: binding.binding,
                     dimension,
-                    // ⚠ 从反射的 `ImageClass` 来，不从名字猜（见 `TextureSlot::depth`）。
                     depth: matches!(class, naga::ImageClass::Depth { .. }),
                 });
             }
@@ -166,9 +125,6 @@ pub fn reflect_assembled(assembled: &str, name: &str) -> Result<MaterialLayout, 
                 texture_bindings()
             ));
         };
-        // ⚠ 放宽一格（用户裁决「全屏 pass 也要支持 import」的后续）：`texture_2d` 那几格
-        //    **也接受 `texture_depth_2d_array`**（金字塔降采样要把上一级的影子 atlas 绑在
-        //    贴图格上）。反向不放宽：数组纹理的格子不许塞 2D。
         if dimension != texture.dimension
             && !(dimension == TextureDimension::D2
                 && texture.dimension == TextureDimension::D2Array)
@@ -278,9 +234,6 @@ mod tests {
         )
     }
 
-    /// 契约的**形状**由 shader 自己的结构体说了算（不是 Rust 侧那张老表）。
-    /// ⚠ 这里钉的是**名字与类型**，不是具体偏移：偏移是 shader 的事，改布局是作者的权利
-    /// （§75 的 W4：原来把偏移钉死，等于让「改结构体」先撞上离线门）。
     #[test]
     fn the_cloud_params_come_from_the_shader_itself() {
         let layout = reflect("clouds.wgsl");
@@ -318,7 +271,6 @@ mod tests {
         );
     }
 
-    /// 贴图格：云只有一张 cube（第 5 格），地表有两张 2D（1、3）+ 一张 cube（5）。
     #[test]
     fn the_texture_slots_follow_the_convention() {
         let clouds = reflect("clouds.wgsl");
@@ -348,11 +300,6 @@ mod tests {
         assert!(err.contains("结构体"), "报错要说清要什么：{err}");
     }
 
-    /// 入口清单：**阶段与名字都要有**，而且只列真的声明了的。
-    ///
-    /// ⚠ 这一条存在的理由是一个付过代价的坑（§136）：配方里那个 `entry` 名字指不到东西时，
-    /// 以前**没有任何一处**查得出来 —— 反射只看参数块与贴图格。烘图侧现在靠这个函数
-    /// 在**烘的时候**就问一句"这个入口在不在"，并把它实际的入口列进报错里。
     #[test]
     fn the_entry_points_are_listed_with_their_stage() {
         let source = "struct P { x: f32 };\n\
@@ -370,7 +317,6 @@ mod tests {
             ],
             "名字与阶段都要报（次序是声明次序）"
         );
-        // 指不到的名字**不在**这张表里 —— 这正是调用方要问的那一句。
         assert!(!entries.iter().any(|(name, _)| name == "fs_main"));
     }
 
@@ -388,8 +334,6 @@ mod tests {
         assert!(err.contains("第 2 格"), "报错要点名那一格：{err}");
     }
 
-    /// 组装器必须把 `#{MATERIAL_BIND_GROUP}` 替成**运行期那个数**（Bevy 的 3），
-    /// 否则门测的不是同一份文本（§75 的 2/3 那颗雷）。
     #[test]
     fn the_assembled_text_uses_the_runtime_bind_group() {
         let source = "#import bevy_pbr::forward_io::VertexOutput\n\

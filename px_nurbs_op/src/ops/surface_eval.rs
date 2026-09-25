@@ -7,7 +7,6 @@ px_graph_schema::px_body! {
     |p, i| crate::ops::surface_eval::eval(p, i.surface.value())?
 }
 
-/// 在一个固定参数 `(u, v)` 上求值（来自参数文件）。
 pub fn eval(
     params: &params::eval::EvalParams,
     surface: &px_nurbs_schema::Surface,

@@ -1,32 +1,9 @@
-//! 贴图与图像：一份贴图的全部字节（`TextureData`）、mip 链与极冠滤波、覆盖度立方图、
-//! 星空、环带贴图，以及顶点数据的二维展平。
-//!
-//! 边界：这一档只管"字节怎么摆"。逐 texel 的颜色怎么算（`shade` / `surface_color`）在
-//! `super::shade`，环的**几何**在 `super::mesh`，写进 CAS 在 `super::store`。
-//! `TextureData::new` 是唯一的构造口，别绕过它——载荷与形状不符要在这里当场炸。
-//! mip 的 `% w` 环绕、`.min(h - 1)` 夹取、`/ 4` 取整、按面分块都是逐字搬自
-//! `px_render/src/planet.rs` 的口径，别拿"看起来等价"的写法替。
-
 use px_field_schema::field::Field;
 use px_protocol::art::{CUBE_COLUMNS, CUBE_FACES, Domain, TextureFormat};
 
 use super::shade::{half_from_f32, push_color};
 
-// ---------------------------------------------------------------------------
-// 贴图载荷
-// ---------------------------------------------------------------------------
-//
-// ⚠ `TextureData` **不在这里**（它搬去了 `px_protocol::art`，与 `VolumeData` / `MeshData`
-//   同住）：算子的 `Payload` 必须由 schema 层声明，而 schema 在 `px_graph` 下面
-//   ⇒ 载荷类型住在 `px_graph` 里的时候，**算子交不出贴图**。
-//   这一份只从上面把它引进来（下面还有一句 re-export，`px_graph::generate::TextureData`
-//   这个路径对调用方保持不变）。
-
 pub use px_protocol::art::TextureData;
-
-// ---------------------------------------------------------------------------
-// mip 链与极冠（逐字搬自 px_render/src/planet.rs）
-// ---------------------------------------------------------------------------
 
 fn mip_chain_cube(width: u32, height: u32, base: &[u8]) -> (Vec<u8>, u32) {
     let mut chain = base.to_vec();
@@ -162,10 +139,6 @@ pub(super) fn pole_cap_filter(pixels: &mut [u8], width: u32, height: u32) {
     }
 }
 
-/// 像素 → 整条 mip 链。渲染器那份在这里还顺手包了个 bevy `Image`；字节与这里相同。
-///
-/// `super::shade` 的 `surface_color` 也走这条口（颜色图与发光图各一次），所以是
-/// `pub(super)`；"选 cube 链还是平铺链"由调用方按投影给。
 pub(super) fn image_from(width: u32, height: u32, data: Vec<u8>, cube: bool) -> TextureData {
     let (chain, levels) = if cube {
         mip_chain_cube(width, height, &data)
@@ -175,11 +148,6 @@ pub(super) fn image_from(width: u32, height: u32, data: Vec<u8>, cube: bool) -> 
     TextureData::new(width, height, 1, levels, TextureFormat::Rgba8Srgb, chain)
 }
 
-// ---------------------------------------------------------------------------
-// 覆盖度立方图
-// ---------------------------------------------------------------------------
-
-/// 覆盖度 + 三轴梯度 → RGBA16F 立方图（6 层，1 级 mip）。校验逐字照搬。
 pub fn coverage_cube(mask: &Field, slopes: [&Field; 3]) -> Result<TextureData, String> {
     let field = mask;
     if field.projection != Domain::CubeMap {
@@ -230,15 +198,6 @@ pub fn coverage_cube(mask: &Field, slopes: [&Field; 3]) -> Result<TextureData, S
     ))
 }
 
-/// **三条通道 → 一张 `Rgba16Float` 立方贴图**（HDR）。
-///
-/// ⚠ 与 [`field_cube`] 的差别：那一档把**一个标量**塞进 R、G/B 留 0（"把场当数据贴图"），
-///   这一档把**三条通道**各自塞进 R/G/B。星云那类"自己会发光"的背景要的是后者 ——
-///   它的颜色就是它积出来的颜色，而**亮度可以超过 1** ⇒ 用半精度浮点，不是 8 位 sRGB
-///   （8 位会把高光砍在 1.0，而"亮核"正是靠超过 1 的那一段）。
-///
-/// ⚠ 三张场必须是**同一张立方贴图**的形状：错一张就会把六面拼歪（判据与
-///   [`coverage_cube`] / [`field_cube`] 同一条）。
 pub fn color_cube(red: &Field, green: &Field, blue: &Field) -> Result<TextureData, String> {
     let face = red.width.max(1);
     for (name, field) in [("R", red), ("G", green), ("B", blue)] {
@@ -276,14 +235,6 @@ pub fn color_cube(red: &Field, green: &Field, blue: &Field) -> Result<TextureDat
     ))
 }
 
-/// **一张 CubeMap 场 → 一张立方贴图**（6 层、1 级、RGBA16F；`R` = 场值，`A` = 1）。
-///
-/// 与 [`coverage_cube`] 的差别：**不掺梯度**。那一张是"云覆盖度 + 三轴梯度"（shader 里
-/// 用法线做细节），这一张是"**把一张场当数据贴图挂到材质上**" —— 任何球面数据都行
-/// （气态巨行星的条带场、极冠、气候图……）。
-///
-/// ⚠ 形状判据与 [`coverage_cube`] 同一条（CubeMap、`height = width × 6`）：挂到
-///   `texture_cube` 上的东西必须是六张面叠成的产物，否则采样出来的是六张不相干的图。
 pub fn field_cube(field: &Field) -> Result<TextureData, String> {
     if field.projection != Domain::CubeMap {
         return Err(format!(
@@ -302,7 +253,6 @@ pub fn field_cube(field: &Field) -> Result<TextureData, String> {
 
     let mut bytes = Vec::with_capacity(field.data.len() * 8);
     for value in &field.data {
-        // R = 值；G / B 留 0、A = 1（与覆盖度那张同一个摆法：一个标量场占满 8 字节/texel）。
         bytes.extend_from_slice(&half_from_f32(*value).to_le_bytes());
         bytes.extend_from_slice(&0_u16.to_le_bytes());
         bytes.extend_from_slice(&0_u16.to_le_bytes());
@@ -319,10 +269,6 @@ pub fn field_cube(field: &Field) -> Result<TextureData, String> {
     ))
 }
 
-// ---------------------------------------------------------------------------
-// 星空
-// ---------------------------------------------------------------------------
-/// 星空：`face` 面的 6 层立方图（1 级 mip，与渲染器 `star_cube` 写进 `Image.data` 的相同）。
 pub fn stars(face: u32) -> TextureData {
     let size = face.max(4);
     let mut data = Vec::with_capacity((size * size * 6 * 4) as usize);
@@ -365,11 +311,6 @@ pub fn stars(face: u32) -> TextureData {
     TextureData::new(size, size, CUBE_FACES, 1, TextureFormat::Rgba8Srgb, data)
 }
 
-// ---------------------------------------------------------------------------
-// 环：贴图
-// ---------------------------------------------------------------------------
-
-/// 环带贴图（从 `ring_image` 逐字搬）。
 pub fn ring_band(width: u32, height: u32) -> TextureData {
     let mut data = Vec::with_capacity((width * height * 4) as usize);
     for _row in 0..height {
@@ -395,7 +336,6 @@ pub fn ring_band(width: u32, height: u32) -> TextureData {
     image_from(width, height, data, false)
 }
 
-/// 顶点数据的二维展平；只有 `super::mesh` 的 `ring_mesh` 用（三维那份 `flatten3` 跟着它）。
 pub(super) fn flatten2(values: &[[f32; 2]]) -> Vec<f32> {
     let mut out = Vec::with_capacity(values.len() * 2);
     for value in values {

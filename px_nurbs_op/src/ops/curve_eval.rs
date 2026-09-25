@@ -7,7 +7,6 @@ px_graph_schema::px_body! {
     |p, i| crate::ops::curve_eval::eval(p, i.curve.value())?
 }
 
-/// 在一个固定参数上求值（参数来自参数文件的 `u`）。
 pub fn eval(
     params: &params::eval::EvalParams,
     curve: &px_nurbs_schema::Curve,

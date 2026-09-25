@@ -1,29 +1,4 @@
-//! **px-scene ⇄ px-pass 的交换边界**，外加**跨进程那一层**。
-//!
-//! ## 交换边界（crate 名义职责的那句话）
-//!
-//! 只装两边都要认的东西：材质参数/绑定的契约（`material`）、场景文档与帧图（`scene`）、
-//! 产物的信封（`art` / `stream` / `wire`）、以及握手身份（`SCHEMA_VERSION` /
-//! `protocol_hash` / `ProtocolId` / `Handshake`）。
-//!
-//! ⚠ pcg **内部**的序列化不在这里，各自归各自的 crate：经济世界视图 → `game`（`sim`）。
-//!
-//! ## 跨进程那一层（`render` / `client` / `frame`）
-//!
-//! 宿主 ⇄ 它的客户端之间那三份形状（作业请求 / 回读报告 / 租约、连接与握手那半、
-//! 四种帧与 `[u32 小端长度][载荷]` 的信封）。
-//!
-//! ⚠ 它们**本该住在宿主 `px_render` 里**，而"不许住在那边"的理由不是分层，是**编译**：
-//! 本 crate 的快照测试要按**真类型**构造它们，若它们住在 `px_render`，这条 dev 边就是
-//! `px_protocol` → `px_render` → wgpu / naga / winit —— **协议测试要编一整套 GPU 栈**。
-//!
-//! ⚠ 曾经试过把它们与握手身份拆去**两个**旁支 crate（`px_handshake` / `px_host_protocol`），
-//! 那是**让测试去决定生产结构**：`ProtocolId` / `SCHEMA_VERSION` / `wire` 本来就是协议的定义，
-//! 把它们搬出协议 crate，只是为了给一条 dev 边让路。⇒ 收回来：本 crate 是**冻结且极小**的
-//! 两份声明式的形状（协议 + 跨进程），`tests/crate_graph.rs` 钉着"运行时只有 serde"。
-//!
-//! ⚠ 运行时依赖只有 `serde` / `serde_json`；这两份形状都**不带 GPU 栈**，所以协议测试
-//! 仍然不为它们编 wgpu。
+//! See docs/protocol.md
 
 pub mod art;
 pub mod client;
@@ -34,13 +9,6 @@ pub mod payload;
 pub mod render;
 pub mod scene;
 pub mod sparse;
-// ⚠ `rows`（按输出分区的并行）**暂时没挂上去** —— 它的判据（单测级的逐位相同）已经通过，
-//   但**产物级**还没证明：把 `field.fbm3` / `cloud.emission` 换成并行之后，
-//   同一份参数烘出来的场产物键与串行版**不同**（`91ca05e2ede7` vs `3bedc81c3c2d`），
-//   而本仓的地基是「键 = 完整产物字节」⇒ 那会让缓存永不命中、症状只是"每次都重烘"。
-//   在证明之前不许接线。文件留在 `src/rows.rs`（带两条通过的判据），
-//   证明之后把下面这一行的注释去掉即可。
-// pub mod rows;
 pub mod stream;
 pub mod wire;
 
@@ -59,12 +27,6 @@ pub use wire::{Blob, BlobHeader, DType, WireError};
 
 pub const PROTOCOL_SNAPSHOT: &str = include_str!("../snapshots/protocol.snapshot.json");
 
-/// 本仓库这一份协议指纹：**快照文本的 FNV-1a**。
-///
-/// ⚠ 快照（`snapshots/protocol.snapshot.json`）记的是**这一侧**的形状（`material` / `scene` /
-/// `art` / `stream` / `wire` + 跨进程那三份的稳定 JSON）；它进 `protocol_hash()`，
-/// 而那个指纹**闸着跨进程握手** ⇒ 改协议必须显式更新快照
-/// （`PX_UPDATE_SNAPSHOT=1 cargo test -p px_protocol`）。
 pub fn protocol_hash() -> u64 {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for byte in PROTOCOL_SNAPSHOT.as_bytes() {
@@ -78,13 +40,6 @@ pub fn protocol_hash_hex() -> String {
     format!("{:016x}", protocol_hash())
 }
 
-/// v10 → v11：`Job` 多一路 `Stable`（等到条件成立再逐帧采样）、`Report` 多 `pair`（配对差）、
-/// `PerfReport` 多 `frames`/分位数/`key`/`waits`/`gpu_ms`/`compare`。
-/// 老的两路（`Shots` / `Perf{windows,drop}`）一个字段都没动，老脚本照走。
-///
-/// v11 → v12：场景产物从「行星配方」（`parts[]` 带 `kind`）改成**通用渲染文档**
-/// （`objects[]` + `lights[]` + `environment`，`SCENE_SCHEMA` 1 → 2）；资产多一种
-/// `Texture`、位深多一档 `U16`。渲染器不再认识「行星 / 云 / 大气」。
 pub const SCHEMA_VERSION: u32 = 12;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -95,7 +50,6 @@ pub struct ProtocolId {
 }
 
 impl ProtocolId {
-    /// 本进程这一份：版本取 [`SCHEMA_VERSION`]、指纹取 [`protocol_hash`]。
     pub fn local() -> Self {
         Self {
             schema_version: SCHEMA_VERSION,
@@ -113,7 +67,6 @@ pub struct Handshake {
 }
 
 impl Handshake {
-    /// 本进程这一份（握手帧上发出去的就是它）。
     pub fn local() -> Self {
         Self {
             id: ProtocolId::local(),

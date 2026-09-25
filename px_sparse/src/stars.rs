@@ -1,14 +1,3 @@
-//! **星场**：R3 里的一批点光源 = 统一稀疏索引 + 一张点表。
-//!
-//! ⚠ 载荷布局（每颗星 [`StarField::STRIDE`] 个 f32）：`[x, y, z, 亮度, r, g, b, 未用]`，
-//!   **按 (brick, 细格) 排**（造格时按 [`Buckets::order`] 重排）⇒ 一个细格的星是连续的一段。
-//!
-//! ⚠⚠ 为什么不是一张立方图（旧 `field.stars`）：见 [`crate::grid`] 的文件头。
-//!   一句话：**星是点，点不该被存进"按方向参数化"的网格里** ——
-//!   那样的网格让世界空间里的圆变成椭圆（实测面心 σ 径向/切向 1.02、面角 1.57），
-//!   让星的位置密度按 `|dₓ|+|d_y|+|d_z|` 偏（实测 1.43x），还要求星图与天空面配对分辨率
-//!   （实测不配对时面角/面心的亮面积比 1.58x —— 用户看到的就是这个）。
-
 use std::ops::Range;
 
 use px_graph_schema::Build;
@@ -18,31 +7,20 @@ use std::collections::BTreeMap;
 
 use crate::grid::{Buckets, Grid, GridMeta};
 
-/// 一颗星的读数（判据与探针用；热循环里直接读 `stars` 那一段）。
-///
-/// ⚠ 它住在**载荷旁边**（不是协议层）：它是"这份载荷怎么解读"的一部分，
-///   而协议层只认"有一种资产叫 `StarField`"。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Star {
     pub position: [f32; 3],
     pub brightness: f32,
-    /// 色（线性 RGB，已含星簇的色温）。
     pub tint: [f32; 3],
 }
 
-/// **R3 星场**：索引 + 点表（`StarField::STRIDE` 个 f32/颗）。
-///
-/// ⚠ 空间参数（`cell` / `origin` / `dims`）住**清单参数**，点表住 blob
-///   —— 与 `VolumeData` 的 `inner`/`outer` 同一个口径。
 #[derive(Debug, Clone, PartialEq)]
 pub struct StarField {
     pub grid: Grid,
-    /// 每颗星 `STRIDE` 个 f32，**按 (brick, 细格) 排**。
     pub stars: Vec<f32>,
 }
 
 impl StarField {
-    /// 每颗星的 f32 数。
     pub const STRIDE: usize = 8;
 
     pub fn count(&self) -> usize {
@@ -58,7 +36,6 @@ impl StarField {
         }
     }
 
-    /// 从"位置 + 亮度 + 色"造一份（索引由 [`Grid::build`] 造，点表按它重排）。
     pub fn build(
         meta: GridMeta,
         positions: &[[f32; 3]],
@@ -93,12 +70,10 @@ impl StarField {
         Ok(Self { grid, stars })
     }
 
-    /// 一个细格里的星（下标区间）。
     pub fn cell_stars(&self, brick: u32, local: u32) -> Option<Range<usize>> {
         self.grid.cell_range(brick, local)
     }
 
-    /// 一个 AABB 里所有非空细格（回调：细格坐标 + 星区间）。
     pub fn for_each_cell_in(
         &self,
         low: [f32; 3],
@@ -108,12 +83,10 @@ impl StarField {
         self.grid.for_each_cell_in(low, high, f);
     }
 
-    /// 一个 brick 里所有非空细格（回调：局部键 + 星区间）。
     pub fn for_each_occupied(&self, brick: u32, f: impl FnMut(u32, Range<usize>)) {
         self.grid.for_each_occupied(brick, f);
     }
 
-    /// 判据用：遍历所有星（下标 + 读数）。
     pub fn for_each_star(&self, mut f: impl FnMut(usize, Star)) {
         for index in 0..self.count() {
             f(index, self.star(index));
@@ -121,10 +94,7 @@ impl StarField {
     }
 }
 
-/// 星表的 blob：`[n, STRIDE]` 一段 f32（**索引住清单参数**）。
 impl Build for StarField {
-    /// 星场没人看（渲染器不读它，只喂天空与光照烘焙）⇒ 不掺评审相机。
-
     fn detail(payload: &Self) -> String {
         let mut min = f32::INFINITY;
         let mut max = f32::NEG_INFINITY;
@@ -145,7 +115,6 @@ impl Build for StarField {
     fn encode(payload: &Self) -> Result<PayloadBundle, String> {
         let meta = payload.grid.meta;
         payload.grid.validate()?;
-        // ⚠ 掩码按 `u32` 词存（WGSL 没有 64 位整数）⇒ 进 blob 不需要任何拆装。
         let mask = payload.grid.brick_mask.clone();
         let blobs = vec![
             Blob::from_f32(
@@ -258,7 +227,6 @@ mod tests {
     }
 
     fn meta(cell: f32, reach: f32) -> GridMeta {
-        // 盒子每轴对齐到 CHUNK_CELLS 的整数倍（块对齐）。
         let raw = (2.0 * (reach + 2.0 * cell) / cell).ceil() as u32;
         let block = crate::grid::CHUNK_CELLS;
         let dims = raw.div_ceil(block) * block;
@@ -269,7 +237,6 @@ mod tests {
         }
     }
 
-    /// **往返恒等**（逐位）—— 内容寻址的地基。
     #[test]
     fn a_star_field_survives_the_round_trip() {
         let positions = shell(4096, 1.5);
@@ -289,8 +256,6 @@ mod tests {
         }
     }
 
-    /// ⚠⚠ **空则子全空**：造格之后，任何一个空细格都必须回 `None`
-    ///   （不管是"块空"、"brick 空"还是"掩码位是 0"那一条路）。
     #[test]
     fn an_empty_cell_answers_none_however_it_is_empty() {
         let positions = shell(2000, 1.5);
@@ -298,7 +263,6 @@ mod tests {
         let tint = vec![[1.0; 3]; positions.len()];
         let meta = meta(0.1, 1.5);
         let field = StarField::build(meta, &positions, &brightness, &tint).expect("造");
-        // 逐格走一遍整盒：有星的格必须回 Some，没星的必须回 None。
         let mut owned = 0;
         for z in 0..meta.dims[2] as i64 {
             for y in 0..meta.dims[1] as i64 {
@@ -319,7 +283,6 @@ mod tests {
         assert_eq!(owned, field.count(), "有星没被任何细格认领（或有格多认了）");
     }
 
-    /// **点表按 (brick, 细格) 排**：一个细格的星在数组里是**连续一段**。
     #[test]
     fn each_cell_owns_a_contiguous_run_of_stars() {
         let positions = shell(3000, 1.5);
@@ -331,7 +294,6 @@ mod tests {
             seen += range.len();
             for index in range {
                 let star = field.star(index);
-                // 这颗星必须真的落在它被登记的那个细格里。
                 let cell = field.grid.meta.cell_of(star.position);
                 let (_, _, local) = field.grid.meta.decompose(cell);
                 let brick = field.grid.brick_at(cell).expect("有星必然有 brick");
@@ -345,7 +307,6 @@ mod tests {
         assert_eq!(seen, field.count(), "有星不在任何细格里");
     }
 
-    /// **位置一一对应**：造格只重排、不改变（位置、亮度、色）的三元组。
     #[test]
     fn the_build_only_reorders() {
         let positions = shell(512, 1.2);
@@ -367,7 +328,6 @@ mod tests {
         }
     }
 
-    /// **确定性**：同输入两遍逐位相同。
     #[test]
     fn the_same_input_gives_the_same_field() {
         let positions = shell(1024, 1.5);
@@ -379,7 +339,6 @@ mod tests {
         assert_eq!(one.stars, two.stars);
     }
 
-    /// **格外面当场拒**（静默丢星 = 画面上"少了几颗"，最难查）。
     #[test]
     fn a_position_outside_the_grid_is_refused() {
         let positions = vec![[0.0, 0.0, 0.0], [99.0, 0.0, 0.0]];
@@ -390,13 +349,6 @@ mod tests {
         assert!(err.contains("格外面"), "报的是：{err}");
     }
 
-    /// ⚠⚠ **同一个 brick 的项必须连续**：造格的排序键是 `(块, brick, 细格)` 三元组，
-    ///   **不是细格的线性键** —— 细格键按 `(z, y, x)` 扫，一行 `x` 扫过去要跨过一排
-    ///   brick，换行之后 brick 键又跳回去 ⇒ 同一个 brick 被切成很多段。
-    ///
-    ///   实测（壳上 3000 个点、细格 0.05）：按细格键排会得到 **2387 段**，而真实 brick
-    ///   只有 **224** 个；症状是"绝大多数 brick 只有一颗星、查询大批落空"
-    ///   （同一次实测里逐格回走的星数只有 286/3000）。
     #[test]
     fn the_items_of_one_brick_stay_contiguous() {
         let positions = shell(3000, 1.5);

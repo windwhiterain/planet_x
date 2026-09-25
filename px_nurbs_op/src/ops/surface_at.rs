@@ -7,7 +7,6 @@ px_graph_schema::px_body! {
     |p, i| crate::ops::surface_at::eval(p, i.surface.value(), i.point.value())?
 }
 
-/// **在别的节点给的参数上求值**：只读上游那个 `PointData` 的 `uv`。
 pub fn eval(
     params: &params::eval::EvalParams,
     surface: &px_nurbs_schema::Surface,

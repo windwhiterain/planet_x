@@ -305,7 +305,6 @@ fn ladder_weights(args: &Args) -> Vec<f32> {
         .collect()
 }
 
-/// 一种商品这一轮的最低保本价：所有能产它的工艺里，投入成本 ÷ 产出量的最小值
 fn break_even(lab: &Lab, good: usize, prices: &[f32]) -> f32 {
     let mut best = f32::INFINITY;
     for department in &lab.departments.departments {

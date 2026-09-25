@@ -1,29 +1,3 @@
-//! **`px`**：stage 1（build graph）与 stage 2（数据图）的**唯一 driver**
-//! （`docs/system/build-graph.md` §182 里那两个词，终于有对应的 bin 了）。
-//!
-//! ```text
-//! px list                              计划：逐条打印 id / 声明 / 根 / 源 / key / 有|缺
-//! px build [--gc] [--deep] [--target]  stage 1：编缺的那些；（--gc 顺手回收非活实例库）
-//! px run <图> [--build] [--store <目录>] [图自己的参数…]
-//!                                      两个 stage 顺序执行
-//! ```
-//!
-//! ⚠ `px run --store <目录>` 是**给调参面板用的**（`px_render/src/edit.rs`）：它把这一趟
-//!   读参数的目录从 `art/` 换到别处（会话副本），再原样转交给图 exe。它**不进键** ——
-//!   产物键跟参数的字节走，不跟目录走（`px_graph::driver` 的模块文档有整段）。
-//!
-//! ⚠ `list` 与 `build`（含 `--gc`）**不需要图名**：stage 1 是 **crate** 的属性，不是哪张图的
-//!   —— 这正是把两个 driver 并成一个的理由。
-//!
-//! ⚠ 节点从哪儿来：跑一遍 `px_graphs::insts::build()` 建图（`20` §184/§190 的 stage 1 声明）。
-//!   而**图里那些事实**（op id / 根 / 源 / 体）今天来自 `inst_recipe.rs` 那张数据表：
-//!   生成器（`px_graphs/build.rs`）把它翻成 `OUT_DIR/insts_gen.rs` 的类型 + 一张
-//!   `insts_gen_catalogue.rs` 的事实表（`docs/system/codegen-types.md`）。**文本扫描不再参与执行**。
-//!
-//! ⚠ 这里**没有一行"怎么编"**：都在 `px_cook::inst::BuildGraph` 上（`missing()` /
-//!   `compile_missing()` / `compile_one()`）—— 这一层只管"取节点、打印、拼汇总行、删垃圾、
-//!   起图 exe"。编译失败的 **stderr 原样透出**，失败**不写缓存**、直接非零退出（`19` §176）。
-
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -53,20 +27,16 @@ fn usage() -> String {
         .to_string()
 }
 
-/// **stage 1 的节点从哪儿来**：跑一遍 `px_graphs::insts::build`（build graph 的声明），
-/// 收它建出来的节点 —— 不读任何手写清单（`20` §184/§190）。
 fn graph() -> BuildGraph {
     let mut graph = BuildGraph::new();
     px_graphs::insts::build(&mut graph);
     graph
 }
 
-/// 生成期事实（每条实例的 op id / key / 体住哪）：**错误映射**与"点名"用它。
 fn codegen() -> &'static px_cook::inst::InstCatalogue {
     px_graphs::insts::codegen()
 }
 
-/// `px list`：`id / 声明 / 根 / 源 / key / 有|缺`。
 fn list() -> Result<(), String> {
     let graph = graph();
     let instances = graph.instances();
@@ -87,10 +57,6 @@ fn list() -> Result<(), String> {
     Ok(())
 }
 
-/// `px build [--gc] [--deep] [--target]`：只编**缺**的那些（`--gc` 顺手回收）。
-///
-/// ⚠ 一条一条编（不是 `compile_missing()` 那样"第一条失败就回"）：这样**剩下的也编得完**，
-///   而汇总那行仍报得出 `失败 c`。两处用的是**同一个** `compile_one`。
 fn build(flags: &[String]) -> Result<(), String> {
     let gc = flags.iter().any(|flag| flag == "--gc");
     let deep = flags.iter().any(|flag| flag == "--deep");
@@ -147,15 +113,6 @@ fn build(flags: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-/// `--gc`：删掉**非活**的实例构件（实例库是**纯缓存**）。
-///
-/// **为什么安全**：实例库的**文件名就是它的构建指纹**（`19` §179.2），而那个指纹由
-/// `px_cook::inst::key` 从盘上重算得出来、`px build` 随手重编得回来 ⇒ 误删的代价上限是
-/// **一次重编**，不伤任何正确性：产物键里进的是算出来的 key，不是"盘上有没有这个文件"。
-///
-/// ⚠ **活键集 = 本 crate 的 build graph 里那些节点**（跑 `insts::build`）—— 判活**只按本 crate**。
-///   若将来有**另一份图程序 crate**也声明实例，它的库会被判成非活（照样可重建，但白编一次）。
-///   到那时 gc 得把**多份 build graph** 合起来判活（或按 key 去问每个图程序），别只改这里一半。
 fn collect_garbage(graph: &BuildGraph, deep: bool, target: bool) -> Result<(), String> {
     let root = px_cook::workspace_root();
     let inst_dir = root.join("target").join("pcg").join("inst");
@@ -203,9 +160,6 @@ fn collect_garbage(graph: &BuildGraph, deep: bool, target: bool) -> Result<(), S
     }
 
     if deep {
-        // ⚠ 扫的是 `target/jit/` **底下的每一格**，不只是"这次删掉的那些 dll 对应的 key"：
-        //   dll 早被手工删掉、或从没拷过去的 key，也会在 `target/jit/<key>/` 里留下源码目录
-        //   （实测踩过：那种目录在盘上留了五六份）。非活 = 不在活键集里，与"dll 在不在"无关。
         let jit = root.join("target/jit");
         if jit.is_dir() {
             let mut dirs: Vec<PathBuf> = std::fs::read_dir(&jit)
@@ -216,7 +170,6 @@ fn collect_garbage(graph: &BuildGraph, deep: bool, target: bool) -> Result<(), S
                 .collect();
             dirs.sort();
             for dir in dirs {
-                // 共享的编译中间物不按 key 分（由 `--target` 管），别在这儿误删。
                 if dir.file_name().and_then(|name| name.to_str()) == Some("target") {
                     continue;
                 }
@@ -238,8 +191,6 @@ fn collect_garbage(graph: &BuildGraph, deep: bool, target: bool) -> Result<(), S
     }
 
     if target {
-        // ⚠ 共享的编译中间物：**所有**实例共用 `target/jit/target/` ⇒ 它不属于某一条 key，
-        //   进不了上面那个按 key 的循环。`--target` 就是"顺手把它清掉"的那一档。
         let cache = root.join("target/jit/target");
         match std::fs::metadata(&cache) {
             Ok(_) => {
@@ -267,21 +218,9 @@ fn collect_garbage(graph: &BuildGraph, deep: bool, target: bool) -> Result<(), S
     Ok(())
 }
 
-/// `px run <图> [--build] [-- <图参数…>]`：两个 stage 顺序执行（`20` §182）。
-///
-/// ⚠ **默认"运行只读"**（`20` §186）：stage 1 有缺**且没给** `--build` ⇒ 停下来报"该跑哪条命令"、
-///   **非零退出**。不许让 stage 2 偷偷触发编译 —— 那会把"先证明状态是静止的，再量"那条纪律
-///   （`18` §171.5 用血换的）一并弄丢。
-/// ⚠ stage 2 **不嵌套 cargo**：图 exe 就在**本 exe 旁边**（同一个 `target/<profile>/`），
-///   直接起它，退出码与输出原样透出去。
-///
-/// ⚠ `--store <目录>` 由**本函数**从自己的命令行摘走、再原样喂给图 exe（见
-///   `parse_run`）。它不进 stage 1，也不许进键：产物键只跟参数的**字节**有关，
-///   与"那些字节住在哪个目录"无关（`px_graph::driver` 的模块文档有整段）。
 fn run(args: &[String]) -> Result<(), String> {
     let (graph_name, build, store, passthrough) = parse_run(args)?;
 
-    // ── stage 1：计划（不编译）──────────────────────────────────────────────
     let graph = graph();
     let plan = graph.missing();
     println!(
@@ -291,7 +230,6 @@ fn run(args: &[String]) -> Result<(), String> {
         plan.missing.len()
     );
     if !plan.complete() {
-        // `--build` 才是显式请求编译（§186）。
         if build {
             println!("stage 1｜--build：编缺的那些");
             let stage = graph.compile_missing(codegen())?;
@@ -301,13 +239,9 @@ fn run(args: &[String]) -> Result<(), String> {
         }
     }
 
-    // ── stage 2：跑那张图（只读装载）────────────────────────────────────────
     let exe = graph_exe(&graph_name)?;
     println!("stage 2｜{}", exe.display());
     let mut command = Command::new(&exe);
-    // ⚠ `--store` 排在**最前**：图 exe 那几支自己按位置读参数（`scene` 的配方名、
-    //   `passes` 的三个位置参数），而它们都走 `px_cook::args_without_store()` 把它摘掉
-    //   —— 排在前面只是让"它属于 px，不属于图"在命令行上一眼看得见。
     if let Some(store) = &store {
         command.arg("--store").arg(store);
     }
@@ -315,28 +249,9 @@ fn run(args: &[String]) -> Result<(), String> {
         .args(&passthrough)
         .status()
         .map_err(|err| format!("起不了 {}：{err}", exe.display()))?;
-    // ⚠ 退出码**原样**传出去：图的判据就是退出码（`tools/px.ps1` 的文件头那条）。
     std::process::exit(status.code().unwrap_or(1));
 }
 
-/// `px run <图> [--build] [--store <目录>] [-- 图参数… | 图参数…]`。
-///
-/// ⚠ 头一个 `--`（`tools/px.ps1 -Target run -Graph <图>` 那条路径可能带进来）只是参数
-///   **分隔符**：PowerShell 的 `-` 会被它自己的参数绑定吃掉（`-Level`），所以那一边用 `-Graph`。
-/// ⚠ `--` 之后一律**原样**交给图 exe（图自己的参数，这里不解释它们）。
-///
-/// ⚠ **不带 `--` 的位置参数也算图参数**（`px run scene orbit-bare`）：`graph_exe` 旁边
-///   那几支图程序自己按位置读参数，而 `px run scene -- orbit-bare` 与
-///   `px run scene orbit-bare` 在这里是**同一件事**。收下它不放松任何一条：
-///   px 自己的开关全部以 `-` 开头，所以"不带 `-` 的东西"不可能是 px 的，只可能是图的。
-///   （从前那种写法只认 `--` 之后，症状是 `px run scene orbit-bare` 报"不认识的参数
-///   `orbit-bare`" —— 那是一句**指错方向**的话：`orbit-bare` 本来就不是给 px 的。）
-///
-/// ⚠ `--store <目录>` 是 px **自己**的开关（所以它在 `--` **之前**），用处是"这一趟从
-///   哪个目录读参数"：产物键跟字节走、不跟目录走（`px_graph::driver` 那一整段）。
-///   它由 px 原样转交给图 exe —— 图 exe 的 `px_cook::apply_store_args` 认的就是它。
-///   ⚠ `--store <目录>` 与 `--store=<目录>` **两种写法都收**：那是同一个开关的两种写法，
-///     只收一种的话，另一种会在**离病因最远的地方**报"不认识的参数"。
 fn parse_run(args: &[String]) -> Result<(String, bool, Option<String>, Vec<String>), String> {
     let usage = || {
         "用法：px run <图> [--build] [--store <目录>] [-- 图自己的参数…]\
@@ -345,7 +260,6 @@ fn parse_run(args: &[String]) -> Result<(String, bool, Option<String>, Vec<Strin
          \n  图自己的参数（`scene` 的配方名、`passes` 那三个位置参数）直接跟在图名后面"
             .to_string()
     };
-    // 头一个分隔符（如果有）不算参数。
     let args: &[String] = match args.first().map(String::as_str) {
         Some("--") => &args[1..],
         _ => args,
@@ -375,7 +289,6 @@ fn parse_run(args: &[String]) -> Result<(String, bool, Option<String>, Vec<Strin
                 store = Some(value.clone());
                 index += 1;
             }
-            // 不带 `-` 的一律是图的（见上面那段）：`px run scene orbit-bare`。
             other if !other.starts_with('-') => passthrough.push(other.to_string()),
             other => match other.strip_prefix("--store=") {
                 Some(value) => store = Some(value.to_string()),
@@ -387,7 +300,6 @@ fn parse_run(args: &[String]) -> Result<(String, bool, Option<String>, Vec<Strin
     Ok((name.clone(), build, store, passthrough))
 }
 
-/// 图 exe 在**本 exe 旁边**（同一个 `target/<profile>/`）—— stage 2 不嵌套 cargo。
 fn graph_exe(name: &str) -> Result<PathBuf, String> {
     let here = std::env::current_exe().map_err(|err| format!("问不到自己在哪：{err}"))?;
     let dir = here
@@ -397,8 +309,6 @@ fn graph_exe(name: &str) -> Result<PathBuf, String> {
     if exe.is_file() {
         return Ok(exe);
     }
-    // ⚠ 兜一个底：`px` 是从 `cargo run` 起的（那时它在同一个目录里），但直接跑
-    //   `target/debug/px.exe` 也一样。两条都不在 ⇒ 说清楚该编什么。
     let workspace = px_cook::workspace_root();
     let fallback = [
         workspace.join("target/debug").join(format!("{name}.exe")),
@@ -415,7 +325,6 @@ fn graph_exe(name: &str) -> Result<PathBuf, String> {
     })
 }
 
-/// 一棵目录树的总字节数（量不出来就回 0：gc 不该因为"量不动"而失败）。
 fn dir_size(dir: &Path) -> u64 {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return 0;

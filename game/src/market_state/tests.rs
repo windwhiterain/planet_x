@@ -106,8 +106,6 @@ fn drift_and_volatility_stay_finite() {
         let price = if step % 2 == 0 { 1e6 } else { 1e-6 };
         state.observe(0, price);
     }
-    // 交替的 1e±6 每步是 ln(1e12) 的对数变化。两个统计量必须有限，而且不能超过
-    // **实际喂进去的最大变化**——这是推导出来的上界，不是 MAX_DRIFT 那样的常数。
     let largest = (1e6f32 / 1e-6).ln();
     assert!(state.drift(0).is_finite());
     assert!(state.volatility(0).is_finite());

@@ -1,20 +1,3 @@
-//! **实例的端到端探针**：把一条实例库真装进来、真算一遍。
-//!
-//! 用法：`inst_probe [op_id]`（默认 `cloud.coarse/band` —— 那条体积域的 `Band`）。
-//!
-//! ⚠ **为什么这是一支探针、不是一条测试**（2026-09-20 从 `tests/inst_gate.rs` 搬出来的）：
-//!   它要跑起来必须先有 `px build` 烘出来的实例库（`target/pcg/inst/<key>.dll`），而那是
-//!   **构建产物**：`cargo test` 不保证它存在、也不该替它去编（测试里起 cargo 就是 20 分钟）。
-//!   搬出来之前那一段在库里写着"**库不在盘上就打印一行、然后 return**"——
-//!   那就是"跳过"，而本仓那条不变式是"**任何『跳过』都是判据的敌人**"：
-//!   一条永远可能什么都不查的判据，比没有这条判据更坏（它给人一种查过了的错觉）。
-//!   ⇒ 判据分成两件**各自都硬**的事：
-//!     * `tests/inst_gate.rs`：**计划那一半**（recipe ↔ 生成物 ↔ 图，纯事实，不需要任何产物）；
-//!     * 这一支：**运行那一半**（装载 + cached + 命中 + 键稳定），缺库就**当场报错并给出命令**。
-//!
-//! ⚠ 这条探针也是"实例库真能装载"这件事**唯一**的判据：`PxOp::LIB` 是空串、
-//!   库按 key 在运行期 `dlopen`、符号按声明名拼 —— 三件事里任何一件错，图跑起来才炸。
-
 use px_cook::inst::BuildGraph;
 use px_cook::{Cooked, Domain, GraphSpec, begin, cached, field_params, node_params, volume};
 use px_graph_schema::PxOp;
@@ -29,7 +12,6 @@ fn main() {
         "今天的探针只认识 `cloud.coarse/band`（要加别的实例，照着下面那段抄一份即可）"
     );
 
-    // 库在哪：从**同一张 build graph** 里找这条实例（与 `cargo build` 时 stage 1 看的是同一份计划）。
     let mut graph = BuildGraph::new();
     px_graphs::insts::build(&mut graph);
     let info = graph
@@ -54,22 +36,16 @@ fn main() {
         "`info_of_facts` 给的库路径与 `source_hash()`（实例 key）不是同一个 key"
     );
 
-    // ⚠ 自己的图名（`inst-op`），不碰 `art/` 下任何既有图。
     let graph = begin(GraphSpec {
         name: "inst-op".to_string(),
     });
 
-    // ⚠ **形状是参数**（没有画布了）：这张 8×4 的形状既喂 `constant` 那一档，也用来造
-    //   下面那张占位覆盖度场 —— 一处写、两处同值。
     let shape = field_params::Shape {
         width: 8,
         height: 4,
         projection: Domain::Cube,
     };
 
-    // 上游那张覆盖度场：实例复用的是 `CloudCoarse` 的**声明** ⇒ 输入形状就是它那个
-    // `CloudCoarseInput { coverage }`。⚠ `Band` 自己就是覆盖度的来源，这张场**不参与计算**，
-    // 但接口要它在场（`19` §179.1：体逐字套在复用的声明上）。
     let coverage = Cooked::new(
         *px_cook::blake3::hash(b"inst-op/coverage").as_bytes(),
         shape.filled(1.0),
@@ -77,7 +53,6 @@ fn main() {
         0,
         0,
     );
-    // `CloudCoarseInput` 不吃 `Clone` ⇒ 两条输入各建一次（同一份上游 ⇒ 同一个键）。
     let inputs = || volume::CloudCoarseInput {
         coverage: coverage.clone(),
     };

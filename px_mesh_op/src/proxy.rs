@@ -1,21 +1,3 @@
-//! 立方球代理 mesh：拿一张 3D 标量网格出等值面。
-//!
-//! 这是**叶子**算子：只依赖参数空间与载荷的约定（`px_volume_schema` / `px_mesh_schema`）
-//! 与算法库（`isosurface`），不认识云、不认识驱动、不认识渲染器 ⇒ 换算法库不动 `px_graphs`。
-//!
-//! 六个面各自在自己的 `[0,1]³`（`u, v, 径向高度`）里跑一次等值面，然后把落在一起的
-//! 顶点焊起来。焊得动靠的是参数空间的性质：相邻两面在共用的那条棱上给出**逐位相同**的
-//! 方向（`cube_direction` 的公式在棱上重合）⇒ 两个面在棱上的采样点、场值、交点位置
-//! 都一样，只需按位置合并。剩下的边界就只有壳的上下两面 —— 而那里场是常数（负），
-//! 等值面碰不到 ⇒ 焊完没有开口边。
-//!
-//! 用的是同一个 crate 里的稠密 `MarchingCubes` 而不是 `LinearHashedMarchingCubes`：
-//! 后者是自适应哈希八叉树，实测（`target/isosurface-probe`）两件事过不去 ——
-//! ① 它的输出顶点位置依赖 `HashMap` 的遍历序（同一进程里跑两次，depth 7 有 1251/14721
-//! 个顶点位置不同），而缓存要求「键 = 内容」；② 它在域壁上把交点放在离壁半格的位置，
-//! 于是相邻两面的切割折线错开一格，焊不严。稠密 MC 逐位可复现，且域壁上的切割折线正是
-//! 两边共享的那条二维等值线，能逐点焊上。
-
 use std::collections::HashMap;
 
 use isosurface::MarchingCubes;
@@ -33,14 +15,11 @@ use px_volume_schema::{PATCHES, VolumeSampler};
 px_graph_schema::px_body! {
     Proxy,
     |p, i| {
-        // ⚠ 与老路径同一个采样器：`VolumeGrid` 只在**同一个面内**插值，
-        // 换成 `VolumeData` 直接当 sampler 会把面缝焊法换掉。
         let grid = px_volume_schema::VolumeGrid::new(i.volume.value());
         crate::proxy::surface(p, &grid)?
     }
 }
 
-/// 把「本面参数」接到「参数空间」上：面号单独传，面内坐标就是 marching cubes 的域。
 struct Face<'a> {
     field: &'a dyn VolumeSampler,
     face: u32,
@@ -66,7 +45,6 @@ fn normalize(vector: [f32; 3]) -> [f32; 3] {
     [vector[0] / length, vector[1] / length, vector[2] / length]
 }
 
-/// 世界点处的场梯度（中心差商）：先反查它落在哪个面的哪个参数上，再回采样器。
 fn radial_gradient(field: &dyn VolumeSampler, point: [f32; 3]) -> [f32; 3] {
     let (face, at) = field.parameters(point);
     let step = 1.0 / 256.0;
@@ -82,17 +60,11 @@ fn radial_gradient(field: &dyn VolumeSampler, point: [f32; 3]) -> [f32; 3] {
     gradient
 }
 
-/// 两点的距离。
 fn distance(one: [f32; 3], two: [f32; 3]) -> f32 {
     let delta = [one[0] - two[0], one[1] - two[1], one[2] - two[2]];
     (delta[0] * delta[0] + delta[1] * delta[1] + delta[2] * delta[2]).sqrt()
 }
 
-/// 世界空间的场梯度（中心差商）。
-///
-/// ⚠ 不能像 `radial_gradient` 那样直接拿参数差商当世界方向：参数空间三轴的**世界长度**
-/// 差 23 倍（面内一格 ≈1.15、径向一格 0.05）⇒ 那样算出来的"法线"几乎全是切向的
-/// （径向分量被压掉一个数量级，而云的轮廓恰恰靠径向）。所以每个轴都除以它自己的世界长度。
 fn world_gradient(field: &dyn VolumeSampler, point: [f32; 3]) -> [f32; 3] {
     let (face, at) = field.parameters(point);
     let step = 1.0 / 256.0;
@@ -110,10 +82,6 @@ fn world_gradient(field: &dyn VolumeSampler, point: [f32; 3]) -> [f32; 3] {
     gradient
 }
 
-/// 落一个顶点，顺手焊掉已经落过的那个（返回已有顶点、或者新顶点）。
-///
-/// 查 27 个量子格而不是只查一个：两块在接缝上的插值可能差 1 ULP，正好跨格的那几个
-/// 只按格查会漏，漏了就留开口边。
 fn push_vertex(
     cells: &mut HashMap<(i64, i64, i64), Vec<u32>>,
     positions: &mut Vec<f32>,
@@ -192,7 +160,6 @@ pub fn surface(
             let v = local[index * 3 + 1];
             let at = [u, v, local[index * 3 + 2]];
             let point = field.point(face, at);
-            // uv 按立方球图谱的排法：面号决定行，面内 v 在行里走
             let uv = [u, (face as f32 + v) / PATCHES as f32];
             let (welded, merged) =
                 push_vertex(&mut cells, &mut positions, &mut uvs, point, uv, weld);
@@ -218,11 +185,6 @@ pub fn surface(
         return Err("体积里没有这个等值面 ⇒ 代理是空的（检查 tau 与 level）".to_string());
     }
 
-    // 法线：按三角形面积加权累加。零长的（碎片三角形凑不出面积）改用场的梯度 ——
-    // 梯度指向场增大的那一侧，取反就是代理的外法线，内壳外壳都对；再兜不住才退回径向。
-    //
-    // 顺手再累两个量，只给下面的几何外扩用（`offset = 0` 时一点不影响老路径）：
-    // `bend` = Σ|叉积| 是「顶点星成形程度」的尺子，`volume` 是有向体积（定缠绕里外）。
     let mut accumulated = vec![0.0_f32; vertices * 3];
     let mut bend = vec![0.0_f32; vertices];
     let mut volume = 0.0_f32;
@@ -276,14 +238,6 @@ pub fn surface(
         normals[slot..slot + 3].copy_from_slice(&unit);
     }
 
-    // 几何外扩：沿外法线把每个顶点往外推 `offset`（世界单位）。
-    //
-    // 方向这里自己算一份，不读属性里那份法线：属性不能动（`offset = 0` 要与老档逐位
-    // 相同），而且它 77% 的顶点走了 `> f32::EPSILON` 那个兜底（门槛对 1e-4 量级的三角形
-    // 面积太严，弯曲面上 Σ 叉积本来就只有 Σ|叉积| 的一半）⇒ 拿它定方向会把外扩推歪。
-    // 三步：① 顶点星成形（|Σ叉积| ≥ Σ|叉积|/16）就用它 —— 那才是这张网格的几何法向，
-    // 它跟着缠绕走，所以要按有向体积翻一次；② 否则用世界空间的场梯度取反（梯度指向
-    // 云里）—— 这条天然朝外，与缠绕无关，不许再翻；③ 再退化才沿用属性里那份。
     let mut fallback = 0_usize;
     if params.offset != 0.0 {
         let winding = if volume < 0.0 { -1.0 } else { 1.0 };
@@ -325,8 +279,6 @@ pub fn surface(
         );
     }
 
-    // 审计：闭合判据就是「没有开口边」。顺带数一下缠绕方向 —— 每条有向边只该出现一次，
-    // 出现两次就说明有三角形翻面了（光栅化要背面剔除的话会在意）。
     let mut edges: HashMap<(u32, u32), u32> = HashMap::new();
     let mut directed: HashMap<(u32, u32), u32> = HashMap::new();
     for triangle in indices.chunks_exact(3) {

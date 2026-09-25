@@ -1,25 +1,8 @@
-//! 细分的两条算法：曲线按弦误差摊成**折线**、曲面按弦误差摊成**三角网格**。
-//!
-//! ⚠ 判据是**弦误差**（真实曲线/曲面与那条折线/那张网格的偏差），不是"切多细"：
-//!   `tolerance` 是世界单位的上界 ⇒ 调它就是在"顶点数"与"看起来是圆的"之间选。
-//!   `depth` 是**保底**（尖点处不允许无限递归）。
-//!
-//! ⚠ 两个产物是**两种载荷**：曲线出 `PolylineData`（顶点 + 线段下标）、曲面出
-//!   `MeshData`（顶点 + 三角形下标）。折线不借网格的壳 —— 见 `PolylineData` 那段。
-//!
-//! ⚠ **装配（焊顶点 / 切片 / 扔退化三角形）不在本文件**：它在
-//!   `px_nurbs_schema::mesh`。GPU 那一侧（`px_nurbs_gpu_op`）求值完之后走**同一个**
-//!   装配函数，否则两条路的拓扑会漂开，而判据量的是装配之后的东西。
-
 use px_nurbs_schema::curve::Curve;
 use px_nurbs_schema::mesh::{grid_mesh, polyline};
 use px_nurbs_schema::surface::Surface;
 use px_protocol::art::{MeshData, PolylineData};
 
-/// **曲线 → 折线**：逐段对分，直到中点到弦的距离小于 `tolerance`。
-///
-/// ⚠ 闭合曲线（首尾同一个点）把首尾并成一个顶点，最后一段**接回第 0 个顶点**
-///   ⇒ 折线在接缝处不断开。
 pub fn curve(
     curve: &Curve,
     tolerance: f64,
@@ -71,14 +54,6 @@ pub fn curve(
     Ok(polyline(&points, closed))
 }
 
-/// **曲面 → 三角网格**：**统一**细分，直到每一格的中心偏离四个角平均（弦误差的估计）
-/// 都不超过 `tolerance`，或者到达深度上限。
-///
-/// ⚠ 为什么是**统一**细分而不是自适应四叉树：自适应会留下 **T 形接点**（粗格那条边上
-///   有细格分出来的顶点），于是"每条边恰好被两个三角形用到"不成立 —— 网格看着没缝
-///   （顶点就在那条直线上），但判据上是**开口**的。要真正水密就得再写一套"挂点扇形"
-///   把粗格那条边按邻居的顶点切开；这一档选了简单且**真水密**的那个。
-///   代价是平坦处也多切了几刀，而 `tolerance` 仍然是弦误差上界（判据的那一条不变）。
 pub fn surface(
     surface: &Surface,
     tolerance: f64,
@@ -110,7 +85,6 @@ pub fn surface(
     }
 }
 
-/// 把 `unit × unit` 那一套格点求值出来，交给**共用**的装配（`px_nurbs_schema::mesh`）。
 fn grid(
     surface: &Surface,
     u0: f64,
@@ -137,7 +111,6 @@ fn grid(
             for lane in 0..3 {
                 normals[index * 3 + lane] = normal[lane] as f32;
             }
-            // uv 就是参数本身（NURBS 的"贴图坐标"没有第二条口径）。
             uvs[index * 2] = u as f32;
             uvs[index * 2 + 1] = v as f32;
         }
@@ -145,10 +118,6 @@ fn grid(
     Ok(grid_mesh(&positions, &normals, &uvs, along, along))
 }
 
-/// 一格的中心偏离"四个角的平均"多远（弦误差的估计）。
-///
-/// ⚠ 它**不进**网格顶点集：误差探针要的中心点不是一个网格顶点，
-///   混进去会留下一堆没人用的孤立顶点。
 fn cell_error(
     surface: &Surface,
     u0: f64,
@@ -198,11 +167,6 @@ fn average4(points: [[f64; 3]; 4]) -> [f64; 3] {
 mod tests {
     use super::*;
 
-    /// **细分出来的每个顶点都在球面上**（半径精确是有理二次表示那条性质，
-    /// 细分只是采样它，不该把它做丢）。
-    ///
-    /// ⚠ 容差是 `f32` 那一档的：网格顶点按 `f32` 出厂（`MeshData` 的线格式就是 `f32`），
-    ///   所以这里量的是"细分 + 降精度"之后还在不在球面上。
     #[test]
     fn the_tessellated_sphere_stays_on_the_radius() {
         let ball = px_nurbs_schema::surface::sphere(2.0, [0.0; 3], 2).expect("造球");
@@ -218,8 +182,6 @@ mod tests {
         }
     }
 
-    /// **闭合网格没有开口边**：每条边恰好被两个三角形用到（极点那几格靠"零面积三角形
-    /// 不进网格"这一条收口）。
     #[test]
     fn the_tessellated_sphere_is_watertight() {
         let ball = px_nurbs_schema::surface::sphere(1.0, [0.0; 3], 2).expect("造球");
@@ -244,7 +206,6 @@ mod tests {
         );
     }
 
-    /// **折线落在圆上**，并且**首尾并成一个顶点、最后一段接回第 0 个**。
     #[test]
     fn the_tessellated_circle_closes_on_itself() {
         let circle = px_nurbs_schema::curve::circle(1.0, "xy", [0.0; 3]).expect("造圆");
@@ -260,7 +221,6 @@ mod tests {
             );
             assert!(point[2].abs() < 1e-6, "第 {vertex} 个顶点跑出了 xy 平面");
         }
-        // 每一段都是一条真的线段（两个**不同**的下标），而且接缝那一段回到 0。
         for segment in line.indices.chunks_exact(2) {
             assert_ne!(segment[0], segment[1], "有一段是零长线段");
             assert!((segment[0] as usize) < line.vertices());
@@ -274,10 +234,6 @@ mod tests {
         );
     }
 
-    /// **折线载荷逐位往返**：缓存是「键 = 内容」，所以 `f32` 顶点与下标一个都不许漂。
-    ///
-    /// ⚠ 量的是 `Build::encode` / `decode` 那一对（就是落进缓存的那条路），不是
-    ///   "再算一遍"（那是可复现，另一条判据）。
     #[test]
     fn the_polyline_payload_round_trips_bit_for_bit() {
         use px_graph_schema::Build;

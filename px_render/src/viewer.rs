@@ -1,45 +1,3 @@
-//! 预览窗口（S7 前半）：**常驻的 winit 窗口** + orbit 相机 + 鼠标输入。
-//!
-//! 语义与 Bevy 宿主（`px_render/src/main.rs`：`view` :3204、`show` :3120、
-//! `viewer_camera` :3152）**逐字对齐**：窗口是**常驻**的，场景由**别人推**进来
-//! （`--show` 写 `target/viewer-scene.json`），相机的方位可以**问回来**（`--where`）
-//! 也可以**摆过去**（`--place`）。三个文件名原样照抄 ——
-//! `target/viewer-scene.json` / `target/viewer.json` / `target/viewer-camera.json`：
-//! 那两个宿主之间唯一的约定就是这三个文件，换一个字节，"谁在线、它现在看着哪儿"
-//! 就变成一条要靠猜的事。
-//!
-//! ⚠ **S8-c 标注："那两个宿主之间"今天只剩一半对象**（§154 删了 Bevy 宿主）。
-//! 而**结论一个字不变**，只是对手方换了：这三个文件今天是**同一支宿主的 CLI 与窗口之间**的
-//! 约定（`--show` / `--where` / `--place` 那三个入口全靠它们说话），也是"窗口在不在线"的唯一
-//! 凭据（[`VIEW_LEASE`] 的心跳）。⇒ 路径写死在常量里，**换一个字节 = 换一个接口**。
-//!
-//! ## 三处与 Bevy 宿主的形状差别（都不是"简化"，各有各的理由）
-//!
-//! 1. **按需渲染**：裸 wgpu 建管线是同步的（§104 第 5 条），一次 `render::run` 就把一整帧
-//!    从头画到尾。所以窗口里**没有**"逐帧推进"那套东西（Bevy 有，因为它的管线与资产要跨帧等）：
-//!    相机一动、场景一换、窗口一改大小，才画一帧；没变的时候只是把上一张重新呈一次。
-//! 2. **屏幕上那些字节 = 判据那张图的字节**：画面画进**本进程自己的** `Rgba8UnormSrgb`
-//!    （`shot::Target`，§104 第 13 条：交换链不许读），回读出来的那批字节
-//!    ① 原样传到屏幕（[`Present`] 那一段）② `--shot` 时原样走 `shot::write_png`。
-//!    ⇒ "窗口显示的是不是我们证明过的那张图"这个问题**只有一个数据来源**，
-//!    没有一个"另画一遍给屏幕看"的第二条路。
-//! 3. **角度的含义由 `camera::probe_camera` 定**：窗口的 `(yaw, pitch, distance)` 与
-//!    `--cam` 是**同一套数、同一个函数**，所以"窗口在某个方位看到的那张图"与
-//!    "离线在同一个方位画的那张图"必须逐字节相同 —— 那就是本单元的判据。
-//!    ⚠ Bevy 的窗口把 `Quat::from_rotation_y(yaw) * Quat::from_rotation_x(pitch)` 乘到
-//!    `(0,0,distance)` 上，它的 **pitch 正方向与它自己的 `--cam`（`camera_for`）相反**；
-//!    我们不让同一个三元组有两套含义（§104 第 1 条那一族：两处会漂开的真相）。
-//!
-//! ## 这一版**没有**的（下一单元：shader 热重载）
-//!
-//! `.wgsl` 改存盘之后画面 1 秒内变 —— 那是 S7 的后半。这里只留下**接口**：
-//! [`Viewer::poll_scene_file`] 已经按"mtime 闹钟 + 载荷指纹"的规矩在看产物文件，
-//! 热重载接上来时只需要在同一处多问一句"shader 闭包变了吗"。
-//!
-//! ⚠ 起窗口必须**脱离**（`Start-Process` 不带 `-Wait`）：窗口进程会一直占着事件循环。
-//! 而且 `Start-Process` 继承的是**宿主 PowerShell 的进程 cwd**（`Set-Location` 改不了它）⇒
-//! 三个相对路径与 CAS 根都会落在错的目录里，`-WorkingDirectory` 一个都不能省。
-
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -56,114 +14,60 @@ use crate::render::{self, Views};
 use crate::shader;
 use crate::shot;
 
-// ---------------------------------------------------------------------------
-// 三个文件（名字与 Bevy 宿主逐字相同）
-// ---------------------------------------------------------------------------
-
-/// `--show` 推场景进来的落点（也是 `--where` / `--place` 的载体）。
 pub const VIEW_REQUEST: &str = "target/viewer-scene.json";
-/// 窗口的心跳（活着 = 这个文件的时间戳是新的）。
 pub const VIEW_LEASE: &str = "target/viewer.json";
-/// 窗口对"相机在哪儿"的回话。
 pub const VIEW_CAMERA: &str = "target/viewer-camera.json";
-/// 请求没给截图路径时落在哪儿。**不是我们发明的缺省**：Bevy 宿主的 `auto_shot` 写死的
-/// 就是这一条（`px_render/src/main.rs:3487`）—— 照抄它是为了让"没给路径"那一档
-/// 两个宿主指的是同一个文件（§104 第 3 条：缺省值也是一处会漂的真相）。
 pub const VIEW_SHOT: &str = "target/viewer-shot.png";
 
-/// 看请求文件的间隔。Bevy 那边每个逻辑帧看一次（60 Hz）；这里是**事件驱动**的窗口，
-/// 只有这个周期会让它醒过来 —— 200 ms 是"人按了 `--show` 之后感觉是即时的"那一档。
 const POLL_INTERVAL: Duration = Duration::from_millis(200);
-/// 心跳的间隔（租约写一次）。Bevy 是每 30 帧（约 0.5 s）。
 const HEARTBEAT: Duration = Duration::from_secs(1);
-/// 租约自查的间隔（与 `serve::LEASE_CHECK_INTERVAL` 同一个数：2 s）。
 const LEASE_CHECK_INTERVAL: Duration = Duration::from_secs(2);
-/// 多久算"租约还新鲜"。**与 Bevy 的 `show()` 同一个数（5 s）**：
-/// 那边的 `lease_age() < 5 s` 就是"窗口在线"的判据，这里把它同时用作单例闸。
 const LEASE_FRESH: Duration = Duration::from_secs(5);
-/// `--where` / `--place` 等回话的上限（Bevy 是 3 s）。
 const REPLY_TIMEOUT: Duration = Duration::from_secs(3);
 
-/// 鼠标灵敏度与轨道范围：**数值逐字照抄 Bevy 的 `orbit_camera`**（:3345-3365）。
-/// 抄而不是"调一个更顺手"的：惯性是肌肉记忆，而这一版没有任何东西需要它不同。
-///
-/// ⚠⚠ **单位**：Bevy 那个 `Orbit` 资源整体是**弧度**，所以 `0.006` 与 `1.25` 都是弧度。
-/// 我们这一侧的状态是**度** —— `--cam` / `--place` / `--where` 报的都是度，
-/// 弧度只在 `camera::probe_camera` 内部出现一次（`to_radians()`）。
-/// ⇒ 这两个常数**必须在用之前换成度**，不能拿弧度直接加到度上：
-/// 那样"拖一下"会变成 0.006°（人眼看不见），而 pitch 的夹取会变成 ±1.25°（一碰就到底）。
-/// 同一个三元组在窗口、`--cam`、`--place` 三处必须是**同一套单位**，否则"窗口看到的"
-/// 与"离线画的"就不是同一台相机（本单元的判据正是那件事）。
 const YAW_PER_PIXEL: f64 = 0.006;
 const PITCH_PER_PIXEL: f64 = 0.006;
 const ZOOM_PER_NOTCH: f64 = 0.08;
-/// Bevy 的 `orbit.pitch.clamp(-1.25, 1.25)` —— **弧度**。
 const PITCH_LIMIT_RADIANS: f64 = 1.25;
 const DISTANCE_MIN: f32 = 1.5;
 const DISTANCE_MAX: f32 = 14.0;
 
-/// `probe_camera` 自己会把 pitch 夹到 ±89.5°（`camera.rs:48`）。窗口这一侧提前夹到**同一个数**：
-/// 状态里存着一个相机根本不会用的角度，`--where` 就会报一个与画面不符的数（§146.3 ③）。
 const PITCH_DEGREES_LIMIT: f32 = 89.5;
 
-/// 鼠标拖一下 → 角度变多少（**度**）。见上面那段单位说明。
 fn drag_degrees(per_pixel: f64, pixels: f64) -> f32 {
     (pixels * per_pixel).to_degrees() as f32
 }
 
-/// Bevy 那条夹取（±1.25 弧度）换成度。
 fn pitch_limit_degrees() -> f32 {
     PITCH_LIMIT_RADIANS.to_degrees() as f32
 }
 
-// ---------------------------------------------------------------------------
-// 请求 / 回话（schema 与 Bevy 逐字相同，只多两格**可缺省**的）
-// ---------------------------------------------------------------------------
-
-/// 推给常驻窗口的东西：**哪一份场景产物** + 它的内容键。内容本身一个字都不进来 ——
-/// 窗口自己去 CAS 取同一份产物（照抄 Bevy 的 `ViewRequest`）。
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct ViewRequest {
     scene: String,
-    /// 场景产物的内容键（清单里的载荷指纹）。窗口只在它变了才重建。
     #[serde(default)]
     key: u64,
     at: u64,
     #[serde(default)]
     shot: bool,
-    /// 窗口不开对照图（多视口是 `--serve` 出图的事），只用来打一行说明。
     #[serde(default)]
     sheet: bool,
-    /// 问一句"相机在哪儿"：窗口把方位写进 `VIEW_CAMERA`。
-    /// ⚠ 与 `shot` 一样是**附带动作**：`scene` / `key` 沿用上一次请求那份，不为问一句话换场景。
     #[serde(default)]
     ask_camera: bool,
-    /// 顺手把相机摆到这个方位（`yaw,pitch,distance`）。`None` = 不动。
     #[serde(default)]
     set_camera: Option<[f32; 3]>,
-    /// **我们多的那一格**：截图存哪儿。
-    ///
-    /// ⚠ Bevy 把它写死成 `target/viewer-shot.png`（`auto_shot`），所以那一格在文件里
-    /// **没有对应的字段**；而"图存哪儿"是调用方写的一句话（策略），不是可以替它猜的东西。
-    /// 加成**可缺省**的一格之后两个方向都不炸：Bevy 写的请求（没有这一格）我们照收
-    /// （缺省 = 它写死的那条路径），我们写的请求它也能解（serde 默认忽略不认识的多余字段）。
     #[serde(default)]
     shot_path: Option<String>,
 }
 
-/// 窗口回话：**复现一个视角要的那三个数**，外加位置与视口尺寸（对账用）。
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct CameraReply {
-    /// 回的是哪一次请求（`ViewRequest.at`）。
     at: u64,
     yaw: f32,
     pitch: f32,
     distance: f32,
     position: [f32; 3],
     size: [u32; 2],
-    /// **我们多的那一格**（可缺省）：这三个角是**从探针位姿反推**出来的，
-    /// 不是窗口手里那份状态 —— 窗口还没被鼠标或 `--place` 接管时它手里根本没有角。
-    /// 少了这一格，"`--place` 它给出来的三个数"与"现在这台相机"之间的关系就要靠猜。
     #[serde(default)]
     derived: bool,
 }
@@ -175,7 +79,6 @@ fn now_nanos() -> u64 {
         .unwrap_or(0)
 }
 
-/// 租约有多旧。`None` = 没有租约文件（没有窗口在跑，或者它收工了）。
 fn lease_age() -> Option<Duration> {
     let stamp: u64 = std::fs::read_to_string(VIEW_LEASE)
         .ok()?
@@ -195,9 +98,6 @@ fn read_request() -> Option<ViewRequest> {
     serde_json::from_str(&text).ok()
 }
 
-/// 场景产物的**载荷指纹**（清单里那一格）。与 `px_render::art_cache::fingerprint_of`
-/// 同一个口径、同一份协议（`px_protocol::art::read_manifest`）—— 两处算法不同的那天，
-/// "同一份产物"会被判成两份。
 fn fingerprint_of(path: &Path) -> Result<u64, String> {
     let bundle = px_protocol::art::read_manifest(path)?;
     Ok(bundle
@@ -207,12 +107,6 @@ fn fingerprint_of(path: &Path) -> Result<u64, String> {
         .unwrap_or(0))
 }
 
-/// 把 `--cam` / `--place` 那三个数收成窗口能用的状态：pitch 夹到**相机自己**的范围
-/// （见 [`PITCH_DEGREES_LIMIT`]），并拒掉非有限的数（NaN 的 yaw 会让 `--where` 回一串 NaN，
-/// 而"回了一串 NaN"看着像窗口坏了，其实是调用方给错了）。
-///
-/// ⚠ 拒词里带上**是哪一个开关**（照 `main.rs::parse_cam` 那条规矩）：`--view --cam` 与
-/// `--place` 用的是同一套数，报错时指向另一个开关会把人引到错的地方（§146.3 ③）。
 fn orbit_of(flag: &str, place: [f32; 3]) -> Result<[f32; 3], String> {
     if !place.iter().all(|value| value.is_finite()) {
         return Err(format!(
@@ -226,15 +120,6 @@ fn orbit_of(flag: &str, place: [f32; 3]) -> Result<[f32; 3], String> {
     ])
 }
 
-// ---------------------------------------------------------------------------
-// 客户端那两条：`--show` 推场景；`--where` / `--place` 一问一答
-// ---------------------------------------------------------------------------
-
-/// `--show --scene 文档 [--shot PNG]`：把一份场景推给在跑的窗口。
-///
-/// ⚠ 它**不渲染任何东西**（本进程连设备都不建）：推完就回话。
-/// "窗口在不在"由**心跳的新鲜度**判（`VIEW_LEASE`），而判不出来的那一天
-/// 说的是"没检测到在跑的窗口"，不是"推失败"（§146.3 ③：拦住了不等于说对了）。
 pub fn show(scene: &Path, shot: Option<PathBuf>) -> Result<(), String> {
     let scene = scene.display().to_string();
     let key = fingerprint_of(Path::new(&scene))?;
@@ -269,12 +154,6 @@ pub fn show(scene: &Path, shot: Option<PathBuf>) -> Result<(), String> {
     Ok(())
 }
 
-/// `--where` / `--place`：**只问/只摆窗口的相机**，不换场景、不重烘。
-///
-/// 为什么需要这条 API：窗口的轨道相机只有鼠标能改，而"某个视角对不对"依赖那个方位 ——
-/// 量的时候必须能把当时的方位**读回来**（写进命令行的 `--place`），才算有了确定性复现。
-/// ⚠ 两个开关**都**等回话（照抄 Bevy：`place` 也带 `ask_camera`）：
-/// "摆到哪儿了"这句话要由**窗口**说，不能由摆的人自己复述一遍（那是同一个数的两次序列化）。
 pub fn camera_query(place: Option<[f32; 3]>) -> Result<(), String> {
     let place = place.map(|place| orbit_of("--place", place)).transpose()?;
     let previous = read_request().ok_or_else(|| {
@@ -295,7 +174,6 @@ pub fn camera_query(place: Option<[f32; 3]>) -> Result<(), String> {
         shot_path: None,
     };
     write_request(&request)?;
-    // 先删回话再等：上一次的回话留着的话，`at` 一对不上就会白等满 3 s。
     let _ = std::fs::remove_file(VIEW_CAMERA);
 
     let deadline = Instant::now() + REPLY_TIMEOUT;
@@ -320,7 +198,6 @@ pub fn camera_query(place: Option<[f32; 3]>) -> Result<(), String> {
                              位置那一栏是真的，`--place` 它得到的是**轨道**那一档"
                         );
                     }
-                    // 这一行能直接粘回命令行：换个窗口也能摆到同一个视角。
                     println!(
                         "--place {:.4},{:.4},{:.4}",
                         reply.yaw, reply.pitch, reply.distance
@@ -338,18 +215,10 @@ pub fn camera_query(place: Option<[f32; 3]>) -> Result<(), String> {
     ))
 }
 
-// ---------------------------------------------------------------------------
-// 起窗口
-// ---------------------------------------------------------------------------
-
-/// `--view [--scene 文档] [--cam …] [--shot PNG] [--width W] [--height H]`。
-///
-/// 这条函数**不返回**直到窗口关掉（winit 的事件循环在里面）。
 pub fn view(options: &crate::Options) -> Result<(), String> {
     let request = match options.shots.first() {
         Some(shot) => {
             let scene = shot.scene.display().to_string();
-            // 命令行起的窗口：键当场算（读不到清单就大声报错，别开着窗一片黑）。
             let key = fingerprint_of(Path::new(&scene))?;
             ViewRequest {
                 scene,
@@ -372,12 +241,6 @@ pub fn view(options: &crate::Options) -> Result<(), String> {
         })?,
     };
 
-    // ---- 单例闸：一个窗口 ----
-    //
-    // §147 那条纪律（租约 = 单例）在窗口这一侧也要成立：两个窗口互相覆盖心跳，
-    // 于是"谁在线"没人说得清，而 `--show` / `--where` 会随缘落到其中一个上。
-    // 判据是**心跳新鲜度**，不是文件在不在：被 kill 掉的窗口会留下一份旧租约，
-    // 那一份必须让路（否则下一次合法启动会被自己的残骸挡住）。
     if let Some(age) = lease_age() {
         if age < LEASE_FRESH {
             return Err(format!(
@@ -390,8 +253,6 @@ pub fn view(options: &crate::Options) -> Result<(), String> {
         }
     }
 
-    // 三处相对路径的基准是**当前目录**，而 `Start-Process` 继承的是宿主 PowerShell 的
-    // **进程** cwd（`Set-Location` 改不了它）—— 所以把基准打出来，错了当场看得见。
     println!(
         "预览窗口：当前目录 {}｜场景 {}｜请求文件 {VIEW_REQUEST}｜租约 {VIEW_LEASE}",
         std::env::current_dir()
@@ -402,8 +263,6 @@ pub fn view(options: &crate::Options) -> Result<(), String> {
 
     let orbit = match options.view_cam() {
         Some(place) => Some(orbit_of("--cam", place)?),
-        // `None` = **不给 --cam 那一档**（探针机位，`camera.rs::probe_camera`）。
-        // 不发明一个"窗口的初始角度"：那正是 §104 第 3 条说的那种没人写过的数。
         None => None,
     };
 
@@ -428,8 +287,6 @@ pub fn view(options: &crate::Options) -> Result<(), String> {
         cursor: None,
         session: None,
         session_key: None,
-        // ⚠ 看不了（目录读不出来）不该让窗口起不来：热重载是**附加**能力，
-        //    起不来的话读数里说一声，别的照旧（窗口的价值不止热重载）。
         shaders: match ShaderWatch::new() {
             Ok(watch) => {
                 println!("shader 热重载：看着 {}", watch.describe());
@@ -456,11 +313,6 @@ pub fn view(options: &crate::Options) -> Result<(), String> {
         last_heartbeat: Instant::now(),
     };
 
-    // 请求文件与租约都**在窗口起来之后**才写（见 `Viewer::open`）：
-    // 它们说的是"窗口现在显示着什么、它还活着"，而窗口还没起来时这两句话都不成立。
-    // ⚠ 反过来说：`--where` / `--place` 因此要等窗口真的起来才有东西可读 ——
-    //    那是实话（"窗口没起来"与"窗口起来了但没回话"是两件事），不是缺陷。
-
     println!(
         "操作：左键拖动 = 转视角、滚轮 = 缩放；s = 存一张图（落到 --shot 那条路径）；q / Esc = 退出"
     );
@@ -475,10 +327,6 @@ pub fn view(options: &crate::Options) -> Result<(), String> {
     }
 
     let event_loop = EventLoop::new().map_err(|err| format!("起事件循环失败：{err}"))?;
-    // 租约 = 生命周期（§147 那条纪律的窗口版）：**删掉租约 ⇒ 窗口自己退出**。
-    // 服务端早就有这一条（`serve::spawn_lease_watch`，"删掉租约 ⇒ 4 秒内自查退出"）；
-    // 窗口这边少了它，"把窗口关掉"就只剩鼠标一条路，于是自动化（包括本单元的验收脚本）
-    // 只能 `/F` 硬杀 —— 而硬杀留下的正是一份**陈租约**（那正是要避免的东西）。
     spawn_lease_watch();
     event_loop
         .run_app(&mut viewer)
@@ -486,12 +334,6 @@ pub fn view(options: &crate::Options) -> Result<(), String> {
     Ok(())
 }
 
-/// 租约没了 ⇒ 自己退出。**另一个线程**（照搬服务端那条的理由）：主线程会**阻塞**在
-/// 一帧渲染里（实测 0.8–2.3 s），塞进事件循环的话"删掉租约"要等这一帧画完才生效。
-///
-/// ⚠ 连续**两个**周期都读不到才退（约 4–6 s），不是一次：心跳是 `fs::write`（不是原子替换），
-/// 读的人有可能正好撞见"文件被截断成 0 字节"的那一瞬间 —— 一次就退的话，那是一次**静默自杀**。
-/// 服务端那条是一锤子（它自己写自己读，窗口比它多一个风险面：写的人与读的人可能同时在不同核上）。
 fn spawn_lease_watch() {
     std::thread::spawn(move || {
         let mut missing = 0;
@@ -510,7 +352,6 @@ fn spawn_lease_watch() {
     });
 }
 
-/// 起始那一份请求要不要截图。`--view --shot P` 与 `--show --shot P` 走的是同一格。
 fn initial_shot(request: &ViewRequest) -> Option<PathBuf> {
     if !request.shot {
         return None;
@@ -520,21 +361,10 @@ fn initial_shot(request: &ViewRequest) -> Option<PathBuf> {
     ))
 }
 
-/// 写一份新租约（**无条件**）。只在窗口刚起来那一次用。
 fn write_lease() {
     let _ = std::fs::write(VIEW_LEASE, format!("{}", now_nanos()));
 }
 
-/// 心跳：**只在租约还在的时候刷新它**。
-///
-/// ⚠ 这一条不是"顺手防一下"，它让"删掉租约"变成一个**能用的操作**：
-/// 服务端那条纪律是"删掉租约 ⇒ 4 秒内自查退出"（§104 第 10 条），而服务端那份租约
-/// **没有心跳** —— 写完就不动了，所以删掉就是删掉了。窗口这份租约按 Bevy 的口径是
-/// **每秒刷新**的，于是"删掉它"会被下一次心跳**原地复活**：外部就再没有任何办法
-/// 把它请出场（只能 `/F` 硬杀，而硬杀留下的正是一份**陈租约** —— 那正是要避免的东西）。
-///
-/// ⇒ 缺了就不再续：租约的**存在**是"这个窗口还在"的唯一真本，谁都不许替它续命。
-/// 于是"删掉 `target/viewer.json`"与"关窗口"是同一件事（退出由 [`spawn_lease_watch`] 做）。
 fn heartbeat_now() {
     if !std::path::Path::new(VIEW_LEASE).exists() {
         return;
@@ -542,30 +372,17 @@ fn heartbeat_now() {
     write_lease();
 }
 
-// ---------------------------------------------------------------------------
-// 窗口本体
-// ---------------------------------------------------------------------------
-
-/// 一次渲染得到的、**也**要送到屏幕上的那批字节。
-///
-/// ⚠ 它就是 `render::run` 回读出来的 `pixels`，一个字节都不重新采样：
-/// 屏幕上那一张与 `--shot` 写出来的那一张因此是**同一批字节**（模块头第 2 条）。
 struct Present {
     layout: wgpu::BindGroupLayout,
     pipeline: wgpu::RenderPipeline,
     sampler: wgpu::Sampler,
     bind: Option<wgpu::BindGroup>,
-    /// 显示用的那张纹理（`Rgba8UnormSrgb` + **非 sRGB 视图**，见 `upload`）。
     texture: Option<wgpu::Texture>,
     size: (u32, u32),
 }
 
 impl Present {
     fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Present {
-        // ⚠ 这一份 WGSL 用 wgpu 的**缺省**编译档（`checked()`）—— 与内容 shader 那条路
-        //    故意不同（`px_pass::module_of_wgsl` 抄的是 Bevy 的 `unchecked()`，§145）。
-        //    理由：它的输出**永远只到交换链**，不进任何判据（连 `--shot` 都不经过它）。
-        //    判据那条路上一个字节都不许走"另一个编译档"，也不该让这一份去共享那个档位。
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("px_render 呈现"),
             source: wgpu::ShaderSource::Wgsl(PRESENT_WGSL.into()),
@@ -629,8 +446,6 @@ impl Present {
         Present {
             layout,
             pipeline,
-            // 1:1 的取样：放大缩小时宁可看到方块，也不要一个"看起来更顺眼"的重采样 ——
-            // 那是屏幕上**另外**画了一遍，而这一格的全部意义是"原样"。
             sampler: device.create_sampler(&wgpu::SamplerDescriptor {
                 label: Some("px_render 呈现"),
                 address_mode_u: wgpu::AddressMode::ClampToEdge,
@@ -647,13 +462,6 @@ impl Present {
         }
     }
 
-    /// 把回读出来的紧凑 RGBA8 原样搬到一张纹理上。
-    ///
-    /// ⚠ 两端都用**非 sRGB 的视图**：判据那张图存的是**已经 sRGB 编码过的字节**
-    /// （`Rgba8UnormSrgb`，`shot::FORMAT`），而交换链那一张也是 sRGB 格式。
-    /// 拿 sRGB 视图采样、再写进 sRGB 目标 ⇒ 硬件会做一次"解码再编码"，
-    /// 而 8 位下那条往返**不是**恒等（有几个值差 1）。非 sRGB 视图把两端都变成
-    /// "字节进、字节出"，于是屏幕上的像素与 PNG 里的字节**逐个相等**。
     fn upload(
         &mut self,
         device: &wgpu::Device,
@@ -675,7 +483,6 @@ impl Present {
                 dimension: wgpu::TextureDimension::D2,
                 format: shot::FORMAT,
                 usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-                // sRGB 的格式 + 非 sRGB 的视图：**只有 sRGB 那一格可以这样换**（wgpu 的规矩）。
                 view_formats: &[shot::FORMAT.remove_srgb_suffix()],
             });
             let view = texture.create_view(&wgpu::TextureViewDescriptor {
@@ -702,7 +509,6 @@ impl Present {
         }
         queue.write_texture(
             wgpu::TexelCopyTextureInfo {
-                // 上面刚保证过 `Some`（`texture.is_none()` 那一支已经建了一张）。
                 texture: self.texture.as_ref().expect("刚建过"),
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
@@ -722,7 +528,6 @@ impl Present {
         );
     }
 
-    /// 一个全屏三角，把那张纹理盖到交换链上。
     fn draw(&self, encoder: &mut wgpu::CommandEncoder, target: &wgpu::TextureView) {
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("px_render 呈现"),
@@ -741,8 +546,6 @@ impl Present {
             multiview_mask: None,
         });
         let Some(bind) = &self.bind else {
-            // 还没画过任何一帧（窗口刚开、第一次 `render::run` 就失败了）：黑屏，
-            // 而不是"拿一张没建好的绑定组去画"。
             return;
         };
         pass.set_pipeline(&self.pipeline);
@@ -751,11 +554,6 @@ impl Present {
     }
 }
 
-/// 全屏三角 + 一次取样。
-///
-/// ⚠ `uv.y = 1 − corner.y`：NDC 的 y 朝上，而纹理的第 0 行是**图的第一行**（顶行）。
-/// 少了这个 `1 − `，屏幕上的图上下颠倒 —— 而"窗口能看"这条判据在人眼里**依然成立**，
-/// 只是上下反了（这正是那种不会被任何门抓到的错）。照抄 `px_pass` 里同一个全屏三角。
 const PRESENT_WGSL: &str = r#"
 struct PxPresentOut {
     @builtin(position) position: vec4<f32>,
@@ -780,27 +578,6 @@ fn fs_main(in: PxPresentOut) -> @location(0) vec4<f32> {
 }
 "#;
 
-/// **屏幕上那一张**（画面 + 面板）读回来存成 PNG —— `--ui-shot`。
-///
-/// ⚠ 它与 `--shot` **不是一回事**，两个都要有：
-///
-/// * `--shot` 写的是**回读出来的那批字节**（`shot::Target`，判据那张图）——
-///   S7 那条"窗口 `--shot` 与离线逐字节相同"靠的就是它**不含面板**；
-/// * `--ui-shot` 写的是**交换链上那一张**（画面 + 面板，人眼看到的东西）。
-///   它是给"面板长什么样"这件事当证据用的（本会话没有可靠的桌面截图：
-///   `CopyFromScreen` 在这台机器上抓到的是别的窗口）。
-///
-/// ⚠ 两处的行距规矩是硬的（`copy_texture_to_buffer` 要求 `bytes_per_row` 是
-///   **256 的整数倍**）：按对齐后的行距读回来，再逐行剪成紧凑的 RGBA8
-///   —— 少了这一步，宽度不是 64 的倍数的窗口会**当场校验错**（而宽度正好是 64 的
-///   倍数时它一声不响地对，于是这个错会在别人换一个窗口尺寸时才出现）。
-///
-/// ⚠⚠ **通道次序要按交换链的格式转**（第二次修这里，第一次只对了行距）：
-///   交换链在这台机器上是 `Bgra8UnormSrgb`，而 `shot::write_png` 收的是 **RGBA8**
-///   ⇒ 直接照抄读回来的字节，写出去的图**红蓝互换**。而互换之后它"看着还是一张行星图"
-///   （只是颜色不对），于是**用这张图当证据去查别的缺陷时，量到的是自己的色偏**：
-///   实测把它与离线那张逐像素比，整片 3D 区都有 |Δ|≈70 的差，我还据此去追了一条
-///   根本不存在的"竖线"。⇒ 按格式转，别猜。
 fn read_back_ui(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -847,21 +624,15 @@ fn read_back_ui(
 
     let slice = buffer.slice(..);
     slice.map_async(wgpu::MapMode::Read, |_| {});
-    // ⚠ 必须等这一份映射真的到：`map_async` 的回调是**设备走完队列之后**才调的，
-    //   不等就 `get_mapped_range` 会拿到空的一段（而那是"读出来一片黑"的症状）。
     let _ = device.poll(wgpu::PollType::Wait {
         submission_index: None,
         timeout: None,
     });
-    // 交换链上那个通道次序（`Bgra*` 系列才有这一档；`Rgba*` 原样）。
     let swap_red_blue = matches!(
         format,
         wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
     );
     if format == wgpu::TextureFormat::Bgra8Unorm {
-        // ⚠ 非 sRGB 的 BGRA 交换链**内部存的是线性值**（呈现那一段写的就是线性），
-        //   而 PNG 要 sRGB 编码的字节 ⇒ 少了这一步，图会整片偏暗。
-        //   今天没有后端会走到这里（`open` 挑的是 sRGB 格式），说出来而不是静默照抄。
         eprintln!(
             "⚠ 交换链格式是 {format:?}（非 sRGB 的 BGRA）⇒ --ui-shot 没做线性→sRGB 编码，图会偏暗"
         );
@@ -884,42 +655,21 @@ fn read_back_ui(
     shot::write_png(path, width, height, bytes).map(|_bytes| ())
 }
 
-/// `BGRA8` → `RGBA8`（那个换序单独拆出来，是为了判据能逐字节验它）。
-///
-/// ⚠⚠ 这一条是**证据链上的一个环**，不是格式细节：写出去的图是人/模型**用来判断
-///   "屏幕上是什么样"的唯一凭据**。红蓝换了之后它**看着还是一张正常的行星图**
-///   （只是颜色偏），于是拿它去查别的缺陷时量到的是自己的色偏 —— 实测：
-///   把它与离线那张逐像素比，整片 3D 区都有 |Δ|≈70 的差，我还据此追了一条
-///   **根本不存在的"竖线"**（把本来正确的像素当成了缺陷）。
 fn swizzle_bgra_to_rgba(source: &[u8], out: &mut Vec<u8>) {
     for pixel in source.chunks_exact(4) {
         out.extend_from_slice(&[pixel[2], pixel[1], pixel[0], pixel[3]]);
     }
 }
 
-/// 窗口的全部状态。事件循环里**只有**它。
 struct Viewer {
-    /// 现在显示的是哪一份产物（请求文件里那一栏的真本就在窗口手里）。
     scene: String,
     key: u64,
-    /// 已经吃过的那一次请求（`ViewRequest.at`）。同一个 `at` 只处理一次。
     request_at: u64,
-    /// 轨道相机：`None` = 不给 `--cam` 那一档（探针机位）。
     orbit: Option<[f32; 3]>,
-    /// 还要存一张图（存完就清）。
     pending_shot: Option<PathBuf>,
-    /// `--ui-shot P`：还要不要存一张**屏幕上那一张**（画面 + 面板）。
-    ///
-    /// ⚠ 它与 `pending_shot` 分开、而且**不自动清**：面板的内容是"这一帧画完才知道"的，
-    ///   而人总想改一个控件之后再存一张看看 ⇒ 留着一个路径，按 `u` 再存一次。
     ui_shot: Option<PathBuf>,
-    /// 交换链那一张能不能读回来（`COPY_SRC` 在不在 —— `open` 那一刻定下，改不了）。
     ui_shot_ok: bool,
-    /// 这一份产物声明了对照图（只用来打一行说明：窗口不出多视口）。
     sheet: bool,
-    /// **那张图的像素尺寸**（`--width/--height`；窗口起来之后跟着交换链走）。
-    ///
-    /// ⚠ 它与离线那条路同名同义：窗口画的与离线画的要能逐字节比。
     size: (u32, u32),
     pcg_root: PathBuf,
     novsync: bool,
@@ -932,86 +682,38 @@ struct Viewer {
 
     dragging: bool,
     cursor: Option<(f64, f64)>,
-    /// **保留态**（S7-b 的前置）：一份文档 → 一次准备 → 每一帧只写相机那两块 uniform。
-    ///
-    /// ⚠ 它属于"哪一份文档"由 [`Viewer::session_key`] 说（路径 + 内容键）：换了场景、
-    /// 或者产物被重烘成**别的内容**（键变了），这一份就作废重开。相机一动**不作废** ——
-    /// 那正是这个单元要的东西。
     session: Option<render::Session>,
-    /// 上面那一份是按**哪一份产物**开的：`(路径, 内容键)`。
     session_key: Option<(String, u64)>,
-    /// 盘上那些 `.wgsl` 的闹钟 + 载荷指纹（shader 热重载的**看**那一半）。
     shaders: Option<ShaderWatch>,
-    /// 看出来了、还没落成的改动（保留态还没开的那一小段窗口里攒着）。
     shader_changes: Vec<PathBuf>,
-    /// `--image-hash`：每帧把**回读出来那张图**的 sha16 与时刻打进日志。
-    ///
-    /// ⚠ 它是个开关而不是默认：算一次 sha256 要读 2.4 MB（dev 档实测几毫秒到十几毫秒），
-    ///    默认开着就把"每帧多少钱"这个数改了。判据（1 秒内画面变）量的是**图**，
-    ///    所以量的时候把它打开，量完关掉。
     image_hash: bool,
-    /// **调参面板**（S9）。`None` = 还没建（`open` 里与窗口一起建）。
-    ///
-    /// ⚠ 它画在**交换链上**（`Viewer::draw` 里 `frame.present()` 之前的那一个 pass），
-    ///   所以 `--shot` 那张图与 `--image-hash` 那把尺子**一个字节都不动** ——
-    ///   S7 那条判据（"窗口 `--shot` 与离线同文档同机位逐字节相同"）因此照旧成立。
     panel: Option<crate::panel::Panel>,
-    /// `--edit <场景配方名>`：面板要编辑哪份配方（`None` = 问清单推，推不出来就问人）。
-    ///
-    /// ⚠ 推的是"窗口正在显示的那份产物**是哪份配方烘的**"，靠的是 `scene` 图的清单
-    ///   （键 → CAS 路径 → 配方名）—— **不是**产物路径的文件名（那是一串内容键）。
-    ///   推出来的名字在日志与面板上都要看得见（"我编辑的是哪个"不能靠猜）。
     edit_recipe: Option<String>,
-    /// 面板**实际**开在哪份配方上（`--edit` 给的，或者按产物名推出来的）。
-    ///
-    /// ⚠ 它与 `edit_recipe` 分开存：推出来的那一份要能显示给人看（"我编辑的是哪个"），
-    ///   而窗口的场景**换过**之后这一格**不跟着换** —— 面板开的是哪一份就是哪一份，
-    ///   直到有人重开窗口（那正是"会话"）。
     panel_recipe: Option<String>,
-    /// 画面脏了：下一次 `RedrawRequested` 要重画一帧。
     dirty: bool,
-    /// 上一次画出来的尺寸（`--shot` 与"重呈一次"都要用它）。
     last: Option<(u32, u32)>,
-    /// 这一份产物的审计行只在**第一次**画它的时候打：相机一动就打一遍会把日志淹掉。
     first_frame: bool,
     frames: u64,
-    /// 产物文件的 mtime（`poll_scene_file` 的闹钟：§50 那条"闹钟 + 载荷指纹"）。
     scene_modified: Option<SystemTime>,
     last_poll: Instant,
     last_heartbeat: Instant,
 }
 
-/// 盘上那些 `.wgsl` 的**闹钟 + 载荷指纹**（与 `poll_scene_file` 同一条规矩，§50）。
-///
-/// ⚠ 两级判据，缺一不可：
-/// 1. **闹钟**：`(mtime, 长度)` —— 一次 tick 只花几次 `stat`，不动磁盘内容；
-/// 2. **指纹**：闹钟响了才读盘算 sha256 ⇒ **只认字节真的变了的**（"touch 一下"、
-///    "存盘但内容没变"都不算改）。
-///
-/// ⚠ 扫的是**目录**（`shader::watch_files`：两个 shader 根 + `art/frame`），不是"从文档推
-/// 一张文件清单"：文档里记的是成员名与内联全文，库文件在文档里根本没有名字。
-/// 扫宽一点的代价只是"某个文件变了、但没有哪一槽的文本跟着变"这一条读数 ——
-/// 而那恰恰是**应该**看得见的东西（比如改的是顶点阶段：它今天不在可重载的槽里）。
 struct ShaderWatch {
     files: Vec<Watched>,
 }
 
 struct Watched {
     path: PathBuf,
-    /// `(mtime, 长度)`：闹钟。
     alarm: Option<(SystemTime, u64)>,
-    /// 上一次读到的**内容**指纹（sha256 前 16）。
     hash: Option<String>,
 }
 
 impl ShaderWatch {
-    /// 起窗口时记一遍**现状**：窗口起来之前就改过的文件不该在开窗那一刻当成"刚改的"。
     fn new() -> Result<ShaderWatch, String> {
         ShaderWatch::of(shader::watch_files()?)
     }
 
-    /// 同上，但**文件清单由调用方给**（判据要能在几个临时文件上验这套逻辑，
-    /// 而不是只能靠"起一个窗口、手改一个真 shader"来验）。
     fn of(files: Vec<PathBuf>) -> Result<ShaderWatch, String> {
         let files = files
             .into_iter()
@@ -1026,8 +728,6 @@ impl ShaderWatch {
         Ok(ShaderWatch { files })
     }
 
-    /// 看着几个文件（进日志：**"看着谁"这件事要看得见**，不然"没反应"分不清是
-    /// "没改"还是"没在看"）。
     fn describe(&self) -> String {
         let names: Vec<String> = self
             .files
@@ -1044,10 +744,6 @@ impl ShaderWatch {
         format!("{} 个：{}", names.len(), names.join(" / "))
     }
 
-    /// 这一 tick 里**字节真的变了**的文件（内容没变的不算，闹钟却已经推新）。
-    ///
-    /// ⚠ 两种都报出来（第二种只报不做事）：`touch` 一下、或者"存盘但内容没变"
-    /// 与"真的改了一行"是两回事，而只有后者该让画面重画（§50 那条口径的 shader 版）。
     fn changed(&mut self) -> (Vec<PathBuf>, Vec<PathBuf>) {
         let mut changed = Vec::new();
         let mut touched = Vec::new();
@@ -1069,7 +765,6 @@ impl ShaderWatch {
     }
 }
 
-/// `(mtime, 长度)` —— 读不到就是 `None`（文件被删了也是"变了一次"：`None → Some` 会响）。
 fn alarm_of(path: &Path) -> Option<(SystemTime, u64)> {
     let meta = std::fs::metadata(path).ok()?;
     Some((meta.modified().ok()?, meta.len()))
@@ -1081,41 +776,21 @@ fn content_hash_of(path: &Path) -> Option<String> {
 }
 
 impl Viewer {
-    /// 指针**归面板**吗（相机的拖拽按这个让路）。
     fn panel_wants_pointer(&self) -> bool {
         self.panel
             .as_ref()
             .is_some_and(crate::panel::Panel::wants_pointer)
     }
 
-    /// 当前这台的"怎么看"：`Views::Single` 那一档（与离线那条路**同一个**入口）。
     fn views(&self) -> Views {
         Views::Single(self.orbit)
     }
 
-    /// 现在这台相机的姿态。⚠ 用**同一个** `probe_camera` 算：`--where` 报的位置
-    /// 与画面上那台相机因此来自同一份算术（两处各算一遍 = 两处会漂开的真相）。
     fn camera(&self, width: u32, height: u32) -> crate::camera::Camera {
         crate::camera::probe_camera(self.orbit, width as f32 / height as f32)
     }
 
-    /// 按当前状态把窗口补出来：窗口 → 实例 → surface → 设备 → 呈现管线 → 租约。
-    ///
-    /// ⚠ 次序是硬的：`Surface` 属于**建它的那个实例**，所以"实例"必须自己建、
-    /// 再把它连同 surface 一起交给 `gpu::connect_with`。少了这一步，适配器/设备来自
-    /// 另一个实例 —— 那是"窗口开了但画不出来"那一族里最难查的一种。
     fn open(&mut self, event_loop: &ActiveEventLoop) -> Result<(), String> {
-        // ⚠ **`--width/--height` 是物理像素**（给没给都一样）—— 与离线那条路同一个意思：
-        //   窗口画的那张图就是这么大，而判据是"与离线那张同尺寸逐字节相同"。
-        //
-        // ⚠⚠ **这里第一次修错了地方，记下来**：面板在 960×640 的窗口上显得吃掉半个画面时，
-        //   我的第一反应是"把窗口按逻辑点开大"（960×640 pt ⇒ 1680×1120 px，本机缩放 1.75）。
-        //   那修错了层：`Viewer::size` 在 `open`/`resize` 里被设成**窗口的物理像素**
-        //   ⇒ 屏幕与 `--shot` 那张图都变成 1680×1120，而它再也**不等于**同一份文档
-        //   960×640 的离线图 —— **S7 那条判据当场就没了**（实测：窗口 `--shot` 变成
-        //   743644 B 的 1680×1120 图，而登记值是 300012 B / 960×640）。
-        //   而它看起来只是"窗口更大了、更舒服"。
-        //   ⇒ 真正的病因是**面板按物理窗口宽度算宽**（`panel.rs` 的 `ui`）：修在那儿。
         let physical = PhysicalSize::new(self.size.0, self.size.1);
         let window = Arc::new(
             event_loop
@@ -1134,8 +809,6 @@ impl Viewer {
         let size = window.inner_size();
         let gpu = crate::gpu::connect_with(instance, Some(&surface));
         let capabilities = surface.get_capabilities(&gpu.adapter);
-        // 交换链的格式：挑一个 sRGB 的（画面本来就是 sRGB 的字节），
-        // 再把它**非 sRGB 的那一面**列进 `view_formats` —— 呈现那一段要用它（见 `Present::upload`）。
         let format = capabilities
             .formats
             .iter()
@@ -1147,16 +820,9 @@ impl Viewer {
                     capabilities.formats
                 )
             })?;
-        // ⚠ `COPY_SRC` 是 `--ui-shot` 要的（把**屏幕上那一张**读回来）：
-        //   `wgpu` 的缺省交换链用法**只有** `RENDER_ATTACHMENT`，少了这一位
-        //   `copy_texture_to_buffer` 会**当场校验错并 panic**（实测踩到：
-        //   "Usage flags RENDER_ATTACHMENT of Texture '<Surface Texture>' do not contain
-        //   required usage flags COPY_SRC"）。⇒ 先问能力，再决定加不加。
         let capability = capabilities.usages;
         let copy_src = capability.contains(wgpu::TextureUsages::COPY_SRC);
         if self.ui_shot.is_some() && !copy_src {
-            // ⚠ **当场清掉它并说清为什么**，不留一个"要截图"的意图在这里：
-            //   留着它会让第一帧就炸，而"炸"与"这张卡不支持"是两件事。
             eprintln!(
                 "⚠ 这块 surface 不支持 COPY_SRC（{:?}）⇒ --ui-shot 这一档用不了：\
                  界面截图要能把交换链那一张读回来。窗口照常开，画面照常画",
@@ -1176,8 +842,6 @@ impl Viewer {
             present_mode: if self.novsync {
                 wgpu::PresentMode::AutoNoVsync
             } else {
-                // 缺省是 `AutoVsync`（Bevy 那边不给 `--novsync` 时也是它）——
-                // 垂直同步不是"性能开关"，它是窗口不该撕裂的那条底线。
                 wgpu::PresentMode::AutoVsync
             },
             desired_maximum_frame_latency: 2,
@@ -1199,20 +863,8 @@ impl Viewer {
 
         self.present = Some(Present::new(&gpu.device, format.remove_srgb_suffix()));
         self.size = (config.width, config.height);
-        // 这一位记下来：运行时按 `u` 也要能知道能不能读回交换链那张
-        // （交换链的用法在 `open` 那一刻定下，改不了 —— `u` 不能反过来要求它重配）。
         self.ui_shot_ok = copy_src;
 
-        // ---- 调参面板（S9）：与窗口同时建 ----
-        //
-        // ⚠ **无条件建**（不看 `--edit`）：面板本身就是"怎么开它"的说明书，而 `Tab`
-        //   收起/展开是窗口的通用操作 —— 把"有没有面板"绑在开关上，人按了 Tab 什么都
-        //   不发生，那就分不清"没有面板"与"面板坏了"。
-        // ⚠ 编辑面**不写死**：`--edit` 没给就问**清单**"窗口正在显示的那份产物是哪份配方
-        //   烘的"（产物路径是 CAS 的内容键，与配方名一个字符都不相干 —— 拿文件名推会推出
-        //   一串十六进制，见 `edit::derive_recipe`）。推不出来就让面板说清该给什么，**不猜**。
-        // ⚠ 编辑那一半**开不起来不算致命**：起不来的理由（配方不在、图不在）要写在
-        //   面板上给人看，而不是让窗口开不出来（§146.3 ③ 那一族：拦住了不等于说对了）。
         let recipe = self.edit_recipe.clone().or_else(|| {
             crate::edit::derive_recipe(shader::workspace(), &self.pcg_root, Path::new(&self.scene))
         });
@@ -1248,11 +900,6 @@ impl Viewer {
         self.config = Some(config);
         self.window = Some(window);
 
-        // ---- 两处"我在线"的声明**都放在窗口真的起来之后** ----
-        //
-        // ⚠ 放在这之前的话，起窗口失败（比如 `create_surface` 被拒）会留下一份
-        //    **假的心跳**：外部仪器看见"窗口在线"，而进程已经死了。
-        //    写在这里之后，租约的含义是"窗口已经画得出来"，与它该有的意思一致。
         let _ = write_request(&ViewRequest {
             scene: self.scene.clone(),
             key: self.key,
@@ -1266,8 +913,6 @@ impl Viewer {
                 .as_ref()
                 .map(|path| path.display().to_string()),
         });
-        // ⚠ 这一次是**无条件**写（`write_lease`，不是心跳）：窗口刚起来，租约还不存在，
-        //    而心跳那条规矩是"缺了就不续" —— 用错那一个，租约永远建不出来。
         write_lease();
         Ok(())
     }
@@ -1287,7 +932,6 @@ impl Viewer {
         }
     }
 
-    /// 窗口尺寸变了：交换链重建，画面**必须**重画（长宽比变了 ⇒ 换了一台相机）。
     fn resize(&mut self, size: PhysicalSize<u32>) {
         let (Some(surface), Some(config), Some(gpu)) = (
             self.surface.as_ref(),
@@ -1297,7 +941,6 @@ impl Viewer {
             return;
         };
         if size.width == 0 || size.height == 0 {
-            // 最小化：交换链不允许 0 尺寸（wgpu 会拒）。等下一次 Resized。
             return;
         }
         config.width = size.width;
@@ -1307,18 +950,12 @@ impl Viewer {
         self.dirty = true;
     }
 
-    /// 现在这台相机在哪 —— 大小只影响投影，位姿与它无关（`seed_orbit` 只用位置）。
     fn current_position(&self) -> [f32; 3] {
         let (width, height) = self.size;
         let camera = self.camera(width.max(1), height.max(1));
         [camera.position.x, camera.position.y, camera.position.z]
     }
 
-    /// 鼠标左键拖着转视角。**逐字照抄** Bevy 的 `orbit_camera`（灵敏度、夹取范围都一样）。
-    ///
-    /// ⚠ 第一次拖动之前窗口还在**探针机位**（没有角这份状态）⇒ 先把位姿反推成角
-    /// （[`seed_orbit`]），再把这一笔位移加上去。少了这一步，鼠标的**第一下**
-    /// 会静默丢掉（相机没动，而"没动"看起来像卡了）。
     fn drag(&mut self, position: (f64, f64)) {
         let previous = self.cursor.replace(position);
         if !self.dragging {
@@ -1340,9 +977,6 @@ impl Viewer {
     }
 
     fn wheel(&mut self, delta: MouseScrollDelta) {
-        // Windows 后端给的是 `LineDelta`（一格 = 1.0）。`PixelDelta` 只在别的平台出现，
-        // 而**没有任何读数依赖它** —— 除以 100 是"一格约 100 像素"这个通行口径，
-        // 写出来只是为了让那一支不是"悄悄什么都不做"。
         let notches = match delta {
             MouseScrollDelta::LineDelta(_, y) => f64::from(y),
             MouseScrollDelta::PixelDelta(position) => position.y / 100.0,
@@ -1360,7 +994,6 @@ impl Viewer {
         self.update_title();
     }
 
-    /// `--place` / 请求里的 `set_camera`。
     fn place(&mut self, place: [f32; 3]) {
         match orbit_of("--place", place) {
             Ok(place) => {
@@ -1376,20 +1009,11 @@ impl Viewer {
         }
     }
 
-    /// 问一句"相机在哪儿"：把三个数与位置写进 `VIEW_CAMERA`。
-    ///
-    /// ⚠ 位置用**画面上那台相机**（`camera()`），不是把角再算一遍 ——
-    /// 两处各算一次就是两处会漂开的真相（§146.3 ③）。
-    /// 探针机位那一档的三个角也**只有一份算法**（[`seed_orbit`]）：那是鼠标接管时的同一个反推，
-    /// 抄成两份的话，"`--where` 报的角"与"鼠标一动从哪个角开始"就会各自漂开。
     fn answer_camera(&self, at: u64) {
         let (width, height) = self.size;
         let camera = self.camera(width.max(1), height.max(1));
         let (yaw, pitch, distance, derived) = match self.orbit {
             Some(state) => (state[0], state[1], state[2], false),
-            // 探针机位：窗口手里**没有**角这一份状态，三个数只能从位姿反推。
-            // 位置那一栏仍然是真的，反推出来的角只在"想用 --place 复现"时被用到，
-            // 而那一档得到的是**轨道**那一档（所以 `derived` 必须为真）。
             None => {
                 let position = camera.position;
                 let angles = seed_orbit([position.x, position.y, position.z]);
@@ -1415,7 +1039,6 @@ impl Viewer {
         }
     }
 
-    /// 周期活之一：看请求文件。`--show` / `--where` / `--place` / `--shot` 全从这里进来。
     fn poll_request(&mut self) {
         let Some(request) = read_request() else {
             return;
@@ -1424,7 +1047,6 @@ impl Viewer {
             return;
         }
         self.request_at = request.at;
-        // 换场景之前先把相机摆好：`--place` 与场景无关，只是"把镜头挪过去"。
         if let Some(place) = request.set_camera {
             self.place(place);
         }
@@ -1437,7 +1059,6 @@ impl Viewer {
             ));
             self.dirty = true;
         }
-        // 换了场景，或者内容键变了 ⇒ 重画；同一份产物再推一次只是「看见了」，不动。
         let changed = request.scene != self.scene
             || request.key == 0
             || request.key != self.key
@@ -1463,21 +1084,6 @@ impl Viewer {
         }
     }
 
-    /// 周期活之二：产物文件自己动了（重烘之后窗口跟上）。
-    ///
-    /// 判据是 mtime 闹钟 + **载荷指纹**（§50）：重新烘一份内容一模一样的产物
-    /// （或者只是 touch 了一下）不该让窗口重画。指纹为 0 的旧产物照样重画 —— 判不了就照旧。
-    /// 周期活之三：**shader 热重载**（§105 的 S7 第二条判据：改一个 `.wgsl` 存盘、约 1 秒内画面变）。
-    ///
-    /// 它做两件事，缺一不可：① 看出**盘上**哪几个 `.wgsl` 真的变了；② 把改动**落回"哪一层"**
-    /// （[`render::Session::reload_shaders`]，读数由它给）。
-    ///
-    /// ⚠ 判据要的是"**画面**变"，而"文件变了 + 日志打了一行"都不是画面：
-    ///    所以这里只负责置 `dirty`，真正的证据在下一帧那张图上
-    ///    （`--image-hash` 会把每帧的图哈希与时刻打出来；1 秒那条判据就是这么量的）。
-    ///
-    /// ⚠ 上一 tick 没落成的改动**不丢**（`shader_changes` 里攒着）：窗口还没准备好
-    ///    （第一帧还没画、`session` 还是 `None`）时把改动吞掉，就会变成"我明明改了、它什么都没说"。
     fn poll_shaders(&mut self) {
         let mut changed = std::mem::take(&mut self.shader_changes);
         let mut touched: Vec<PathBuf> = Vec::new();
@@ -1500,7 +1106,6 @@ impl Viewer {
         changed.sort();
         changed.dedup();
         let Some(session) = self.session.as_mut() else {
-            // 保留态还没开（第一帧之前）⇒ 攒着，下一 tick 再落。
             self.shader_changes = changed;
             return;
         };
@@ -1509,10 +1114,6 @@ impl Viewer {
             println!("{line}");
         }
         if self.image_hash {
-            // ⚠ 这一行**只在量的时候打**：它是给仪器用的时刻（epoch ms），
-            //    好用"文件 mtime → 这一条"分开量出"发现 + 重载"那一段有多长
-            //    （剩下那一段是"下一帧画完"，由帧行自己的 `t` 给）。
-            //    不进审计：审计是能逐字复现的文本，塞一个墙钟进去它就不可复现了（J4 那条口径）。
             println!(
                 "｜热重载时刻 t={}",
                 SystemTime::now()
@@ -1525,25 +1126,8 @@ impl Viewer {
             self.dirty = true;
             self.update_title();
         }
-        // ⚠ 被拒的改动**不留在 `shader_changes` 里重试**：拒的理由（写坏了 / 契约变了）
-        //    不会因为再试一次而改变，留着就是每 200 ms 刷一遍同一段日志。
-        //    人改好了 = 盘上又变了一次 = 新的事件，那一条自然会重新走一遍。
     }
 
-    /// 周期活之四：**面板烘图**（S9）走到了哪一步。
-    ///
-    /// 它做三件事，缺一不可：
-    /// 1. 把子进程那几行输出收进面板的日志区（**原样**：判据与"我该看哪一行"都在里面）；
-    /// 2. 烘完之后**换画面** —— 而且是**走 `poll_scene_file` 那条老路换**（见下）；
-    /// 3. 烘着的时候**要帧**：状态行上那个计时器、日志区那些行都要跟着走
-    ///    （本窗口是按需渲染的，不主动要帧的话面板会停在"开始烘"那一刻）。
-    ///
-    /// ⚠ **为什么换画面要借 `poll_scene_file` 的判据，而不是在这里直接换**：
-    ///   窗口显示的那一份产物**可能不是刚烘的那一份**（`scene` 那张图里住着
-    ///   `orbit` / `orbit-bare` / `nebula` … 好几份场景，而面板烘的是它自己那份配方）。
-    ///   直接换就会在"面板烘 A、窗口看 B"时**把 B 换成 A** —— 那不是任何人要的。
-    ///   借那条判据之后，规矩变成一句能说清的话：
-    ///   **烘完的产物就是窗口正在看的这一份 ⇒ 重载它；否则只说一句、画面不动。**
     fn poll_cook(&mut self) {
         let Some(panel) = self.panel.as_mut() else {
             return;
@@ -1555,7 +1139,6 @@ impl Viewer {
             return;
         };
         let Some((path, fingerprint)) = update.scene else {
-            // 清单读不到：理由已经在面板那几行输出里，这里不再编一句。
             self.dirty = true;
             return;
         };
@@ -1611,23 +1194,14 @@ impl Viewer {
         }
     }
 
-    /// 画一帧（脏了才画），然后把它呈到屏幕上。
-    ///
-    /// ⚠ 全程只碰**直接字段**（不调 `&self` 的方法）拿借用：`render::run` 借的是
-    /// `self.gpu`，而紧接着要改的是 `self.present` / `self.pending_shot` —— 同一结构体的
-    /// 不同字段可以同时借，走一次 `&self` 就不行了。
     fn draw(&mut self) {
-        // ⚠ 这里**不 `expect`**：`resumed` 之前、`open` 失败之后都可能进来一次，
-        //    而 panic 会把租约留在盘上（§147：不留陈租约）。
         if self.window.is_none() || self.gpu.is_none() {
             return;
         }
 
-        // 这一帧那一段"渲染"的描述（打完呈现在同一行补上"呈现"那一段，见下面）。
         let mut note: Option<String> = None;
         if self.dirty {
             self.dirty = false;
-            // 先把"这一帧要什么"全部抄成局部量（这一批读都是 `&self`，必须在改之前做完）。
             let views = self.views();
             let scene = self.scene.clone();
             let pcg_root = self.pcg_root.clone();
@@ -1637,16 +1211,6 @@ impl Viewer {
                 let Some(gpu) = self.gpu.as_ref() else {
                     return;
                 };
-                // ---- **保留态**：一份文档准备一次，之后每一帧只写相机那两块 uniform ----
-                //
-                // ⚠ 从前这里是 `render::run(...)`：**每帧**重读文档、重载 CAS 成员、重编
-                //    每一条管线（实测 0.75–2.0 s/帧）—— 拖一下要等一帧（§150 记的就是它）。
-                //    现在：① 换场景（或内容键变了）才 `Session::open`；② 相机一动只是
-                //    `session.draw(...)`（同一份文档、同一批组，两次 64 字节的写）。
-                //
-                // ⚠ 判据是**场景路径 + 内容键**，不是 `dirty`：`dirty` 有三条来源
-                //    （换场景 / 相机动 / 窗口改大小），而只有第一条要重开这一份。
-                //    尺寸那一条由 `Session::draw` 自己认（层结构对不上就重开）。
                 let stale = match (&self.session, &self.session_key) {
                     (Some(_), Some(key)) => *key != (scene.clone(), self.key),
                     _ => true,
@@ -1674,7 +1238,6 @@ impl Viewer {
                 }
                 match failed {
                     Some(message) => Err(message),
-                    // 不重开的那条路：留着的那一份**画一帧**（相机就是在这一步进去的）。
                     None => match self.session.as_mut() {
                         Some(session) => session.draw(gpu, views, width, height),
                         None => Err("保留态不见了（内部不一致）".to_string()),
@@ -1701,27 +1264,16 @@ impl Viewer {
                             );
                         }
                     }
-                    // ⚠ 上传之后**另起一段**计时：截图那一笔（PNG 编码，dev 档实测上百毫秒）
-                    //    混进"画+上传"里，会让那个数看着像渲染慢了一个数量级（§151 实测过）。
                     let uploaded = std::time::Instant::now();
-                    // 图哈希**在截图之前**算：截图把 `pixels` 拿走（它自己那一段也不算进来）。
                     let image: Option<String> = if self.image_hash {
                         Some(crate::digest::sha256_hex(&rendered.pixels)[..16].to_string())
                     } else {
                         None
                     };
-                    // 截图**从刚回读出来的这批字节**走同一条 PNG 路径（§104 第 3 条）：
-                    // 屏幕上是它、文件里也是它，中间没有第二次渲染。
                     let mut shot_ms: u128 = 0;
                     if let Some(path) = self.pending_shot.take() {
                         match shot::write_png(&path, width, height, rendered.pixels) {
                             Ok(bytes) => println!(
-                                // ⚠ 两个哈希**不是一把尺子**，所以两个都报、并各自署名：
-                                //    `sha256` 那个是**文件**（PNG 编码之后，与 那六张已删除的判据图
-                                //    以及 J1/J2 的判据同一个东西）；`像素` 那个是**回读出来的
-                                //    原始字节**（与上面那一行"图/像素"同一个东西）。
-                                //    只报一个的时候，人会拿文件哈希去比窗口那一行 —— 那两个
-                                //    永远不相等，而"不相等"看着就像画面错了。
                                 "预览截图 → {}（{}×{}，{} 字节，sha256 {}{}）",
                                 path.display(),
                                 width,
@@ -1739,19 +1291,6 @@ impl Viewer {
                     }
                     self.last = Some((width, height));
                     self.frames += 1;
-                    // ⚠ 这一行**分成两段报**，而且整行挪到 `present()` 之后才打：两个数说的是
-                    //    两件事，而"拖动一帧多少钱"这个问题只有两段都有答案。
-                    //
-                    //    ① `画+上传`：从 [`render::Session::draw`] 进去到**把回读出来的那张图
-                    //       上传进呈现纹理**（`Present::upload` 也在这段里 —— 它每次要写
-                    //       宽×高×4 字节）。⚠ 名字里写"上传"就是为了不让它看着像纯渲染。
-                    //    ② `呈现`：拿交换链那张图、录一个全屏三角、提交、`present()`
-                    //       （Fifo 等 vblank 的那一笔就在这里面）。
-                    //
-                    //    实测（orbit-soft，960×640，保留态）：① 34–44 ms、② ~1 ms；
-                    //    而**离线** `--time` 那条路量到的每帧是 14.9 ms —— 那一段只有
-                    //    [`render::Session::draw`]：两条路的差在"窗口在跑"这件事上
-                    //    （DWM 合成、上传、机器状态），不是保留态本身的代价。
                     note = Some(format!(
                         "第 {} 帧：{}×{}｜{}｜画+上传 {} ms｜截图 {}{}",
                         self.frames,
@@ -1760,16 +1299,8 @@ impl Viewer {
                         describe_orbit(self.orbit),
                         (uploaded - started).as_millis(),
                         shot_ms,
-                        // ⚠ 图哈希是**判据的尺子**（1 秒内画面变）：它给的是"这一帧画出来的
-                        //    那张图"的身份，而不是"日志里多了一行"。`t` 是**墙钟毫秒**
-                        //    （epoch），好让外面的脚本拿文件 mtime 直接减出端到端延迟。
                         if let Some(image) = &image {
                             format!(
-                                // ⚠ 这个数是**回读出来的那批字节**（Rgba8UnormSrgb，宽×高×4）
-                                //    的 sha16，**不是** `--shot` 那个 PNG 文件的 sha256 ——
-                                //    判据（1 秒内画面变）要的正是前者：文件多一层编码，
-                                //    而"编码器换一版图就变了"这件事与渲染无关（§104 第 3 条）。
-                                //    `t` 是墙钟毫秒（epoch），好让外面的脚本拿文件 mtime 直接减。
                                 "｜像素 {image}｜t={}",
                                 std::time::SystemTime::now()
                                     .duration_since(std::time::UNIX_EPOCH)
@@ -1782,7 +1313,6 @@ impl Viewer {
                     ));
                 }
                 Err(message) => {
-                    // 画不出来就**留着窗口里现在这张图**（Bevy 的 `rebuild_scene` 同一条）。
                     eprintln!("⚠ 这一帧画不出来，保留窗口里现在这张图：{message}");
                 }
             }
@@ -1791,8 +1321,6 @@ impl Viewer {
         let Some(gpu) = self.gpu.as_ref() else {
             return;
         };
-        // ⚠ 呈现那一段单独计时，而且**与渲染报在同一行**：拖动一帧 = 渲染 + 呈现，
-        //    两个数各有各的瓶颈（渲染那一段就是 [`render::Session::draw`]）。
         let present_started = Instant::now();
         let (device, queue) = (&gpu.device, &gpu.queue);
         let Some(surface) = self.surface.as_ref() else {
@@ -1806,20 +1334,11 @@ impl Viewer {
             | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
             wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
                 surface.configure(device, config);
-                // ⚠ **画出来的那一帧没有呈现**这件事必须说出来（§150 那条"不许哑掉"）：
-                //    帧号已经加过了，日志里却没有那一行 ⇒ 外面读日志的人会以为"第 4 帧
-                //    从来没画过"。§7b 实测踩到过：一次热重载后窗口自己那一帧正好被这里
-                //    吞掉，判据的仪器于是以为"画面没变"（而它变了）。
                 println!(
                     "第 {} 帧画出来了，但**没有呈现**（交换链 Outdated/Lost ⇒ 重新配置，这一帧丢掉）\
                      —— 立刻再画一帧",
                     self.frames
                 );
-                // ⚠ 这一句是**判据要的**那一步：`configure` 把这一帧的内容丢了，而 `dirty`
-                //    在本帧开头就被清了 ⇒ 不主动再要一帧的话，画面会停在上一次呈现的内容上，
-                //    直到人来动一下鼠标。热重载正好撞上它时，症状就是"改完 shader 一秒内
-                //    没反应，动一下鼠标才变" —— §7b 实测：那一帧被丢掉之后，真正的更新是
-                //    1.4 s 后被仪器催的那一帧救回来的（而不是窗口自己）。
                 self.dirty = true;
                 self.request_redraw();
                 return;
@@ -1849,23 +1368,10 @@ impl Viewer {
         }
         queue.submit(Some(encoder.finish()));
 
-        // ---- 面板：**交换链上的第二个 pass**（S9）--------------------------------
-        //
-        // ⚠ 位置是判据的一部分：它在 `present.upload`（画面那批字节）**之后**、
-        //   在 `frame.present()` 之前。于是
-        //   ① `--shot` 那张图里**没有**面板（截图走的是另一条路：回读出来的字节）；
-        //   ② `--image-hash` 那把尺子也不动（同上）；
-        //   ③ 人看到的画面上有面板。S7 那条判据因此一个字都不用改。
-        //
-        // ⚠ 换一个做法——把面板画进 `shot::Target` 那张纹理——就会把判据弄脏：
-        //   屏幕与文件仍然是同一批字节，但**判据那张图**里多了一块 GUI。
         if let Some(panel) = self.panel.as_mut() {
             if panel.is_open() {
                 if let Some(window) = self.window.as_ref() {
                     let [width, height] = [config.width, config.height];
-                    // ⚠ 面板那一张视图用**原生格式**（sRGB），与画面那一张（非 sRGB）不同：
-                    //   画面是"字节进、字节出"，而 egui 按自己的格式选 shader —— 拿非 sRGB
-                    //   视图去喂它，颜色的语义就被解释了两次（面板会发灰/发白）。
                     let panel_view = frame.texture.create_view(&wgpu::TextureViewDescriptor {
                         label: Some("px_render 面板（原生格式）"),
                         ..Default::default()
@@ -1888,10 +1394,6 @@ impl Viewer {
             }
         }
 
-        // ---- `--ui-shot` / `u`：把**屏幕上这一张**（画面 + 面板）读回来 --------------
-        //
-        // ⚠ 位置是判据的一部分：它在两个 pass **都画完之后**、`frame.present()` **之前**
-        //   ⇒ 读到的正是人眼看到的那张（含面板），而 `--shot` 那条路一个字节都不动。
         if let Some(path) = self.ui_shot.take() {
             match read_back_ui(device, queue, &frame.texture, config.format, &path) {
                 Ok(()) => {
@@ -1914,7 +1416,6 @@ impl Viewer {
         }
     }
 
-    /// 只重呈一次（不重画）：窗口露出来 / 尺寸没变但要刷一下时用。
     fn request_redraw(&self) {
         if let Some(window) = &self.window {
             window.request_redraw();
@@ -1922,7 +1423,6 @@ impl Viewer {
     }
 
     fn shot_now(&mut self) {
-        // `s` 键：存进"这一次请求说的那个路径"，没有请求给过就用 Bevy 那条固定路径。
         let path = self
             .pending_shot
             .clone()
@@ -1933,20 +1433,11 @@ impl Viewer {
     }
 
     fn cleanup(&self) {
-        // 收工时把租约删掉：它是一份"我在线"的声明，而进程没了还留着就是**假的**在线
-        // （§147 那条纪律：不留陈租约；下一次启动的单例闸判的正是这个文件）。
         let _ = std::fs::remove_file(VIEW_LEASE);
         println!("预览窗口收工（{} 帧）", self.frames);
     }
 }
 
-/// 探针机位 → 轨道角：**只是鼠标接管那一刻的种子**。
-///
-/// 窗口一开始是"不给 `--cam` 那一档"（探针机位），而鼠标要改的是**角**。
-/// 这两个表示之间只能反推一次（`probe_camera` 的构造反过来：`direction = position/|position|`，
-/// `yaw = atan2(x, z)`、`pitch = asin(y/|position|)`、`distance = |position|`），
-/// 而从这一刻起相机归那三个数管 —— 反推不是恒等（浮点），所以 [`CameraReply::derived`]
-/// 那一格必须把"这三个数是反推的"说出来。
 fn seed_orbit(position: [f32; 3]) -> [f32; 3] {
     let [x, y, z] = position;
     let length = (x * x + y * y + z * z).sqrt();
@@ -1990,19 +1481,6 @@ impl ApplicationHandler for Viewer {
         _window_id: WindowId,
         event: WindowEvent,
     ) {
-        // ---- 面板先吃（S9）----------------------------------------------------
-        //
-        // ⚠ **先给 egui**：它说"这一下我要了"（点按钮 / 拖滑条 / 在文本框里打字），
-        //   相机与那几个快捷键就当这一下没发生 —— 否则在面板上拖滑条，相机会跟着转。
-        // ⚠ 四样东西**不进** egui：`RedrawRequested`（不是输入，是调度）、
-        //   `CloseRequested`（关窗口与面板无关）、`Resized` / `ScaleFactorChanged`
-        //   （窗口自己的账，要在下面那一支里改交换链）。
-        //   ⚠ 反过来说，**键盘与滚轮要进**：面板关着时 egui 也该知道这些键
-        //   （否则"关掉面板再展开，它还记着上一次的输入"），而它按 `consumed`
-        //   告诉调用方要不要往下传。
-        //
-        // ⚠ `Tab` 是**窗口自己的开关**，要在交给 egui **之前**截走：egui 也认 Tab
-        //   （焦点在控件之间走）⇒ 它会说自己"要了"，那样这个开关就永远按不动。
         if let WindowEvent::KeyboardInput { event: key, .. } = &event {
             if key.state == ElementState::Pressed
                 && matches!(
@@ -2042,7 +1520,6 @@ impl ApplicationHandler for Viewer {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => self.resize(size),
-            // 缩放因子变了会紧跟一次 `Resized`，尺寸与交换链都在那里处理。
             WindowEvent::ScaleFactorChanged { .. } => {}
             WindowEvent::RedrawRequested => self.draw(),
             WindowEvent::MouseInput {
@@ -2052,7 +1529,6 @@ impl ApplicationHandler for Viewer {
             } => {
                 self.dragging = state == ElementState::Pressed;
                 if !self.dragging {
-                    // 松手时把方位打一行：它能直接粘回 `--place`，也是"人看到了什么"的读数。
                     println!(
                         "拖到：{}｜{}",
                         describe_orbit(self.orbit),
@@ -2061,8 +1537,6 @@ impl ApplicationHandler for Viewer {
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
-                // ⚠ 指针在面板上时**相机不动**（S9）：egui 上一次说自己要了指针，
-                //   这一下就是"拖滑条"而不是"转视角"。
                 if self.panel_wants_pointer() {
                     return;
                 }
@@ -2085,7 +1559,6 @@ impl ApplicationHandler for Viewer {
                     Key::Named(NamedKey::Escape) => event_loop.exit(),
                     Key::Character(ref text) if text.eq_ignore_ascii_case("q") => event_loop.exit(),
                     Key::Character(ref text) if text.eq_ignore_ascii_case("s") => self.shot_now(),
-                    // `u`：存一张**屏幕上那一张**（画面 + 面板）—— 面板长什么样的证据。
                     Key::Character(ref text) if text.eq_ignore_ascii_case("u") => {
                         if !self.ui_shot_ok {
                             eprintln!(
@@ -2126,7 +1599,6 @@ impl ApplicationHandler for Viewer {
             self.last_heartbeat = now;
             heartbeat_now();
         }
-        // 事件驱动 + 一个 200 ms 的闹钟：没有帧循环要转，也不拿 `Poll` 空转烧 CPU。
         event_loop.set_control_flow(ControlFlow::WaitUntil(self.last_poll + POLL_INTERVAL));
     }
 
@@ -2135,7 +1607,6 @@ impl ApplicationHandler for Viewer {
     }
 }
 
-/// 一行能直接粘回命令行的 `--place`。
 fn place_line(orbit: Option<[f32; 3]>) -> String {
     match orbit {
         Some([yaw, pitch, distance]) => format!("--place {yaw:.4},{pitch:.4},{distance:.4}"),
@@ -2147,12 +1618,6 @@ fn place_line(orbit: Option<[f32; 3]>) -> String {
 mod tests {
     use super::*;
 
-    /// 三个文件是**两个宿主之间的全部约定**（§147 那三个文件名逐字相同），
-    /// 所以 schema 得钉两件事：
-    ///
-    /// 1. Bevy 写的请求（**没有** `shot_path` 那一格）我们解得开；
-    /// 2. 我们写的请求（多一格）它解得开 —— serde 默认忽略不认识的多余字段，
-    ///    这一条**必须**有一次实测，不能靠"我记得 serde 是这样"。
     #[test]
     fn the_bevy_shaped_request_still_parses_and_ours_still_parses_for_it() {
         let bevy = r#"{
@@ -2178,8 +1643,6 @@ mod tests {
             "缺省必须是 Bevy 的 `target/viewer-shot.png`（不是我们发明的路径）"
         );
 
-        // 反过来：我们写出去的那一份，Bevy 的 `ViewRequest`（无 deny_unknown_fields）解它时
-        // 只会忽略 `shot_path`。这里用"照它的字段集解一遍"来钉这件事。
         let ours = serde_json::to_string(&ViewRequest {
             scene: "b.pxart".to_string(),
             key: 1,
@@ -2208,12 +1671,6 @@ mod tests {
         }
     }
 
-    /// `--place` 收进来的数：pitch 夹到**相机自己**的范围（`probe_camera` 的 ±89.5°），
-    /// 非有限的数当场拒。
-    ///
-    /// 为什么不"原样收下"：`probe_camera` 内部照样会夹，于是窗口的**状态**里存着一个
-    /// 相机不会用的角度 ⇒ `--where` 报一个与画面不符的数（§146.3 ③：说错了原因，
-    /// 与没拦住一样贵）。
     #[test]
     fn a_place_angle_is_clamped_to_what_the_camera_will_actually_use() {
         assert_eq!(
@@ -2238,13 +1695,6 @@ mod tests {
         );
     }
 
-    /// 探针位姿 → 轨道角：**反推不是恒等**，但必须是那条构造的逆（位置量级上对得上）。
-    ///
-    /// ⚠ 为什么钉"近似"而不是"逐位"：这两个表示本来就不是双射（探针机位不在
-    /// `direction × distance` 那张曲面上）。实测的差落在像素上：把反推出来的三个数
-    /// `--place` 回去，960×640 的 `orbit-bare` 与探针机位那张差 **314 个像素**（最大通道差 11）
-    /// ⇒ 所以回话里那一格 `derived` 必须为真（说清"这三个数是反推的"）。
-    /// 这一条钉的是"反推的方向对、量级对"——**不是**"它等价于探针机位"。
     #[test]
     fn the_seed_angles_are_the_inverse_of_the_probe_pose_within_rounding() {
         let probe = crate::camera::probe_camera(None, 960.0 / 640.0);
@@ -2277,13 +1727,10 @@ mod tests {
             );
         }
 
-        // 正下方/正上方那种退化输入不该给出 NaN（`asin` 的定义域）。
         assert!(seed_orbit([0.0, 0.0, 0.0]).iter().all(|v| v.is_finite()));
         assert!(seed_orbit([0.0, 0.0, 4.0])[1].abs() < 1e-4);
     }
 
-    /// 标题/日志那一行 `--place` 的格式：它能直接粘回命令行（4 位小数，逗号分隔）。
-    /// 探针机位没有对应的三元组 —— 那一档必须**说出来**，不能编一个数。
     #[test]
     fn the_place_line_is_copy_pasteable_and_the_probe_pose_says_so() {
         assert_eq!(
@@ -2295,21 +1742,14 @@ mod tests {
         assert!(describe_orbit(Some([1.0, 2.0, 3.0])).contains("distance 3.0000"));
     }
 
-    /// ⚠ 鼠标那一路的**单位**：Bevy 的常数是弧度，我们的状态是度。
-    ///
-    /// 这一格是实测抓到的缺陷：第一版拿 `0.006` 直接往度上加，于是"拖 100 像素"只转
-    /// **0.6°**（人眼看不见，看着像"鼠标没反应"），而 pitch 的夹取变成 ±1.25°（一碰就到底）。
-    /// 钉住三件事：① 换算确实乘了 180/π；② 拖满一屏的量级是"几十度"；③ 夹取是 ±71.62°。
     #[test]
     fn the_mouse_deltas_are_radians_converted_to_the_degrees_we_store() {
-        // 100 像素 × 0.006 rad/px = 0.6 rad = 34.377°（**不是** 0.6°）
         let turned = drag_degrees(YAW_PER_PIXEL, 100.0);
         assert!(
             (turned - 34.377_47).abs() < 0.001,
             "100 像素该转约 34.38°，实得 {turned}"
         );
 
-        // 夹取：Bevy 的 ±1.25 rad ⇒ ±71.6197°
         let limit = pitch_limit_degrees();
         assert!(
             (limit - 71.619_73).abs() < 0.001,
@@ -2320,7 +1760,6 @@ mod tests {
             "鼠标的夹取比相机自己的 ±89.5° 紧（Bevy 就是这么定的），两条不是同一个数"
         );
 
-        // 往上/往下拖都落在同一个范围里，而且不会因为单位错了而"一碰到底"
         let mut pitch = 0.0_f32;
         pitch = (pitch + drag_degrees(PITCH_PER_PIXEL, 50.0)).clamp(-limit, limit);
         assert!(
@@ -2330,8 +1769,6 @@ mod tests {
         assert!(pitch < limit, "还没到夹取点");
     }
 
-    /// 窗口的"怎么看"**就是**离线那条路的入口：`Views::Single(那一份角)`。
-    /// 两个表示之间不许有第二套翻译（角 → 相机只走 `camera::probe_camera`）。
     #[test]
     fn the_window_asks_for_the_same_views_the_offline_path_does() {
         assert_eq!(Views::Single(None), Views::Single(None));
@@ -2342,18 +1779,12 @@ mod tests {
         assert_ne!(Views::Single(None), Views::Single(Some([0.0, 0.0, 3.15])));
     }
 
-    /// `--ui-shot` 读回来的字节**红蓝不能换**：交换链在这台机器上是 `Bgra8UnormSrgb`，
-    /// 而 `shot::write_png` 收的是 RGBA8。
-    ///
-    /// ⚠ 判据小，但它挡的是**一整类**错：换过之后那张图看着仍是"一张行星图"，
-    ///   于是"屏幕上是什么样"这件事就被自己的色偏污染了（实测追了一条不存在的竖线）。
     #[test]
     fn the_ui_capture_reads_back_in_rgba_order() {
         let source = [10u8, 20, 30, 255, 40, 50, 60, 128];
         let mut out = Vec::new();
         swizzle_bgra_to_rgba(&source, &mut out);
         assert_eq!(out, [30, 20, 10, 255, 60, 50, 40, 128]);
-        // alpha 与绿不动：换的只有 R 与 B 两格。
         assert_eq!(out[1], source[1]);
         assert_eq!(out[3], source[3]);
         assert_eq!(out[5], source[5]);

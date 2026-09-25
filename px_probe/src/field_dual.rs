@@ -486,8 +486,6 @@ fn the_shader_analytic_gradient_matches_the_exact_field_gradient() {
     );
 }
 
-/// §46.3 的 arbiter：4 条腿的场级对拍。两条腿用同一组参数，靠进程内缓存复用
-/// （原来是两个 `#[test]`，各建一次设备）。
 pub fn checks() -> Vec<(&'static str, fn())> {
     vec![
         (

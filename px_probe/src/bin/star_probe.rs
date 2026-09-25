@@ -1,28 +1,3 @@
-//! **星场的单点探针**：星撒得均不均、稀疏格花多少内存、一次查询要翻多少东西、
-//! 以及**直射项在立方图上的密度还是不是随位置变**。
-//!
-//! 用法：
-//!
-//! ```text
-//! cargo run --release -p px_probe --bin star_probe -- [face] [SKY.pxart]
-//! ```
-//!
-//! ⚠ 给了 `SKY.pxart` 就**量那份真产物**（而不是现算一份）：这是唯一能同时验到
-//!   "GPU 那一侧的直射项扫的星与 CPU 语义一致"的一条 —— 少扫了星，亮面积就会掉下去。
-//!   产物是 `rgba16f` 的立方贴图（`px_volume_alg::half` 解回 f32）。
-//!
-//! ⚠ 它量的是 2026-09-25 那次改存储模型**之前**的三个病（都用同一套口径量出来，
-//!   好与旧版对照）：
-//!
-//! | 病 | 旧版实测 | 现在应有的值 |
-//! |---|---|---|
-//! | 位置密度按方向偏（立方格投到球面） | 面心 11.2e3 / 面角 15.9e3 星/球面度 = **1.43x** | 1.0x |
-//! | 成品天空的亮面积比（星图 4096 点采到面 1024） | 面心 2.75% → 面角 4.33% = **1.58x** | 1.0x |
-//! | 星的横向足迹（纹素角跨面差 3 倍） | σ 径向/切向 1.02 → **1.57** | 1.0 |
-//!
-//! ⚠ 星场参数**从 `art/nebulasky/stars.toml` 读**（不在探针里抄一份）：抄一份的下场是
-//!   "探针量的是一份与烘图不同的星场"，而那种偏差看起来只是"数字不好看"。
-
 use std::collections::BTreeMap;
 
 use px_sparse::StarField;
@@ -31,7 +6,6 @@ use px_volume_schema::VolumeData;
 use px_volume_schema::params::sky::SkyParams;
 use px_volume_schema::params::stars::StarsParams;
 
-/// 读 `art/nebulasky/stars.toml`（探针只读，不改）。
 fn star_params() -> Result<StarsParams, String> {
     let path = px_graph::workspace_root()
         .join("art")
@@ -42,7 +16,6 @@ fn star_params() -> Result<StarsParams, String> {
     toml::from_str(&text).map_err(|err| format!("{} 解不开：{err}", path.display()))
 }
 
-/// 索引与载荷各占多少字节（清单里那几段 u32/f32）。
 fn memory(field: &StarField) -> BTreeMap<&'static str, usize> {
     let grid = &field.grid;
     BTreeMap::from([
@@ -55,10 +28,6 @@ fn memory(field: &StarField) -> BTreeMap<&'static str, usize> {
     ])
 }
 
-/// **位置密度**：每个箱里的星数 ÷ 那个箱的体积（按体积均匀 ⇒ 所有箱一样）。
-///
-/// ⚠ 分箱必须**按体积等分**，不是按半径等分：半径等分的箱体积不同，量到的差是几何给的，
-///   与撒点无关（那是"量错了工具"）。
 fn density_by_band(field: &StarField, params: &StarsParams, bands: usize) -> Vec<(f64, f64)> {
     let (inner, outer) = (params.inner as f64, params.outer as f64);
     let cube = |r: f64| r * r * r;
@@ -78,7 +47,6 @@ fn density_by_band(field: &StarField, params: &StarsParams, bands: usize) -> Vec
         .collect()
 }
 
-/// **方向各向同性**：八个卦限里的星数（卦限体积相同 ⇒ 数直接可比）。
 fn density_by_octant(field: &StarField) -> Vec<usize> {
     let mut counts = vec![0_usize; 8];
     for index in 0..field.count() {
@@ -91,7 +59,6 @@ fn density_by_octant(field: &StarField) -> Vec<usize> {
     counts
 }
 
-/// 一份**真空**发射体积（只剩星与背景）：直射项才能单独量。
 fn vacuum(res: u32, layers: u32, inner: f32, outer: f32) -> VolumeData {
     VolumeData {
         lanes: 1,
@@ -103,10 +70,6 @@ fn vacuum(res: u32, layers: u32, inner: f32, outer: f32) -> VolumeData {
     }
 }
 
-/// **直射项在立方图上的密度**：按"离面心的距离"分三个环带，数亮面积占该带的比例。
-///
-/// ⚠ 这正是用户报的那个症状的量法（旧版 1.58x）。现在星是世界坐标里的点、轮廓是
-///   弧度的角函数、每条视线按**方向**解析求值 ⇒ 三个环带必须一样。
 fn lit_by_ring(field: &StarField, params: &SkyParams, face: u32) -> Vec<(f64, f64, f64)> {
     let scene = vacuum(8, 4, 1.0, 2.0);
     let stars = SkyParams {
@@ -133,11 +96,6 @@ fn lit_by_ring(field: &StarField, params: &SkyParams, face: u32) -> Vec<(f64, f6
                     2
                 };
                 let value = plane.at(x, face_index * face + y);
-                // ⚠⚠ 按**球面度**加权，不是数 texel：立方图一个 texel 的立体角是
-                //   `4/(1+a²+b²)^{3/2}/face²` —— 面角比面心小 **5.2 倍**（a=b=1 时
-                //   `3^{3/2} = 5.196`）⇒ 数 texel 会把面角的亮面积凭空抬高（同一个角半径的
-                //   星在面角盖住 5 倍多的 texel）。旧版那个 1.58x 量的是**球面度**，
-                //   所以这里也必须按球面度，否则两件事不可比。
                 let weight =
                     1.0 / ((1.0 + (a * a + b * b) as f64) * (1.0 + (a * a + b * b) as f64).sqrt());
                 area[band] += weight;
@@ -152,18 +110,7 @@ fn lit_by_ring(field: &StarField, params: &SkyParams, face: u32) -> Vec<(f64, f6
         .collect()
 }
 
-/// **解析版的位置均匀性**：把每颗星的"亮于阈值的那块角面积"按它所在的环带累加，
-/// 再除以**带内的球面度**。
-///
-/// ⚠⚠ 为什么要有这一条（而不是只看烘出来的贴图）：产物那一侧混着**气**（亮的带本来就多
-///   过线的）、**分级曲线**（非线性）与**立方图 texel 的立体角差 5.2 倍**（面角一个 texel
-///   的立体角只有面心的 1/5.2 ⇒ 同一个角半径的星在面角盖住 5 倍多的 texel）。
-///   这一条把星这一层**单独**拿出来量：真空（透过率 1）、不给分级、按球面度加权。
-///
-/// 面积取高斯的解析式 `π σ² ln(P / 阈值)`（`P = 亮度 × 增益`；`P ≤ 阈值` 时为 0）——
-/// ⚠ 它是**每颗星各自**的，与采样分辨率无关。
 fn analytic_core_area(field: &StarField, params: &SkyParams, threshold: f64) -> Vec<(f64, f64)> {
-    // 三个带的球面度（把立方图表面按 `1/(1+a²+b²)^{3/2}` 积一遍）。
     let grid = 2048_usize;
     let mut solid = [0.0_f64; 3];
     for face in 0..6 {
@@ -194,7 +141,6 @@ fn analytic_core_area(field: &StarField, params: &SkyParams, threshold: f64) -> 
         if length <= 0.0 {
             continue;
         }
-        // 方向 → 立方图的面 + (a, b)（取主轴那一面，与 `cube_direction` 同一套参数）。
         let d = [
             p[0] as f64 / length,
             p[1] as f64 / length,
@@ -230,7 +176,6 @@ fn analytic_core_area(field: &StarField, params: &SkyParams, threshold: f64) -> 
         .collect()
 }
 
-/// **一次球查询要翻多少东西**（`cloud.emission` 的逐体素光照那一档的形状）。
 fn query_cost(field: &StarField, radius: f32, probes: usize) -> (f64, f64, f64) {
     let mut bricks = 0.0_f64;
     let mut cells = 0.0_f64;
@@ -259,10 +204,6 @@ fn query_cost(field: &StarField, radius: f32, probes: usize) -> (f64, f64, f64) 
     (bricks / scale, cells / scale, stars / scale)
 }
 
-/// **量一份烘好的天空产物**：逐 texel 取 R（星点是白的 ⇒ 任一通道都能代表它），
-/// 按"离面心的距离"分三个环带数亮面积。
-///
-/// ⚠ 用真产物量（不是现算）有一个别处替代不了的用处：**GPU 那一侧少扫了星，这里立刻掉**。
 fn lit_rings_of_artifact(
     path: &str,
     threshold: f32,
@@ -298,10 +239,8 @@ fn lit_rings_of_artifact(
                 } else {
                     2
                 };
-                // 布局与 `VolumeData` 同一个口径：行 = 面 × 面 + y，每行 `面 × 4` 个通道。
                 let texel = ((face_index * face + y) * face + x) as usize;
                 let value = half(texel * 4);
-                // ⚠ 与 `lit_by_ring` 同一个口径：**按球面度加权**（面角的 texel 小 5.2 倍）。
                 let radius2 = (a * a + b * b) as f64;
                 let weight = 1.0 / ((1.0 + radius2) * (1.0 + radius2).sqrt());
                 area[band] += weight;
@@ -333,7 +272,6 @@ fn main() -> Result<(), String> {
         .unwrap_or(128)
         .max(16);
     let artifact = args.next();
-    // 第三个参数（可选）：一份 `cloud.density` 产物 —— 有它才量"星 ↔ 气的大尺度相关"。
     let density = args.next();
 
     let params = star_params()?;
@@ -366,7 +304,6 @@ fn main() -> Result<(), String> {
         text.join("｜")
     );
 
-    // ── 位置密度 ────────────────────────────────────────────────────────────
     let bands = density_by_band(&field, &params, 3);
     let band_density: Vec<f64> = bands.iter().map(|(density, _)| *density).collect();
     println!(
@@ -384,7 +321,6 @@ fn main() -> Result<(), String> {
         ratio(&octant_counts)
     );
 
-    // ── 查询成本 ────────────────────────────────────────────────────────────
     for radius in [0.1_f32, 0.2, 0.4] {
         let (bricks, cells, stars) = query_cost(&field, radius, 512);
         println!(
@@ -392,7 +328,6 @@ fn main() -> Result<(), String> {
         );
     }
 
-    // ── 天空直射项在立方图上的密度 ──────────────────────────────────────────
     let params_sky: SkyParams = toml::from_str(
         &std::fs::read_to_string(
             px_graph::workspace_root()
@@ -422,8 +357,6 @@ fn main() -> Result<(), String> {
         }
     );
 
-    // ⚠ 这一条才是**星层单独**的判据（真空、不分级、按球面度加权）：上面那条现算与下面
-    //   那条产物都被气/分级/texel 面积混着，只有这一条能指认"星自己偏没偏"。
     let analytic = analytic_core_area(&field, &params_sky, 0.05);
     println!(
         "星核亮面积（解析、真空、按球面度）：面心 {:.3e} / 中 {:.3e} / 面角 {:.3e}｜面角/面心 **{:.3}x**",
@@ -437,7 +370,6 @@ fn main() -> Result<(), String> {
         }
     );
 
-    // ── 直射项：每条视线的候选星（GPU 那份定长队列该开多大，靠这个数说话）──────
     let support = px_volume_alg::raymarch::star_support(&params_sky);
     let mut per_ray: Vec<usize> = Vec::new();
     let mut per_slab: Vec<usize> = Vec::new();
@@ -492,9 +424,6 @@ fn main() -> Result<(), String> {
         mean(&per_slab),
         max(&per_slab),
     );
-    // ⚠ 逐条视线的候选数**必须只差泊松**（σ = √均值）：它是"星按球面度均匀 + 视线穿过壳的
-    //   路径一样长"的直接推论。这一列也是"某个方向星特别多/特别少"的唯一量法
-    //   —— 画面上"某一片星更密"多半只是那里**气更暗**（对比度），不是密度。
     let mut sorted_rays = per_ray.clone();
     sorted_rays.sort_unstable();
     let pick = |q: f64| -> usize { sorted_rays[((sorted_rays.len() - 1) as f64 * q) as usize] };
@@ -513,8 +442,6 @@ fn main() -> Result<(), String> {
         total_slabs, worst_at.1, worst_at.2 as usize
     );
 
-    // ⚠ 单层 40 颗是个**离群**（基线约 1）：先确认星场自己有没有"抱团"（同一个位置很多颗、
-    //   或者某处密度是别处的几十倍）—— 那会让任何定长队列都不够，而且看不出来。
     let mut worst_cell = 0_usize;
     let mut worst_cell_at = [0.0_f32; 3];
     for index in 0..512 {
@@ -531,7 +458,6 @@ fn main() -> Result<(), String> {
     println!(
         "  半径 0.05 的球里最多有 {worst_cell} 颗星（均匀场该是 1~2；抱团会在这里露出来）@ {worst_cell_at:?}"
     );
-    // 重合的星：位置逐位相同的对数（哈希相关会让一批星落在同一个点上）。
     let mut positions: Vec<[u32; 3]> = (0..field.count())
         .map(|index| {
             let p = field.star(index).position;
@@ -548,7 +474,6 @@ fn main() -> Result<(), String> {
         before - positions.len()
     );
 
-    // ⚠ **按体积等分**分箱（`r³` 均匀）：按半径等分的话每箱体积 ∝ r²，量到的 9 倍差全是几何给的。
     let bins = 128_usize;
     let mut histogram = vec![0_usize; bins];
     for index in 0..field.count() {
@@ -568,7 +493,6 @@ fn main() -> Result<(), String> {
         worst_bin as f64 / thinnest_bin.max(1) as f64
     );
 
-    // ⚠ 最坏那条视线的逐层剖面：看它是**一层突然装下几十颗**（并集式的异常）还是均匀铺开。
     let worst_ray = {
         let mut best = (0_usize, 0_usize);
         for index in 0..4096 {
@@ -613,7 +537,6 @@ fn main() -> Result<(), String> {
         .map(|(slab, count)| (slab, *count))
         .collect();
     println!("    {nonzero:?}");
-    // 那条视线上、最坏那一层的 AABB 里到底有多少颗星（"测过多少"对"收下多少"）。
     let slab = nonzero
         .iter()
         .max_by_key(|(_, count)| *count)
@@ -631,10 +554,6 @@ fn main() -> Result<(), String> {
         "    第 {slab} 层（t1 = {t1:.2}、半宽 {half:.3}）：AABB 外接球里有 {inside} 颗星（这是「测过」的上界）"
     );
 
-    // ⚠ **按表观亮度剔除**的账（用户 2026-09-25）：`1/r²` 之后远处的暗星读不出来 ⇒ 剔掉。
-    //   三栏一起看才够：①剔多少颗 ②每条视线的候选降多少（省下来的那件事）
-    //   ③**照亮气体**那一档的辐照降多少（被剔的星本来就最暗，但剔多了气会跟着暗）。
-    //   ⚠ ③ 用未封顶的和（`starlight_max` 截断是 emission 那一档的事）—— 这里要的是相对变化。
     let (light_radius, light_soft) = (0.2_f32, 0.05_f32);
     let lit_at = |field: &StarField| -> f64 {
         let probes = 256;
@@ -693,10 +612,6 @@ fn main() -> Result<(), String> {
         );
     }
 
-    // ⚠⚠ **大尺度是否跟气近似**（用户 2026-09-25）：这条是那个要求的判据。
-    //   两侧都在**方向**上取：星按方向数（小锥内的颗数），气按方向积**柱密度**
-    //   （从密度产物沿径向积，`density::sample_world`）。然后求皮尔逊相关。
-    //   ⚠ 只看大尺度 ⇒ 两个方向图都先按 6×8 的粗格分箱再算相关（细结构不该算进去）。
     if let Some(path) = density {
         let gas = column_density(&path, 32)?;
         let mut stars_dir = vec![0.0_f64; gas.len()];
@@ -710,7 +625,6 @@ fn main() -> Result<(), String> {
             let bin = coarse_bin(direction, 8);
             stars_dir[bin] += 1.0;
         }
-        // 两侧各自按"每球面度"归一（分箱的立体角不同）再算相关。
         let solid = coarse_solid_angles(8);
         let a: Vec<f64> = (0..gas.len()).map(|i| gas[i] / solid[i]).collect();
         let b: Vec<f64> = (0..gas.len()).map(|i| stars_dir[i] / solid[i]).collect();
@@ -722,10 +636,6 @@ fn main() -> Result<(), String> {
     }
 
     if let Some(path) = artifact {
-        // ⚠ 两个阈值都要看：**0.05 那一档量的是"整幅亮不亮"**（气也过线 ⇒ 它反映气的分布
-        //   与分级曲线），而 **0.5 那一档只有星核过线**（气很少那么亮）⇒ 后者才是
-        //   "星在立方图上的位置偏不偏"。旧版那个 1.58x 是量在星这一档上的，两个都印出来，
-        //   免得拿混淆的那一档去比。
         for threshold in [0.05_f32, 0.5] {
             let (rings, face) = lit_rings_of_artifact(&path, threshold)?;
             let lit: Vec<f64> = rings.iter().map(|(value, _, _)| *value).collect();
@@ -745,7 +655,6 @@ fn main() -> Result<(), String> {
     Ok(())
 }
 
-/// 方向 → 一个粗格（`bins × 2·bins` 的等距经纬网格，粗到只看大尺度）。
 fn coarse_bin(direction: [f64; 3], bins: usize) -> usize {
     let theta = direction[2].clamp(-1.0, 1.0).acos() / std::f64::consts::PI;
     let phi = direction[1].atan2(direction[0]) / std::f64::consts::TAU + 0.5;
@@ -754,7 +663,6 @@ fn coarse_bin(direction: [f64; 3], bins: usize) -> usize {
     row * 2 * bins + column
 }
 
-/// 每个粗格的立体角（等距经纬：`Δφ · Δ(cosθ)`）。
 fn coarse_solid_angles(bins: usize) -> Vec<f64> {
     let dphi = std::f64::consts::TAU / (2 * bins) as f64;
     let mut out = Vec::with_capacity(bins * 2 * bins);
@@ -769,7 +677,6 @@ fn coarse_solid_angles(bins: usize) -> Vec<f64> {
     out
 }
 
-/// 皮尔逊相关（判据用，不引统计库）。
 fn pearson(a: &[f64], b: &[f64]) -> f64 {
     let n = a.len().min(b.len());
     if n == 0 {
@@ -794,7 +701,6 @@ fn pearson(a: &[f64], b: &[f64]) -> f64 {
     cov / (var_a.sqrt() * var_b.sqrt())
 }
 
-/// **气沿方向的柱密度**：读一份 `cloud.density` 产物，逐方向把 `sample_world` 积起来。
 fn column_density(path: &str, samples: usize) -> Result<Vec<f64>, String> {
     let bytes = std::fs::read(path).map_err(|err| format!("读不到 {path}：{err}"))?;
     let bundle = px_protocol::payload::PayloadBundle::from_bytes(&bytes)
@@ -802,7 +708,6 @@ fn column_density(path: &str, samples: usize) -> Result<Vec<f64>, String> {
     let volume =
         <px_volume_schema::VolumeData as px_graph_schema::Build>::decode(&bundle, "density")?;
     let bins = 8_usize;
-    // ⚠ 先自检一次：读进来的密度场均值该与烘图日志里那一行对得上（不然下面的相关是噪声）。
     {
         let count = volume.data.len() as f64;
         let mean = volume.data.iter().map(|v| *v as f64).sum::<f64>() / count.max(1.0);
@@ -818,8 +723,6 @@ fn column_density(path: &str, samples: usize) -> Result<Vec<f64>, String> {
             mean,
             max
         );
-        // ⚠⚠ 用户 2026-09-25："背景变红了，说明空旷地带没有变为 0 —— 检查一下稀疏度。"
-        //   这一行就是那个判据：**恰好等于 0 的体素占比**，以及非零那部分的分布。
         let total_cells = volume.data.len();
         let zero = volume.data.iter().filter(|v| **v == 0.0).count();
         let tiny = volume

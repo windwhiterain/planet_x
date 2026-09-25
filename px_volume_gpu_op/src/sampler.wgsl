@@ -1,22 +1,10 @@
-// 天空体的**跨面三线性采样**（GPU 侧）。语义与 `px_volume_alg::raymarch::sample_at`
-// 逐条对齐 —— 真源在那边，改那边必须改这里；规格见 `lib.rs` 的"移植规格"一节。
-//
-// ⚠⚠ 八个角**必须逐个按方向反查相邻面**（`corner_slot`）：从前 CPU 那份把八个角困在本面里
-//   （wrap + 面号写死）⇒ 视线跨过面棱时采样值跳一下 ⇒ 立方贴图上那道通高的竖缝。
-//   搬 GPU 时这一步是**同一个坑**。
 
 struct Volume {
-    // res, layers, lanes, lane —— 只读参数用 vec4 对齐（uniform 的 16 字节规矩）。
     shape: vec4<u32>,
-    // inner, outer, 未用, 未用
     extent: vec4<f32>,
 };
 
 
-// ⚠⚠ 一维派发有个**硬顶**：`max_compute_workgroups_per_dimension = 65535`（WebGPU 规范常数）。
-//   天穹 face 1024 要 6 * 1024^2 / 64 = 98304 个工作组 ⇒ 一维派发必然越界（实测：烘图报
-//   wgpu 校验错，panic 穿过算子的 dylib 边界 ⇒ 整个烘焙进程 abort，且没有任何可读信息）。
-//   ⇒ x 方向切在 65535，余数走 y 维；这里按同一把尺子把 (x, y) 摊平。
 const WG_X: u32 = 65535u;
 const WG_SIZE: u32 = 64u;
 
@@ -24,15 +12,8 @@ fn flat_index_of(id: vec3<u32>) -> u32 {
     return id.x + id.y * WG_X * WG_SIZE;
 }
 
-// **占用索引**的只读参数块（与 Rust 的 `OccupancyUniform` 逐字段对齐）。
-//
-// ⚠⚠ `extra.w` 是**空跳开关**：`0` ⇒ 这一档的步进与"没有这份索引"时**逐位相同**
-//   （关掉被验证的那一项，本身就是判据要的参考档）。它不能省 —— 判据 `the_skip_matches_
-//   the_reference_march` 靠同一份 WGSL 的开关两档对账，不另写一份实现。
 struct Occupancy {
-    // res, layers, blocks_per_face, skip
     extra: vec4<u32>,
-    // ratio = ln(outer/inner)（inner <= 0 时 0），未用 x3
     scalars: vec4<f32>,
 };
 
@@ -62,7 +43,6 @@ fn cube_direction(face: u32, s: f32, t: f32) -> vec3<f32> {
     return d / length;
 }
 
-// 方向 → (面, s, t)。面序与 `cube_direction` 的表一致。
 fn cube_face_of(d: vec3<f32>) -> vec3<f32> {
     let ax = abs(d.x);
     let ay = abs(d.y);
@@ -107,8 +87,6 @@ fn snap(fraction: f32) -> f32 {
     return fraction;
 }
 
-// 一个角在 data 里的**起始下标**（含通道步长，但还没加 lane）。
-// ⚠ 这里就是"跨面"那一步：格心方向反查相邻面，再落到那一面的格子上。
 fn corner_slot(face: u32, cell_s: f32, cell_t: f32, layer: u32, res: u32, layers: u32) -> u32 {
     let s = (cell_s + 0.5) / f32(res);
     let t = (cell_t + 0.5) / f32(res);
@@ -127,52 +105,26 @@ fn gather_at(corners: array<u32, 8>, weights: array<f32, 8>, lane: u32) -> f32 {
     return total;
 }
 
-// ---------------------------- 占用索引（层次化空跳）----------------------------
-//
-// 布局与 `px_volume_gpu_op::occupancy` 逐字段对齐（那边是真源，改那边必须改这里）：
-//   * L1 侧车：`packed = 面 · blocks_per_face + (ct · blocks_l + cl) · blocks_s + cs` 位 = 存活；
-//   * L2 掩码：存活粗块固定 64 个子块槽位（`2³` 子块，位号 `(l·4 + t)·4 + s`），每 32 位一个字；
-//   * 空的判据是**块内精确 0**（六通道全 0），所以"块空"⇒ 该块里任何采样都贡献 0。
-//
-// ⚠⚠ 取整规则（`u32(s · res)` 截断 + `min(·, n-1)`）必须与 Rust 那份**逐字一致**：
-//   差一格就是"掩码比采样核偏半格"，而画面上的症状只是一小截气多出来或少掉，归因极远。
 const COARSE: u32 = 8u;
 const FINE: u32 = 2u;
 const FINE_PER_AXIS: u32 = 4u;
-// ⚠⚠ `FINE_PER_AXIS³ / 32` = `64 / 32` = **2**：子块掩码只有 64 位 ⇒ 每块两个 `u32`。
-//   这里硬编码过 `16`，而 Rust 那边是算出来的 2 ⇒ 每个块的 L2 都读到了**八个块以外**
-//   的掩码 ⇒ `occupancy_class` 几乎恒回"粗块活着但子块空"，skip 侧整片错。
-//   两处的数必须同源：改 `FINE`/`COARSE` 就要同时改这一行，或者干脆别在这里算。
 const WORDS_PER_BLOCK: u32 = FINE_PER_AXIS * FINE_PER_AXIS * FINE_PER_AXIS / 32u;
 
-// ⚠ 这里**不能**写 `@inline`：naga 只认 `@const`/`@must_use` 那几种属性，
-//   写了它的症状是"整份 WGSL 解析失败 ⇒ 每次派发都返回 Err"，而读起来像"没有 GPU"。
 fn occupancy_bit(word: u32, bit: u32) -> bool {
     return (word & (1u << bit)) != 0u;
 }
 
-// 世界点落在哪个**层**（与 `layer_of_altitude` 同一套取整）。
 fn layer_index(radius: f32) -> u32 {
     let layers = max(volume.shape.y, 1u);
     let altitude = shell_altitude(radius);
     return min(u32(altitude * f32(layers - 1u)), layers - 1u);
 }
 
-// 世界点 → 层 `cl` 的下界半径（`u = cl / (layers-1)`）。
 fn layer_radius(cl: u32) -> f32 {
     let layers = max(volume.shape.y, 2u);
     return shell_radius(f32(min(cl, layers - 1u)) / f32(layers - 1u));
 }
 
-// ⚠⚠ 世界方向 → **体积网格的** `(面, u, v)`。
-//
-//   体积的 `(面, u, v)` 是 `px_protocol::art::cube_direction` 那一套（`direction_of` 就是它）；
-//   这一份是它的**逆**：`u = (a/major)·0.5 + 0.5`，`a`/`major` 就是那 6 条公式里的量。
-//
-//   ⚠⚠ **不能用 `cube_face_of`**：那是另一套面序/轴向约定（同一个方向给出另一个面号），
-//     拿它去查按**网格面序**建的掩码 ⇒ 读到别的面 ⇒ 真空判定整片落空 ⇒ skip 侧全 0
-//     （实测踩过：最大偏差 0.363、skip 全黑，而掩码本身是对的）。
-//     判据要看"掩码与采样是不是同一套坐标"，不是"两个函数各自像不像"。
 fn grid_coords_of(direction: vec3<f32>) -> vec3<f32> {
     let ax = abs(direction.x);
     let ay = abs(direction.y);
@@ -214,13 +166,6 @@ fn grid_coords_of(direction: vec3<f32>) -> vec3<f32> {
     return vec3<f32>(f32(face), u, v);
 }
 
-// 一档占用：`0` = 空块（可以整段跳）、`1` = 粗块活但这一子块空、`2` = 有内容。
-//
-// ⚠ 越界的下标**先夹回范围**再算：`u32(负数)` 在 WGSL 里会绕成巨大值，落进别的面/层里，
-//   那是最难归因的一类错（掩码看上去正常，只是判在了别处）。
-// ⚠⚠ 角向格号用 `u · res`（**格心**口径：`0..res-1` 个格心均匀铺在 `[0,1]` 上），
-//   与 `layer_index` 的 `altitude · (layers-1)` 同一个"取哪一个格"的意思。
-//   掩码与"读哪一格"必须是同一套取整 —— 这一处与 Rust 的 `voxel_index` 逐字对齐。
 fn occupancy_class(point: vec3<f32>) -> u32 {
     if (occupancy.extra.w == 0u) {
         return 2u;
@@ -241,10 +186,6 @@ fn occupancy_class(point: vec3<f32>) -> u32 {
     let bl = min(cl / COARSE, blocks_l - 1u);
     let bt = min(ct / COARSE, blocks_t - 1u);
     let packed = face * occupancy.extra.z + (bt * blocks_l + bl) * blocks_s + bs;
-    // ⚠⚠ **上传布局是两段**：`[L1 位（每块 1 位）][L2 掩码（每块 WORDS_PER_BLOCK 字）]`。
-    //   ⚠ 不能把 L1 当成"每块的第 0 个字"：`WORDS_PER_BLOCK = 4³/32 = 2`，L2 正好把两个字节
-    //     用满 ⇒ L1 必须独占一段（`occupancy.scalars.z` = L1 的字数）。
-    //   真源是 `Occupancy::upload_words` / `at_cell`；三处必须同一套。
     let l1_word = occupancy_words[packed / 32u];
     if (!occupancy_bit(l1_word, packed % 32u)) {
         return 0u;
@@ -256,12 +197,6 @@ fn occupancy_class(point: vec3<f32>) -> u32 {
     return select(1u, 2u, occupancy_bit(occupancy_words[base], sub % 32u));
 }
 
-// ⚠⚠ **径向律：参数空间里线性、世界空间里等比**（2026-09-25 用户口径，与 CPU 的
-//   `px_volume_schema::volume::Shell` 是**同一条**）：`r = inner·(outer/inner)^u`。
-//   角向格子的世界尺寸是 `r·Δθ`（∝ r），径向也 ∝ r ⇒ 格子在每个半径上是同一个形状
-//   （线性径向在 r = 3 处给出 3:1 的"饼"）。
-//   ⚠ 采样 O(1)：层号 = `floor(u·layers)`，非线性只活在下面这一对函数里。
-//   改这里必须同时改 CPU 那一份 —— 两侧不一致的症状是"层错位"（画面上一圈圈台阶）。
 fn shell_radius(u: f32) -> f32 {
     let inner = volume.extent.x;
     let outer = volume.extent.y;
@@ -295,8 +230,6 @@ fn sample_volume(point: vec3<f32>, lane: u32) -> f32 {
     let outer = volume.extent.y;
     let radius = sqrt(dot(point, point));
     let span = outer - inner;
-    // ⚠ 边界**闭 + 相对容差**（与 CPU 同一口径）：体网格第一层/最后一层正落在 inner/outer 上，
-    //   而 f32 上那个和会偏 1e-7 ⇒ 严格比较会把壳的两壁读成 0。
     let tolerance = max(abs(span), 1.0) * 1e-5;
     if (radius < inner - tolerance || radius > outer + tolerance || abs(span) <= 1e-7) {
         return 0.0;
@@ -362,60 +295,31 @@ fn sample_points(@builtin(global_invocation_id) id: vec3<u32>) {
     out[index] = sample_volume(point, volume.shape.w);
 }
 
-// ------------------------------- R3 星场（统一稀疏格）------------------------------
-//
-// ⚠⚠ 五段索引**拼成一个** storage buffer（`chunk_start ‖ brick_slot ‖ brick_mask ‖
-//   brick_sub ‖ sub_start`），段起点走 uniform：`sky_radiance` 这个入口已经有 5 个
-//   storage 绑定（体数据 / 图 / 星表 / 索引 / 溢出计数），把五段拆成五个绑定就是 9 个 ——
-//   越过 WebGPU 的 `maxStorageBuffersPerShaderStage = 8`（默认下限）。症状是"某些设备上
-//   这个入口直接起不来"，而错误信息指不到"是星场那几个绑定"。
-//
-// ⚠ 逐条语义的真源是 `px_sparse::grid`（`GridMeta::decompose` / `Grid::brick_at` /
-//   `Grid::cell_range`）：位移分解（BRICK = 8、CHUNK = 4）、"空则子全空"（块区间长度 0、
-//   表项 EMPTY）、掩码位 + popcount 排名 → 子 CSR 区间。改那边必须改这里。
 struct StarMeta {
-    // (星数, dims.x, dims.y, dims.z)
     counts: vec4<u32>,
-    // (细格边长, origin.x, origin.y, origin.z)
     space: vec4<f32>,
-    // 五段索引里的前四段起点：chunk_start, brick_slot, brick_mask, brick_sub
     segments_a: vec4<u32>,
-    // (sub_start 起点, 逐星阴影步数, 每体素最多吃几颗星, 未用)
     segments_b: vec4<u32>,
-    // 星光球（发射那一档）：(查询半径, 软化半径, 增益, 未用)
     light: vec4<f32>,
-    // 星点轮廓（天空那一档）：(核, 晕, 晕权重, 支持域)
     profile: vec4<f32>,
 };
 
-// 星表：每颗 `StarField::STRIDE = 8` 个 f32 —— `[x, y, z, 亮度, r, g, b, 未用]`。
 @group(0) @binding(6) var<storage, read> star_table: array<f32>;
-// 五段索引拼成的那一段（u32）。
 @group(0) @binding(10) var<storage, read> star_index: array<u32>;
 @group(0) @binding(11) var<uniform> star_meta: StarMeta;
-// ⚠⚠ 溢出计数：WGSL 没有变长数组，天空那一档的待消费队列是**定长**的。真溢出时静默丢星是
-//   最坏的错法（画面上少几颗，归因不到）⇒ 让它落在一个计数器上、由宿主当场报 Err。
 @group(0) @binding(12) var<storage, read_write> star_overflow: array<atomic<u32>>;
 
-// ⚠ 这几个常数就是 `px_sparse::grid` 的那几个（`BRICK` / `CHUNK` / `CHUNK_CELLS` /
-//   `MASK_WORDS`）：细格 → (块, brick, 局部) 是移位与掩码，不是除法。
-//   ⚠⚠ 块那一维写**除法**（`/ STAR_CHUNK_CELLS`）而不是字面移位：常数是 2 的幂 ⇒ 编译器
-//   给出的就是移位，而手写 `>> 5` 只要数错一次就没有任何编译错 —— 实测写成 `>> 4`
-//   （把 `CHUNK_CELLS` 当成 16）让块键在每个轴上都少一半，症状不是"报错"而是
-//   **一颗星都查不到**：块区间读到别的块、`start == end` ⇒ 整块被判空。
 const STAR_BRICK: u32 = 8u;
 const STAR_CHUNK: u32 = 4u;
 const STAR_CHUNK_CELLS: u32 = 32u;
 const STAR_MASK_WORDS: u32 = 16u;
 const STAR_EMPTY: u32 = 0xffffffffu;
-// ⚠ 就是 `f32::EPSILON`（CPU 那一侧判"星落在原点"用的那个数）。
 const STAR_EPSILON: f32 = 1.1920929e-7;
 
 fn star_dims() -> vec3<i32> {
     return vec3<i32>(i32(star_meta.counts.y), i32(star_meta.counts.z), i32(star_meta.counts.w));
 }
 
-// 细格坐标 → (块键, brick 的块内局部键, 细格在 brick 内的局部键)。⚠ 调用前必须已判界。
 fn star_decompose(cell: vec3<i32>) -> vec3<u32> {
     let v = vec3<u32>(cell);
     let chunk_dims = vec3<u32>(
@@ -431,8 +335,6 @@ fn star_decompose(cell: vec3<i32>) -> vec3<u32> {
     );
 }
 
-// 细格坐标 → brick 下标（越界 / 空块 / 空 brick 都回 -1）。
-// ⚠ "空则子全空"：块区间长度 0 ⇒ 整块跳过；brick 表项是 EMPTY ⇒ 整块跳过。
 fn star_brick_at(cell: vec3<i32>) -> i32 {
     if (any(cell < vec3<i32>(0)) || any(cell >= star_dims())) {
         return -1;
@@ -450,9 +352,6 @@ fn star_brick_at(cell: vec3<i32>) -> i32 {
     return i32(slot);
 }
 
-// 一个 brick 里某个细格的星区间。
-// ⚠ 空细格回 `(0, 0)`：占用细格必然有 ≥ 1 项 ⇒ `start == end` 只可能是空（与 CPU 回
-//   `None` 是同一件事），调用方的循环于是自然一次都不进。
 fn star_cell_range(brick: u32, local: u32) -> vec2<u32> {
     let base = star_meta.segments_a.z + brick * STAR_MASK_WORDS;
     let word = local / 32u;
@@ -466,9 +365,6 @@ fn star_cell_range(brick: u32, local: u32) -> vec2<u32> {
         rank = rank + countOneBits(star_index[base + i]);
     }
     rank = rank + countOneBits(bits & (flag - 1u));
-    // ⚠⚠ `brick_sub[brick]` 是**读出来的值**（那个 brick 在子 CSR 里的起点），
-    //   不是"brick_sub 这一段的下标" —— 写成 `segments_a.w + brick + rank` 就把起点
-    //   当成了下标：症状是区间落在**别的 brick** 上（星数对不上，而且不报错）。
     let sub = star_index[star_meta.segments_a.w + brick];
     let at = sub + rank;
     return vec2<u32>(
@@ -491,18 +387,12 @@ fn star_tint(star: u32) -> vec3<f32> {
     return vec3<f32>(star_table[at], star_table[at + 1u], star_table[at + 2u]);
 }
 
-// 取 vec3 的第 i 个分量（显式分支：动态 vec 下标在语言间有差异，不碰它）。
 fn pick3(v: vec3<f32>, i: u32) -> f32 {
     if (i == 0u) { return v.x; }
     if (i == 1u) { return v.y; }
     return v.z;
 }
 
-// 一颗星的轮廓（核 + 晕）：自变量是**世界横向偏移** `sinθ × d`。
-// ⚠⚠ 轮廓是**世界长度**（`star_meta.profile.x/y`），不是弧度 —— 星是个有半径的球，
-//   角尺寸 = 半径/距离 ⇒ **近大远小**（用户 2026-09-25）；亮度则决定"可见的那一圈到哪"。
-// ⚠ 与 CPU 的 `star_power` **同序**：先 `(offset/core)²` 再 `exp(-·)`，最后
-//   `核项 + 晕权重 × 晕项`；两个 `max(1e-6)` 已经在宿主上夹进 uniform 了。
 fn star_power(sine: f32, distance: f32) -> f32 {
     let offset = sine * max(distance, 1e-4);
     let core = offset / star_meta.profile.x;
@@ -510,22 +400,12 @@ fn star_power(sine: f32, distance: f32) -> f32 {
     return exp(-(core * core)) + star_meta.profile.z * exp(-(halo * halo));
 }
 
-// 星光球那一档的两张定长表（见 `star_light`）：`star_cand` 记**遍历次序**的前几名、
-// `star_kept` 记稳定降序的前几名。
-// ⚠⚠ 两套并存不是冗余：`brightest_near` **只在候选多于 keep 时**才排序 ⇒ 候选不多时
-//   用的是**遍历次序**，而逐通道的求和是浮点加法 ⇒ 次序不同就不是逐位相同。
 const STAR_KEEP_MAX: u32 = 32u;
 var<private> star_cand: array<u32, STAR_KEEP_MAX + 1u>;
 var<private> star_kept: array<u32, STAR_KEEP_MAX>;
 var<private> star_cand_count: u32;
 var<private> star_kept_count: u32;
 
-// 把一颗星插进"亮度降序"的前 `keep` 名：插在第一个**严格更暗**的位置 ⇒ 亮度并列时后到的
-// 排在后面（与 CPU 那次**稳定** `sort_by` + `truncate` 逐条同一规则）。
-//
-// ⚠⚠ `keep` 是**入参**（`starlight_max`），不是数组容量 `STAR_KEEP_MAX`：拿容量当上限
-//   会让"前 2 名"变成"前 32 名"，症状是**两边亮度差几十倍**（实测 2849 对 70）——
-//   而它看起来像"星光太亮"，不像"截断写错了"。
 fn star_keep_insert(star: u32, keep: u32) {
     let brightness = star_brightness(star);
     var at = 0u;
@@ -550,9 +430,6 @@ fn star_keep_insert(star: u32, keep: u32) {
     }
 }
 
-// ------------------------------- 步进入口 -------------------------------
-// binding 4/5：与采样入口的 0..3 分开（同一模块里同一号只能有一种类型）。
-// 0/1（体积 uniform 与体数据）两个入口同类型，直接复用。
 
 struct Sky {
     counts: vec4<u32>,        // (steps, face, channel, 未用)
@@ -571,22 +448,12 @@ struct Sky {
 @group(0) @binding(4) var<uniform> sky: Sky;
 @group(0) @binding(5) var<storage, read_write> image: array<f32>;
 
-// 待消费队列：CPU 那一侧把整条视线的候选**一次收齐**、按 (半径, sin) 排好再按半径消费；
-// GPU 这一侧边走边收（候选表按视线放不下），但**次序逐条相同**：
-//   * 层（半径的归属区间）按升序处理 ⇒ 后收的星半径只会更大 ⇒ 直接接在队尾；
-//   * 层内按 CPU 的遍历次序稳定插入 (半径, sin) ⇒ 与 CPU 那次**稳定**排序逐位同序。
-// ⚠ 容量要按**实测的单层候选**定，而且要看**整幅**（630 万条视线）的尾巴，不是探针的几千条：
-//   探针（4096 条）量到单层最多 28；而 `--face 2048` 那一轮实测溢出 —— 尾巴更长。
-//   ⚠ 世界尺寸的支持域（近大远小）让**近处那几层**的角度支持域最大（`support/t`）⇒
-//     那里是队列的瓶颈；把晕从 0.02 收到 0.012 之后候选按面积降 ~60%。
 const STAR_PENDING_MAX: u32 = 64u;
 var<private> star_pending_star: array<u32, STAR_PENDING_MAX>;
 var<private> star_pending_radius: array<f32, STAR_PENDING_MAX>;
 var<private> star_pending_sine: array<f32, STAR_PENDING_MAX>;
 var<private> star_pending_count: u32;
 
-// ⚠ `mark` = 这一层开始收之前的队尾：新星只在 `[mark, count)` 这一段里找插入位
-//   （队列前面是更近的层，半径必然更小 ⇒ 队尾那一截才是本层）。
 fn star_pending_insert(mark: u32, star: u32, radius: f32, sine: f32) {
     if (star_pending_count >= STAR_PENDING_MAX) {
         atomicAdd(&star_overflow[0], 1u);
@@ -611,15 +478,10 @@ fn star_pending_insert(mark: u32, star: u32, radius: f32, sine: f32) {
     star_pending_count = star_pending_count + 1u;
 }
 
-// 一层（半径 ∈ `[t0, t1)`）里**支持域内**的星收进队列。
-// ⚠ 层的 AABB 与 CPU 的 `gather_stars` 逐字相同（层里**最远**半径上的支持域再放一格 ——
-//   格是方的、锥是圆的），逐格下探的次序也相同（z → y → x，两端夹回格内）⇒ 层内次序逐条同。
 fn star_slab_collect(direction: vec3<f32>, t0: f32, t1: f32, support: f32) {
     let mark = star_pending_count;
     let cell = star_meta.space.x;
     let origin = star_meta.space.yzw;
-    // ⚠ 支持域是**世界长度** ⇒ 换算成角度 `support / t1`（近大远小），
-    //   横向半径因此是常数 `support + cell`（比从前省：远处不再扫一大片）。
     let half = max(support + cell, cell);
     let angular = support / max(t1, 1e-4);
     let centre = direction * t1;
@@ -638,7 +500,6 @@ fn star_slab_collect(direction: vec3<f32>, t0: f32, t1: f32, support: f32) {
                 for (var star = range.x; star < range.y; star = star + 1u) {
                     let p = star_position(star);
                     let radius = length(p);
-                    // ⚠ 半径的**归属**：一颗星只属于它自己那一层（这一条是"每颗只收一次"的全部）。
                     if (radius < t0 || radius >= t1 || radius <= STAR_EPSILON) {
                         continue;
                     }
@@ -654,20 +515,6 @@ fn star_slab_collect(direction: vec3<f32>, t0: f32, t1: f32, support: f32) {
     }
 }
 
-// 一条视线的**辐射**（一条通道）：步进 + 按半径消费星候选 + 底色。
-// ⚠ 与 `px_volume_alg::raymarch::march_channel` 逐条对齐：
-//   * 星摆在**透过率更新之后**（"这一步之前的吸收算完了，星的光从那里过来"）；
-//   * `T < 1e-4` 时 CPU 把游标推到末尾 ⇒ 剩下的星**整批丢掉**（不是用 `T` 兜底）；
-//   * 走完全程时，剩下的星（半径超出最后一个采样点的、**以及还没收到的那几层**）
-//     才用最后的透过率兜底。
-//
-// ⚠⚠ **空跳**（层次化，`occupancy.extra.w != 0` 时生效）：视线沿**粗块**（`8³`）推进，
-//   空块（块内六通道全 0）整块跳过 —— 那里的发射与消光是**精确 0**，跳过它是恒等变换
-//   （不写 0 与乘 `exp(0) = 1` 都不改变结果），所以这一步动的**不是**物理，是循环的次数。
-//   有内容的块里按**块自己的尺度**取 `k` 个中点样本（`k = Δ层 / Δu`）⇒ 逐样本的位置与
-//   挨着穿过这一段的密集步进**一致**，质量不降。
-//   ⚠ `occupancy.extra.w == 0` 时这条路一次都不进（`occupancy_class` 恒回 `2`），
-//     逐位退回密集步进 —— 同一份 WGSL 的开关两档就是判据要的对账参考。
 fn march_radiance(direction: vec3<f32>, lane: u32, steps: u32, enter: f32, background: f32) -> f32 {
     let outer = volume.extent.y;
     let cell = star_meta.space.x;
@@ -679,18 +526,10 @@ fn march_radiance(direction: vec3<f32>, lane: u32, steps: u32, enter: f32, backg
     var transmittance = 1.0;
     var radiance = 0.0;
     var stopped = false;
-    // ⚠⚠ **步长在参数空间里固定**（`u` 均匀 ⇒ 世界等比，与 CPU 同一口径）。
-    //   世界长度每步都要算（光学深度是世界的量），而它与抖动无关 ⇒ 期望值不变。
     let du = 1.0 / f32(steps);
-    // ⚠ 预算按**采样点数 × 16** 记：有内容的块花"它自己的样本数"，空块不花 ⇒
-    //   同样的 `steps` 能推进更远（用户 2026-09-25 选的"预算换纵深"）。
-    //   乘 16 是为了让"块内样本数"的小数部分能累加（不然每块都被 `u32` 截断、细块的采样会悄悄变稀）。
     var budget = steps * 16u;
-    // 这一趟跑过的**层**（径向格坐标，`u32`）：DDA 的当前位置。
     var current = 0u;
     let max_layer = volume.shape.y - 1u;
-    // 空跳档的起点：`enter` 向上贴到**它所在层的边界**（`u = cl / (layers-1)`）。
-    // ⚠ 这一贴是把"空块"与"层号"对齐 —— 采样点一个都不挪（挪的只是从哪里开始看块）。
     let enter_layer = min(u32(shell_altitude(enter) * f32(max_layer) + 1e-6), max_layer);
     var radius = select(clamp(enter, shell_radius(0.0), shell_radius(1.0)), layer_radius(enter_layer), occupancy.extra.w != 0u);
     var i = 0u;
@@ -704,39 +543,22 @@ fn march_radiance(direction: vec3<f32>, lane: u32, steps: u32, enter: f32, backg
             }
             break;
         }
-        // 这一步的采样点与步长（**密集档**：与"没有那份索引"时逐字相同的那条路）。
         var here = (f32(i) + 0.5) * du;
         var distance = shell_radius(here);
         var step = shell_radius(f32(i + 1u) * du) - shell_radius(f32(i) * du);
         var samples = 1u;
-        // 这一段的粗块号（空跳档用它推下一块的边界）
         var block = 0u;
         if (occupancy.extra.w != 0u) {
-            // ---- 空跳档：先看这一块有没有内容，空就整块跳过 ----
             block = current / COARSE;
             let state = occupancy_class(direction * radius);
             if (state == 0u) {
-                // ⚠ 下一块的边界：`bl = current / COARSE` ⇒ 下一个粗块从层 `(bl+1)·8` 起。
-                //   它在世界里的半径由 `u = 层 / (layers-1)` 反解 —— 与 `layer_radius` 同一个口径。
                 let next_layer = min((block + 1u) * COARSE, max_layer);
                 let boundary = clamp(layer_radius(next_layer), enter, outer);
-                // ⚠⚠ **必须真的跨过去**：`layer_radius` 是 `pow`，边界上 `layer_index(boundary)`
-                //   未必正好等于 `next_layer`（差一个 ulp 就退回上一块）⇒ 光标停在原地、下一轮
-                //   又判空、直到 `radius >= outer` 收尾。症状是"贴着块边界的那几条视线整条全黑"
-                //   （实测：384 条里 12 条，全是 `cs`/`ct` 恰落在块缝上的）。
-                //   采样点一个都不挪（它们由 `layer_radius(block_low) + …` 逐层定），
-                //   这里只把**看块的位置**推过一个 ulp 的量级。
                 let past = boundary * (1.0 + 1e-5) + 1e-6;
                 radius = max(past, radius + step);
                 current = next_layer;
                 continue;
             }
-            // ---- 有内容的块：按**层中点**取样本（与密集档同一条径向尺子） ----
-            // ⚠⚠ 用"块跨度 ÷ 步长"定样本数再均分，会把块内的层**错开半个步长**（块边界不由
-            //   步长整除）⇒ 逐 texel 差 4.8%（实测），而这条判据要的是"跳过空块是恒等变换"。
-            //   改成**逐层中点**：`distance = (layer_radius(l) + layer_radius(l+1)) / 2`，
-            //   `step = layer_radius(l+1) - layer_radius(l)` —— 与密集档 `shell_radius((i+0.5)·du)`
-            //   是同一条尺子（差一个 `pow` 的二阶项），于是"跳过的只有空块"这件事可逐位检验。
             let block_low = block * COARSE;
             let block_high = min(block_low + COARSE, max_layer);
             samples = clamp(block_high - block_low, 1u, 2048u);
@@ -759,7 +581,6 @@ fn march_radiance(direction: vec3<f32>, lane: u32, steps: u32, enter: f32, backg
                     current = block_low + COARSE;
                     break;
                 }
-                // ⚠ 逐层中点 + 该层的径向跨度：与密集档同一条尺子（见上面那段说明）。
                 let layer = min(block_low + local, max_layer);
                 let low = layer_radius(layer);
                 let high = layer_radius(min(layer + 1u, max_layer));
@@ -777,12 +598,10 @@ fn march_radiance(direction: vec3<f32>, lane: u32, steps: u32, enter: f32, backg
                 radiance = radiance + transmittance * sample_emit * layer_step;
                 transmittance = transmittance * exp(-sample_sigma * layer_step);
                 if (star_on) {
-                    // ⚠ 每颗星用它**自己那一步**的透过率：近处的星不被整层气遮住、远处的被前面的气吃掉。
                     var taken = 0u;
                     while (taken < star_pending_count && star_pending_radius[taken] <= sample_distance) {
                         let star = star_pending_star[taken];
                         let power = star_brightness(star) * pick3(star_tint(star), lane);
-                        // 点源的辐照律：像素值 ∝ 1/r²，增益锚在内壁上（与 CPU 的 star_falloff 同一条）。
                         let falloff = (enter / max(star_pending_radius[taken], 1e-4));
                         radiance = radiance + ((transmittance * power) * star_power(star_pending_sine[taken], star_pending_radius[taken])) * gain * (falloff * falloff);
                         taken = taken + 1u;
@@ -810,7 +629,6 @@ fn march_radiance(direction: vec3<f32>, lane: u32, steps: u32, enter: f32, backg
             continue;
         }
         if (star_on) {
-            // 半径不超过这一步的层全部收下来（多收无害：消费那一条按半径判）。
             while (slab <= outer && slab <= distance) {
                 star_slab_collect(direction, slab, slab + cell, support);
                 slab = slab + cell;
@@ -822,12 +640,10 @@ fn march_radiance(direction: vec3<f32>, lane: u32, steps: u32, enter: f32, backg
         radiance = radiance + transmittance * emit * step;
         transmittance = transmittance * exp(-sigma * step);
         if (star_on) {
-            // ⚠ 每颗星用它**自己那一步**的透过率：近处的星不被整层气遮住、远处的被前面的气吃掉。
             var taken = 0u;
             while (taken < star_pending_count && star_pending_radius[taken] <= distance) {
                 let star = star_pending_star[taken];
                 let power = star_brightness(star) * pick3(star_tint(star), lane);
-                // 点源的辐照律：像素值 ∝ 1/r²，增益锚在内壁上（与 CPU 的 star_falloff 同一条）。
                 let falloff = (enter / max(star_pending_radius[taken], 1e-4));
                 radiance = radiance + ((transmittance * power) * star_power(star_pending_sine[taken], star_pending_radius[taken])) * gain * (falloff * falloff);
                 taken = taken + 1u;
@@ -847,9 +663,6 @@ fn march_radiance(direction: vec3<f32>, lane: u32, steps: u32, enter: f32, backg
             stopped = true;
             break;
         }
-        // ⚠⚠ **密集档也要自己推进 `i`**（原来那是 `for` 的第三步）。漏了这一行，
-        //   循环就靠"透过率见底"或"预算见底"收尾 —— 症状是**密集档悄悄多走样本**
-        //   （实测 256 步变 373 步、解析解 0.633 出成 1.001），而空跳档看起来"正常"。
         i = i + 1u;
     }
     if (star_on && !stopped) {
@@ -867,8 +680,6 @@ fn march_radiance(direction: vec3<f32>, lane: u32, steps: u32, enter: f32, backg
     return radiance + transmittance * background;
 }
 
-// 单通道步进：每条视线从 enter 走到 outer，中点取样的黎曼和。
-// 布局与星点查表同一套：row = 面 * face_size + y。
 @compute @workgroup_size(64)
 fn march(@builtin(global_invocation_id) id: vec3<u32>) {
     let index = flat_index_of(id);
@@ -890,7 +701,6 @@ fn march(@builtin(global_invocation_id) id: vec3<u32>) {
     image[index] = march_radiance(direction, lane, steps, enter, pick3(sky.background.xyz, lane));
 }
 
-// 取 vec4 的第 i 个分量（显式分支：动态 vec 下标在语言间有差异，不碰它）。
 fn pick(v: vec4<f32>, i: u32) -> f32 {
     if (i == 0u) { return v.x; }
     if (i == 1u) { return v.y; }
@@ -898,8 +708,6 @@ fn pick(v: vec4<f32>, i: u32) -> f32 {
     return v.w;
 }
 
-// 响应曲线：log-log 分段线性（锚点间插值，两端按最外一段的斜率幂外推）+ 指数软肩。
-// 与 CPU 的 tone 逐条对齐；三个常量（锚点 x2、肩/上限）全部走 uniform，不在这里复制。
 fn tone(l: f32, tone_in: vec4<f32>, tone_out: vec4<f32>) -> f32 {
     if (l <= 0.0) {
         return 0.0;
@@ -942,10 +750,6 @@ fn tone_of(@builtin(global_invocation_id) id: vec3<u32>) {
     image[index] = tone(image[index], sky.tone_in, sky.tone_out);
 }
 
-// 档位色相：按档位键的亮度取段；段间过渡**收窄到段间的 20%**（线性混色会让大量像素停在
-// 混色带上 —— 暖沙到蓝河的中点就是"薰衣草"）。与 CPU 的 ramp_hue 逐条对齐。
-// 档位表走 uniform（ramp_luma / ramp_hue_0..3），WGSL 里不复制。
-// 注意：WGSL 的保留字比 Rust 多 —— 第一版这里用 base_hue 之前叫过 from，直接编不过。
 fn hue_of(stop: u32) -> vec3<f32> {
     if (stop == 0u) { return sky.ramp_hue_0.xyz; }
     if (stop == 1u) { return sky.ramp_hue_1.xyz; }
@@ -972,7 +776,6 @@ fn ramp_hue(key: f32) -> vec3<f32> {
     return sky.ramp_hue_3.xyz;
 }
 
-// 每格一次：键就是这一格自己的亮度（没有邻域平均 —— 烘焙离线，判据直接来自采样本身）。
 @compute @workgroup_size(64)
 fn hue_of_keys(@builtin(global_invocation_id) id: vec3<u32>) {
     let index = flat_index_of(id);
@@ -986,8 +789,6 @@ fn hue_of_keys(@builtin(global_invocation_id) id: vec3<u32>) {
     image[index * 3u + 2u] = hue.z;
 }
 
-// 每格一次分级：先亮度响应、后色相斜坡，逐格亮度守恒；纯黑原样出去。
-// 与 CPU 的 grade_pixel + raymarch_sky 的装配逐条对齐。
 fn luma_of(rgb: vec3<f32>) -> f32 {
     return rgb.x * 0.2126 + rgb.y * 0.7152 + rgb.z * 0.0722;
 }
@@ -997,7 +798,6 @@ fn grade_pixel(rgb: vec3<f32>) -> vec3<f32> {
     if (measured <= 1e-6) {
         return rgb;
     }
-    // 注意：WGSL 的保留字比 Rust 多 —— target / from / to 这些都不能当标识符。
     let band_hue = ramp_hue(measured);
     let band_luma = luma_of(band_hue);
     let scale = measured / max(band_luma, 1e-9);
@@ -1009,10 +809,6 @@ fn grade_pixel(rgb: vec3<f32>) -> vec3<f32> {
     return out;
 }
 
-// 整条天空的**辐射**（未分级）：三条通道各积一遍（入口名避开模块级的 sky uniform）（逐通道消光不同 => 透过率也不同），再分级。
-// ⚠ 三条通道各自**重收一遍**星候选（候选是按通道的透过率消费的）—— CPU 那一侧同样是
-//   `raymarch_sky` 调三遍 `raymarch_channel`，每一遍自己 gather 一次。
-// image 每格 3 个 f32（分级就地覆盖）。
 @compute @workgroup_size(64)
 fn sky_radiance(@builtin(global_invocation_id) id: vec3<u32>) {
     let index = flat_index_of(id);
@@ -1044,9 +840,6 @@ fn sky_radiance(@builtin(global_invocation_id) id: vec3<u32>) {
     image[index * 3u + 2u] = rgb.z;
 }
 
-// 分级（就地）：先亮度响应（tone(l)/l 保色相），后色相斜坡。
-// ⚠ 锚点由宿主在烘焙时**量出来**（见 bin_luma）：档位常数在输出域量与响应之后对齐，
-//   顺序反了整片色偏。
 @compute @workgroup_size(64)
 fn grade_pixels(@builtin(global_invocation_id) id: vec3<u32>) {
     let index = flat_index_of(id);
@@ -1066,8 +859,6 @@ fn grade_pixels(@builtin(global_invocation_id) id: vec3<u32>) {
     image[index * 3u + 2u] = graded.z;
 }
 
-// 亮度直方图（对数分箱）：宿主据此在**烘焙时**量出响应曲线的输入锚点 ——
-// 锚点的定义就是"本次烘焙的输入分位 -> 参考的输出分位"，量出来才与分辨率解耦。
 const BIN_COUNT: u32 = 512u;
 const LOG_MIN: f32 = -16.0;
 const LOG_MAX: f32 = 4.0;
@@ -1091,12 +882,6 @@ fn bin_luma(@builtin(global_invocation_id) id: vec3<u32>) {
     atomicAdd(&histogram[bin], 1u);
 }
 
-// ======================= 发射烘焙（逐体素，compute）=======================
-//
-// ⚠ 为什么搬这里：它是体积链上**最贵**的一处（每体素一次 `shadow_steps` 步的阴影行进），
-//   而且逐体素完全独立 —— 没有比它更像 compute 的东西。
-// ⚠ 星光那一档（`starlight_*`）是**同一类量**（与看它的视线无关）⇒ 也在这里按体素算完：
-//   算式与 CPU 的"星光照气体"那一段逐条对齐。
 
 struct EmissionUniform {
     params: vec4<f32>,      // (light_radius_ratio, shadow_gain, emission_power, emission_gain)
@@ -1116,13 +901,6 @@ fn emission_world(point: vec3<f32>) -> f32 {
     return max(sample_volume(point, 0u), 0.0);
 }
 
-// 一颗星落在这一点上的**辐照**（**无色**）：朝星走 `steps` 步算光深，再
-// `exp(-τ × shadow_gain) × 亮度 / (d² + soft²)`。常数与 CPU 那一趟同一个来路
-// （`soft2` 在宿主上按 `starlight_soft.max(1e-4)²` 夹好）。
-//
-// ⚠⚠ **不乘 `star_tint(star)`**（2026-09-25，用户口径：星云不许自发光，亮度只能来自星光
-//   的散射）：这一笔是"星光被气散射出来的光"，通道配比由 `emission.glow_tint`（红）给；
-//   星自己的色温只走**直射**那一档（`march_radiance` 里 `亮度 × star_tint`，蓝）。
 fn star_visible(position: vec3<f32>, star: u32, soft2: f32, steps: u32) -> f32 {
     let to_star = star_position(star) - position;
     let distance2 = dot(to_star, to_star);
@@ -1137,20 +915,12 @@ fn star_visible(position: vec3<f32>, star: u32, soft2: f32, steps: u32) -> f32 {
     return exp(-tau * emission.params.y) * falloff;
 }
 
-// **星光照气体**（= 星光被气散射）：球查询（半径 `starlight_radius`）里亮度前
-// `starlight_max` 颗 + 逐星遮挡。
-// ⚠ 累加的是**无色的辐照**（`vec3` 三格同一个数）：星的颜色不进这一笔。
-// ⚠⚠ 与 CPU 的 `brightest_near` 逐条对齐，包括那条最容易漏的次序规则：CPU **只在候选多于
-//   `keep` 时**才排序 ⇒ 候选不多时用的是**遍历次序**；而逐通道的求和是浮点加法
-//   ⇒ 次序不同就不是逐位相同。所以这里两套表并存（见上面的注释）。
 fn star_light(position: vec3<f32>) -> vec3<f32> {
     var lit = vec3<f32>(0.0, 0.0, 0.0);
     let radius = star_meta.light.x;
     if (star_meta.counts.x == 0u || star_meta.light.z <= 0.0 || radius <= 0.0) {
         return lit;
     }
-    // ⚠ 宿主已经把 `starlight_max > STAR_KEEP_MAX` 挡在派发之前；这里再夹一次纯粹是
-    //   为了定长表的**下标**不会越界。
     let keep = min(star_meta.segments_b.z, STAR_KEEP_MAX);
     let steps = max(star_meta.segments_b.y, 1u);
     let soft2 = star_meta.light.y * star_meta.light.y;
@@ -1176,7 +946,6 @@ fn star_light(position: vec3<f32>) -> vec3<f32> {
                         continue;
                     }
                     if (keep == 0u) {
-                        // `keep = 0` = CPU 那一侧的"不封顶"：不排序 ⇒ 直接按遍历次序累加。
                         lit = lit + vec3<f32>(star_visible(position, star, soft2, steps));
                     } else {
                         if (star_cand_count <= keep) {
@@ -1226,8 +995,6 @@ fn bake_emission(@builtin(global_invocation_id) id: vec3<u32>) {
     let position = direction * radius;
     let d = emission_world(position);
 
-    // ---- 朝**点光源**的遮挡 + 1/d² 辐照（与 CPU 的 `bake_emission` 逐条对齐）----
-    // ⚠⚠ 从前是平行光 + 只算遮挡（无距离衰减）⇒ 整团气被均匀照亮 ⇒ 画面"像自发光"。
     let light_direction = normalize(emission.light.xyz);
     let light_radius = shell_radius(clamp(emission.params.x, 0.0, 1.0));
     let light_position = light_direction * light_radius;
@@ -1244,23 +1011,16 @@ fn bake_emission(@builtin(global_invocation_id) id: vec3<u32>) {
     let reach = clamp(light_radius / light_distance, 0.0, 1.0);
     let lit = exp(-optical_depth * emission.params.y) * (reach * reach);
 
-    // ---- 星光照气体（= 星光被气散射）：R3 星场里附近最亮的几颗 + 逐星遮挡 ----
-    // ⚠ 与 CPU 的 `bake_emission` 逐条对齐：**无色**（`star_lit` 三格同一个数）。
     let star_lit = star_light(position);
 
     let main = pow(d, emission.params.z) * emission.params.w * lit;
     let above = max(d - emission.glow.z, 0.0);
     let glow = pow(above, emission.glow.y) * emission.glow.x * lit;
-    // 星光被气**散射**那一笔：与主发射**同形状**（只在有气的地方亮），而 `star_lit` 只是
-    // 一份**无色的形状** ⇒ 它的颜色完全由 `glow_tint` 给（用户 2026-09-25：散射走红）。
     let star_emit = pow(d, emission.params.z) * star_meta.light.z;
     let base = pow(d, emission.extinction.w);
     let dust = max(d - emission.dust.y, 0.0) * emission.dust.x;
 
     let at = index * 6u;
-    // ⚠⚠ `glow_tint` **也乘 `main`**（它的含义是"星云散射出来的光的通道配比"），而且
-    //   **散射项也吃它**：星云不许自发光 ⇒ 画面上亮的那一片就是星光被气散射出来的，
-    //   而它必须是**红色**。`scatter_tint` 是分色诊断（`[1,1,1]` = 不染色）。
     let tint = emission.glow_tint.xyz;
     let scatter = emission.scatter_tint.xyz;
     emitted[at + 0u] = (main + glow + star_emit * star_lit.x) * tint.x * scatter.x;

@@ -1,17 +1,3 @@
-//! **一张场产物的读数探针**：接缝、行/列梯度，以及"**这张场有多少是纯纬度的函数**"。
-//!
-//! 用法：`field_probe <FIELD.pxart> [投影]`（投影默认 `cube_map`，取值同
-//! `Projection` 的名字：`equirect` / `octahedral` / `cube` / `cube_map`）。
-//!
-//! ⚠ 最后那一条读数是 2026-09-20 加的，起因是用户对气态巨行星的一句评价：
-//!   **"你的那个像个西瓜"**（条带是纯纬度的函数）。"不规则"这件事在那之前只能靠眼睛看，
-//!   于是把它变成一个数：
-//!     * **纬向可解释度 `R²`** = 按纬度分箱之后"箱间方差 / 总方差"。纯纬度的函数 ⇒ 接近 1；
-//!       越不规则越低。⚠ 它**不是**"好看"的判据，只是"像不像西瓜"的判据。
-//!     * **经/纬梯度比** = 沿经度的平均 |Δ| ÷ 沿纬度的平均 |Δ|。西瓜的经向梯度接近 0，
-//!       比值很小；条带被扭曲之后两者可比。
-//!   ⚠ 读数只对**球面投影**（`cube_map` / `equirect` / `octahedral`）有意义：它们才有"纬度"。
-
 use px_field_schema::field::{Field, Projection};
 use px_protocol::stream::{self, Frame};
 
@@ -86,7 +72,6 @@ fn main() {
     report_band_structure(&path, width, height, &data, projection);
 }
 
-/// 每一行**沿经度**的两条读数：行内标准差 + lag=`W/8` 的归一化自相关（取中位数）。
 fn longitude_readings(field: &Field, width: u32, height: u32) -> (f64, f64) {
     let lag = (width / 8).max(1);
     let mut stds = Vec::new();
@@ -118,7 +103,6 @@ fn longitude_readings(field: &Field, width: u32, height: u32) -> (f64, f64) {
     (stds[stds.len() / 2], corrs[corrs.len() / 2])
 }
 
-/// **这张场有多少是纯纬度的函数**（"西瓜度"）—— 见文件头那一段。
 fn report_band_structure(
     path: &str,
     width: u32,
@@ -172,14 +156,6 @@ fn report_band_structure(
     };
     let lon = along_lon / (samples - height as f64).max(1.0);
     let lat = along_lat / (samples - width as f64).max(1.0);
-    // ⚠ 2026-09-20 补：`R²` **分不开**"纯纬度条带"与"平滑的长波流线"（实测：
-    //   西瓜那版 0.6175、长波流线那版 0.6148 —— 几乎同一个数，而画面上完全是两回事：
-    //   后者沿经度有明显起伏，只是起伏是**低频**的，被纬度分箱平均掉之后又"像"纬度的函数）。
-    //   ⇒ 再量两条**只看沿经度**的读数：
-    //     · `lon_std`：每一行内的标准差（沿经度有没有变化）——西瓜 ≈ 0；
-    //     · `lon_corr`：行内信号在 lag = W/8 处的归一化自相关（变化是**低频**还是**碎**）——
-    //       长波流线接近 1、絮状接近 0。
-    //   两条合起来才分得开三种形态。
     let (lon_std, lon_corr) = longitude_readings(&field, width, height);
     println!("  沿经度标准差（中位）= {lon_std:.4}（西瓜 ≈ 0）");
     println!("  沿经度自相关 lag=W/8（中位）= {lon_corr:.3}（≈1 = 低频长波，≈0 = 碎）");

@@ -1,12 +1,3 @@
-//! 落盘与读回：按清单里的键读一份场（`load_field`），以及把生成物写进 CAS
-//! （`Generated` / `write_cas` / `write_texture[_at]` / `write_generated_mesh[_at]` /
-//! `fingerprint_of`）。
-//!
-//! 边界：这一档只认字节与路径，不认调色板也不认 mip —— 贴图/网格怎么生成在
-//! `super::texture` 与 `super::mesh`，这里只负责"算键、比形状、写文件、说清命中没命中"。
-//! 键 = 完整产物字节的 blake3、路径 = `px_protocol::scene::cas_path`，与渲染器无关，
-//! 所以读回的那份场也能在没开图的时候用（`super::shade` 的取数口径就靠它）。
-
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -18,17 +9,6 @@ use px_protocol::payload::PayloadBundle;
 use px_protocol::stream::{self, Frame};
 use px_protocol::wire::{Blob, BlobHeader, DType};
 
-// ---------------------------------------------------------------------------
-// 产物读取：按清单里的键读一份场（读法与渲染器 `load_field` 相同）
-// ---------------------------------------------------------------------------
-
-/// 读一份场产物。投影取自**载荷清单里那一格**（`px_field_schema::payload::PROJECTION_KEY`）
-/// —— 与渲染器 `planet::load_field` 同一个口径。**这一步不能省**：投影决定
-/// `texel_latitude` 走哪一支、颜色贴图走 `mip_chain` 还是 `mip_chain_cube`、
-/// 要不要 `pole_cap_filter`。
-///
-/// ⚠ 它从前按清单里的 `AssetKind` 反推投影 —— 而资产种类已经不是图缓存载荷的一栏
-///   （那是**渲染**认"盘上这坨字节是什么"的概念）⇒ 由**载荷自己**说清楚。
 pub fn load_field(path: &str) -> Result<Field, String> {
     let bytes = std::fs::read(path).map_err(|err| format!("读不到 {path}：{err}"))?;
     let frames = stream::read_stream(&mut bytes.as_slice()).map_err(|err| err.to_string())?;
@@ -57,27 +37,16 @@ pub fn load_field(path: &str) -> Result<Field, String> {
     Ok(field)
 }
 
-// ---------------------------------------------------------------------------
-// 落盘：内容寻址（键 = 完整产物字节的 blake3）
-// ---------------------------------------------------------------------------
-
-/// 一份落进 CAS 的生成物。
 #[derive(Debug, Clone)]
 pub struct Generated {
     pub id: String,
     pub key: Key,
     pub path: PathBuf,
     pub bytes: u64,
-    /// 这份内容在 CAS 里已经有了（没重写文件）。
     pub hit: bool,
     pub millis: u64,
 }
 
-/// 把一份生成物写进 CAS。
-///
-/// **键 = 内容**：键是对完整产物字节（清单帧 + 载荷帧，就是 `stream::write_stream`
-/// 的输出）算的 blake3，路径是 `px_protocol::scene::cas_path(cache_root, hex)`。
-/// 文件已存在 ⇒ `hit = true` 且一个字节都不重写。
 fn write_cas(
     root: &Path,
     id: &str,
@@ -119,12 +88,6 @@ fn write_cas(
     })
 }
 
-/// 把一份贴图写进 CAS：清单帧（`params = TextureShape::params()`、
-/// `fingerprint` = 对载荷算的 FNV-1a 指纹）—— ⚠ 清单里**没有**"资产种类"那一栏
-/// + 一个 blob（`Rgba8Srgb` → `DType::U8`；`Rgba16Float` → `DType::U16`，字节原样）。
-///
-/// 要一个 CAS 根：默认走 [`crate::cache_root`]（纯函数，与开不开图无关）；
-/// 不方便依赖它时用 [`write_texture_at`] 显式给一个根。
 pub fn write_texture(
     id: &str,
     shape: TextureShape,
@@ -134,7 +97,6 @@ pub fn write_texture(
     write_texture_at(&crate::cache_root(), id, shape, payload, dtype)
 }
 
-/// [`write_texture`] 的显式根变体。
 pub fn write_texture_at(
     root: &Path,
     id: &str,
@@ -177,14 +139,10 @@ pub fn write_texture_at(
     write_cas(root, id, shape.params(), vec![blob])
 }
 
-/// 网格产物同理（用 `MeshData::blobs()`），供环用。
-///
-/// 要一个 CAS 根：默认走 [`crate::cache_root`]；不方便依赖它时用 [`write_generated_mesh_at`]。
 pub fn write_generated_mesh(id: &str, mesh: &MeshData) -> Result<Generated, String> {
     write_generated_mesh_at(&crate::cache_root(), id, mesh)
 }
 
-/// [`write_generated_mesh`] 的显式根变体。
 pub fn write_generated_mesh_at(
     root: &Path,
     id: &str,
@@ -197,7 +155,6 @@ pub fn write_generated_mesh_at(
     write_cas(root, id, params, mesh.blobs())
 }
 
-/// 一份生成物的指纹（与 `px_graph::write_artifact` 用的是同一个函数）。审计/对账用。
 pub fn fingerprint_of(id: &str, blobs: &[Blob]) -> u64 {
     crate::payload_fingerprint(id, blobs)
 }

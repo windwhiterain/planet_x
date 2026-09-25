@@ -1,14 +1,3 @@
-//! 内容指纹：一份**自带**的 SHA-256。
-//!
-//! 为什么自己写：这个指纹只用来给"这张图是哪一张"一个稳定、可与别人对账的名字（报告里的
-//! `sha256` 字段），**不是安全边界**；而为了它引一个 crate 就要动 `Cargo.lock`、还要赌
-//! 离线环境里能拉到包 —— 代价比收益大。正确性由下面三条已知向量钉住。
-//!
-//! ⚠ 从 `px_render::digest` **逐字搬来**（§102：那份的 bevy 耦合度是 0）—— 那是
-//! **已删的 Bevy 宿主**的模块（§154），**不是本 crate 的 [`crate::digest`]**（同名，两份东西）。
-//! **口径必须一模一样**：§86 那批读数（`63184151909371A5` …）是 `Get-FileHash -Algorithm
-//! SHA256` 取前 16 位，换一个摘要算法就等于把历史读数全作废。
-
 const K: [u32; 64] = [
     0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
     0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
@@ -87,8 +76,6 @@ pub fn sha256_file(path: &std::path::Path) -> Result<String, String> {
     Ok(sha256_hex(&bytes))
 }
 
-/// 前 16 位十六进制 —— 与 `passdoc/run.ps1`、§86 那批读数**同一个口径**
-/// （整串 sha256 截前 16 位）。口径换一格，历史读数就不可比。
 pub fn short(path: &std::path::Path) -> String {
     match sha256_file(path) {
         Ok(hex) => hex[..16].to_uppercase(),
@@ -100,8 +87,6 @@ pub fn short(path: &std::path::Path) -> String {
 mod tests {
     use super::*;
 
-    /// 三条已知向量：空串、"abc"、以及跨过一个 64 字节分组边界的 1 000 000 个 'a' 的短版
-    /// （56 字节 —— 它刚好处在"要补第二个分组"的位置）。
     #[test]
     fn the_known_vectors_hold() {
         assert_eq!(
@@ -116,7 +101,6 @@ mod tests {
             sha256_hex(&b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq".to_vec()),
             "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"
         );
-        // 长度 64 整倍数时补一整块，这是最容易写错的那一格。
         assert_eq!(
             sha256_hex(&vec![b'a'; 64]),
             "ffe054fe7ae0cb6dc65c3af9b61d5209f439851db43d0ba5997337df154668eb"

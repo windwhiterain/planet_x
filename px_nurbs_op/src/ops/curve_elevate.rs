@@ -7,7 +7,6 @@ px_graph_schema::px_body! {
     |p, i| crate::ops::curve_elevate::eval(p, i.curve.value())?
 }
 
-/// 升阶（曲线）：算法住在 schema 里（`elevate_degree`），这一档只把参数接上去。
 pub fn eval(
     params: &params::elevate::ElevateParams,
     source: &px_nurbs_schema::Curve,

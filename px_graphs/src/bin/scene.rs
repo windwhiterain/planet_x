@@ -1,42 +1,14 @@
-//! 场景图：**一份配方**（`art/scene/*.toml`）→ **一份低层帧图产物**（`.pxart`）。
-//!
-//! 它就是 pcg 的一张**普通的图**（与 `planet` / `clouds` / `desert` 同形）：一次运行、
-//! 产物进 CAS、节点进 `target/pcg/scene/manifest.json`。**没有单独的 CLI、没有另一套入口**
-//! —— 语义住在 `px_scene` 里，这一支只负责"读配方、算键、落盘、登记"。
-//!
-//! 它做三件事（细节全在 `px_scene`）：
-//!
-//! 1. 把配方里的 part 展开成**物体**：几何（网格产物或内建图元）+ 材质（shader 产物 +
-//!    按名字给的参数 + 按绑定下标给的贴图）+ 世界系变换；
-//! 2. 把需要程序化生成的东西**烘成产物**（色板贴图 / 覆盖度立方图 / 星空 / 环），
-//!    写进 CAS 的 `generated` 图 —— 渲染器只认产物，不生成任何东西；
-//! 3. 把"怎么看"（评审相机表）与"照什么"（灯表、环境）以及**帧图**（pass 表 / 中间目标 /
-//!    帧自有材质 / 材质实例）一并写进文档。
-//!
-//! ⚠ **键与字节不许动**：`scene_key`（`px_cook::scene_key`）与
-//! `px_protocol::scene::write_scene` 一起定下了那份 `.pxart` 的**文件字节**，而
-//! 那条已退休的"逃生门"判据（`docs/anchors.md`）判的就是它（逃生门）。改这两个中的任何一个，
-//! 那六份冻产物就不再"逐字节可复现"。
-
 use px_scene::baked::Baked;
 use px_scene::recipe;
 
 const DEFAULT_SCENE: &str = "orbit";
 
 fn main() {
-    // ⚠ **第一行**：`--store <目录>` 要在任何 `begin` 之前落成 `PX_ART`
-    //   （参数目录不是节点键的一部分，见 `px_graph::driver` 的模块文档）。
     px_cook::apply_store_args().unwrap_or_else(|err| panic!("{err}"));
-    // ⚠ 这张图**一个节点都不走缓存**：`begin` 只要它那一行摘要（图名 / 参数目录 / 缓存条数）。
     let _graph = px_cook::begin(px_cook::GraphSpec {
         name: "scene".to_string(),
     });
 
-    // 用法：scene [配方名] [--no-frame-graph]
-    // ⚠ `--no-frame-graph` 是**兼容逃生门**（见 `px_scene::recipe::compile` 里那段注释），
-    //    不是常规用法：它存在的唯一目的是证明老产物还能逐字节复现。
-    // ⚠ 参数走 `args_without_store()`：这里按**位置**读配方名，而 `--store X` 那一对
-    //    会顶到位置参数上 ⇒ 读成"一份叫 `--store` 的配方"（不是报错，是读错东西）。
     let mut name = DEFAULT_SCENE.to_string();
     let mut with_graph = true;
     for arg in px_cook::args_without_store().unwrap_or_else(|err| panic!("{err}")) {
@@ -70,9 +42,6 @@ fn main() {
             .unwrap_or_else(|err| panic!("{err}"));
 
     println!("{}", compiled.document.audit());
-    // ⚠ 尾巴上那一格是**内容键**（`scene_key` 算出来的、也嵌在文件名里那个），**不是文件字节的
-    //    sha256** —— 两者是两个量。那条已退休的"逃生门"判据（`docs/anchors.md`）判的是**文件字节**，
-    //    而这一行印的是键：拿这一格去比登记值，六份会**全报 ✗ 而真值其实是对的**。
     println!(
         "产物 scene -> {}（内容键 {}，不是文件字节的 sha256）",
         artifact.display(),
@@ -89,8 +58,6 @@ fn main() {
         bytes,
         detail: format!("{} 个物体", compiled.document.objects.len()),
     };
-    // 清单按场景名合并：一台机器上会并存好几份场景（有云 / 无云 / …），
-    // 后烘的不许把先烘的挤掉。
     let mut entries = px_cook::graph_manifest("scene").unwrap_or_default();
     entries.retain(|old| old.node != entry.node);
     entries.push(entry);

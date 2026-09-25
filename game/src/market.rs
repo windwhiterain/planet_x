@@ -8,12 +8,9 @@ use crate::market_state::MarketState;
 pub struct Market {
     pub merchandises: Vec<Merchandise>,
     pub traders: Vec<Trader>,
-    /// key: deal sender, deal reciver, merchandise
     pub deals: Vec<Vec<Vec<Deal>>>,
-    /// key: deal sender, deal reciver
     pub relations: Vec<Vec<f32>>,
     pub state: MarketState,
-    /// 势流的价差尺度：`φ = tanh(ln(买价/卖价) / flow_scale)`
     pub flow_scale: f32,
 }
 
@@ -30,7 +27,6 @@ pub struct Trader {
 #[derive(Debug, Clone, PartialEq)]
 pub struct TraderMerchandise {
     pub price: f32,
-    /// 这个仓库货架上有多少。**不是买卖申报**：方向由市场按挂价比较得出。
     pub volume: f32,
     deal_price: f32,
     deal_volume: f32,
@@ -56,7 +52,6 @@ impl TraderMerchandise {
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Deal {
-    /// 正 = 这一对里 i 卖出的量，负 = i 买入的量
     pub volume: f32,
     pub price: f32,
 }

@@ -7,10 +7,6 @@ px_graph_schema::px_body! {
     |p, i| crate::ops::curve_hodograph::eval(p, i.curve.value())?
 }
 
-/// **一阶导（hodograph）**：`t → 切向量`。
-///
-/// ⚠ 切向量放在 `tangent` 那一栏、`point` 仍放曲线上的点：读的人要的是"在哪、朝哪"，
-///   而 `tangent` 是这套 `PointData` 里语义最准的一格（`has_tangent` 跟着置位）。
 pub fn eval(
     params: &params::eval::EvalParams,
     curve: &px_nurbs_schema::Curve,

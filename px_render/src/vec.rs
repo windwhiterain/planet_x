@@ -1,21 +1,3 @@
-//! 一点点向量数学。**故意不用 `glam`。**
-//!
-//! 理由只有一条，但是实测过的：`glam` 是单态化大户，§92 的冷编账里**它一个人就值 11.5 s**
-//! （那是剥离 bevy 要省的那笔账里最大的单项之一），而本渲染器真正用到的只有
-//! `dot` / `cross` / `normalize` 这几个算符。用户口径（§100）："能动态的就动态、
-//! 减少类型检查与单态化的时间"。
-//!
-//! ⚠ 但**算式必须与 glam 逐位一致**，否则 `weld_normals` 焊出来的法线会在最后一位上
-//! 与 Bevy 分岔，而判据是逐字节的。下面每一个函数都是从 `glam 0.32.1` 的
-//! `src/f32/vec3.rs` **逐字抄**下来的（连括号的结合顺序都照抄）：
-//!
-//! - `dot`  = `(x*x') + (y*y') + (z*z')`（左结合，不是先加后两项）
-//! - `length` = `sqrt(dot(self, self))`
-//! - `length_recip` = `1.0 / length()`（`length().recip()`）
-//! - `normalize_or_zero` = `rcp = length_recip(); if rcp.is_finite() && rcp > 0.0 { self * rcp } else { ZERO }`
-//!
-//! 少抄一个括号就是另一条法线 —— 这正是 §104 第 1 条那种"看着一样、哈希不一样"的来源。
-
 use std::ops::{Add, AddAssign, Div, Mul, Neg, Sub};
 
 #[derive(Clone, Copy, Debug, PartialEq, Default)]
@@ -71,12 +53,10 @@ impl Vec3 {
         [self.x, self.y, self.z]
     }
 
-    /// 逐字抄 glam：`(x*x') + (y*y') + (z*z')`，**左结合**。
     pub fn dot(self, rhs: Vec3) -> f32 {
         (self.x * rhs.x) + (self.y * rhs.y) + (self.z * rhs.z)
     }
 
-    /// 逐字抄 glam：分量相减的次序也一样（`self.y * rhs.z - rhs.y * self.z`）。
     pub fn cross(self, rhs: Vec3) -> Vec3 {
         Vec3 {
             x: self.y * rhs.z - rhs.y * self.z,
@@ -93,13 +73,10 @@ impl Vec3 {
         self.length().recip()
     }
 
-    /// glam 的 `normalize()`：**不判零**，直接乘 `length_recip`。
     pub fn normalize(self) -> Vec3 {
         self * self.length_recip()
     }
 
-    /// glam 的 `normalize_or_zero()` ⇒ `normalize_or(ZERO)`，判定条件是
-    /// `rcp.is_finite() && rcp > 0.0`（注意不是拿长度判，是拿**倒数**判）。
     pub fn normalize_or_zero(self) -> Vec3 {
         let rcp = self.length_recip();
         if rcp.is_finite() && rcp > 0.0 {
@@ -179,8 +156,6 @@ impl Neg for Vec3 {
 mod tests {
     use super::*;
 
-    /// 这几条钉的是"与 glam 同一位"：数值取自 glam 自己那套算式手算的结果，
-    /// 任何一处括号/次序改动都会让它们变。
     #[test]
     fn the_arithmetic_matches_glam_bit_for_bit() {
         let a = Vec3::new(1.5, -2.25, 0.125);

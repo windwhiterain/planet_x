@@ -1,8 +1,3 @@
-//! 场：一张 `width × height` 的 f32 网格 + 它的投影。
-//!
-//! ⚠ 场的**形状与投影是参数**（`params::Shape`）—— 从前它们叫"画布"、住在驱动里，
-//!   现在没有那个概念了：谁产出场，谁在自己的参数里写清产出多大、什么投影。
-
 use px_protocol::wire::{Blob, DType, WireError};
 
 pub use px_protocol::art::Domain as Projection;
@@ -57,10 +52,6 @@ pub fn direction_at(width: u32, height: u32, projection: Projection, x: u32, y: 
 }
 
 impl Field {
-    /// 与 `self` **同形同投影**的一张常值场。
-    ///
-    /// ⚠ 过滤类算子（重映射 / 混合 / 扭曲 / 梯度）的输出**与上游同形** —— 从前那是靠
-    ///   调用点递一张"画布"、并要求它与上游同形来达到的；现在形状只有一个来源。
     pub fn like(&self, value: f32) -> Field {
         Field::filled_with(self.width, self.height, value, self.projection)
     }

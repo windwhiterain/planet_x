@@ -9,13 +9,6 @@ use crate::{ArtBundle, ProtocolId};
 pub const MAGIC: [u8; 4] = *b"PXST";
 pub const STREAM_VERSION: u32 = 1;
 
-/// 跨进程的信封：只装**两边都认**的那几样 —— 握手（`Protocol`）、产物清单与二进制块
-/// （`Art` / `Blob`）、场景文档（`Scene`）以及拒词。
-///
-/// ⚠ 原来这里还有三路：`World`（经济世界视图）、`Request` / `Response`（渲染作业）。
-/// 它们各自搬去了 `game`（`sim`）—— 搬的理由不是整洁：
-/// 那两边的 crate **本来就依赖 `px_protocol`**，这三路再留在这里就是循环依赖，编都编不过。
-/// 信封留在本 crate 是因为它确实两边都认：px_graph 写产物、px_scene / px_pass / px_verify 读产物。
 #[derive(Debug, Clone, PartialEq)]
 pub enum Frame {
     Protocol(ProtocolId),

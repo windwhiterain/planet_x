@@ -12,47 +12,17 @@ pub enum AssetKind {
     CubeMap,
     Mesh,
     Instances,
-    /// 立方球参数空间里的 3D 标量网格（等值面算子的输入）。
-    /// **渲染器不读它**：烘代理 mesh 是 PCG 那一侧的事，渲染器只认 `Mesh`。
-    ///
-    /// ⚠ 它是**体积**（`VolumeData`：`res` / `layers` / `inner` / `outer` 住在清单参数里），
-    ///   与 [`Self::VoxelField`] 不是一回事 —— 见那一条。
     Volume,
-    /// **体网格当一张场**（`Domain::Volume`）：一张普通的 `[height, width]` f32 网格，
-    /// 第三维折进了 `height`（一面 = `res × (layers × res)` 行，见 `px_field_schema::volume`）。
-    ///
-    /// ⚠ 为什么它必须与 [`Self::Volume`] **分开**：两者的 blob 都是 f32，但**形状与含义不同**
-    ///   （体网格场是二维 blob，`VolumeData` 是四维 `[面, 层, t, s]`，且半径另存）。
-    ///   更要紧的是**域必须能从资产种类唯一还原**：`load_field` 是"资产种类 → 域"的逆映射，
-    ///   把体网格场并进 `Field2D` 就会读回 `Equirect`（静默错域），而域决定"这一格在世界里的哪"
-    ///   —— 那正是影不影响像素的开关。
     VoxelField,
-    /// 场景配方：这次要渲什么、用什么参数、用哪个 shader 槽。
     Scene,
-    /// Shader 源码（U8 blob）。它和场、网格一样是内容寻址的资产。
     Shader,
-    /// 贴图载荷：像素 + 整条 mip 链，`layers` 层（1 = 2D、6 = cube）。
-    ///
-    /// 形状住在清单参数里（`width` / `height` / `layers` / `levels` / `format`）：
-    /// 位深与 sRGB 不是 blob 头那一档（`DType`）能表达的东西。
-    /// 渲染器**不生成**它 —— 色板、覆盖度立方图、星空都由烘图侧烘成产物（§65）。
     Texture,
-    /// **R3 星场**（`px_sparse::StarField`）：世界坐标里的一批点光源 + 统一稀疏格。
-    ///   **渲染器不读它** —— 它只喂天空烘焙那一档（`sky.nebula` 的直射项与
-    ///   `cloud.emission` 的星光照）。
-    ///
-    /// ⚠ 它必须有自己的种类：载荷是 f32 点表 + 五段 u32 索引，形状既不是"二维场"
-    ///   也不是"四维体积"，借任何一档都会在读回时把形状解错
-    ///   （与 [`Self::VoxelField`] 同一条理由）。
     StarField,
 }
 
-/// 贴图产物的格式档。数字写进清单参数 `format`（清单参数只有 f64）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TextureFormat {
-    /// 每通道 1 字节、sRGB 采样的 RGBA（颜色贴图、星空）。
     Rgba8Srgb,
-    /// 每通道半精度的线性 RGBA（覆盖度立方图：mask + 三轴梯度）。
     Rgba16Float,
 }
 
@@ -89,7 +59,6 @@ impl TextureFormat {
         }
     }
 
-    /// 每个 texel 的字节数。
     pub fn texel_bytes(self) -> usize {
         match self {
             Self::Rgba8Srgb => 4,
@@ -98,14 +67,11 @@ impl TextureFormat {
     }
 }
 
-/// 一份贴图产物的形状与格式（清单参数那一档）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TextureShape {
     pub width: u32,
     pub height: u32,
-    /// 1 = 2D，6 = cube。
     pub layers: u32,
-    /// mip 链级数（含最细那一级）。
     pub levels: u32,
     pub format: TextureFormat,
 }
@@ -121,7 +87,6 @@ impl TextureShape {
         ])
     }
 
-    /// 从清单参数里读回来。缺项/取值不认识 ⇒ `Err`，不猜。
     pub fn from_params(params: &BTreeMap<String, f64>) -> Result<Self, String> {
         let number = |key: &str| -> Result<u32, String> {
             let value = params
@@ -166,7 +131,6 @@ impl TextureShape {
         Ok(shape)
     }
 
-    /// 整条 mip 链的字节数（从最细那一级逐级减半，直到某一维为 1）。
     pub fn chain_bytes(self) -> usize {
         let mut total = 0_usize;
         let (mut width, mut height) = (self.width, self.height);
@@ -180,13 +144,6 @@ impl TextureShape {
     }
 }
 
-/// 一份贴图的**全部字节**：整条 mip 链，与渲染器今天写进 `Image.data` 的那串逐字节相同。
-///
-/// ⚠ **它为什么住这里**（与 [`VolumeData`] / [`MeshData`] 同住一处）：`AssetKind::Texture`
-///   本来就在本模块，而"一个域的载荷类型与它的编解码住在一起"是全仓的口径
-///   （孤儿规则那条）。从前它在 `px_graph::generate`，于是**算子交不出贴图**
-///   —— 算子的 `Payload` 必须由 schema 层声明，而 schema 在 `px_graph` **下面**。
-///   搬到这里之后 `sky.nebula` 那类算子可以直接把一张烘好的天空当产物交出去。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TextureData {
     pub width: u32,
@@ -208,13 +165,6 @@ impl TextureData {
         }
     }
 
-    /// **唯一的构造口**：自检「载荷字节数 = 形状算出来的整条 mip 链字节数」。
-    /// 少一级 mip、多层一层、位深写错，都会在这里当场炸，而不是等到渲染器那边采样出错。
-    ///
-    /// ⚠ `px_graph` 那边原来把它写成**私有**的（"别绕过它"）。搬过来之后私有做不到
-    ///   （跨 crate），于是它变成公开的 —— 但那条纪律没变：**要用贴图就过这一道**，
-    ///   别去手搓结构体字面量。这也是为什么它叫 `new` 而字段是公开的：
-    ///   字段公开是为了让 `Build::decode` 能从字节还原（那时字节已经是自己人写出来的）。
     pub fn new(
         width: u32,
         height: u32,
@@ -298,15 +248,6 @@ pub fn octahedral_uv_y_up(direction: [f32; 3]) -> [f32; 2] {
     octahedral_uv([direction[0], -direction[2], direction[1]])
 }
 
-/// **折线**（曲线算子的产物）：一串顶点 + **线段**（两个下标一段）。
-///
-/// ⚠ 为什么它不借 `MeshData` 的壳：折线**不是**一张曲面 —— 它没有法线、没有面积，
-///   而 `MeshData` 说的三件事（"每个顶点一个法线""索引三个一组是三角形""三角形数"
-///   这个读数）都不成立。硬塞进去只能靠零面积三角形假装，于是三角形那一侧读出来的
-///   是一堆退化面、`triangles()` 这个读数在说谎。
-///
-/// ⚠ 与 `MeshData` 同一条口径：形状（顶点数 / 下标个数）走清单参数或 blob 头，
-///   数据一律 `f32` / `u32` 原样，一个都不重排。
 pub const POLYLINE_ATTRIBUTES: [&str; 2] = ["positions", "indices"];
 pub const POLYLINE_POSITION: usize = 0;
 pub const POLYLINE_INDEX: usize = 1;
@@ -314,7 +255,6 @@ pub const POLYLINE_INDEX: usize = 1;
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct PolylineData {
     pub positions: Vec<f32>,
-    /// 线段：`[a0, b0, a1, b1, …]`（闭合折线的最后一段接回第一个顶点）。
     pub indices: Vec<u32>,
 }
 
@@ -399,36 +339,17 @@ impl MeshData {
     }
 }
 
-/// 立方球参数空间里的一张 3D 标量网格（`kind = Volume`）。
-///
-/// 排布：`data[((face * layers + layer) * res + t) * res + s]`，共
-/// `CUBE_FACES * layers * res * res` 个值。`s`/`t` 是面内参数，`layer` 是径向高度层
-/// （0 = `inner`、`layers-1` = `outer`）。
-///
-/// 它只是**等值面算子的输入**：渲染器不读它（见 `AssetKind::Volume` 的注释）。
 #[derive(Debug, Clone, PartialEq)]
 pub struct VolumeData {
     pub res: u32,
     pub layers: u32,
     pub inner: f32,
     pub outer: f32,
-    /// **每体素几条通道**（`data` 按体素交错）。
-    ///
-    /// ⚠⚠ 用户 2026-09-25："你为什么要用六通道交错存？为什么不用结构体？"
-    ///   交错本身是为了采样器（一次 gather 8 个角，每个角的通道连续 ⇒ 一个 cache line
-    ///   拿下全部通道；SoA 要按通道各扫一遍 ✗）。**真正错的是通道数没进类型** ✗：
-    ///   从前 `data` 的长度由读者自己反推 ⇒ 任何一个"假设每体素一个值"的读取者都会
-    ///   **静默读错**（实际发生过：星场吃了六通道的发射体积 ⇒ 读出来是乱的 ✗）。
-    ///   现在它就在结构体里：读者必须显式面对"这是几通道"，编译器逼着每个构造点写出来 ✓。
-    ///
-    /// `1` = 密度（等值面/星场的输入）；`6` = 发射（`[发射 R,G,B, σ_R,σ_G,σ_B]`）。
     pub lanes: u32,
     pub data: Vec<f32>,
 }
 
 impl Default for VolumeData {
-    /// ⚠ 手工实现（不是 derive）：derive 会给 `lanes = 0`，而 0 通道的体积没有意义 ⇒
-    ///   默认按**单通道**（密度的语义）。
     fn default() -> Self {
         Self {
             res: 0,
@@ -441,22 +362,14 @@ impl Default for VolumeData {
     }
 }
 
-/// Volume 载荷的 blob 形状：`[面, 径向层, t, s]`。
-///
-/// ⚠ 多通道体积在**末尾多一维**（通道数，只在 > 1 时写）—— 见 [`VolumeData::blobs`]。
 pub const VOLUME_SHAPE: [u32; 4] = [CUBE_FACES, 0, 0, 0];
 
 impl VolumeData {
-    /// 体素下标 → `data` 下标（**唯一的**通道步长来源）。
     #[inline]
     pub fn lane_slot(&self, voxel: usize, lane: usize) -> usize {
         voxel * self.lanes.max(1) as usize + lane
     }
 
-    /// ⚠ 只对**单通道**（密度）体积有效的读者，必须先过这一关。
-    ///
-    /// 从前这层约定只写在注释里（`density::sample_world` 的文档 ✗），而类型上拦不住
-    /// ⇒ 把六通道的发射喂进去就会静默读错。现在它是运行期断言 ✓。
     #[inline]
     pub fn expect_single(&self) -> &Self {
         assert_eq!(
@@ -469,7 +382,6 @@ impl VolumeData {
         self
     }
 
-    /// 发射通道（`0..3` = RGB、`3..6` = σ）的一个体素值；**非**发射体积上会断言。
     #[inline]
     pub fn emission_at(&self, voxel: usize, channel: usize) -> f32 {
         assert!(channel < self.lanes.max(1) as usize, "通道越界");
@@ -480,50 +392,23 @@ impl VolumeData {
         self.res as usize * self.layers as usize * self.res as usize * CUBE_FACES as usize
     }
 
-    /// 每格几条通道（`data.len() / samples()`）：密度是 1、发射是 6（3 发射 + 3 消光）。
-    ///
-    /// ⚠⚠ **通道数必须编进 blob 形状**（见 [`Self::blobs`]）—— 这一档踩过一次：
-    ///   形状只写单通道的量、字节却是 `samples × 6` ⇒ 产物**自相矛盾**、读回被拒，
-    ///   而症状只是"每次烘图都重算"（不报错、不崩溃）。
-    /// 通道数（`usize` 版，方便按 index 用）。
-    ///
-    /// ⚠⚠ 从前它是 `data.len() / samples()`（**反推**）✗ —— 那正是"通道数没进类型"
-    ///   的残余：只要有一个构造点忘了写对，反推就会跟着错，而错法是完全静默的。
-    ///   现在唯一来源是字段 [`Self::lanes`]（`1` = 密度、`6` = 发射）。
     pub fn lanes(&self) -> usize {
         self.lanes.max(1) as usize
     }
 
     pub fn at(&self, face: u32, layer: u32, t: u32, s: u32) -> f32 {
-        // ⚠ 多通道体积**不能**用 `at`：布局是交错的（`data[格 × lanes + 通道]`），
-        //   单通道下标式只对 `lanes == 1` 有意义。
-        // ⚠ 从前是 `debug_assert` ⇒ release 里**静默**按单通道下标读六通道体积 ✗。
-        //   这一档踩过真实的坑（星场吃掉发射体积）⇒ 改成硬断言。
         assert_eq!(self.lanes(), 1, "多通道体积请逐通道取（见 `lanes`）");
         self.data[(((face * self.layers + layer) * self.res + t) * self.res + s) as usize]
     }
 
-    /// ⚠⚠ **形状要装得下所有字节**：`Blob` 的头按 `DType` 自检长度
-    ///   （`elems × 4 == 字节数`），而多通道体积的 `data` 是 `samples × lanes`。
-    ///   第一版形状只写 `[面, 层, t, s]`（单通道的量）却塞六通道的字节
-    ///   ⇒ 写出的产物自相矛盾，读回时被"长度不符"拒收
-    ///   （实测：`头部声明 6291456 字节，实际 37748736 字节` —— 正好差 6 倍）
-    ///   ⇒ **每次烘图都判未命中、每次重算**，而画面对不对完全看不出这件事。
-    ///
-    /// 规则：**第 5 维只在 `lanes > 1` 时出现** ⇒ 一份内容只有一种编码，
-    /// 而老的单通道产物（4 维形状）**照旧能读**。
     pub fn blobs(&self) -> Vec<Blob> {
         let mut shape = vec![CUBE_FACES, self.layers, self.res, self.res];
-        // ⚠ 用**字段**（不是 `lanes()`）：编码路径从此不含任何反推。
         if self.lanes > 1 {
             shape.push(self.lanes);
         }
         vec![Blob::from_f32(shape, &self.data)]
     }
 
-    /// 只从载荷里还原数据与形状：`inner`/`outer` 住在清单参数里（`px_graph` 负责补）。
-    ///
-    /// 形状 4 维 = 单通道（老形状）；第 5 维是通道数（只在 > 1 时写 —— 见 [`Self::blobs`]）。
     pub fn from_blob(blob: &Blob) -> Result<Self, WireError> {
         let shape = &blob.header.shape;
         if shape.len() != 4 && shape.len() != 5 {
@@ -546,14 +431,6 @@ impl VolumeData {
     }
 }
 
-/// 一台评审相机。
-///
-/// `direction` 是**局部坐标系**里的方向（行星还没被 `SYSTEM_TILT` 转过去的那个系），
-/// `distance` 以行星半径 1 为单位。渲染器负责套上自己的倾斜
-/// （`px_render::planet::camera_for`），所以这里**不含**任何渲染器常数。
-///
-/// 它住在 `.pxart` 里 ⇒「这个产物该怎么看」跟产物一起走，
-/// 不再散在 `tools/probe.ps1` 的 yaw/pitch 与那个 `$tilt = 0.34` 里。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Camera {
     pub direction: [f32; 3],
@@ -563,7 +440,6 @@ pub struct Camera {
 }
 
 impl Camera {
-    /// 方向归一化、距离保底。0 长度方向会让渲染器把相机放在原点。
     pub fn new(direction: [f32; 3], distance: f32, tag: impl Into<String>) -> Self {
         Self::raw(direction, distance, tag).normalized()
     }
@@ -600,8 +476,6 @@ pub struct AssetManifest {
     pub id: String,
     pub params: BTreeMap<String, f64>,
     pub blobs: Vec<BlobHeader>,
-    /// 载荷内容的 FNV-1a 指纹（0 = 没记过，旧产物）。
-    /// diff 靠它分辨「参数一样、值不一样」—— CAS 路径能分辨，同名覆盖分辨不了。
     #[serde(default)]
     pub fingerprint: u64,
 }
@@ -700,14 +574,6 @@ pub enum Domain {
     Octahedral,
     Cube,
     CubeMap,
-    /// **三维**：立方球参数空间里的体网格（`res × res × layers × 6 面`）。
-    ///
-    /// ⚠ 前四个域是"**同一张网格的四种读法**"（都是球面上的一个方向），而这一个多了一维
-    ///   —— 它不是"另一种投影"，是**另一类采样空间**。放进同一个枚举是因为算子读的
-    ///   处处都是 `Field`（`width × height` 的 f32 网格 + 一个域），而"这一格在世界里
-    ///   落在哪儿"完全由域决定 ⇒ 加一个域就让**整套场算法**多了一档可用空间，
-    ///   而不必再造一类资产、一套 crate。⚠ 代价：`direction_at` / `uv_of` 这类
-    ///   **只对球面有意义**的入口必须显式把这一档挡掉（见那两处的文档）。
     Volume,
 }
 
@@ -722,12 +588,6 @@ impl Domain {
         }
     }
 
-    /// **域的编号**（`0..5`）—— 载荷清单参数里那一格 `projection` 用的就是它。
-    ///
-    /// ⚠ 为什么域要能**自己**在清单里留一个数：`AssetKind` 已经不再是图缓存载荷的一栏
-    ///   （它是**渲染**那一侧认资产种类的概念），而场载荷**不含**投影
-    ///   （`Field::to_blob` 只存形状）⇒ 读一份盘上的场产物时，"这一格在世界里的哪"
-    ///   就必须由**载荷自己**说清楚。编号是**冻结**的：改了它 = 旧产物读成别的域。
     pub fn code(self) -> u8 {
         match self {
             Self::Equirect => 0,
@@ -750,27 +610,12 @@ impl Domain {
     }
 }
 
-/// 体网格的**画布尺寸**：`(res, res × layers × 6)`。
-///
-/// ⚠ 为什么第三维折进 `height` 而不是给 `Field` 加一个 `layers` 字段：`Field` 是
-///   `width × height` 的 f32 网格（[`Field::to_blob`] 写的就是 `[height, width]`），
-///   加一维要动线格式、动每一个消费方。折进 `height` 之后**体网格就是一张普通场**，
-///   逐元素算子（`remap` / `mix`）一行都不用改就能用。
-///
-/// ⚠ 一面是一块 `res × (layers × res)` 的平面 ⇒ **一面 `layers × res` 行**（一"层"占
-///   `res` 行），行号是 `face × (res·layers) + layer × res + t`。
-///
-/// ⚠⚠ **行数因此是 `res × layers × 6`**（原来写的是 `res² × layers × 6`，多乘了一个
-///   `res`）：行号公式只覆盖前 `1/res` 的行，其余的行 `slot_of` 会把面号夹到 5 ——
-///   也就是说**每张体积场有 98.4% 的行算了却没人读**（shape 64 时一张场 402 MB、
-///   而它描述的体积只有 157 万格），烘焙时间、内存与磁盘都跟着大 64 倍。
 pub fn volume_extent(res: u32, layers: u32) -> (u32, u32) {
     let res = res.max(1);
     let layers = layers.max(1);
     (res, res * layers * CUBE_FACES)
 }
 
-/// 体网格的行数 → 层数（[`volume_extent`] 的逆）。
 pub fn volume_layers(height: u32, res: u32) -> Option<u32> {
     let res = res.max(1);
     let block = res.checked_mul(CUBE_FACES)?;
@@ -808,11 +653,6 @@ pub fn direction_at(domain: Domain, width: u32, height: u32, x: u32, y: u32) -> 
             let t = ((y % face_size) as f32 + 0.5) / face_size as f32;
             cube_direction(face, s, t)
         }
-        // ⚠ 体网格**不是一个方向**：它多一维（径向层），而这一格的层号在 `height` 里
-        //   （`y = face × layers + layer`）—— 这里只有 `height`，解不出 `layers`，
-        //   于是拿不到真正的半径。⇒ 给"半径 1 的方向"会让调用方以为这是个方向场，
-        //   那是**静默的错**。体网格的世界点映射住在 `px_field_schema::volume::point_of`
-        //   （它知道 `inner` / `outer` / `res` / `layers`），球面那些入口一律走它。
         Domain::Volume => panic!(
             "体网格（Domain::Volume）没有「一个方向」这回事：\
              世界点映射走 px_field_schema::volume::point_of（它知道 inner/outer/res/layers）"
@@ -836,8 +676,6 @@ pub fn uv_of(domain: Domain, direction: [f32; 3], width: u32, _height: u32) -> [
             let (face, s, t) = cube_face_of(direction);
             [s, (face as f32 + t) / CUBE_FACES as f32]
         }
-        // ⚠ 体网格的那一面里，这一格的面内参数就是 `(s, t)`（径向层不在这个二元组里，
-        //   它由行号给）—— 见 [`direction_at`] 那一档的文档。
         Domain::Volume => {
             let (_, s, t) = cube_face_of(direction);
             [s, t]
@@ -845,28 +683,15 @@ pub fn uv_of(domain: Domain, direction: [f32; 3], width: u32, _height: u32) -> [
     }
 }
 
-// ---------------------------------------------------------------------------
-// 产物 diff
-//
-// 渲染器拿到新的一批 `.pxart` 时，不该无脑把整场景重建一遍。它先问
-// 「跟上次那份比，到底哪个节点的输出变了」—— 这就是这里回答的问题。
-//
-// 三档判据，从硬到软：指纹（内容）> 参数 > 载荷头（形状/类型）。
-// 有了指纹，跨路径（新烘的产物换了 CAS 路径）也能分辨「值真的变了」。
-// ---------------------------------------------------------------------------
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "change", rename_all = "snake_case")]
 pub enum AssetChange {
     Added,
     Removed,
-    /// 载荷指纹不同 ⇒ 同样的参数烘出了不一样的值（最硬的一档）。
     Content,
-    /// 哪些参数变了（含新增/删除）。
     Params {
         keys: Vec<String>,
     },
-    /// 载荷的形状/类型变了（blob 头逐项对比）。
     Shape {
         before: Vec<BlobHeader>,
         after: Vec<BlobHeader>,
@@ -906,7 +731,6 @@ impl Diff {
         self.changed.is_empty() && self.added.is_empty() && self.removed.is_empty()
     }
 
-    /// 变了的节点名（渲染器用它决定「哪些子资源要重做」）。
     pub fn touched(&self) -> Vec<&str> {
         self.changed
             .iter()
@@ -916,7 +740,6 @@ impl Diff {
             .collect()
     }
 
-    /// 一行能给人/agent 看的摘要。
     pub fn summary(&self) -> String {
         if self.is_identical() {
             return format!("零变化（{} 个产物逐项相同）", self.unchanged.len());
@@ -948,10 +771,6 @@ fn shape_text(headers: &[BlobHeader]) -> String {
         .join("×")
 }
 
-/// 按 `id`（节点名）配对两份清单，逐项给出最硬的那条差异。
-///
-/// ⚠️ 配对靠节点名。图里的节点名一改，这份 diff 只会说「一个新增一个移除」——
-/// 这是诚实的：名字变了就不再是同一样东西。
 pub fn diff(before: &ArtBundle, after: &ArtBundle) -> Diff {
     let mut out = Diff::default();
     for asset in &before.assets {
@@ -1035,7 +854,6 @@ mod tests {
 
     #[test]
     fn a_changed_fingerprint_beats_equal_params() {
-        // 参数逐项相同、只有值变了 —— 正是「换了 CAS 路径 / 同名覆盖」那一档
         let before = bundle(vec![manifest("height", 7, 0.3, [4, 4])]);
         let after = bundle(vec![manifest("height", 8, 0.3, [4, 4])]);
         let report = diff(&before, &after);
@@ -1068,9 +886,6 @@ mod tests {
         assert_eq!(report.touched().len(), 2);
     }
 
-    /// ⚠ **相机不进产物**（2026-09-27：相机是**场景脚本**的数据 ⇒ 这一条判据连同
-    ///   `AssetManifest.cameras` 一起删了）。这里改为钉住"**参数变了才算变化**"：
-    ///   参数是产物内容的一部分（`diff` 靠它分辨「同名覆盖」）。
     #[test]
     fn a_param_change_is_a_payload_change() {
         let before = manifest("height", 7, 0.3, [4, 4]);
@@ -1095,8 +910,6 @@ mod tests {
         )
         .unwrap();
 
-        // 前缀恰好停在清单帧末尾（载荷一个字节都没读）也必须解得出来：
-        // 服务端就是靠这个先把「变没变」问清楚的。帧头 = magic 4 + 版本 4 + 长度 4。
         let length = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
         let exact = 12 + length;
         assert!(exact < bytes.len(), "载荷应当还在后面");
@@ -1134,18 +947,10 @@ mod tests {
     }
 }
 
-/// 读一份 Shader 产物（`kind = Shader`）里的 WGSL 文本。
-/// 它和场、网格走同一条 CAS：内容键 → 路径 → 载荷。
 pub fn read_shader(path: &std::path::Path) -> Result<String, String> {
     Ok(read_shader_parts(path)?.0)
 }
 
-/// 读一份 Shader 产物的两半：**WGSL 文本** + **schema descriptor**（规范 JSON）。
-///
-/// 约定：第一个 U8 blob 是 WGSL，第二个（如果有）是 descriptor ——
-/// 它由烘图侧用 `px_shader::reflect` 算出来（契约收口之后，§74.3）。
-/// 老产物只有第一个 blob ⇒ `None`：调用方该当场拒并给重烘配方，
-/// 与「闭包指纹没记过」同款（§52.3）—— 那一版没有 descriptor，认它等于认错契约。
 pub fn read_shader_parts(path: &std::path::Path) -> Result<(String, Option<String>), String> {
     let bytes = std::fs::read(path).map_err(|err| format!("读不到 {}：{err}", path.display()))?;
     let frames =
@@ -1176,7 +981,6 @@ pub fn read_shader_parts(path: &std::path::Path) -> Result<(String, Option<Strin
     Ok((source, schema))
 }
 
-/// 从 `.pxart` / `.pxstream` 里取出第一份产物清单。
 pub fn read_bundle(path: &std::path::Path) -> Result<ArtBundle, String> {
     let bytes = std::fs::read(path).map_err(|err| format!("读不到 {}：{err}", path.display()))?;
     let frames =
@@ -1186,15 +990,8 @@ pub fn read_bundle(path: &std::path::Path) -> Result<ArtBundle, String> {
         .ok_or_else(|| format!("{} 里没有 Art 帧", path.display()))
 }
 
-/// 读清单要预读多少字节。清单是 JSON（载荷指纹 + 相机表 + blob 头），几 KB 足够；
-/// 给到 64 KB 是为了容下相机表以后长胖。
 pub const MANIFEST_PREFIX: usize = 64 * 1024;
 
-/// 只读**清单帧**，不碰载荷。
-///
-/// 服务端每次请求都要先问「这份产物跟上次那份是不是同一份」（缓存键 = 路径 + 载荷指纹），
-/// 而清单帧**写在流的最前面**（`px_graph::write_artifact` 如此）⇒ 读一个前缀就够，
-/// 不必把 8 MB 的场整个读进来。前缀里没解出清单帧（文件不是那么写的）⇒ 回落到整读。
 pub fn read_manifest(path: &std::path::Path) -> Result<ArtBundle, String> {
     let mut file =
         std::fs::File::open(path).map_err(|err| format!("读不到 {}：{err}", path.display()))?;
@@ -1214,7 +1011,6 @@ pub fn read_manifest(path: &std::path::Path) -> Result<ArtBundle, String> {
     }
 }
 
-/// 前缀里的**第一个**帧就是清单帧时返回它，否则 `None`（说明这份流不是那么排的，交给整读）。
 fn bundle_from_prefix(prefix: &[u8]) -> Option<ArtBundle> {
     let rest = prefix.strip_prefix(&crate::stream::MAGIC[..])?;
     let version = u32::from_le_bytes(rest.get(..4)?.try_into().ok()?);
@@ -1229,7 +1025,6 @@ fn bundle_from_prefix(prefix: &[u8]) -> Option<ArtBundle> {
     }
 }
 
-/// 一组帧里的第一份清单。
 pub fn bundle_of(frames: &[crate::stream::Frame]) -> Option<&ArtBundle> {
     frames.iter().find_map(|frame| match frame {
         crate::stream::Frame::Art(bundle) => Some(bundle),

@@ -42,7 +42,6 @@ pub fn eval(params: &params::cubesphere::Params, inputs: &[&Field]) -> Result<Me
     } else {
         stats.max - stats.min
     };
-    // ⚠ 面内尺寸由**上游那张场**给（形状只有一个来源）。
     let face_size = cube_face_size(field.width).max(2);
     let cell = cube_cell_size(field.width);
     let n = params.subdivisions.clamp(2, 512);
@@ -219,16 +218,6 @@ pub fn eval(params: &params::cubesphere::Params, inputs: &[&Field]) -> Result<Me
         indices.len() / 3,
     );
 
-    // ⚠ **法线朝内是硬失败**（2026-09-20 加）。在那之前这条审计只是**打印**：
-    //   一个顶点法线翻了 1/3 的网格照样烘得出来、场景照样编得过 —— 症状是**一颗黑球**
-    //   （实测：`moon` 图把 `displace` 从 0.045 提到 0.075，`height` 场一个字没动，
-    //   审计从"朝内 0、最小点积 0.783"变成"朝内 51858、最小点积 -1.000"，
-    //   渲染出来整个圆面是暗的、只剩轮廓一圈亮边）。
-    //   ⇒ 报错要**说得清是哪两件事**：`displace` 与"场比网格还碎"。这两条都是实测过的：
-    //     * `planet` / `desert`（平滑场）在 `displace = 0.075` 下朝内都是 0（0.769 / 0.476）；
-    //     * `moon` 的场里最小波长只有几十个格（`pits` 频率 24 × 3 层）⇒ 同一个 0.075 就翻了。
-    //   ⚠ 不做"自动把法线翻回来"：翻回来只是把**几何自交**盖住，那张网格仍然是错的
-    //     （渲染出来还会自我遮挡），错的是图，不是这一行的判据。
     if worst < 0.0 {
         return Err(format!(
             "这份立方球网格有 {inward} 个顶点的**法线朝内**（最小点积 {worst:.3}）⇒ 几何在网格分辨率上已经翻转或自交，\

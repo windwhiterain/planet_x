@@ -1,32 +1,16 @@
-//! **NURBS 曲面**：张量积有理 B 样条 + 求值 / 偏导 / 法线 / 节点插入 / 升阶。
-//!
-//! 与曲线逐条同构（`curve.rs` 的口径原样搬过来），只是**两向**：
-//! 次数 `(p, q)`、控制点 `(nu × nv)`、节点 `u: nu + p + 1` / `v: nv + q + 1`。
-//!
-//! ⚠ 控制点按**行主序**（`index = i · nv + j`，`i` 沿 u、`j` 沿 v）。
-//!   行主序不是"顺手"：它让"沿 v 的一行"是**连续一段**（`insert_knot` 按行处理时
-//!   不用跳着走），而沿 u 是跨行等距取。
-
 use crate::knot;
 
-/// 一张 NURBS 曲面。
 #[derive(Debug, Clone, PartialEq)]
 pub struct Surface {
-    /// `(u 向次数, v 向次数)`。
     pub degree: (usize, usize),
-    /// u 向的控制点数。
     pub nu: usize,
-    /// v 向的控制点数。
     pub nv: usize,
-    /// 控制点，扁平 `[x, y, z, …]`，**行主序**（`i · nv + j`）。
     pub control: Vec<f64>,
-    /// 有理权（空 = 非有理）。
     pub weights: Vec<f64>,
     pub knots_u: Vec<f64>,
     pub knots_v: Vec<f64>,
 }
 
-/// 曲面上的一格读数：点 + 两个偏导 + 单位法线（偏导退化时是 `None`）。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Patch {
     pub point: [f64; 3],
@@ -109,10 +93,6 @@ impl Surface {
         ]
     }
 
-    /// **齐次曲面的偏导** `∂^(du+dv) / ∂u^du ∂v^dv`。
-    ///
-    /// 张量积曲面 `A(u, v) = Σ_i Σ_j N_{i,p}(u)·N_{j,q}(v)·P_ij` 逐项求偏导 ⇒
-    /// 把两边的基函数各自换成第 `du` / 第 `dv` 阶导再乘起来即可（没有交叉项的麻烦）。
     fn homogeneous_derivative(
         &self,
         du: usize,
@@ -121,8 +101,6 @@ impl Surface {
         v: f64,
     ) -> Result<[f64; 4], String> {
         let (p, q) = self.degree;
-        // ⚠ 次数之上偏导就是 0：`basis` 只会算到 `min(order, degree)` 阶，不先挡住
-        //   就会把"低一阶的导"当成"高一阶的导"交出去。
         if du > p || dv > q {
             return Ok([0.0; 4]);
         }
@@ -148,13 +126,7 @@ impl Surface {
         Ok(value)
     }
 
-    /// **有理偏导**：先算齐次的，再用商法则把权除掉。
-    ///
-    /// 用的是那张递推表（`A = w·S`）：
-    /// `S⁽ᵏ⁾ = (A⁽ᵏ⁾ − Σ_{i=1..k} C(k,i)·w⁽ⁱ⁾·S⁽ᵏ⁻ⁱ⁾) / w`。
     pub fn derivative(&self, du: usize, dv: usize, u: f64, v: f64) -> Result<[f64; 3], String> {
-        // ⚠ 次数之上的导数**就是 0**（那张递推表只在 `du ≤ p` 且 `dv ≤ q` 时成立：
-        //   齐次曲面在那一档上恒为零，而"零除以权"会被误当成一个真导数）。
         if du > self.degree.0 || dv > self.degree.1 {
             return Ok([0.0; 3]);
         }
@@ -172,7 +144,6 @@ impl Surface {
                 point[2] / point[3],
             ]);
         }
-        // 递推表：每一格是 (i, j) 阶的**有理**导（点）。
         let mut table: Vec<Vec<[f64; 3]>> = vec![vec![[0.0; 3]; dv + 1]; du + 1];
         let mut weight: Vec<Vec<f64>> = vec![vec![0.0; dv + 1]; du + 1];
         for i in 0..=du {
@@ -218,12 +189,10 @@ impl Surface {
         Ok(table[du][dv])
     }
 
-    /// 点。
     pub fn point(&self, u: f64, v: f64) -> Result<[f64; 3], String> {
         self.derivative(0, 0, u, v)
     }
 
-    /// 点 + 两个偏导 + 单位法线。
     pub fn patch(&self, u: f64, v: f64) -> Result<Patch, String> {
         let point = self.point(u, v)?;
         let du = self.derivative(1, 0, u, v)?;
@@ -248,7 +217,6 @@ impl Surface {
     }
 }
 
-/// `C(n, k)`（升阶与商法则都要它）。
 pub fn binomial(n: usize, k: usize) -> u64 {
     if k > n {
         return 0;
@@ -261,17 +229,12 @@ pub fn binomial(n: usize, k: usize) -> u64 {
     value
 }
 
-/// 插入的**方向**。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Along {
     U,
     V,
 }
 
-/// **插入一个节点**：与曲线同一条算法（Böhm），只是逐行/逐列各做一遍。
-///
-/// ⚠ 它**保持张量积**：沿 u 插时，`v` 的每一个下标各是一条曲线（沿 u 取点），
-///   各自插完再填回去 —— 不是"把曲面当一条长曲线"（那会换掉基）。
 pub fn insert_knot(
     surface: &Surface,
     along: Along,
@@ -291,11 +254,6 @@ pub fn insert_knot(
     }
 
     let rational = !surface.weights.is_empty();
-    // 三个数一起定下来，配错一个就是"读出来的不是一条线"（实测踩过两次）：
-    //
-    // * `lines`  = **有几条线**（沿 u 插时每个 `v` 一条 ⇒ `nv` 条；沿 v 插时 `nu` 条）；
-    // * `stride` = 行主序里**沿插入方向走一步**跨过几个点（沿 u 是 `nv`、沿 v 是 `1`）；
-    // * `count`  = 一条线**有几个控制点**（沿 u 是 `nu`、沿 v 是 `nv`）—— 节点向量的形状由它定。
     let (lines, count, knot_vector) = match along {
         Along::U => (surface.nv, surface.nu, surface.knots_u.clone()),
         Along::V => (surface.nu, surface.nv, surface.knots_v.clone()),
@@ -311,17 +269,12 @@ pub fn insert_knot(
         ));
     }
 
-    // 控制网是行主序（`flat = u·nv + v`）⇒ 两个方向取线的下标公式**不一样**
-    // （沿 u 是"步长乘 `nv`"、沿 v 是"下标乘 `nv`"）。写成"统一的 `step·stride + index`"
-    // 看起来更整齐，但那个 `stride` 在沿 v 时要取 1、而 `index` 又要乘回 `nv`，
-    // 于是必然有一处错（实测：整条线取出来是错的，插完曲面在 v 方向漂掉）。
     let flat = |step: usize, index: usize| -> usize {
         match along {
             Along::U => step * surface.nv + index,
             Along::V => index * surface.nv + step,
         }
     };
-    // 一条**沿插入方向**的曲线：控制点按上面那个公式取出来。
     let line = |index: usize| -> crate::curve::Curve {
         let mut control = Vec::with_capacity(count * 3);
         let mut weights = Vec::with_capacity(count);
@@ -344,7 +297,6 @@ pub fn insert_knot(
         }
     };
 
-    // 逐行/逐列插完之后，新的控制点数（每一条都一样）。
     let grown = count + times;
     let (nu, nv) = match along {
         Along::U => (grown, surface.nv),
@@ -365,8 +317,6 @@ pub fn insert_knot(
             ));
         }
         for step in 0..grown {
-            // 写回用**新网格**的那个下标公式：沿 u 时行宽没变（还是 `nv`），
-            // 沿 v 时行宽已经变成 `grown` ⇒ 这里复用同一个 `flat` 形状的公式。
             let to = match along {
                 Along::U => step * nv + index,
                 Along::V => index * nv + step,
@@ -400,27 +350,6 @@ pub fn insert_knot(
     Surface::new(degree, nu, nv, control, weights, knots_u, knots_v)
 }
 
-/// **有理二次球面**：一张张量积曲面片，u 向绕一圈（四个 90° 片）、v 向从北极到南极
-/// （`rings` 个 90° 片）。
-///
-/// 一维那一半就是**有理二次圆弧**的经典写法（与 `curve::circle` 同一份）：
-/// `n = 2p + 1` 个控制点、`p` 段 90°，权是 `1, √2/2, 1, …`，控制点在 `ρ = 1/w` 倍处
-/// （偶数档 `ρ = 1` 在圆上、奇数档 `ρ = √2` 落在两条切线的交点上）。
-///
-/// 曲面这一档取**两个一维模式的外积**：把"经线"那一半当作半平面里的坐标
-/// `(r, z)`、把"纬线"那一半当作平面里的 `(X, Y)`，于是
-///
-/// ```text
-/// 控制点 = center + R · (r_j · X_i, r_j · Y_i, z_j)
-/// 权     = w_u_i · w_v_j
-/// ```
-///
-/// ⚠ `r_j` 与 `X_i` 是**各自**那一半的（已经含了各自的 `ρ`）—— 不能把两个权揉成一个
-///   再除一次：极点上 `r = 0`，可那一行的**权仍然是 `w_u_i`**，揉起来除会把极点那一行
-///   拉成 `(0, 0, R/w_u)`（实测：极点附近半径算出来 3.5 而不是 3）。
-///
-/// ⚠ 缝上（90° 那条线）节点重数写成 2 ⇒ 只有 `C⁰` 连续，但**几何是精确的**：
-///   `|P(u, v) − center| = R` 在每个参数上成立。判据量的正是后者。
 pub fn sphere(radius: f64, center: [f64; 3], rings: u32) -> Result<Surface, String> {
     if !(radius > 0.0) || !radius.is_finite() {
         return Err(format!("半径必须是个正数，给的是 {radius}"));
@@ -430,13 +359,11 @@ pub fn sphere(radius: f64, center: [f64; 3], rings: u32) -> Result<Surface, Stri
             "纬向片数要在 1..=8 之间（每片 90°），给的是 {rings}"
         ));
     }
-    // u 向绕一圈（四个 90° 片）；v 向 `rings` 个 90° 片（北极 → 南极）。
     let patches_u = 4_usize;
     let patches_v = rings as usize;
     let nu = 2 * patches_u + 1;
     let nv = 2 * patches_v + 1;
 
-    // 一维模式：`2p + 1` 个控制点的有理二次圆弧，每段 90°。
     let arc = |patches: usize| -> Vec<(f64, f64)> {
         let root = std::f64::consts::FRAC_1_SQRT_2;
         (0..=2 * patches)
@@ -451,7 +378,6 @@ pub fn sphere(radius: f64, center: [f64; 3], rings: u32) -> Result<Surface, Stri
             .collect()
     };
     let pattern_u = arc(patches_u);
-    // v 向只走 180°（北极 → 南极）：角度是 `π · j / (2·patches_v)`；权与 u 向同一串。
     let pattern_v: Vec<(f64, f64)> = (0..=2 * patches_v)
         .map(|index| {
             let (weight, _) = pattern_u[index.min(pattern_u.len() - 1)];
@@ -464,14 +390,12 @@ pub fn sphere(radius: f64, center: [f64; 3], rings: u32) -> Result<Surface, Stri
     let mut weights = vec![0.0_f64; nu * nv];
     for i in 0..nu {
         let (weight_u, angle_u) = pattern_u[i];
-        // `ρ = 1/w`：偶数档 1、奇数档 √2（切线交点）。
         let rho_u = 1.0 / weight_u;
         let (sin_u, cos_u) = angle_u.sin_cos();
         for j in 0..nv {
             let (weight_v, angle_v) = pattern_v[j];
             let rho_v = 1.0 / weight_v;
             let (sin_v, cos_v) = angle_v.sin_cos();
-            // 经线那一半：`r` 是离轴的距离、`z` 是高度。极点上 `r = 0`（整行同一个点）。
             let r = rho_v * sin_v;
             let z = rho_v * cos_v;
             let direction = [r * rho_u * cos_u, r * rho_u * sin_u, z];
@@ -500,7 +424,6 @@ pub fn sphere(radius: f64, center: [f64; 3], rings: u32) -> Result<Surface, Stri
 mod tests {
     use super::*;
 
-    /// **球是精确的**：`|P(u, v)| = R` 在整个参数域上成立。
     #[test]
     fn the_rational_sphere_stays_on_the_radius() {
         let ball = sphere(3.0, [1.0, 0.0, 0.0], 2).expect("造球");
@@ -519,7 +442,6 @@ mod tests {
         }
     }
 
-    /// **法线是径向的**（曲面法线与位置同向）。
     #[test]
     fn the_normal_of_the_sphere_points_along_the_radius() {
         let ball = sphere(1.0, [0.0; 3], 2).expect("造球");
@@ -542,7 +464,6 @@ mod tests {
         }
     }
 
-    /// **插入节点不换几何**（曲面那一档：沿 u 与沿 v 都试）。
     #[test]
     fn inserting_a_knot_keeps_the_surface_where_it_was() {
         let ball = sphere(1.0, [0.0; 3], 2).expect("造球");
@@ -566,11 +487,6 @@ mod tests {
     }
 }
 
-/// **升阶**（沿一个方向）：张量积曲面沿 u 升阶 = **每一列**（固定 v）各升一次，
-/// 沿 v 升阶 = **每一行**（固定 u）各升一次 —— 与 `insert_knot` 同一条分解。
-///
-/// ⚠ 两个方向可交换（各自只动自己那一维的基），所以"升到 `(p, q)`"就是两次调用；
-///   而**不能**只升一个方向却改两个节点向量（基变了，另一个方向的曲线就对不上了）。
 pub fn elevate(surface: &Surface, along: Along, target: usize) -> Result<Surface, String> {
     let (p, q) = surface.degree;
     if target
@@ -582,10 +498,6 @@ pub fn elevate(surface: &Surface, along: Along, target: usize) -> Result<Surface
         return Ok(surface.clone());
     }
     let rational = !surface.weights.is_empty();
-    // ⚠ `fixed` = 那一条线**有几条**（另一个方向的下标数）；`stride` = 它内部的**步长**
-    //   （沿 u 取一条 v = 常数的线：u 每 +1 跨过一整行 `nv` 个点 ⇒ 步长 `nv`；
-    //    沿 v 取一条 u = 常数的线：v 每 +1 就是下一个点 ⇒ 步长 1）。
-    //   这一对在下面三处（取线 / 写回）必须一致，配错一次就是"读出来的不是一条线"。
     let (fixed, stride) = match along {
         Along::U => (surface.nv, surface.nv),
         Along::V => (surface.nu, 1),

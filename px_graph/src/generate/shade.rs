@@ -1,11 +1,3 @@
-//! 着色：色板 → 逐 texel 的颜色（`shade`、`push_color`）与整条贴图的驱动（`surface_color`）。
-//!
-//! 边界：色带与停靠点在 `super::palette`；mip 链、极冠滤波、立方图打包在 `super::texture`
-//! ——`surface_color` 只负责"按投影选路子、顺手把审计文本算出来"，字节由 texture 那一档生成。
-//! 这里另外住着场取数的两个小助手（`normalized` / `texel_latitude`）与 f16 打包
-//! （`half_from_f32`）：前者是着色循环的输入口径，后者只有 texture 那一档的覆盖度立方图调，
-//! 所以是 `pub(super)`。
-
 use px_field_schema::field::Field;
 use px_protocol::art::Domain;
 
@@ -13,10 +5,6 @@ use super::palette::{
     BASIN, DUNE, FROZEN, GAS, LAND, LAVA_ROCK, MARE, Palette, REGOLITH, SHEET, WATER, mix, ramp,
 };
 use super::texture::{TextureData, image_from, pole_cap_filter};
-
-// ---------------------------------------------------------------------------
-// 着色（逐字搬自 px_render/src/planet.rs）
-// ---------------------------------------------------------------------------
 
 fn shade(
     palette: Palette,
@@ -83,17 +71,13 @@ fn shade(
             (color, [0.0, 0.0, 0.0])
         }
         Palette::Moon => {
-            // 月海（低处，暗）与风化层（高处，中性灰）。没有植被、没有水 ⇒ 不用 LAND/WATER。
             let mut color = if height < sea {
                 ramp(MARE, water_t)
             } else {
                 ramp(REGOLITH, land_t)
             };
-            // 溅射纹（ejecta ray）：拿高度做一组很细的条纹，只在**高地**上淡淡压一点，
-            // 让陨坑密集的地方不至于平得像一块水泥。
             let rays = (height * 61.0).sin() * 0.5 + 0.5;
             color = mix(color, [0.867, 0.871, 0.878], rays * land_t * 0.20);
-            // 极区稍暗（观测上的极地阴影区），与 rocky 那条"极冠提亮"方向相反。
             let cap = ((latitude - 0.86) / 0.14).clamp(0.0, 1.0);
             color = mix(color, [0.318, 0.325, 0.345], cap * 0.30);
             (color, [0.0, 0.0, 0.0])
@@ -101,8 +85,6 @@ fn shade(
     }
 }
 
-/// `super::texture` 的环带（`ring_band`）也走这条口 —— 它的 alpha 是覆写这 4 个字节的
-/// 末字节，两处必须是同一套编码，所以是 `pub(super)`。
 pub(super) fn push_color(bytes: &mut Vec<u8>, color: [f32; 3]) {
     bytes.push((color[0].clamp(0.0, 1.0).powf(1.0 / 2.2) * 255.0).round() as u8);
     bytes.push((color[1].clamp(0.0, 1.0).powf(1.0 / 2.2) * 255.0).round() as u8);
@@ -110,11 +92,6 @@ pub(super) fn push_color(bytes: &mut Vec<u8>, color: [f32; 3]) {
     bytes.push(255);
 }
 
-// ---------------------------------------------------------------------------
-// 场的那两个小助手（`px_graph::field::Field` 上没有，照渲染器那份的数学原样搬）
-// ---------------------------------------------------------------------------
-
-/// `Field::normalized`：`px_graph` 把 `min` / `max` 放在 `stats()` 里，口径一样。
 fn normalized(min: f32, max: f32, value: f32) -> f32 {
     let span = max - min;
     if span.abs() < f32::EPSILON {
@@ -124,7 +101,6 @@ fn normalized(min: f32, max: f32, value: f32) -> f32 {
     }
 }
 
-/// `Field::texel_latitude`（逐字照抄，含 Equirect 与"其余投影走方向"这两支）。
 pub fn texel_latitude(field: &Field, x: u32, y: u32) -> f32 {
     match field.projection {
         Domain::Equirect => {
@@ -136,14 +112,6 @@ pub fn texel_latitude(field: &Field, x: u32, y: u32) -> f32 {
     }
 }
 
-// ---------------------------------------------------------------------------
-// 逐 texel 上色 + 整条 mip 链
-// ---------------------------------------------------------------------------
-
-/// 色板 → (颜色贴图, 可选发光贴图, 审计文本)。
-///
-/// 审计文本照抄今天那条（缓存命中时要重放它，仪器不能因为走了缓存就哑掉）：
-/// 它是**值**不是副作用，所以这里返回、不打印。
 pub fn surface_color(
     field: &Field,
     palette: Palette,
@@ -215,10 +183,6 @@ pub fn surface_color(
     };
     (color_image, glow_image, audit)
 }
-
-// ---------------------------------------------------------------------------
-// f16 打包（覆盖度立方图用；只有 `super::texture` 那一档调）
-// ---------------------------------------------------------------------------
 
 pub(super) fn half_from_f32(value: f32) -> u16 {
     let bits = value.to_bits();

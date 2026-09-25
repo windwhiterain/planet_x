@@ -1,11 +1,3 @@
-//! **配方**（`art/scene/*.toml`）的形状与它的语义组装。
-//!
-//! 配方文件的形状**没变**（还是 `[[parts]]` + `kind` + `members` + `params`）：它是艺术内容。
-//! 变的是它编译成什么、以及**这份语义住在哪** —— 它从 `px_graphs/src/bin/scene.rs`
-//! 搬进了这个库，于是 pcg 的图程序（以及将来的工具）用的是同一份语义。
-//!
-//! ⚠ 倾斜（[`SYSTEM_TILT`]）只在这里出现一次：文档里的方向与朝向**都是世界系**的。
-
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -28,49 +20,32 @@ use crate::{math, stage};
 
 use serde::Deserialize;
 
-/// 场景配方：这次要渲什么、用什么参数。
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SceneFile {
     pub name: String,
     #[serde(default)]
     pub ambient: f32,
-    /// `"review"` = 评审相机表；缺省也用它。
     #[serde(default)]
     pub cameras: Option<String>,
-    /// 用哪张**帧图**（`art/frame/<名>.toml`，§128）。不写 = `default`。
     #[serde(default)]
     pub frame: Option<String>,
-    /// **天空盒换一份产物**（`"图名::节点名"`，或者配上 `skybox_graph` 写裸节点名）。
-    ///
-    /// ⚠ 不写 = 内置星空（`generate::stars`）—— 那条路是老行为，一个字节没动。
-    ///   写了的用途是"天空由 PCG 烘出来"那一档（星云背景）：烘出来的贴图是一条**正常的
-    ///   图产物**，场景这边按名字引用它即可，渲染器不必知道它是怎么来的。
     #[serde(default)]
     pub skybox: Option<String>,
-    /// `skybox` 写裸节点名时，它属于哪张图。
     #[serde(default)]
     pub skybox_graph: Option<String>,
     pub parts: Vec<PartFile>,
 }
 
-/// 配方里的一个 part。
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PartFile {
     pub id: String,
     pub kind: String,
-    /// 这一 part 用哪份 shader（成员名）。⚠ **可选**：`kind = "light"` 那一档**没有材质**
-    /// （灯不是物体）—— 2026-09-20 加第二光源（地球反照）时发现的：原先它是必填，
-    /// 于是"灯"这种 part 在配方里根本写不出来。要材质的那几档在装配时自己会报"没给 shader"。
     #[serde(default)]
     pub shader: String,
-    /// 这个 part 的成员默认属于哪张图；跨图的成员写 `图名::节点名`。
     #[serde(default)]
     pub graph: Option<String>,
-    /// **本体的几何**（只对 `kind = "planet"` 有意义）：不写 = 用 `members` 里那个网格；
-    /// 写 `"icosphere"` = 用内建球（气态巨行星那种"可见面就是光球层"的天体）。
-    /// ⚠ 内建球之后 `mesh` 成员就不再需要 —— 见 `compile` 里那一段的理由。
     #[serde(default)]
     pub primitive: Option<String>,
     #[serde(default)]
@@ -157,7 +132,6 @@ impl PartFile {
         }
     }
 
-    /// 云的一个形状档。
     pub fn cloud_shape(&self) -> CloudShape {
         let default = CloudShape::default();
         CloudShape {
@@ -183,7 +157,6 @@ impl PartFile {
         }
     }
 
-    /// 按角色取一个成员（配方里 `members` 那张表）。
     pub fn member(&self, role: &str) -> Result<px_protocol::scene::Member, String> {
         let reference = self.members.get(role).ok_or_else(|| {
             format!(
@@ -201,7 +174,6 @@ impl PartFile {
         crate::members::reference(&what, reference, self.graph.as_deref())
     }
 
-    /// 可选成员。
     pub fn optional_member(
         &self,
         role: &str,
@@ -215,9 +187,6 @@ impl PartFile {
         }
     }
 
-    /// part 用的那份 WGSL。配方里 `shader = "surface"` 是给人看的名字，真本由
-    /// `members.shader` 指 —— 两个对不上就报错：否则改了一处、另一处还写着老名字，
-    /// 读配方的人会以为换的是另一个 shader。
     pub fn shader_member(&self) -> Result<px_protocol::scene::Member, String> {
         let member = self.member("shader")?;
         if member.node != self.shader {
@@ -230,17 +199,11 @@ impl PartFile {
     }
 }
 
-/// 一份已经组装好、准备进帧图的场景。
 pub struct Compiled {
     pub document: SceneSpec,
     pub name: String,
 }
 
-/// **编译**：配方 → 通用渲染文档（不含帧图那三节）。
-///
-/// `with_graph = false` 是**兼容逃生门**（`--no-frame-graph`）：帧图那三节两栏都空，
-/// 产物因此与没有帧图时**逐字节相同**（六份冻产物的 sha256 是这条的判据）。
-/// ⚠ 它不是"另一种受支持的烘法" —— 它存在的唯一目的是证明老产物还能逐字节复现。
 pub fn compile(file: &SceneFile, baked: &mut Baked, with_graph: bool) -> Result<Compiled, String> {
     let root = px_graph::cache_root();
     let planet = file
@@ -257,7 +220,6 @@ pub fn compile(file: &SceneFile, baked: &mut Baked, with_graph: bool) -> Result<
         check_kind(part)?;
     }
 
-    // 配方的参数名不再在这里按白名单查：判据换成这份 shader 的契约（见 `merge`）。
     let palette_name = planet.text("palette")?;
     let palette = Palette::parse(palette_name).ok_or_else(|| {
         format!(
@@ -269,17 +231,10 @@ pub fn compile(file: &SceneFile, baked: &mut Baked, with_graph: bool) -> Result<
     let radius = planet.number("radius")? as f32;
     let spin = planet.number_or("spin", 0.0);
     let sea_level = planet.number("sea_level")? as f32;
-    // `displace` 只对「从场现造球面网格」那条路有意义 —— 那条路随渲染器里的程序化网格
-    // 一起没了（网格现在是 `planet` 图的产物）。配方里留着它是因为它本来就是场那一侧的数。
     let _displace = planet.number_or("displace", 0.075);
     let rings = planet.number_or("rings", 0.0);
     let world = math::orientation(spin, vocab::SYSTEM_TILT);
 
-    // ---- 生成物：色板贴图 + 星空 ----
-    // ⚠ 本体那份 shader 决定**要烘哪些生成物**（`contract::schema_of` 读它的贴图格）：
-    //   自写的 surface 要 `albedo@1` / `glow@3`，而气态巨行星那份（`gasgiant`）要的是
-    //   一张**条带立方图**（`bands@7`，成员由配方给、图烘出来）。
-    //   ⇒ "生成物只为消费者烘"：没有消费者的贴图不再白烘（也不再多出几 MB 的产物字节）。
     let surface_shader = planet.shader_member()?;
     let surface_layout = crate::contract::schema_of(&surface_shader, &root)?;
     let wants_texture = |binding: u32| {
@@ -289,9 +244,6 @@ pub fn compile(file: &SceneFile, baked: &mut Baked, with_graph: bool) -> Result<
             .any(|slot| slot.binding == binding)
     };
 
-    // ⚠ 高度场成员**只在色板那条路上要**：本体 shader 声明了 `@binding(1)`（albedo）才读它。
-    //   气态巨行星那份（次表面散射）没有 albedo 贴图 ⇒ 配方不必给 `height` —— 于是
-    //   "一份生成物只有一个消费者"这条也落到了成员上。
     let height = match planet.optional_member("height")? {
         Some(member) => {
             let path = path_of(&member, &root)?;
@@ -323,8 +275,6 @@ pub fn compile(file: &SceneFile, baked: &mut Baked, with_graph: bool) -> Result<
     } else {
         (None, None)
     };
-    // ⚠ 天空那一格：**不写就用内置星空**（老行为），写了就按名字取一份**烘出来的**产物
-    //   —— 后者是星云背景那条路（`sky.nebula` 交出一张 HDR 立方贴图，这里只引用它）。
     let stars_member = match (&file.skybox, &file.skybox_graph) {
         (Some(reference), graph) => {
             crate::members::reference("场景的 skybox", reference, graph.as_deref())?
@@ -332,7 +282,6 @@ pub fn compile(file: &SceneFile, baked: &mut Baked, with_graph: bool) -> Result<
         (None, _) => baked.texture("stars", generate::stars(STARS_FACE), "texture.stars")?,
     };
 
-    // ---- 云：壳、覆盖度立方图、形状档 ----
     let (cloud_inner, cloud_outer, cloud_shape, coverage_member) = match clouds {
         Some(clouds) => {
             let shape = clouds.cloud_shape();
@@ -360,23 +309,14 @@ pub fn compile(file: &SceneFile, baked: &mut Baked, with_graph: bool) -> Result<
         }
     };
 
-    // ---- 物体 ----
     let mut objects: Vec<Object> = Vec::new();
 
-    // 行星本体：走自写材质（`surface` 或别的自写本体 shader，如 `gasgiant`）。
-    // 云影那几个参数与云材质同一口径。
     let cloud_shadow = if coverage_member.is_some() {
         planet.number_or("cloud_shadow", 0.0)
     } else {
         0.0
     };
     let has_glow = glow_member.is_some();
-    // 行星的材质参数**全是算出来的**（云影那几个量必须与云材质同口径）⇒ `computed` 就是全部；
-    // 但配方里仍然可以按名字**补**这份 shader 声明过的其它参数（§80 第 2 步的透传）。
-    // ⚠ **算出来的那些按这份 shader 声明了什么过滤**：本体 shader 不只有 `surface` 一种
-    //   （气态巨行星那份 `gasgiant` 要的是 `wrap` / `absorption` / `thickness` 这一族，
-    //   没有 `inner` / `coverage` / `emissive`）—— 把用不到的名字塞进参数表就是"多给参数"，
-    //   会在 `pack` 那一关当场红。过滤掉不等于放过：**shader 声明了而没人给** 仍然会红。
     let mut computed = BTreeMap::from([
         ("orientation".to_string(), Value::Quad(world)),
         (
@@ -418,12 +358,6 @@ pub fn compile(file: &SceneFile, baked: &mut Baked, with_graph: bool) -> Result<
             TextureRef::new(5, coverage.clone(), Sampler::clamped()),
         );
     }
-    // 条带立方图（气态巨行星那一档）：配方给一个 **CubeMap 场成员**，这里把它烘成
-    // 一张立方贴图挂到 `@binding(7)`（`TEXTURE_SLOTS` 里第二格 cube）。
-    // ⚠ 与覆盖度那张的差别：不掺梯度 —— 它是"把一张场当数据贴图"，不是云的细节场。
-    // 第三层次（第 10 轮）：**第二张立方图**。成员名 `detail`，进 21 号格
-    // （`TEXTURE_SLOTS` 里那一对空着的 cube）。⚠ 可选：不给成员就吃渲染器的兜底贴图，
-    // 于是"没有这一层的场景"产物与从前逐字节相同。
     if let Some(detail_member) = planet.optional_member("detail")? {
         let field = generate::load_field(&path_of(&detail_member, &root)?.display().to_string())
             .map_err(|err| format!("读细丝场失败：{err}"))?;
@@ -439,11 +373,6 @@ pub fn compile(file: &SceneFile, baked: &mut Baked, with_graph: bool) -> Result<
         surface = surface.with_texture("bands", TextureRef::new(7, member, Sampler::clamped()));
     }
     check_stage(&file.name, "planet", &surface)?;
-    // 本体几何：默认是**图烘出来的网格**（`planet` / `moon` 那两张图的立方球）；
-    // 配方写 `primitive = "icosphere"` 时改用**内建球**。
-    // ⚠ 气态巨行星必须走这一支：它的可见面是**光球层**（一个球），不是有起伏的地形网格
-    //   —— 挂上岩石那张位移网格，地形起伏会从次表面散射材质里透出来（实测：一版渲染图上
-    //   那几块"海岸线"其实就是 `planet` 图的陆地，法线带着它 ⇒ 条带被采样歪了）。
     let geometry = match planet.primitive.as_deref() {
         None => Geometry::mesh(planet.member("mesh")?),
         Some("icosphere") => Geometry::primitive(
@@ -464,7 +393,6 @@ pub fn compile(file: &SceneFile, baked: &mut Baked, with_graph: bool) -> Result<
             ));
         }
     };
-    // ⚠ 半径**在这里量**（见 `measure_radius`）：虚拟影图分页要它，而分页是烘图时做的。
     let shape_radius = measure_radius(&geometry, &root)?;
     let geometry = geometry.with_bounding_radius(shape_radius);
     objects.push(Object {
@@ -476,9 +404,6 @@ pub fn compile(file: &SceneFile, baked: &mut Baked, with_graph: bool) -> Result<
         shadow_density: shadow_density_of(planet)?,
     });
 
-    // ⚠ 物体的次序**就是文档的次序**，而透明物体（大气、云）都摆在原点 ⇒ 深度排序分不出
-    // 先后，谁先画谁后画完全由这张表决定。次序照迁移前的渲染器摆：行星 → 大气 → 云。
-    // 反过来的话，云壳薄的像素会差 1~2 个色阶（实测 33/614400 个像素、最大差 2）。
     if let Some(atmosphere) = atmosphere {
         let inner = atmosphere.number_or("inner", radius);
         if (inner - radius).abs() > 1e-3 {
@@ -526,10 +451,8 @@ pub fn compile(file: &SceneFile, baked: &mut Baked, with_graph: bool) -> Result<
             )
             .with_bounding_radius(outer),
             material,
-            // 大气壳是**球对称**的：迁移前它挂在根上（不带倾斜），这里也就给单位变换。
             transform: Transform::default(),
             cast_shadow: false,
-            // 大气不投影 ⇒ 不进虚拟影图的分配。
             shadow_density: 0.0,
         });
     }
@@ -554,7 +477,6 @@ pub fn compile(file: &SceneFile, baked: &mut Baked, with_graph: bool) -> Result<
         let params = material_params(clouds, &clouds_shader, &CLOUDS_KEYS, computed, &root)?;
         let mut material = Material::new(clouds_shader).with_params(params);
         material.alpha = AlphaMode::Premultiplied;
-        // 云壳压一点深度：它整颗球都盖在行星上。
         material.depth_bias = -1.0;
         material = material.with_texture(
             "coverage",
@@ -567,7 +489,6 @@ pub fn compile(file: &SceneFile, baked: &mut Baked, with_graph: bool) -> Result<
             ),
         );
         check_stage(&file.name, "clouds", &material)?;
-        // 几何：有代理 mesh 就用它（空区域在光栅阶段就被剔除），没有就是一个细分球壳。
         let geometry = match clouds.optional_member("proxy")? {
             Some(proxy) => Geometry::mesh(proxy),
             None => Geometry::primitive(
@@ -578,8 +499,6 @@ pub fn compile(file: &SceneFile, baked: &mut Baked, with_graph: bool) -> Result<
                 ]),
             ),
         };
-        // 云不投影 ⇒ 这一栏量了也只是"说得全"，不进任何分配。量它仍然值得：
-        // 哪天云要投影，半径就已经在文档里了（而它是唯一能从那颗壳量出来的数）。
         let cloud_radius = measure_radius(&geometry, &root)?;
         let geometry = geometry.with_bounding_radius(cloud_radius);
         objects.push(Object {
@@ -587,7 +506,6 @@ pub fn compile(file: &SceneFile, baked: &mut Baked, with_graph: bool) -> Result<
             geometry,
             material,
             transform: Transform::rotated(world),
-            // 云壳**不投**阴影：它是一整颗球，进 shadow map 就是一颗球形硬影。
             cast_shadow: false,
             shadow_density: 0.0,
         });
@@ -607,8 +525,6 @@ pub fn compile(file: &SceneFile, baked: &mut Baked, with_graph: bool) -> Result<
             "texture.ring",
         )?;
         let ring_shader = ring_shader()?;
-        // ⚠ `ambient`（2026-09-20 加）：环**受光也接受影**之后，"影里剩多少"是一栏观感旋钮。
-        //   0.18 = 影里留一点星光/天光（参考图里行星投在环上的那道影是深灰，不是纯黑）。
         let ring_params = BTreeMap::from([
             ("tint".to_string(), Value::Quad([1.0, 1.0, 1.0, 1.0])),
             ("ambient".to_string(), Value::Num(0.18)),
@@ -625,24 +541,13 @@ pub fn compile(file: &SceneFile, baked: &mut Baked, with_graph: bool) -> Result<
             material,
             transform: Transform::rotated(world),
             cast_shadow: true,
-            // 环的影落在行星赤道带上（参考图上那道暗带就是它）：要影，密度与行星同口径。
             shadow_density: shadow_density_of(planet)?,
         });
     }
 
-    // ---- 卫星：天上**另外一颗小球**（`kind = "moon"`，2026-09-20 加）----
-    //
-    // ⚠ 它与 planet 的区别只有三条：① 不产环、不产云、不当光源；② 几何**只**走内建球
-    //   （一颗小球不需要图烘网格）；③ 自己带 `position`（世界系里的偏移）—— 参考图上那颗
-    //   凌日的卫星就是"球 + 一个位置"。
-    //   ⚠ 材质那一侧与 planet **同一条口径**：参数按本 part shader 的契约判，声明了贴图
-    //   而配方没给成员的格子就吃渲染器的兜底（`fallback_slots`）—— 气态巨行星那份材质
-    //   在没有条带图时退化成"一颗均匀的气球"，正好是参考图上那颗土黄小球的样子。
     for part in file.parts.iter().filter(|part| part.kind == "moon") {
         let moon_shader = part.shader_member()?;
         let (geometry, transform, moon_rotation) = moon_body(part)?;
-        // ⚠ `orientation` 与行星同口径：由 `spin × SYSTEM_TILT` 算出来（不是配方写的），
-        //   所以这里要当**算好的那一栏**递进去，否则契约会判"shader 声明的 orientation 没给"。
         let moon_params = material_params(
             part,
             &moon_shader,
@@ -658,14 +563,10 @@ pub fn compile(file: &SceneFile, baked: &mut Baked, with_graph: bool) -> Result<
             material,
             transform,
             cast_shadow: true,
-            // ⚠ 卫星是**自己的密度**：它半径只有 0.09 量级，用行星那档密度的话
-            //   它在影图里只占几十个 texel，影就是一团糊。第 7 轮那颗"凌日的卫星"
-            //   在参考图上有清楚的轮廓，靠的正是这一栏（配方里给 2048）。
             shadow_density: shadow_density_of(part)?,
         });
     }
 
-    // ---- 灯：那盏太阳（点光源，§60）----
     let position = match planet.params.get("light_position") {
         Some(_) => planet.triple("light_position")?,
         None => [-4.2, 1.15, 2.35],
@@ -675,15 +576,9 @@ pub fn compile(file: &SceneFile, baked: &mut Baked, with_graph: bool) -> Result<
         None => [1.0, 1.0, 1.0],
     };
     let intensity = planet.number_or("light_intensity", 7.6e5);
-    // 射程 = `|position| × 2.5`（迁移前是渲染器里的 `SUN_RANGE_FACTOR`）。
     let reach = planet.number_or("light_range", math::length(position) * SUN_RANGE_FACTOR);
     let mut sun = Light::point("sun", position, color, intensity as f32).with_range(reach as f32);
     sun.shadows = planet.number_or("shadows", 0.0) > 0.5;
-    // ---- 灯：**配方里额外声明的那些**（`kind = "light"`）----
-    // ⚠ 为什么需要：地球反照（行星反照到月球暗面那一层光）是**第二光源**，只有一盏灯时
-    //   根本表达不出来。它们按配方顺序跟在太阳后面；**默认不投影**（省掉一整张 cube 影图，
-    //   也不动帧图里 `shadow_cubes` 的数量）。
-    // ⚠ 灯**没有材质** ⇒ 不走"参数对 shader 契约"那条路；结构键是 `vocab::LIGHT_KEYS`。
     let mut extra_lights: Vec<Light> = Vec::new();
     for part in &file.parts {
         if part.kind != "light" {
@@ -702,7 +597,6 @@ pub fn compile(file: &SceneFile, baked: &mut Baked, with_graph: bool) -> Result<
         extra_lights.push(light);
     }
 
-    // ---- 相机：局部方向 → 世界系 ----
     let cameras: Vec<Camera> = match file.cameras.as_deref() {
         Some("review") | None => crate::cameras::review(),
         Some(other) => return Err(format!("不认识的相机表 '{other}'（现在只有 review）")),
@@ -714,33 +608,23 @@ pub fn compile(file: &SceneFile, baked: &mut Baked, with_graph: bool) -> Result<
     })
     .collect();
 
-    // ---- 灯表：**先摆出来**，因为帧图（虚拟影图的分配）要按灯的位置分页 ----
     let lights: Vec<px_protocol::scene::Light> = {
         let mut all = vec![sun];
         all.extend(extra_lights);
         all
     };
 
-    // ---- 帧图（§128）：**渲染器的形状**烘进文档 ----
     let frame_name = file
         .frame
         .clone()
         .unwrap_or_else(|| crate::frame::DEFAULT_FRAME.to_string());
-    // ⚠ 逃生门那条路**连帧图配方都不读**：它是"证明老产物还能逐字节复现"的仪器，
-    //    不该因为帧图配方坏了就一起坏掉（那正是它要保的东西）。
     let framebaked = if with_graph {
         let frame = crate::frame::load(&frame_name)?;
-        // 帧材质的参数写的是**来源**，这里把**内容**那一边的值给它 ——
-        // 帧配方里一个内容值都不许写死（§133）。
         let sources = crate::frame::Sources {
             ambient: file.ambient,
             skybox_brightness: SKYBOX_BRIGHTNESS,
-            // 投影的点光有几盏（`lights[].shadows`）：帧图里那份 atlas 的层数、
-            // 以及"展开几条影子 pass"都由它算出来。
             shadow_lights: lights.iter().filter(|light| light.shadows).count(),
         };
-        // ⚠ 灯表也递进去：**虚拟影图的页是烘图时分配的**（`frame::build`），
-        //    而分页要知道"灯在哪"。
         crate::frame::build(&frame, &objects, &sources, &lights, true)?
     } else {
         crate::frame::Baked {
@@ -769,7 +653,6 @@ pub fn compile(file: &SceneFile, baked: &mut Baked, with_graph: bool) -> Result<
         resources: framebaked.resources,
         passes: framebaked.passes,
         lights,
-        // 页表（§本轮）：**烘图侧**算出来的那一份，原样落盘（采样侧按同一份排法查页）。
         shadow: framebaked.shadow,
         objects,
         frame_materials: framebaked.materials,
@@ -782,20 +665,8 @@ pub fn compile(file: &SceneFile, baked: &mut Baked, with_graph: bool) -> Result<
     })
 }
 
-/// **逐 stage 的 per-pass 对账**（运行期那一条路，配方适配器专用）。
-///
-/// ⚠ 这一支是**唯一**的运行期入口：配方是数据，`kind` / `shader` 是字符串 ⇒ 走到这里
-/// "哪份内容"已经不在类型里。表与判据**仍然是类型级那两份**（`StageParams` 的实现 +
-/// [`stage::check`]），这里只做分派（[`stage::runtime`]）。
-///
-/// ⚠ **无条件跑**：每份材质做完就查，没有开关、没有"先放过以后再说"的档。
-/// 认不出的内容（自写 shader）这一档没有表可查 ⇒ 不算错，但那是**没有表**，不是"跳过检查"。
-///
-/// 判据用的是**产物那一档**（`stage_of_alpha`）—— 与 `frame::draws_of` 的 `opaque` /
-/// `transparent` 两个 `select` 同一套谓词：两处各写一遍就是"同一件事两个答案"。
 fn check_stage(scene: &str, id: &str, material: &Material) -> Result<(), String> {
     let Some(content) = stage::runtime::RuntimeContent::parse(&material.shader.node) else {
-        // 认不出的内容（自写 shader 之类）：这一档没有表可查，不是错误。
         return Ok(());
     };
     let stage_name = stage::runtime::stage_of_alpha(material.alpha);
@@ -803,17 +674,6 @@ fn check_stage(scene: &str, id: &str, material: &Material) -> Result<(), String>
         .map_err(|err| format!("场景 '{scene}' 的物体 '{id}'：{err}"))
 }
 
-/// 配方参数表 + 编译器算出来的那些 → 材质参数表，并在**烘图时**按契约校验一遍。
-///
-/// 三档，逐条都当场说清楚（§79 的 W1：原来「配方里能写什么」是一张写死的白名单，
-/// 加一个 shader 参数就得改那张表 —— 也就是改 Rust）：
-/// · 名字在 `structural` 里 ⇒ 编译器自己要用它（半径、色板、灯、消融档……），**不进**参数表；
-/// · 名字在这份 shader 的参数表里 ⇒ 按它声明的类型透传（**这就是「加一个参数不用改 Rust」**）；
-/// · 两边都不是 ⇒ 报错，并把两张表都列出来。
-/// **part 的种类白名单**（2026-09-20 第 7 轮把 `moon` 加进来）。
-///
-/// ⚠ 抽成函数不是为了好看：它是"场景里能放什么"这件事**唯一的门**，
-///   一个 part 种类加进来而这里没放行，报错必须**点名它认哪些**（否则用户只能猜）。
 fn check_kind(part: &PartFile) -> Result<(), String> {
     const KINDS: [&str; 5] = ["planet", "clouds", "atmosphere", "moon", "light"];
     if KINDS.contains(&part.kind.as_str()) {
@@ -827,15 +687,7 @@ fn check_kind(part: &PartFile) -> Result<(), String> {
     ))
 }
 
-/// 卫星 part 的**几何与变换**（`kind = "moon"`）。
-///
-/// ⚠ 抽出来是为了**能单独判**：`position` 进 `translation`、`radius` 进内建球、
-///   `subdivisions` 有默认值、`spin` 与行星同口径 —— 这四件都不需要烘任何产物，
-///   于是可以在一个 unit 测试里钉住（场景级那条判据要烘图，代价大得多）。
 fn moon_body(part: &PartFile) -> Result<(Geometry, Transform, [f32; 4]), String> {
-    // ⚠ 这两栏**不许走 `number_or`**（它给 f32）：几何参数在产物里是 f64（`Value::Num`），
-    //   绕一趟 f32 会把配方里的 `0.093` 写成 `0.09300000220537186` —— 那是**静默改产物字节**。
-    //   （测试 `a_moon_part_carries_its_position_and_radius_into_the_object` 抓的就是这一条。）
     let number = |key: &str, fallback: f64| -> Result<f64, String> {
         match part.params.get(key) {
             Some(_) => part.number(key),
@@ -883,7 +735,6 @@ pub fn material_params(
     .map_err(|err| format!("{err}\n  shader 成员：{}", shader.node))
 }
 
-/// 烘图时的最后一道：这份参数表**打得进这份契约吗**（缺参 / 多参 / 类型不符都在这里红）。
 pub fn validate_material(
     label: &str,
     shader: &px_protocol::scene::Member,
@@ -897,10 +748,6 @@ pub fn validate_material(
         .map_err(|err| format!("{label} 的材质参数对不上 {} 的契约：{err}", shader.node))
 }
 
-/// 一份**内建图元**的包围球半径：`icosphere` 的 `radius` 参数。
-///
-/// ⚠ 只认它一个：图元名是**白名单**（`primitive` 那一栏只放行 `icosphere`），
-/// 而半径那一格是它的定义参数 —— 不认识的名字在别处已经拒过了。
 fn primitive_radius(geometry: &Geometry) -> Option<f32> {
     let Geometry::Primitive { name, params, .. } = geometry else {
         return None;
@@ -914,11 +761,6 @@ fn primitive_radius(geometry: &Geometry) -> Option<f32> {
     }
 }
 
-/// 一份**网格产物**的包围球半径：顶点到原点的最大距离。
-///
-/// ⚠ 为什么烘图侧要读网格：虚拟影图的页分配问的是"这个物体在灯看来张开多大的角"，
-/// 而那个数就是它的包围球半径。半径**只有网格自己知道** —— 把"半径"当成一栏内容参数
-/// 写在配方里，就是让作者手抄一个可以从产物量出来的数（`displace` 一改它会漂）。
 fn mesh_radius(member: &px_protocol::scene::Member, root: &Path) -> Result<f32, String> {
     let path = member
         .resolve(root)
@@ -926,8 +768,6 @@ fn mesh_radius(member: &px_protocol::scene::Member, root: &Path) -> Result<f32, 
     let bytes = std::fs::read(&path).map_err(|err| format!("读不到 {}：{err}", path.display()))?;
     let frames = px_protocol::stream::read_stream(&mut bytes.as_slice())
         .map_err(|err| format!("解 {} 的流：{err}", path.display()))?;
-    // ⚠ 读法照 `px_render::mesh::load_mesh`：后面的 blob 帧是载荷；种类不再是载荷的一栏
-    //   ⇒ 由 `MeshData::from_blobs` 自己逐块对账（读不出网格就当场报错）。
     let blobs: Vec<&px_protocol::wire::Blob> = frames
         .iter()
         .filter_map(|frame| match frame {
@@ -951,10 +791,6 @@ fn mesh_radius(member: &px_protocol::scene::Member, root: &Path) -> Result<f32, 
     Ok(radius)
 }
 
-/// 一份几何的包围球半径 —— **量出来**（网格读顶点、图元读半径参数）。
-///
-/// 见 [`Geometry::bounding_radius`]：这一栏是虚拟影图页分配的唯一依据，
-/// 而它必须由**拿得到几何产物**的那一侧填。
 fn measure_radius(geometry: &Geometry, root: &Path) -> Result<f32, String> {
     if let Some(radius) = primitive_radius(geometry) {
         return Ok(radius);
@@ -965,16 +801,6 @@ fn measure_radius(geometry: &Geometry, root: &Path) -> Result<f32, String> {
     }
 }
 
-/// 一个 part 的**阴影密度**（texel / 世界单位）—— 虚拟影图那一侧要的量。
-///
-/// 判定只有两条，且都与"要不要影"这件事对齐：
-/// - `shadows = 1`（缺省 0，与 `sun.shadows` 同一只旋钮的读法）而**没给** `shadow_density`
-///   ⇒ [`DEFAULT_SHADOW_DENSITY`]："要影"说了就不该一点影都没有；
-/// - 其余的（含 `shadows = 0` 与 `shadows = 1, shadow_density = 0`）⇒ **0** = 不参与分配。
-///
-/// ⚠ 0 是**真的不分配**，不是"退回旧路"：旧的那条 1024² cube 已经被虚拟影图**替掉**了
-/// （§本轮），文档里的 0 就是"这个物体不进任何页"。一个场景若所有投影物体都是 0，
-/// 它就没有影 —— 而不是"一副糊影"。
 fn shadow_density_of(part: &PartFile) -> Result<f32, String> {
     if part.number_or("shadows", 0.0) <= 0.5 {
         return Ok(0.0);
@@ -982,12 +808,6 @@ fn shadow_density_of(part: &PartFile) -> Result<f32, String> {
     Ok(part.number_or("shadow_density", DEFAULT_SHADOW_DENSITY))
 }
 
-/// 环的自写材质（原来是 Bevy 的 `StandardMaterial { unlit: true, blend, cull: none }`）。
-/// 和 `shaders` 图里那三份同规矩：**include 闭包进键**（§17.1、§52.3）。
-///
-/// ⚠ 入口文本走**工作区根**拼绝对路径，不靠当前目录：`cargo run` 与 `cargo test`
-/// 的工作目录是**两个**（调用目录 / 包目录）—— 相对路径会让同一份配方指向两个地方，
-/// 而那一处的症状是"环的键变了"（读不到文件就换一个 shader）。
 pub fn ring_shader() -> Result<px_protocol::scene::Member, String> {
     let path = px_graph::workspace_root().join("art/shaders/ring.wgsl");
     let text = std::fs::read_to_string(&path)
@@ -1008,7 +828,6 @@ pub fn ring_shader() -> Result<px_protocol::scene::Member, String> {
     ))
 }
 
-/// 配方文件的位置（`art/scene/<名>.toml`）。
 pub fn recipe_path(name: &str) -> PathBuf {
     px_graph::workspace_root()
         .join("art")
@@ -1016,7 +835,6 @@ pub fn recipe_path(name: &str) -> PathBuf {
         .join(format!("{name}.toml"))
 }
 
-/// 读一份配方。
 pub fn load(name: &str) -> Result<SceneFile, String> {
     let path = recipe_path(name);
     let text = std::fs::read_to_string(&path)
@@ -1024,10 +842,8 @@ pub fn load(name: &str) -> Result<SceneFile, String> {
     toml::from_str(&text).map_err(|err| format!("{} 解不开：{err}", path.display()))
 }
 
-/// 环的 shader 成员在文档里的角色名（`shaders::ring`）。
 pub const RING_SHADER_NODE: &str = "ring";
 
-/// 一个占位，让 `member_of` 在本模块里也有一条直路（`shaders` 图）。
 pub fn shader_member(node: &str) -> Result<px_protocol::scene::Member, String> {
     member_of("shaders", node)
 }
@@ -1064,15 +880,11 @@ mod tests {
                 ("shadow", Value::Num(0.0)),
                 ("height", Value::Num(0.5)),
                 ("gain", Value::Num(2.0)),
-                // ⚠ 多出来的格**不算错**：一份材质往往同时被几档 pass 用。
                 ("这一格是别的档要的", Value::Num(1.0)),
             ],
         )
     }
 
-    /// 卫星 part：`position` 进 `translation`、`radius` 进内建球、`subdivisions` 有默认值。
-    ///
-    /// ⚠ 判的是**装配**（这条新路唯一容易写错的那几栏），不烘任何产物。
     #[test]
     fn a_moon_part_carries_its_position_and_radius_into_the_object() {
         let part: PartFile = toml::from_str(
@@ -1091,17 +903,12 @@ params = { radius = 0.093, position = [-0.62, 0.30, 1.32] }
             Geometry::Primitive { name, params, .. } => {
                 assert_eq!(name, "icosphere");
                 assert_eq!(params.get("radius"), Some(&Value::Num(0.093)));
-                // ⚠ 默认细分：不写这一栏也该有一颗球（不是 0 个三角形）。
                 assert_eq!(params.get("subdivisions"), Some(&Value::Num(48.0)));
             }
             other => panic!("卫星的几何必须是内建球，实际是 {other:?}"),
         }
     }
 
-    /// **种类白名单**：`moon` 放行；不认识的种类当场点名"我认哪些"。
-    ///
-    /// ⚠ 报错信息里必须出现 `moon` —— 新加一个 part 种类时，这条会替他回答用户
-    ///   "为什么我写的 kind 不被认"（否则只能去读源码）。
     #[test]
     fn an_unknown_part_kind_is_named_against_the_list_it_knows() {
         let known: PartFile = toml::from_str(
@@ -1124,10 +931,6 @@ shader = \"surface\"
         assert!(err.contains("moon"), "要点名它认哪些（含 moon）：{err}");
     }
 
-    /// **对账真的会红**：surface 那一档要 8 格，只给 2 格 ⇒ 当场点名缺的是哪几个。
-    ///
-    /// ⚠ 这是**行为的**判据（不是"这个函数存在"）：它走的是配方编译时那条路
-    /// （[`check_stage`] → `stage::runtime::check` → 类型级那份 `StageParams` 表）。
     #[test]
     fn the_stage_param_check_refuses_a_material_missing_per_pass_fields() {
         let thin = material(
@@ -1145,21 +948,17 @@ shader = \"surface\"
         assert!(err.contains("surface"), "要点名是哪份内容：{err}");
     }
 
-    /// 给全了就不红（同一条路的**正对照** —— 少了它，上面那条可能只是"永远红"）。
     #[test]
     fn the_stage_param_check_accepts_a_complete_material() {
         check_stage("夹具", "planet", &full_surface()).expect("给全了就不该红");
     }
 
-    /// **认不出的内容不查**（自写 shader 之类）：这一档没有表可查，不是错误。
     #[test]
     fn an_unknown_content_is_not_an_error() {
         check_stage("夹具", "custom", &material("custom", &[])).expect("没有表就不查");
         assert!(RuntimeContent::parse("custom").is_none());
     }
 
-    /// 透明的物体走**透明**那一档：同样一份大气材质，在不透明那一档下没有表 ⇒ 不查；
-    /// 在透明那一档下按大气那五格查。
     #[test]
     fn the_stage_comes_from_the_alpha_mode() {
         let mut atmosphere = material("atmosphere", &[("density", Value::Num(0.3))]);
@@ -1172,7 +971,6 @@ shader = \"surface\"
         assert!(err.contains("softness"), "{err}");
     }
 
-    /// 分派表与类型级那张表**说的是同一件事**：`opaque` + surface 这一对在两边都存在。
     #[test]
     fn the_runtime_dispatch_agrees_with_the_typed_table() {
         let typed = <Opaque as crate::stage::StageParams<Opaque, Surface>>::GIVEN;

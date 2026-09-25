@@ -1,15 +1,3 @@
-//! 本宿主的桩表：**文本住在 `px_shader::host_stubs`**，这里只把它接成宿主的入口并**钉住它**。
-//!
-//! ⚠ **文本为什么搬走（S8-a）**：`px_probe` 把云 shader 编到自己的设备上，它要的正是
-//! 「新宿主会编出哪份文本」；而本 crate **只有 bin target**（没有 `src/lib.rs`），
-//! `px_probe` 依赖不到它。规则与 `assemble::HOST_VIEW_STUB` 当初搬进 `px_shader` 时是同一条：
-//! 够不到就抄一份，而抄第二份 = §66.1 那颗「同一条契约、两处文本」的雷。
-//! ⇒ 文本搬进共享叶子 crate，**判据留在宿主这一侧**（下面那些测试钉的是"宿主认下来的那张表"，
-//! 那是宿主的事，不是叶子 crate 的事）。搬家是**纯文本位移**：组装出来的字一个都没变，
-//! 由回归集（J1/J2/J3 + 逃生门六份文件字节）复测证明。
-//!
-//! 三处与 Bevy 那张表的差别，逐条见下面对应的测试。
-
 pub use px_shader::assemble::HOST_VIEW_STUB as VIEW_STUB;
 pub use px_shader::assemble::bevy_stub;
 pub use px_shader::host_stubs::wgpu_host_stub as stubs;
@@ -19,17 +7,8 @@ pub use px_shader::host_stubs::{DEPTH_NDC_TO_VIEW_Z, POINT_SHADOW_STUB};
 mod tests {
     use super::*;
 
-    /// 桩表与 Bevy 那张的差别**逐符号点名**：差哪几个、每个为什么必须差。
-    ///
-    /// ⚠ 这条绊线的形状是改过的：原来它写的是"**只**差 `fetch_point_shadow` 一个符号"，
-    /// 而那种"数个数"的断言在真的多出第二处差别时只会说"多了"，说不出**为什么**。
-    /// 现在三处各自点名、各自写清后果，剩下的符号仍然**必须逐字相同** ——
-    /// 多差一个都意味着两边的 group 0 开始漂开。
     #[test]
     fn the_table_differs_from_bevys_in_exactly_three_named_symbols() {
-        // ① 影子采样：本表**自己拥有**这一格（`bevy_stub` 今天给的也是同一段占位文本，
-        //    差别在**语义**：Bevy 宿主运行期拿到的是 Bevy 的真实现，而我们拿到的是这段
-        //    占位 —— S3 换成采样我们自己的 cube 影子图）。绊线见下一条测试。
         let shadow = "bevy_pbr::shadows::fetch_point_shadow";
         assert_eq!(
             stubs(shadow),
@@ -37,8 +16,6 @@ mod tests {
             "影子那一格必须由本表显式提供（不许漏下去让 `bevy_stub` 兜住）"
         );
 
-        // ② 视图变换：near 必须从**相机矩阵**来，不能是 `1.0`。
-        //    症状是一颗被冲淡的灰蓝球（数在 `DEPTH_NDC_TO_VIEW_Z` 的注释里）。
         let depth = "bevy_pbr::view_transformations::depth_ndc_to_view_z";
         assert_eq!(stubs(depth), Some(DEPTH_NDC_TO_VIEW_Z));
         assert_ne!(
@@ -55,10 +32,6 @@ mod tests {
             "near 不许抄成字面量（§66.1：同一条契约、两个数）"
         );
 
-        // ③ `view`：本宿主**自己拥有**这一格。Bevy 的 `View` 有七十多个字段，那张近似表里
-        //    只有五格；天空盒要的 `view_from_clip` 与 `world_from_view` 在近似表里**没有**，
-        //    所以这一格必须由本表说了算。⚠ 差别只许是"末尾多两格"：
-        //    前五格与绑定号必须逐字相同（否则内容 shader 按名字读到的是别的字节）。
         let view = "bevy_pbr::mesh_view_bindings::view";
         assert_eq!(stubs(view), Some(VIEW_STUB), "`view` 由本表显式提供");
         let bevy_view = bevy_stub(view).expect("Bevy 那张近似表也认这一格");
@@ -74,7 +47,6 @@ mod tests {
             assert!(!head.contains(field), "Bevy 那张近似表里没有 {field}");
         }
 
-        // 其余符号：逐字相同。少一个都不行 —— 这几格是 group 0 的绑定号与结构体形状。
         let probes = [
             "bevy_pbr::forward_io::VertexOutput",
             "bevy_pbr::mesh_view_bindings::lights",
@@ -92,12 +64,6 @@ mod tests {
         }
     }
 
-    /// 覆盖掉的那一格**在真内容里组装得出、校验得过**。
-    ///
-    /// 为什么必须有这一条：函数体里引用了 `view`，而 `view` 是**另一条 import** 带进来的
-    /// （`bevy_pbr::mesh_view_bindings::view`）。谁的 shader 只 import 了
-    /// `depth_ndc_to_view_z` 而没 import `view`，组装出来的文本就少一个声明 ——
-    /// naga 当场拒。这一条把"两处 import 的搭配"钉在真内容上，而不是靠人去记。
     #[test]
     fn the_depth_override_assembles_against_the_real_content() {
         let modules = crate::shader::modules();
@@ -119,11 +85,6 @@ mod tests {
         }
     }
 
-    /// 影子那一个符号**由本表显式提供**，而且是**真实现**（§109）。
-    ///
-    /// ⚠ 这一条原来是"绊线"：桩换成真实现的那一天它会响，逼着换的人是有意识地换。
-    /// 现在它响过了，于是它改成钉**真实现的那几处不许化简**：8 个采样、`flip_z`、
-    /// 自带的两格声明、以及"它确实在采样"（而不是又退回一个常量）。
     #[test]
     fn the_point_shadow_symbol_is_owned_by_this_host() {
         let shadow = "bevy_pbr::shadows::fetch_point_shadow";
@@ -132,9 +93,6 @@ mod tests {
             Some(POINT_SHADOW_STUB),
             "影子走的是本表里那一格（§109 起是真实现）"
         );
-        // ⚠ 判据从"不许出现 `return 1.0;`"改成下面这两条（§本轮）：虚拟影图里
-        //    `return 1.0;` 是**合法**的（那一页没分配 ⇒ 照"不在影里"处理），
-        //    所以"出现过这个字符串"不再是桩的痕迹。真正要钉的是"它真的在采样并比较"。
         assert!(
             POINT_SHADOW_STUB.contains("depth < stored"),
             "手动比较那一条（reverse-Z：影里是 `depth < stored`）不许丢"
@@ -164,9 +122,6 @@ mod tests {
             POINT_SHADOW_STUB.contains("px_shadow_faces["),
             "面选择与 UV 必须走文档给的那张基表"
         );
-        // ⚠ 这一条**反过来**了（§本轮）：从前它要求 `flip_z`（`frag_ls * (1,1,-1)`），
-        //    那是 Bevy 的 cube 采样约定。我们的层是**渲染器按世界空间的六面相机**画的，
-        //    所以分类与 UV 必须用**世界方向本身** —— 翻一次就是"影子按镜像找面"。
         assert!(
             !POINT_SHADOW_STUB.contains("vec3<f32>(1.0, 1.0, -1.0)"),
             "采样方向**不许** flip_z：我们的层不是 cube 采样，是渲染器按世界空间六面相机\
@@ -179,7 +134,6 @@ mod tests {
         );
     }
 
-    /// 退休的符号不许被认下来：离线门应当当场报「找不到」，而不是运行期才发现画面不对。
     #[test]
     fn retired_symbols_are_not_silently_accepted() {
         assert!(stubs("bevy_pbr::shadows::fetch_directional_shadow").is_none());

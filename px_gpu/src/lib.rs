@@ -1,17 +1,4 @@
-//! **无窗口 GPU 计算的最小宿主**。
-//!
-//! ⚠ 为什么单独一个 crate（而不是把 `px_probe` 当依赖）：`px_probe` 是**探针工具**
-//!   （`default-members` 里都没有它），而烘图侧的算子要调它 —— 生产 op 依赖开发工具是一条
-//!   反过来的边。这里只放"起设备 + 跑一遍计算 + 回读"这三件事，`px_probe` 将来可以并到它上面。
-//!
-//! ⚠ **键这一侧不受影响**（GPU 产物的计算不确定性不破坏缓存语义）：
-//!   `px_cook::cached` 的节点键 = 算子身份（含实现库的源码指纹）+ 参数 + 画布 + **输入键**
-//!   （`px_cook/src/lib.rs:134`），**不看产物内容**。产物字节只在落 CAS 时算 blake3 当文件名
-//!   ⇒ 同一台机器同输入命中不重算；换机器/驱动时内容不同而键相同，各自在本地 CAS 里
-//!   重算自己那一份，不会混。**唯一失去的是"跨机器 .pxart 逐字节相同"。**
-//!
-//! ⚠ 后端默认 DX12：本机实测 DX12 枚举 0.27 s、Vulkan 2.8 s（Vulkan loader 在挨个找不存在的
-//!   layer JSON）。`WGPU_BACKEND=vulkan|gl` 可覆盖 —— 与 `px_probe` 同一口径。
+//! See docs/gpu.md
 
 use std::sync::OnceLock;
 
@@ -24,26 +11,12 @@ pub struct Gpu {
 
 static GPU: OnceLock<Option<Gpu>> = OnceLock::new();
 
-/// 最近一次**未被错误域捕获**的 wgpu 错误。
-///
-/// ⚠⚠ 为什么必须装这个处理器：wgpu 默认的错误处理是 **panic**，而算子是 dylib ——
-///   panic 穿过 dylib 边界会变成 `Rust cannot catch foreign exceptions`，
-///   **整个烘焙进程直接 abort**（实测踩过，而且没有任何可读信息）。装了之后错误落在这里，
-///   由调用方决定怎么报（算子契约本来就是 `Result`）。
 static LAST_ERROR: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
 pub fn take_last_error() -> Option<String> {
     LAST_ERROR.lock().ok().and_then(|mut slot| slot.take())
 }
 
-/// 用哪个后端建实例。
-///
-/// ⚠ **缺省是 Vulkan，不是 DX12**（2026-09-28 改）：`px_render` 在 `Cargo.toml` 里
-///   **编译期**只带了 Vulkan（§104 第 9 条："后端不是可选项"），而这一层从前的缺省是 DX12
-///   ⇒ **烘图（算子 dylib 走 `px_gpu::connect`）与出图（宿主）跑在两个后端上**。
-///   本仓的铁律是"夹具 / 桩不能替被测物挡枪"（§144），两个后端比同一个后端更坏。
-///   `WGPU_BACKEND` 仍然可以覆盖（`vulkan` / `gl` / `gles`），这个口子是给
-///   "换一台机器、Vulkan 不在"那一档留的逃生门。
 fn backends() -> wgpu::Backends {
     match std::env::var("WGPU_BACKEND").as_deref() {
         Ok("dx12") => wgpu::Backends::DX12,
@@ -67,10 +40,6 @@ fn build() -> Option<Gpu> {
     let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
         label: Some("px_gpu"),
         required_features: adapter.features() & wgpu::Features::FLOAT32_FILTERABLE,
-        // ⚠⚠ 用**适配器自己的上限**，不用 `downlevel_defaults`：后者的 storage buffer 上限只有
-        //   128 MB，而 shape 128 的体积（6 面 x 128^2 x 128 层 x 6 通道 x 4 B）就有 300 MB
-        //   ⇒ 校验错。而校验错走 wgpu 默认的错误处理会 **panic**，panic 再穿过算子的 dylib
-        //   边界 ⇒ `Rust cannot catch foreign exceptions` ⇒ **整个烘焙进程 abort**（实测踩过）。
         required_limits: adapter.limits(),
         experimental_features: wgpu::ExperimentalFeatures::disabled(),
         memory_hints: wgpu::MemoryHints::MemoryUsage,
@@ -92,36 +61,21 @@ fn build() -> Option<Gpu> {
     })
 }
 
-/// 进程内唯一的设备：第一次调用建，之后都是同一份（设备创建本身要 0.3 s 量级）。
 pub fn connect() -> Option<&'static Gpu> {
     GPU.get_or_init(build).as_ref()
 }
 
-/// 一次派发要绑的东西，**顺序就是 WGSL 里的 `@binding(n)`**。
 pub enum Binding<'a> {
-    /// 只读参数（`var<uniform>`）。
     Uniform(&'a [u8]),
-    /// 只读数据（`var<storage, read>`）。
     Storage(&'a [u8]),
-    /// 要回读的缓冲区（`var<storage, read_write>`）。
     Write(&'a [u8]),
 }
 
-/// 一个绑定 + 它的**显式 binding 号**。
-///
-/// 为什么需要显式号：WGSL 的 `@group(0) @binding(n)` 是**模块级**的，一个模块里同一个 n
-/// 只能有一种类型。两个入口（采样 / 步进）想共用同一份函数时，最省事的办法是让它们
-/// 用**互不冲突的号**（采样 0..3、步进 0/1 复用同类型 + 4/5 放自己的），
-/// 而 wgpu 的管线布局只覆盖入口**实际用到**的那些绑定。
 pub struct Slot<'a> {
     pub binding: u32,
     pub value: Binding<'a>,
 }
 
-/// 跑一遍计算着色器；回读**所有 `Binding::Write`**，顺序同声明顺序。
-///
-/// ⚠ 每段字节的长度必须是 4 的倍数（`write_buffer` 的要求）—— 不满足时当场说清，
-///   而不是让驱动在别处报一个指不到这里的错。
 pub fn dispatch(
     gpu: &Gpu,
     wgsl: &str,
@@ -144,7 +98,6 @@ pub fn dispatch(
     dispatch_slots(gpu, wgsl, entry, &slots, workgroups)
 }
 
-/// 同 [`dispatch`]，但每个绑定的 `binding` 号由调用者给（见 [`Slot`]）。
 pub fn dispatch_slots(
     gpu: &Gpu,
     wgsl: &str,
@@ -218,8 +171,6 @@ pub fn dispatch_slots(
         }
         buffers.push(buffer);
         if matches!(binding, Binding::Write(_)) {
-            // ⚠ 这里要的是**缓冲区下标**（buffers 里的位置），不是槽位号：
-            //   槽位号可以是 4/5，而 buffers 只有 0..n-1。混用就是越界 panic。
             readback.push((buffers.len() - 1, bytes.len()));
         }
     }
@@ -230,9 +181,6 @@ pub fn dispatch_slots(
             label: Some("px_gpu"),
             entries: &entries,
         });
-    // ⚠ 条目号必须用**槽位号**（不是 0..n 的顺序号）：布局是按槽位号建的，
-    //   两边一旦不同，wgpu 报的是「binding 2 找不到对应声明」——措辞指向绑定，
-    //   病因却在"我把顺序号当成了号"。
     let bindings_ref: Vec<wgpu::BindGroupEntry> = buffers
         .iter()
         .enumerate()
@@ -251,7 +199,6 @@ pub fn dispatch_slots(
         .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("px_gpu"),
             bind_group_layouts: &[Some(&layout)],
-            // ⚠ wgpu 29 的 immediate（取代 push constant）：这里不用。
             immediate_size: 0,
         });
     let pipeline = gpu
@@ -265,7 +212,6 @@ pub fn dispatch_slots(
             cache: None,
         });
 
-    // ⚠ 回读用**各自的**暂存缓冲：一张图几 MB，几份一起读比逐份 `poll` 省一整轮同步。
     let mut staging = Vec::with_capacity(readback.len());
     for (_, size) in &readback {
         staging.push(gpu.device.create_buffer(&wgpu::BufferDescriptor {
@@ -276,10 +222,6 @@ pub fn dispatch_slots(
         }));
     }
 
-    // ⚠ 待办：这里该压一层校验错误域（出错返回 Err 而不是 panic —— panic 穿过算子的
-    //   dylib 边界会 abort 整个烘焙进程，实测踩过）。wgpu 29 的这个位置没有
-    //   `pop_error_scope`，留到搞清 API 之后再补。
-    // ⚠ 压一层校验错误域 ⇒ 出错**返回 Err**（算子契约本来就是 Result），不 panic、不 abort。
     let scope = gpu.device.push_error_scope(wgpu::ErrorFilter::Validation);
     let mut encoder = gpu
         .device
@@ -310,7 +252,6 @@ pub fn dispatch_slots(
         slice.map_async(wgpu::MapMode::Read, move |result| {
             let _ = sender.send(result);
         });
-        // ⚠ 先 poll 再收：设备要跑起来回调才会来。
         gpu.device
             .poll(wgpu::PollType::Wait {
                 submission_index: None,
@@ -338,18 +279,12 @@ pub fn dispatch_slots(
 mod tests {
     use super::*;
 
-    /// **冒烟**：设备起得来 + 一趟 compute 派发能把结果原样读回来。
-    ///
-    /// ⚠ 这一条判的不是"某个着色器算得对不对"，而是**宿主这条链**：建缓冲 → 绑组 →
-    ///   派发 → 暂存回读 → 映射。少了哪一步，症状都是"算子在烘焙里给出全 0 或旧数据"，
-    ///   而归因不到这里。⚠ 没有可用设备时**跳过**（不是失败）：CI 机器未必有 GPU。
     #[test]
     fn a_compute_pass_round_trips() {
         let Some(gpu) = connect() else {
             println!("px_gpu：没有可用设备，跳过冒烟");
             return;
         };
-        // 64 个工作项，各自写 x*2；workgroup_size(64) ⇒ 一个工作组。
         let wgsl = r#"
 @group(0) @binding(0) var<storage, read> src: array<u32>;
 @group(0) @binding(1) var<storage, read_write> dst: array<u32>;

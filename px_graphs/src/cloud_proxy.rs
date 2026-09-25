@@ -1,11 +1,3 @@
-//! 云硬表面代理的**判据仪器**：射线求交（参照场的交点半径 vs 代理 mesh 的径向范围）
-//! 与梯度上界 `L` 的量法。
-//!
-//! ⚠ 算子（`CloudCoarse` / `Proxy`）**不在这里**：声明在各域 schema 的 `ops.rs`，
-//! 实现在 `px_volume_op` / `px_mesh_op`（dylib，运行期按身份装载）。
-//! 这份仪器留在图脚本这一侧，是因为它要**静态**用（判据不能依赖动态装载的成败），
-//! 而它用的参照场住在 `px_verify::proxy`（算子用的也是同一份 ⇒ 两边判的是同一个东西）。
-
 use px_field_schema::field::Field;
 use px_mesh_schema::MeshData;
 use px_verify::cloud_field::CloudFieldParams;
@@ -40,7 +32,6 @@ fn normalize(vector: [f32; 3]) -> [f32; 3] {
     [vector[0] / size, vector[1] / size, vector[2] / size]
 }
 
-/// 一串确定性的伪随机方向（不依赖 rand，跨进程一致）。
 pub fn scatter_directions(seed: u64, count: usize) -> Vec<[f32; 3]> {
     let mut state = seed | 1;
     let mut next = move || {
@@ -59,7 +50,6 @@ pub fn scatter_directions(seed: u64, count: usize) -> Vec<[f32; 3]> {
         .collect()
 }
 
-/// 参照场 `= τ` 在这条射线上的全部交点半径（暴力扫 + 二分）。
 pub fn coarse_roots(
     cloud: &CloudFieldParams,
     coverage: &Field,
@@ -72,7 +62,6 @@ pub fn coarse_roots(
         return Vec::new();
     }
     let samples = samples.max(2);
-    // ⚠ 等值面的根落在**世界半径**上 ⇒ 参数高度要过 `Shell`（参数空间线性、世界等比）。
     let shell = px_volume_schema::volume::Shell::new(params.inner, params.outer);
     let value_at =
         |altitude: f32| proxy::field_at(cloud, params, cover, direction, altitude) - params.tau;
@@ -107,7 +96,6 @@ pub fn coarse_roots(
     roots
 }
 
-/// 代理 mesh 在这条射线上的交点半径。
 pub fn mesh_roots(mesh: &MeshData, direction: [f32; 3]) -> Vec<f32> {
     let vertex = |index: u32| -> [f32; 3] {
         let slot = index as usize * 3;
@@ -149,7 +137,6 @@ pub fn mesh_roots(mesh: &MeshData, direction: [f32; 3]) -> Vec<f32> {
     roots
 }
 
-/// 一个方向上一格的世界尺寸（三轴合成对角线）——判据里「小于一个单元对角线」用的就是它。
 pub fn cell_diagonal(params: &Params, direction: [f32; 3], radius: f32) -> f32 {
     let res = params.res.max(2);
     let layers = params.layers.max(2);
@@ -169,7 +156,6 @@ pub fn cell_diagonal(params: &Params, direction: [f32; 3], radius: f32) -> f32 {
         params.inner,
         params.outer,
     );
-    // ⚠ 径向步长在**世界**里是等比的（Shell），所以在 ltitude 处取那一点的 dr/du。
     let step_r = px_volume_schema::volume::Shell::new(params.inner, params.outer)
         .stretch_of(altitude)
         / (layers - 1) as f32;
@@ -182,21 +168,15 @@ pub fn cell_diagonal(params: &Params, direction: [f32; 3], radius: f32) -> f32 {
 pub struct Containment {
     pub rays: usize,
     pub rays_with_surface: usize,
-    /// 内边界余量：粗场最里面的交点半径 − 代理最里面的交点半径（正 = 代理更靠里 = 包住）。
     pub worst_inner: f32,
-    /// 外边界余量：代理最外面的交点半径 − 粗场最外面的交点半径（正 = 包住）。
     pub worst_outer: f32,
-    /// 两者取小，就是这条判据的余量（正 = 包住）。
     pub worst_slack: f32,
     pub worst_direction: [f32; 3],
     pub worst_cell: f32,
-    /// 粗场在这条方向上有交点、代理 mesh 却一个交点都没有的方向数（硬失败）。
     pub missing: usize,
-    /// 粗场的交点区间没被代理的任何区间包含的方向数（比径向范围更严的一档，仅报告）。
     pub intervals_outside: usize,
 }
 
-/// 判据 2：沿 `rays` 个随机方向暴力求交，断言代理的径向范围包住粗场的全部交点半径。
 pub fn containment(
     mesh: &MeshData,
     cloud: &CloudFieldParams,
@@ -241,7 +221,6 @@ pub fn containment(
                 0.5 * (roots[0] + roots[1.min(roots.len() - 1)]),
             );
         }
-        // 区间级：粗场的每一段 [低, 高] 都要落在代理的某一段里
         let mut outside = false;
         for pair in roots.chunks(2) {
             let (low, high) = (pair[0], *pair.last().expect("非空"));
@@ -267,19 +246,13 @@ pub fn containment(
 #[derive(Debug, Clone, Copy)]
 pub struct Bound {
     pub bound: f32,
-    /// 三个轴上各自最大的单边差商，用来看出 L 是被哪一维顶起来的。
     pub axes: [f32; 3],
     pub face: u32,
-    /// 面内参数 `(u, v, 径向高度)`。
     pub at: [f32; 3],
     pub direction: [f32; 3],
     pub value: f32,
 }
 
-/// `L` 的量法：在参数空间 `(s, t, 高度)` 上对粗场做单边和中心差商，取欧氏范数的最大值。
-///
-/// 剪枝测试用的是各向同性的域 `[0,1]³`，所以量的是三轴合成的范数。粗场里有 `clamp`
-/// 造成的折点，折点处中心差商会低估一侧的斜率 ⇒ 单边差商也一并量，取三者的最大。
 pub fn measure_gradient_bound(
     cloud: &CloudFieldParams,
     coverage: &Field,
@@ -318,9 +291,6 @@ pub fn measure_gradient_bound(
                     let mut worst = [0.0_f32; 3];
                     for axis in 0..3 {
                         let point = [u, v, altitude];
-                        // 单边差商：域边界上只量往里那一侧（另一侧的间距是 0）。
-                        // 两边的斜率都能量时取绝对值大的那个 —— 粗场里有 `clamp` 的折点，
-                        // 折点处中心差商会低估斜率。
                         for sign in [-1.0_f32, 1.0] {
                             let mut other = point;
                             other[axis] = point[axis] + sign * step;
@@ -356,7 +326,6 @@ pub fn measure_gradient_bound(
     bound
 }
 
-/// 一行给报告用的打印。
 pub fn print_containment(report: &Containment, params: &Params) {
     println!(
         "包住判据：{} 条方向里 {} 条粗场有交点；{} 条代理找不到交点；{} 条的区间没被包住",

@@ -8,8 +8,6 @@ use crate::warehouse::{Stock, Warehouse, Warehouses};
 pub const GOODS: usize = 3;
 pub const UNITS: usize = 3;
 
-/// 每个单元拆成两类部门：**生产部门**（只留生产政策，仓库里是投入品与产出品）
-/// 与**消费部门**（只留消费政策，仓库里是口粮，靠市场与转移支付过日子）。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Kind {
     Producer,
@@ -41,11 +39,6 @@ pub const SECTOR_INPUT: f32 = 2.0;
 pub const SECTOR_CAPACITY: [f32; 3] = [0.1, 0.2, 0.3];
 pub const SECTOR_MOTIVE: [f32; 3] = [1.0, 1.6, 2.4];
 
-/// 专精：把"这个部门自己那一层"的产出乘上 `factor`。
-///
-/// 只动**产出**，不动投入、不动产能占用——所以它改的是绝对效率，而每个部门
-/// 在别的层上仍然和别人一样，于是"谁该干什么"由相对效率决定（比较优势），
-/// 而不是由"谁能干什么"决定（绝对壁垒）。
 fn specialize(outputs: &mut [f32], unit: usize, factor: f32) {
     if !(factor > 0.0) || (factor - 1.0).abs() < f32::EPSILON {
         return;
@@ -67,11 +60,6 @@ pub struct Spec {
     pub primary_free: bool,
     pub all_consume: bool,
     pub motive_ladder: Vec<f32>,
-    /// 专精：第 `u` 号部门生产**自己那一层**（商品 `u`）的工艺产出乘数。
-    ///
-    /// `1.0` = 同构（历史行为），`> 1` = 有比较优势。**异质性从这里来**：
-    /// 九个部门同构时，"自己造"永远不比"买"贵，于是每个部门在自己内部把整条链跑完，
-    /// 成交恒为 0（§13.5 第 2 条）。让每个部门各自擅长一层，交易才有理由发生。
     pub specialty: Vec<f32>,
 }
 
@@ -91,11 +79,6 @@ impl Spec {
         }
     }
 
-    /// 每个部门擅长自己那一层：第 `u` 号部门生产商品 `u` 的工艺产出乘 `factor`。
-    ///
-    /// 这是"比较优势"的最小实现：各层仍然**人人可开**（wildcard 没动），
-    /// 所以交易是划算而不是必须——异质性负责让买比造便宜，不负责强迫分工。
-    /// 这一层的专精强度
     pub fn specialty_of(&self, good: usize) -> f32 {
         self.specialty.get(good).copied().unwrap_or(1.0)
     }
@@ -110,7 +93,6 @@ impl Spec {
         self
     }
 
-    /// 只抬某一层的专精强度（`good` 是那一层的商品序号）
     pub fn with_specialty_at(mut self, good: usize, factor: f32) -> Self {
         if let Some(slot) = self.specialty.get_mut(good) {
             if factor.is_finite() && factor > 0.0 {
@@ -120,8 +102,6 @@ impl Spec {
         self
     }
 
-    /// 人人可搞一产、人人消耗三种产物、人人都能开各种工业。
-    /// 一产产能便宜 ⇒ 人人搞 ⇒ 过剩 ⇒ 贱；工业占产能 ⇒ 稀缺 ⇒ 贵
     pub fn modern(polities: usize) -> Self {
         let mut spec = Self::symmetric(polities);
         spec.all_consume = true;
@@ -145,7 +125,6 @@ impl Spec {
         spec
     }
 
-    /// 三层投入产出：一产零投入、二产吃一产、三产吃二产，产能占用逐层变高
     pub fn sectors(polities: usize) -> Self {
         let mut spec = Self::symmetric(polities);
         spec.self_capacity = true;
@@ -182,7 +161,6 @@ impl Spec {
         spec
     }
 
-    /// 同一个部门挂两个工艺：省料但慢、费料但快。切换点在 工业品价 ÷ 粮食价 = 1
     pub fn ladder(polities: usize, food_supply: f32) -> Self {
         let mut spec = Self::scarce(polities, 0, 0);
         spec.supply[0][0] = food_supply;
@@ -278,33 +256,21 @@ impl Polity {
     }
 }
 
-/// 一种商品在某一轮的全场状态
 #[derive(Clone, Copy, Default)]
 pub struct GoodState {
-    /// 各仓库挂价的几何平均
     pub index: f32,
-    /// 成交价（按成交量加权），没有成交记 0
     pub deal_price: f32,
-    /// 各地方挂价区间的平均
     pub bid: f32,
     pub ask: f32,
-    /// 卖方加权挂价与买方加权挂价
     pub quote_sell: f32,
     pub quote_buy: f32,
-    /// 各仓库自适应目标的合计
     pub target: f32,
-    /// 成交量（只数一次）
     pub dealt: f32,
-    /// 卖方与买方各自成交的量
     pub sold: f32,
     pub bought: f32,
-    /// 全场库存合计
     pub stock: f32,
-    /// 本轮部门想取走的量
     pub wanted: f32,
-    /// 本轮部门实际取走的量
     pub consumed: f32,
-    /// 本轮实际入账的产出
     pub delivery: f32,
 }
 
@@ -323,10 +289,7 @@ pub struct Lab {
     pub market: Market,
     pub polities: Vec<Polity>,
     pub round: usize,
-    /// 消费结算**没解出来**的次数（逐部门逐轮计）。不许静默继续：解不出来必须在读数里看得见。
     pub settlement_failures: usize,
-    /// 结算过程中出现过退化（Cholesky 或回溯失败）但最终仍然收敛的次数。
-    /// 与 `settlement_failures` 分开报：前者是"没解出来"，后者只是"路上磕了一下"。
     pub settlement_degraded: usize,
     pub history: Vec<Snapshot>,
 }
@@ -354,10 +317,6 @@ impl Lab {
                 for kind in [Kind::Producer, Kind::Consumer] {
                     let mut stocks = Vec::with_capacity(GOODS);
                     for good in 0..GOODS {
-                        // 自有商品是 0：生产者的自有商品本来就该全卖，消费者不吃自己那样。
-                        // 其余给一场战役的量——生产者的**投入品**和消费者的**口粮**都从
-                        // 这里来，所以这条规则拆前拆后都成立。目标从第二轮起被
-                        // "三倍取货量"覆盖，初值只在第一轮起作用。
                         let (volume, target) = if good == unit {
                             (0.0, 0.0)
                         } else {
@@ -371,8 +330,6 @@ impl Lab {
                             .with_locality(polity),
                     );
                     let policies: Vec<Policy> = match kind {
-                        // 生产部门：只有生产政策。它**不吃东西**——两族之间只剩市场这一条
-                        // 通道，价格才有活干。
                         Kind::Producer => {
                             let mut policies: Vec<Policy> = Vec::new();
                             for transform in spec.transforms(polity, unit) {
@@ -394,7 +351,6 @@ impl Lab {
                             }
                             policies
                         }
-                        // 消费部门：只有消费政策，产出为零，靠每轮的拨款过日子。
                         Kind::Consumer => (0..GOODS)
                             .filter(|good| spec.all_consume || *good != unit)
                             .map(|good| {
@@ -425,8 +381,6 @@ impl Lab {
             });
         }
         let mut departments = Departments::new(departments);
-        // 货币是**存量**：开局每部门发一份，之后靠"卖产出收钱、买消费付钱"自己滚动，
-        // 再由转移支付在部门之间调剂。仓库不持钱。
         for department in departments.departments.iter_mut() {
             department.currency = GRANT;
         }
@@ -446,13 +400,11 @@ impl Lab {
         lab
     }
 
-    /// 势流的价差尺度，见 [`crate::market::Market::with_flow_scale`]
     pub fn with_flow_scale(mut self, scale: f32) -> Self {
         self.market = self.market.with_flow_scale(scale);
         self
     }
 
-    /// 消费结算规则，见 [`crate::department::Rationing`]
     pub fn with_rationing(mut self, rationing: Rationing) -> Self {
         self.departments.rationing = rationing;
         self
@@ -473,14 +425,12 @@ impl Lab {
         self
     }
 
-    /// 价格律：`price = price_base · exp(−κ·tanh(ln(volume/target)))`，先过一阶低通
     pub fn with_price_law(mut self, curvature: f32, inertia: f32, target_rate: f32) -> Self {
         self.warehouses
             .set_price_law(curvature, inertia, target_rate);
         self
     }
 
-    /// 转移支付速率：每轮把部门余额按这个比例拉向均值
     pub fn with_transfer(mut self, rate: f32) -> Self {
         self.departments.transfer_rate = rate.clamp(0.0, 1.0);
         self
@@ -505,7 +455,6 @@ impl Lab {
         self.market.set_relations(&relations);
     }
 
-    /// 局部制裁：只掐掉这几个部门与政权外的配对，政权内部与其余部门照常
     pub fn sanction(&mut self, departments: &[usize], relation: f32) {
         let traders = self.market.traders.len();
         let mut relations = self.market.relations.clone();
@@ -528,12 +477,10 @@ impl Lab {
             .set_relations(&vec![vec![1.0; traders]; traders]);
     }
 
-    /// 某个政权、某个单元里的一类部门（生产或消费）
     pub fn department_of(&self, polity: usize, unit: usize, kind: Kind) -> usize {
         polity * 2 * UNITS + unit * 2 + if kind == Kind::Producer { 0 } else { 1 }
     }
 
-    /// 某个部门的各个转换工艺的（份额，单位产能利润，产能占用）
     pub fn process_state(&self, department: usize) -> Vec<(f32, f32, f32)> {
         self.departments
             .departments
@@ -555,7 +502,6 @@ impl Lab {
             .unwrap_or_default()
     }
 
-    /// 每个部门每种商品的成交均价除以银河指数，没有成交记 0
     pub fn department_prices(&self) -> Vec<Vec<f32>> {
         self.market
             .traders
@@ -618,7 +564,6 @@ impl Lab {
         warehouse_polity(warehouse)
     }
 
-    /// 每种商品这一轮的全场状态。报价与指数分开给：报价是挂出来的，指数是成交出来的
     pub fn good_states(&self) -> Vec<GoodState> {
         let goods = self.market.merchandises.len();
         let traders = self.market.traders.len();
@@ -703,8 +648,6 @@ impl Lab {
         states
     }
 
-    /// 某个地方的**挂价**相对银河指数的偏离，正数表示它比别人挂得贵。
-    /// 纯挂价口径：不依赖成交，也不掺成交价。
     pub fn spread(&self, polity: usize, good: usize) -> f32 {
         let level = |p: usize| -> f32 {
             let ask = self

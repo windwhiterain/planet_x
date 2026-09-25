@@ -713,8 +713,6 @@ fn probe(points: &[[f32; 3]], params: &CloudParams, sweep: [f32; STEPS], mask: M
 
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("probe"),
-        // 5 格会超：探针设备是 downlevel_defaults（max_bind_groups = 4）⇒ 只能给 4 个布局。
-        // 材质组按契约在 3；探针自己的 job/out 放 1（0 是 Bevy 的视图组，2 空着）。
         bind_group_layouts: &[None, Some(&job_layout), None, Some(&material)],
         immediate_size: 0,
     });
@@ -1630,7 +1628,6 @@ fn attribute(label: &str, rows: &[Row], sweep: [f32; STEPS], factor: f32) {
     }
 }
 
-/// 全部 check，按「先便宜后贵」排。原来这些是 `#[test]`，现在由 bin 逐个跑。
 pub fn checks() -> Vec<(&'static str, fn())> {
     vec![
         (

@@ -1,18 +1,3 @@
-//! 云参数在**探针这一侧**的那一份：一份**类型化的取值容器** + 一份**来自契约的字节布局**。
-//!
-//! 它原来是一份「WGSL 结构体的逐字镜像」：字段顺序、类型、打包全由这份 Rust 结构体自己说了算
-//! （`#[derive(ShaderType)]` + `encase`）。那是**第五份手抄的契约**（§67.4 那一类）：
-//! shader 那边挪一格（比如 `steps` 从 `f32` 改成 `u32`、或者中间插一个新参数），
-//! 这边不会有任何编译错误，只会在 GPU 上读出一块错位的 uniform。
-//!
-//! 现在分开：
-//! - **值**由这个结构体给（探针的代码读 `params.base` 比读 map 清楚）；
-//! - **名字 ↔ 字节**由 shader 自己声明的契约给（[`layout`]，反射 `art/shaders/clouds.wgsl`）。
-//!
-//! ⇒ 漂移是**当场报错**：shader 声明了而这里没给 ⇒ [`params_bytes`] 打包时就 panic
-//! （"shader 声明了参数 'x'，产物没给"）；这里多给了 ⇒ 同样报错。
-//! 单测 `the_mirror_matches_the_contract` 再把**名字、顺序、类型**三样逐项钉住（跑起来之前就红）。
-
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
@@ -24,8 +9,6 @@ use px_protocol::scene::Value;
 pub const CLOUD_BASE: f32 = 1.01;
 pub const CLOUD_TOP: f32 = 1.06;
 
-/// 云的"老那一档"参数（原来是 `px_render::clouds::CloudShape::default()` 盖上去的）。
-/// 探针的判据是"生产参数下两边一致"，所以这份数必须与当年那一档逐项相同。
 #[derive(Clone, Copy, Debug)]
 pub struct CloudParams {
     pub orientation: [f32; 4],
@@ -86,7 +69,6 @@ impl CloudParams {
         }
     }
 
-    /// 按名字摊平成产物参数表（走的就是渲染器那条路：名字 → 契约里的格子 → 字节）。
     pub fn to_map(&self) -> BTreeMap<String, Value> {
         BTreeMap::from([
             ("orientation".to_string(), Value::Quad(self.orientation)),
@@ -136,11 +118,6 @@ impl CloudParams {
     }
 }
 
-/// `clouds.wgsl` 的**契约**（参数块的布局 + 贴图格）：反射一次，进程内共用。
-///
-/// 为什么现反射而不是读产物里那份 descriptor：探针跑的是**工作区里那份 shader 文本**
-/// （`assemble("clouds.wgsl")` 与渲染器装载时用的是同一份组装规则），
-/// 所以它要的正是「这份文本声明了什么」——那和装载时现反射的是同一个问题。
 pub fn layout() -> &'static MaterialLayout {
     static LAYOUT: OnceLock<MaterialLayout> = OnceLock::new();
     LAYOUT.get_or_init(|| {
@@ -150,7 +127,6 @@ pub fn layout() -> &'static MaterialLayout {
     })
 }
 
-/// 进 compute shader 的那块 uniform：**按契约打包**（不是按这份 Rust 结构体的字段顺序）。
 pub fn params_bytes(params: &CloudParams) -> Vec<u8> {
     layout().pack(&params.to_map()).unwrap_or_else(|err| {
         panic!(
@@ -160,8 +136,6 @@ pub fn params_bytes(params: &CloudParams) -> Vec<u8> {
     })
 }
 
-/// 镜像的**名字与类型**，顺序就是 WGSL 结构体的顺序。只给测试用：
-/// 它跟 [`layout`] 逐项比 —— 名字、顺序、类型三样都要对上。
 #[cfg(test)]
 const MIRROR: [(&str, ParamKind); 25] = [
     ("orientation", ParamKind::Vec4),
@@ -195,8 +169,6 @@ const MIRROR: [(&str, ParamKind); 25] = [
 mod tests {
     use super::*;
 
-    /// 镜像 = 契约：名字、顺序、类型逐项对上（§69 S2 那一格）。
-    /// 这条红的时候不要去改断言 —— 去改 `clouds.wgsl` 或这份结构体，让两边真的对上。
     #[test]
     fn the_mirror_matches_the_contract() {
         let layout = layout();
@@ -219,7 +191,6 @@ mod tests {
         );
     }
 
-    /// **漂移要当场红**：多给一个名字也一样（`pack` 两边都拒）。
     #[test]
     fn a_drifted_mirror_is_refused_loudly() {
         let mut map = CloudParams::new(CLOUD_BASE, CLOUD_TOP, 900.0).to_map();

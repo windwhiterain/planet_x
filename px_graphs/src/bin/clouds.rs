@@ -1,29 +1,15 @@
-//! 云：**普通 Rust** —— 一张场接一张场地算下去，每一步走 `px_cook::cached` 那个缓存函数。
-//!
-//! 与老写法（`node("field.fbm", "clusters", &[])`，字符串 id + 字节边界）的差别：
-//! * 参数类型、**输入个数**、输出域全是**编译期**的事（接错一个输入编不过）；
-//! * 参数是**普通 rust 值**：`node_params` 从 `art/clouds/<名>.toml` 读一份打底
-//!   （同一个 `field.fbm` 在别的图里叫别的名字，算子不该知道），想改哪个字段在 Rust 里改；
-//! * 键里多了算子的源码哈希 ⇒ 改算子体必然重算，不靠人记得升版本。
-
 use px_cook::{
     Domain, Graph, GraphSpec, begin, cached, field, field_params, mesh, node_params, volume,
 };
 use px_field_schema::field::cube_map_extent;
-// ⚠ element 那一档（`elem::Constant` / `elem::Mix` / `elem::Remap`）**不从 `px_cook` 那一扇门
-//   出去**：那一档的算子类型由图侧的生成物给（`px_graphs/build.rs` 写 `OUT_DIR/elem_gen.rs`），
-//   而 `px_cook` 是"各域算子表 + 缓存路径"那一扇门，两者不是一回事。
 use px_graphs::elem;
 use px_volume_schema::PATCHES;
 
 const FACE: u32 = 256;
 
-/// 图侧对错误的统一态度：**当场失败**，不静默跳过（§62 那条口径的同一面）。
-/// `cook_*` 回的是 `Result<_, String>`，`String` 天然能进 `Box<dyn Error>`。
 type Fault = Box<dyn std::error::Error>;
 
 fn main() -> Result<(), Fault> {
-    // ⚠ **第一行**：`--store <目录>` 要在任何 `begin` / `node_params` 之前落成 `PX_ART`。
     px_cook::apply_store_args()?;
     let (width, height) = cube_map_extent(FACE);
     let graph = begin(GraphSpec {
@@ -36,9 +22,6 @@ fn main() -> Result<(), Fault> {
         projection: Domain::CubeMap,
     };
 
-    // ── 场：七步，每一步都是「普通函数调用 + 隐式缓存」 ───────────────────────
-    // ⚠ 上游是**具名字段的普通 Rust 值**（`Unary1/2/3`），漏一个、接错域都是编译错。
-    // ⚠ 共享的上游（`mixed` 被 6 处用）克隆一次就好 —— `Cooked` 里是值，不是引用。
     let clusters = cached(
         &graph,
         "clusters",
@@ -138,7 +121,6 @@ fn main() -> Result<(), Fault> {
         },
     )?;
 
-    // ── 体积：粗场（包住真场）与含细节的真场，参数文件不同、算子同一个 ─────────
     let coarse = cached(
         &graph,
         "coarse",
@@ -245,8 +227,6 @@ fn report(
     }
 }
 
-/// 判据 2（包住）与 `L` 的量法：每次烘完都在真数据上跑一遍，包括全部命中那一次
-/// —— 断言的对象是**存下来的产物**，不是内存里刚算出来的东西。
 fn check(
     graph: &Graph,
     name: &str,
@@ -254,8 +234,6 @@ fn check(
     volume: &volume::VolumeOut,
     proxy: &px_cook::Cooked<px_mesh_schema::MeshData>,
 ) {
-    // ⚠ 参数走**同一条**读参数的路（`node_params`）：判据读的是**同一份 TOML**，
-    //   不是自己再抄一遍的数。
     let params = node_params(graph, name).unwrap_or_else(|err| panic!("读参数 {name} 失败：{err}"));
     let cloud = px_verify::proxy::from_volume(&params);
     let coverage = mixed.value();

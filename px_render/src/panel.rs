@@ -1,56 +1,19 @@
-//! **面板那一半**（S9）：把 [`crate::edit::ParamStore`] 画成控件，再接到 [`crate::cook`]。
-//!
-//! 它住在**交换链**上，不在判据那条路上 —— 这一条是硬约束，写在这里免得后来的人搬错：
-//!
-//! ```text
-//! render::Session::draw → 回读出来的字节 ─┬→ Present::upload → 交换链 ─→ 屏幕上那张
-//!                                        └→ shot::write_png（--shot）
-//! ```
-//!
-//! 面板画在**交换链那一格之后**（`Viewer::draw` 里 `queue.submit` 之后、`frame.present`
-//! 之前，同一个命令缓冲里的第二个 pass）。于是：
-//!
-//! * 面板**不可能**进 `--shot` 那张图 —— 屏幕上多了一块，图里没有；
-//! * `--image-hash`（判据那把尺子）也一个字都不动。
-//!
-//! `--view` 那条 S7 判据（"窗口 `--shot` 与离线同文档同机位**逐字节相同**"）因此
-//! **一个字都不用改**：面板是叠加，不是渲染。
-//!
-//! ## 输入的归属
-//!
-//! 鼠标/键盘**先给 egui**，它说"这一下我要了"（[`Panel::wants_pointer`]）相机就不动 ——
-//! 否则在面板上拖一下滑条，相机会跟着转（而人会以为"面板坏了"）。
-
 use egui_wgpu::{Renderer, RendererOptions, ScreenDescriptor, wgpu};
 
 use crate::cook::{self, Cook};
 use crate::edit::{Kind, ParamStore, Scalar};
 
-/// 面板 + 它的设备侧资源。
 pub struct Panel {
     ctx: egui::Context,
     state: egui_winit::State,
     renderer: Option<Renderer>,
-    /// 状态行与日志区（`cook.rs` 给的）。
     cook: Cook,
-    /// 编辑那一半（`None` = `--edit` 没给 / 开不起来，面板只说这件事）。
     editor: Option<ParamStore>,
-    /// `--edit` 那一格（`None` = 没给：面板只说"怎么开它"）。
-    ///
-    /// ⚠ 它只用来**显示**与"这一次要不要去开 store"：真正在用的配方取的是
-    ///   `store.recipe()`（面板开的哪一份就以那一份为准，没有第二个来源）。
     recipe: Option<String>,
-    /// 上一次要说给用户的那句话（烘完/保存/出错都从这里出）。
     notice: String,
-    /// 面板开着吗（`Tab` 切；关掉之后一个像素都不画）。
     open: bool,
 }
 
-/// 面板上的动作：**先收集、后执行**。
-///
-/// ⚠ 理由不是风格：控件的闭包借的是 `&ParamStore`（画那一半），而"改一个数"要 `&mut`
-///   并写盘。在闭包里就地改要同时持有两个借用 —— 于是 egui 那一侧会变成一堆
-///   `RefCell`/克隆。收集成一张动作表之后，两个阶段各自只持有一个借用。
 enum Action {
     Set {
         node: usize,
@@ -66,17 +29,12 @@ enum Action {
 }
 
 impl Panel {
-    /// 建面板。`recipe` 是 `--edit` 给的那一格（`None` = 面板只说"怎么开它"）。
-    ///
-    /// ⚠ 设备侧资源（[`Renderer`]）**这里不建**：它要 `&Device`，而窗口还没开
-    ///   （`Viewer::open` 才建设备）。见 [`Panel::ready`]。
     pub fn new(
         window: &winit::window::Window,
         recipe: Option<String>,
         editor: Option<ParamStore>,
     ) -> Panel {
         let ctx = egui::Context::default();
-        // 深色底：面板压着的画面还要看得见（这块面板的用处就是"看着画面调参"）。
         ctx.set_visuals(egui::Visuals::dark());
         install_cjk_font(&ctx);
         let state = egui_winit::State::new(
@@ -112,7 +70,6 @@ impl Panel {
         }
     }
 
-    /// 设备侧资源建一次（`Viewer::open` 建好设备之后调）。
     pub fn ready(&mut self, device: &wgpu::Device, format: wgpu::TextureFormat) {
         if self.renderer.is_some() {
             return;
@@ -123,8 +80,6 @@ impl Panel {
             device,
             format,
             RendererOptions {
-                // 面板与画面的多重采样档**故意不同**：面板走它自己的 pass（`load` 不清），
-                // 与画面那张纹理没有关系。
                 msaa_samples: 1,
                 depth_stencil_format: None,
                 ..RendererOptions::default()
@@ -132,32 +87,18 @@ impl Panel {
         ));
     }
 
-    /// 指针**归 egui** 吗（相机的拖拽按这个让路）。
-    ///
-    /// ⚠ 这是个**问句**（每次现问），不是一个记下来的标志：egui 自己那条口径是
-    ///   `egui_wants_pointer_input()` = "正在用指针（拖着滑条）"或"指针停在 egui 区域上
-    ///   而当前没有按下任何键" —— 两档都是"这一下不是给相机的"。
-    ///   记一个自己的布尔值会在"拖到面板外"那一瞬间与它漂开（而症状是相机突然跟着动）。
     pub fn wants_pointer(&self) -> bool {
         self.open && self.ctx.egui_wants_pointer_input()
     }
 
-    /// 面板开着的（`Tab` 切换；关掉之后输入全部归相机）。
     pub fn is_open(&self) -> bool {
         self.open
     }
 
-    /// `Tab`：收起 / 展开。
     pub fn toggle(&mut self) {
         self.open = !self.open;
     }
 
-    /// 窗口事件：**先给 egui**，它说"我要了"就当这一下没发生过（相机不动）。
-    ///
-    /// ⚠ 交回的是"egui 要了没有"，调用方按它**跳过自己那一支**（不是跳过整个事件 ——
-    ///   `RedrawRequested` / `Resized` 那些根本不进这里，见 `Viewer::window_event`）。
-    /// ⚠ 只把**交互**当"要了"（`consumed`）：`repaint` 那一格说的是"egui 要一帧"
-    ///   （指针一动它就会响），拿它当"要了"会把相机的事件一并吞掉。
     pub fn on_window_event(
         &mut self,
         window: &winit::window::Window,
@@ -166,20 +107,14 @@ impl Panel {
         self.state.on_window_event(window, event).consumed
     }
 
-    /// 每 tick 收一次烘图进度（**非阻塞**）；交回"场景产物换成了哪一份"。
     pub fn poll(&mut self) -> Option<cook::SceneUpdate> {
         self.cook.pump()
     }
 
-    /// 正在烘吗（窗口按这个决定要不要每 tick 要一帧：状态行上的计时在走）。
     pub fn busy(&self) -> bool {
         self.cook.busy()
     }
 
-    /// 画面板，并把它画进 `view`（交换链那一张）。
-    ///
-    /// ⚠ 顺序是硬的：`run` → `update_texture` → `update_buffers` → `render`，
-    ///   中间任何一步漏掉都是**静默**的空面板（egui 自己不会报）。
     pub fn paint(
         &mut self,
         window: &winit::window::Window,
@@ -193,14 +128,7 @@ impl Panel {
         if self.renderer.is_none() {
             return;
         }
-        // ---- ① 跑一遍界面（借 `self` 的全部字段）--------------------------------
-        //
-        // ⚠ 这一段与下面 ② 是**分开**的，理由是借用的形状：`run_ui` 的闭包要 `&mut self`，
-        //   而 `Renderer::update_buffers` 要 `&mut self.renderer` —— 两个 `&mut` 撞在一起。
-        //   拆成两段之后，② 里的 `self.renderer` 才能单独借出来。
         let input = self.state.take_egui_input(window);
-        // ⚠ 这里**解构** `self`：`run_ui` 要借 `ctx`，而闭包要 `&mut` 其余那几个字段 ——
-        //   不解构就是"同一个 `&mut self` 借两次"（E0500）。解构之后两处借的是**不同的字段**。
         let Panel {
             ctx,
             state,
@@ -224,7 +152,6 @@ impl Panel {
             pixels_per_point: full.pixels_per_point,
         };
 
-        // ---- ② 把这一批画到交换链上 -------------------------------------------
         let Some(renderer) = self.renderer.as_mut() else {
             return;
         };
@@ -238,8 +165,6 @@ impl Panel {
                 view,
                 depth_slice: None,
                 resolve_target: None,
-                // ⚠ `Load`（不是 `Clear`）：画面已经在这一张上，面板是**叠上去**的。
-                //   清掉就等于"打开面板时画面变黑"，而那正是本单元最不该有的观感。
                 ops: wgpu::Operations {
                     load: wgpu::LoadOp::Load,
                     store: wgpu::StoreOp::Store,
@@ -250,13 +175,7 @@ impl Panel {
             occlusion_query_set: None,
             multiview_mask: None,
         });
-        // ⚠ `forget_lifetime()` **拿走** `pass`（它把生命周期抹成 `'static`，因为
-        //   `Renderer::render` 要的就是那个形状）⇒ 之后不许再有 `drop(pass)`；
-        //   那个 `'static` 的 pass 在 `render` 返回时自己就落了。
         renderer.render(&mut pass.forget_lifetime(), &jobs, &descriptor);
-        // ⚠ `update_buffers` 交回的是**它自己的命令缓冲**（egui 在缓冲不够时会重新分配
-        //   并录一段拷贝）。不提交就等于面板画的是**上一次**的顶点 —— 症状是面板要么
-        //   空白、要么停在几帧之前，而没有任何一行会报错。
         queue.submit(user);
         for id in &full.textures_delta.free {
             renderer.free_texture(id);
@@ -264,11 +183,6 @@ impl Panel {
     }
 }
 
-/// **画界面要动的那几样**（`Panel` 里除设备侧资源之外的全部状态）。
-///
-/// ⚠ 它单独存在是**借用的形状**逼出来的，不是分层洁癖：`Context::run_ui` 要借 `ctx`，
-///   而画界面要 `&mut` 其余状态；把后者打包成一个值，两处借的才是不同的东西
-///   （否则 E0500：同一个 `&mut self` 借两次）。
 struct Render<'a> {
     cook: &'a mut Cook,
     editor: &'a mut Option<ParamStore>,
@@ -277,45 +191,17 @@ struct Render<'a> {
 }
 
 impl Render<'_> {
-    /// 面板的**内容**（唯一一处描述界面长什么样的地方）。
-    ///
-    /// ⚠ 两点是 egui 0.35 的形状，别按旧例子写：
-    ///   ① 入口是 `Context::run_ui`（交回一个根 `Ui`，不是 `Context`）⇒ 用 `show_inside`
-    ///      把面板挂到那个根上；
-    ///   ② 侧栏类型叫 **`Panel`**（`SidePanel` 这个名字在 0.35 已经没了 —— 左侧/右侧/
-    ///      顶栏/底栏合成同一个类型，方向由 `Panel::left` / `::right` 那一族给）。
     fn ui(&mut self, ui: &mut egui::Ui, root: &std::path::Path) {
         let mut actions: Vec<Action> = Vec::new();
-        // ⚠ **宽度要有上限，但不能太窄**。两处都实测踩过：
-        //   * 太宽（缺省 360 pt，而 960 物理像素 ÷ 缩放 1.75 = 549 逻辑点）⇒ 面板吃掉一多半；
-        //   * 太窄（按"可用宽度的 30%"算 ⇒ 164 pt，被 160 pt 的下限托住）⇒ 汉字成句地折行、
-        //     按钮挤到第二行（"重读"被切掉），日志区只剩一行半。
-        //   宽度**下限**才是这块面板的可用性天花板：这些标签是汉字（一个字≈14 pt），
-        //   而按钮一行要放三个。⇒ 下限 240 pt，上限取可用宽度的 44%（不超 460 pt）。
         let available = ui.available_width();
         let cap = (available * 0.44).clamp(260.0, 460.0);
         let default = (available * 0.38).clamp(240.0, 400.0);
         egui::Panel::left("px_edit")
             .resizable(true)
-            // ⚠⚠ **不要那一条分隔线**（`show_separator_line`）：它画在面板矩形**之外**
-            //   （实测：面板右边界 x=417 时它落在 x=418..419；x=314 时落在 315..316），
-            //   而那条位置正是**画面上**（面板之外）—— 于是成了一条**贯穿全高、宽 2 物理
-            //   像素的暗竖线**压着行星。用户报的就是它（离线渲染与 `--shot` 都干净，
-            //   因为那两条路读的是面板**之前**的那批字节）。
-            //   面板边界靠自己的底色（`Visuals::dark` 的面板色）已经分得清，不需要这条线。
             .show_separator_line(false)
             .default_size(default)
             .size_range(240.0..=cap)
-            // ⚠ `show_inside` 在 0.35 里已经**改名成 `show`**（签名的第二格就是 `&mut Ui`）
-            //   —— 用旧名字编译得过，但会带一条 `deprecated` 警告。
             .show(ui, |ui| {
-                // ⚠⚠ **把裁剪矩形钉在这块面板自己身上**：实测面板会把一部分图元画到
-                //   **自己的矩形之外**（960 宽那一档：面板右边界 180 pt，而一个 8 顶点的
-                //   矩形落在 198.6..200.2 pt）—— 那一条正好压在 3D 画面上，成了一条
-                //   **贯穿全高、宽 2 物理像素的暗竖线**（用户报的就是它；离线渲染与
-                //   `--shot` 那张判据图里都没有，因为它们是面板**之前**的那批字节）。
-                //   这不是"画家法的顺序"问题（面板画在画面之后，本来就该盖住），
-                //   而是**它盖到了自己没有权盖的地方**。⇒ 就在这里把裁剪收到面板的矩形。
                 ui.set_clip_rect(ui.max_rect());
                 self.header(ui);
                 self.toolbar(ui, &mut actions);
@@ -395,8 +281,6 @@ impl Render<'_> {
             );
             return;
         };
-        // ⚠ 借用分两段：这一段只**读** store 画控件，动作收集到 `actions` 里，
-        //   执行在 `Panel::ui` 的最后（那时才拿 `&mut`）。
         let mut last_graph = String::new();
         for (node_index, node) in store.nodes().iter().enumerate() {
             if node.graph != last_graph {
@@ -463,7 +347,6 @@ impl Render<'_> {
                                 })
                                 .inner
                             }
-                            // 类型与面板记的那一栏对不上：那是**内部**不一致，说出来。
                             _ => {
                                 ui.colored_label(
                                     egui::Color32::from_rgb(255, 160, 80),
@@ -517,7 +400,6 @@ impl Render<'_> {
             });
     }
 
-    /// 动作表那一半（**唯一一处改状态的地方**）。
     fn perform(&mut self, action: Action, root: &std::path::Path) {
         match action {
             Action::Set { node, field, value } => {
@@ -551,9 +433,6 @@ impl Render<'_> {
                 }
             }
             Action::Reload => {
-                // ⚠ 用的配方是**面板自己编辑的那一份**（`store.recipe()`），不是 `--edit`
-                //   那一格：`--edit` 没给时 store 也不存在，而 store 存在时两者本来就是同一个
-                //   —— 取 store 那一份，这两件事就没有"什么时候会不一致"这个格子。
                 let Some(recipe) = self.editor.as_ref().map(|store| store.recipe().to_string())
                 else {
                     *self.notice = "没有可重读的图（--edit 没给）".to_string();
@@ -561,8 +440,6 @@ impl Render<'_> {
                 };
                 match ParamStore::open(root, &recipe) {
                     Ok(store) => {
-                        // ⚠ 重读**不删副本**：会话里的改动还在副本上，重读只是把面板
-                        //   那一份从盘上再读一遍（"我在别的编辑器里改了副本"这条也要能看见）。
                         *self.notice =
                             format!("重读了会话副本（{}）", store.store_root().display());
                         *self.editor = Some(store);
@@ -591,8 +468,6 @@ impl Render<'_> {
                                 .collect::<Vec<_>>()
                                 .join(" / ")
                         );
-                        // 写回之后"原值"就变了（art/ 里那一份现在等于副本）⇒ 重读一次，
-                        // 否则面板会一直显示"改过"（而它已经是新的原始值了）。
                         if let Some(store) = self.editor.take() {
                             *self.editor = ParamStore::open(root, store.recipe()).ok();
                         }
@@ -605,10 +480,7 @@ impl Render<'_> {
                     *self.notice = "没有可烘的图（--edit 没给）".to_string();
                     return;
                 };
-                // ⚠ 烘的是**这份 store 对应的那份配方**（同上：不取 `--edit` 那一格）。
                 let recipe = store.recipe().to_string();
-                // ⚠ 烘的是**窗口正在读的那个 CAS 根**：读别处的话，面板报的键与窗口
-                //   载入的那一份可以不是同一个（"看着像生效了、其实没有"）。
                 let pcg_root = crate::art::default_pcg_root();
                 match cook::start(store, &recipe, &pcg_root) {
                     Ok(cook) => {
@@ -622,10 +494,6 @@ impl Render<'_> {
     }
 }
 
-/// 滑条的步长：区间的千分之一（够细，又不至于拖不动）。
-///
-/// ⚠ 这一步只是**手感**：滑条本身不夹取（`Slider` 的区间是提示，不是约束 ——
-///   人可以在它旁边的数字框里写任何值）。见 `edit::range_of` 那段。
 fn step_of(min: f64, max: f64) -> f64 {
     let span = (max - min).abs();
     if span <= 0.0 {
@@ -635,20 +503,6 @@ fn step_of(min: f64, max: f64) -> f64 {
     if step <= 0.0 { 0.0 } else { step }
 }
 
-// ---------------------------------------------------------------------------
-// 汉字显示：**默认字体里一个汉字都没有**
-// ---------------------------------------------------------------------------
-
-/// 面板的标签是中文（这个仓的文档与传统都是），而 `egui` 自带的那几份字体
-/// （Ubuntu-Light / Hack / 两份图标字体）**没有汉字** ⇒ 不挂一份中文字体的话，
-/// 面板上每一个汉字都渲成一个空方框（实测：整块面板全是 □，看着像"界面坏了"，
-/// 而控件其实是好的）。
-///
-/// ⚠ **从系统里取，不往仓库里塞**：一份中日韩字体 10–20 MB，而它只给这一块面板用。
-///   仓库里现有最大的东西也没有这个量级，而 `art/` 那一批作品的字节是要逐字节复现的
-///   ⇒ 十几 MB 的字体进 git 是把一件工具的事变成所有 checkout 的事。
-/// ⚠ 挂法是**追加**（不是替换）：拉丁字母仍走 egui 自带那两份（形状与 hinting 都更配），
-///   汉字落到这一份上。缺了它面板照旧能用（只是汉字变方框），所以找不到**不是**致命错误。
 fn install_cjk_font(ctx: &egui::Context) {
     let Some((path, bytes)) = load_a_cjk_font() else {
         eprintln!(
@@ -664,8 +518,6 @@ fn install_cjk_font(ctx: &egui::Context) {
         std::sync::Arc::new(egui::FontData::from_owned(bytes)),
     );
     for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
-        // ⚠ **追加到尾巴上**（不是插到最前）：字体是一串后备，先到先得 ⇒ 放在后面
-        //   只影响"前面那几份里没有的字形"，拉丁字母的观感一个字都不变。
         fonts
             .families
             .entry(family)
@@ -679,26 +531,17 @@ fn install_cjk_font(ctx: &egui::Context) {
     );
 }
 
-/// 常见的系统字体落点（Windows 在前，其次 macOS / Linux）。
-///
-/// ⚠ 顺序是**按"这份字体长得像不像界面字"**排的，不是按大小：雅黑是界面字，
-///   黑体/宋体在屏幕上偏重、偏细。
 const CJK_FONT_CANDIDATES: &[&str] = &[
-    "C:/Windows/Fonts/msyh.ttc", // 微软雅黑（Windows 中文默认界面字）
+    "C:/Windows/Fonts/msyh.ttc",
     "C:/Windows/Fonts/msyh.ttf",
-    "C:/Windows/Fonts/simhei.ttf",        // 黑体（老系统上通常也有）
-    "C:/Windows/Fonts/simsun.ttc",        // 宋体
-    "C:/Windows/Fonts/YuGothM.ttc",       // 日文（汉字覆盖够用）
-    "/System/Library/Fonts/PingFang.ttc", // macOS
+    "C:/Windows/Fonts/simhei.ttf",
+    "C:/Windows/Fonts/simsun.ttc",
+    "C:/Windows/Fonts/YuGothM.ttc",
+    "/System/Library/Fonts/PingFang.ttc",
     "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
     "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
 ];
 
-/// 从候选里挑**第一份真的能当字体用**的读进来。
-///
-/// ⚠ "存在"不等于"是字体"：`C:\Windows\Fonts` 下有人会放 0 字节的占位文件
-///   （本机实测有一份这样的 `msyh.ttf`），而 `FontData` 拿到垃圾字节是**后面某一次
-///   排版时才炸**（那时离病因已经很远）。⇒ 先看魔数，坏的就跳过、说一句，换下一份。
 fn load_a_cjk_font() -> Option<(String, Vec<u8>)> {
     for candidate in CJK_FONT_CANDIDATES {
         let path = std::path::Path::new(candidate);
@@ -720,10 +563,6 @@ fn load_a_cjk_font() -> Option<(String, Vec<u8>)> {
     None
 }
 
-/// 一份字节流像不像矢量字体：TrueType/OpenType 的**魔数**。
-///
-/// ⚠ `ttcf` 那一支是**字体集合**（`.ttc`，雅黑就是）：它里面装着好几个面，
-///   `FontData::index` 选第几个 —— 缺省 0，对雅黑就是"微软雅黑 Regular"。
 fn looks_like_a_font(bytes: &[u8]) -> bool {
     matches!(
         bytes.get(..4),

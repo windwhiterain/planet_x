@@ -1,59 +1,16 @@
-//! **统一稀疏 R3 格**（索引那一半）：世界坐标里的物质都存这里。
-//!
-//! ⚠⚠ 这一档存在的理由（用户 2026-09-25 拍的口径）：
-//!   *"一切物质都应该在世界坐标生成，球体坐标只应当用于储存/采样"* +
-//!   *"把这个作为统一的稀疏结构，星云也用这个"*。
-//!
-//!   旧那套把**方向**当存储轴（立方图 / 立方球体网格）：一个面上纹素角差 3 倍
-//!   ⇒ 世界空间里一个圆被存成椭圆、星图与天空面必须配对分辨率、六面接缝要单独补
-//!   —— 那些全是"用方向网格存点/存体"带来的。R3 格里没有面、没有极、没有斜度。
-//!
-//! ⚠ 三级，**固定分叉、固定深度、全扁平数组**（GPU 优先：没有指针、没有变长下探）：
-//!
-//! ```text
-//! chunk（块，每轴 CHUNK 个 brick）  稠密 CSR：chunk_start[块] → brick_slot 的区间
-//!   └ brick（每轴 BRICK 个细格）    块内**稠密**表：每个未空块 CHUNK_BRICKS 项，EMPTY = 整块空
-//!       └ 细格（cell）              BRICK³ 位掩码（u32 × MASK_WORDS）+ 占用细格的子 CSR
-//! ```
-//!
-//! **"空则子全空"**是这一档的核心规则：`chunk_start[c] == chunk_start[c + 1]`（空块）
-//! 或 `brick_slot[...] == EMPTY`（空 brick）⇒ 下面所有细格都不必看。查询于是是
-//! 一条**定长**的下行：块 → brick → 掩码位 → 子 CSR 区间。
-//!
-//! ⚠ 常数取 2 的幂（`BRICK = 8`、`CHUNK = 4`）⇒ 细格 → (块, brick, 局部) 的分解是
-//!   移位与掩码，不是除法；掩码正好 `BRICK³ / 32 = 16` 个 u32（WGSL 没有 64 位整数）。
-//!
-//! ⚠ **索引不带载荷**：`Grid` 只说"哪个细格里有东西、有几项、从第几项起"，
-//!   载荷（星表 / 体素 brick 样本）由调用方按 [`Buckets::order`] 自己排。
-//!   于是"点"与"体素"共用同一份索引与同一套遍历语义（GPU 侧那份 WGSL 也只写一遍）。
-
 use std::ops::Range;
 
-/// 每个 brick 每轴的细格数（掩码 = `BRICK³ = 512` 位 = `MASK_WORDS` 个 u32）。
 pub const BRICK: u32 = 8;
-/// 每个 chunk 每轴的 brick 数（块内 brick 表 = `CHUNK_BRICKS` 项）。
 pub const CHUNK: u32 = 4;
-/// 一个 chunk 每轴的细格数（`BRICK × CHUNK`）。
 pub const CHUNK_CELLS: u32 = BRICK * CHUNK;
-/// 掩码用几个 `u32`（`BRICK³ / 32`）。
-///
-/// ⚠ **用 `u32` 而不是 `u64`**：GPU 那一侧（WGSL）没有 64 位整数 ⇒ 掩码若按 u64 编进
-///   blob，还得再拆一次两半（"拆得对不对"是一条没人看得见的隐患）。这里直接按 32 位词存，
-///   两侧读法逐字相同。
 pub const MASK_WORDS: usize = (BRICK * BRICK * BRICK / 32) as usize;
-/// 块内 brick 表的项数。
 pub const CHUNK_BRICKS: usize = (CHUNK * CHUNK * CHUNK) as usize;
-/// "这一格/这一块是空的"。
 pub const EMPTY: u32 = u32::MAX;
 
-/// 格的空间参数（**进清单参数**，不进 blob —— 与 `VolumeData` 的 `inner/outer` 同一个口径）。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GridMeta {
-    /// 细格边长（世界单位）。
     pub cell: f32,
-    /// 格 `(0,0,0)` 的**近角**（世界坐标）。
     pub origin: [f32; 3],
-    /// 每轴的细格数（**是 `CHUNK_CELLS` 的整数倍**：块对齐是位移分解的前提）。
     pub dims: [u32; 3],
 }
 
@@ -75,7 +32,6 @@ impl GridMeta {
         self.dims[0] as usize * self.dims[1] as usize * self.dims[2] as usize
     }
 
-    /// 世界点 → 细格坐标（**不判界**；越界由调用方筛）。
     pub fn cell_of(&self, point: [f32; 3]) -> [i64; 3] {
         let mut out = [0_i64; 3];
         for axis in 0..3 {
@@ -89,12 +45,10 @@ impl GridMeta {
         (0..3).all(|axis| cell[axis] >= 0 && cell[axis] < self.dims[axis] as i64)
     }
 
-    /// 细格坐标 → 线性键（`x` 最快）。
     pub fn key_of(&self, cell: [i64; 3]) -> u32 {
         ((cell[2] as u32 * self.dims[1] + cell[1] as u32) * self.dims[0]) + cell[0] as u32
     }
 
-    /// 线性键 → 细格坐标。
     pub fn cell_of_key(&self, key: u32) -> [i64; 3] {
         let x = key % self.dims[0];
         let rest = key / self.dims[0];
@@ -103,10 +57,6 @@ impl GridMeta {
         [x as i64, y as i64, z as i64]
     }
 
-    /// 细格坐标 → `(块键, brick 的块内局部键, 细格在 brick 内的局部键)`。
-    ///
-    /// ⚠ 全是移位与掩码（常数是 2 的幂）：GPU 那一侧逐格调用，除法在这里是浪费。
-    ///   三个轴的权重都按 `x` 最快拼（`dims` 三轴可以不等）。
     pub fn decompose(&self, cell: [i64; 3]) -> (u32, u32, u32) {
         let dims = self.chunk_dims();
         let geometry = |axis: usize| -> (u32, u32, u32) {
@@ -122,7 +72,6 @@ impl GridMeta {
         (chunk, brick, local)
     }
 
-    /// [`Self::decompose`] 的逆（遍历与判据用）。
     pub fn compose(&self, chunk: [u32; 3], brick: [u32; 3], local: [u32; 3]) -> [i64; 3] {
         let mut out = [0_i64; 3];
         for axis in 0..3 {
@@ -147,42 +96,27 @@ impl GridMeta {
     }
 }
 
-/// **索引**：三级稀疏结构，不带载荷。
 #[derive(Debug, Clone, PartialEq)]
 pub struct Grid {
     pub meta: GridMeta,
-    /// 块的 CSR（长度 = 块数 + 1）：空块两端相等 ⇒ 整块一次判掉。
     pub chunk_start: Vec<u32>,
-    /// 每个**未空块**一块的稠密 brick 表（`CHUNK_BRICKS` 项）：局部 brick 键 → brick 下标。
     pub brick_slot: Vec<u32>,
-    /// 每个 brick 的细格占用掩码（`MASK_WORDS` 个 u32）。
     pub brick_mask: Vec<u32>,
-    /// 每个 brick 在 `sub_start` 里的起点。
     pub brick_sub: Vec<u32>,
-    /// 占用细格的子 CSR（全局拼接）：每个 brick 占"占用数 + 1"项。
     pub sub_start: Vec<u32>,
-    /// 载荷项数（= `sub_start` 的末项 = 每个细格的项数之和）。
     pub items: u32,
 }
 
-/// 造格的中间物：索引 + **载荷该按什么次序排**。
-///
-/// ⚠ 索引不认识载荷 ⇒ 造格只交出"第几项该放到第几位"，载荷由调用方自己搬。
-///   于是"点"与"体素"共用这一份（体素那一档的"项"就是砖块样本）。
 #[derive(Debug, Clone)]
 pub struct Buckets {
     pub grid: Grid,
-    /// 载荷的新次序：`order[新] = 旧`。
     pub order: Vec<u32>,
-    /// 每一项落在哪个 brick（按**新**次序；判据与探针用）。
     pub brick_of: Vec<u32>,
 }
 
-/// 一个 brick 在造格过程中的累积（只在这一档内部用）。
 struct BrickAcc {
     chunk: u32,
     local_brick: u32,
-    /// `(细格局部键, 项数)`，**按局部键升序**。
     cells: Vec<(u32, u32)>,
 }
 
@@ -197,16 +131,8 @@ impl BrickAcc {
 }
 
 impl Grid {
-    /// **从一批世界位置造格**（载荷项数 = `positions.len()`，每项一个位置）。
-    ///
-    /// ⚠ 排序是**确定性**的（细格键升序、同格内保持输入次序）⇒ 同一批位置永远同一个产物
-    ///   （"键 = 内容"那条地基）。
     pub fn build(meta: GridMeta, positions: &[[f32; 3]]) -> Result<Buckets, String> {
         meta.validate()?;
-        // ⚠⚠ 排序键必须是 **(块, brick, 细格)** 这个三元组，**不是**细格的线性键：
-        //   细格键按 (z, y, x) 扫，一行 x 扫过去要跨过一排 brick，换行之后 brick 键
-        //   又跳回去 ⇒ 同一个 brick 的项**不连续**（实测 224 个 brick 被切成 2387 段，
-        //   症状是"绝大多数字段只有一颗星、查询大批落空"）。
         let mut keyed: Vec<((u32, u32, u32), u32)> = Vec::with_capacity(positions.len());
         for (index, position) in positions.iter().enumerate() {
             let cell = meta.cell_of(*position);
@@ -247,7 +173,6 @@ impl Grid {
             brick_of.push(index as u32);
         }
 
-        // 块层：每个未空块一块稠密 brick 表（"空则子全空"靠块区间长度 0 一次判掉）。
         let dims = meta.chunk_dims();
         let chunks = meta.chunks();
         let mut chunk_start = vec![0_u32; chunks + 1];
@@ -271,7 +196,6 @@ impl Grid {
         chunk_start[chunks] = brick_slot.len() as u32;
         let _ = dims;
 
-        // 掩码 + 子 CSR。
         let mut brick_mask: Vec<u32> = Vec::with_capacity(bricks.len() * MASK_WORDS);
         let mut brick_sub: Vec<u32> = Vec::with_capacity(bricks.len());
         let mut sub_start: Vec<u32> = Vec::new();
@@ -302,30 +226,23 @@ impl Grid {
         })
     }
 
-    /// 每个轴上的细格数（方便调用方）。
     pub fn dims(&self) -> [u32; 3] {
         self.meta.dims
     }
 
-    /// brick 数。
     pub fn bricks(&self) -> usize {
         self.brick_sub.len()
     }
 
-    /// 占用细格数（有载荷的细格；一个细格可以有多个项）。
     pub fn occupied_cells(&self) -> usize {
         self.sub_start.len() - self.bricks()
     }
 
-    /// 一个 brick 的掩码那一段。
     fn mask_words(&self, brick: u32) -> &[u32] {
         let at = brick as usize * MASK_WORDS;
         &self.brick_mask[at..at + MASK_WORDS]
     }
 
-    /// 细格坐标 → brick 下标（空 / 越界回 `None`）。
-    ///
-    /// ⚠ 这一条就是"空则子全空"：块区间长度 0 ⇒ 整块跳过；局部表项 `EMPTY` ⇒ 整块跳过。
     pub fn brick_at(&self, cell: [i64; 3]) -> Option<u32> {
         if !self.meta.inside(cell) {
             return None;
@@ -340,7 +257,6 @@ impl Grid {
         (brick != EMPTY).then_some(brick)
     }
 
-    /// 一个 brick 里某个细格的载荷区间（该格为空回 `None`）。
     pub fn cell_range(&self, brick: u32, local: u32) -> Option<Range<usize>> {
         let words = self.mask_words(brick);
         let word = local as usize / 32;
@@ -354,7 +270,6 @@ impl Grid {
         Some(self.sub_start[at] as usize..self.sub_start[at + 1] as usize)
     }
 
-    /// 世界点所在细格的载荷区间（空 / 越界回 `None`）。
     pub fn range_at(&self, point: [f32; 3]) -> Option<Range<usize>> {
         let cell = self.meta.cell_of(point);
         let (_, _, local) = self.meta.decompose(cell);
@@ -362,10 +277,6 @@ impl Grid {
         self.cell_range(brick, local)
     }
 
-    /// 一个 brick 里**所有非空细格**（回调：细格局部键 + 载荷区间）。
-    ///
-    /// ⚠ 走的是掩码里**置位的那些位**（不是 512 个格子全扫）：这是掩码在这一档里最值钱的
-    ///   用法 —— 空细格一次都不进循环。
     pub fn for_each_occupied(&self, brick: u32, mut f: impl FnMut(u32, Range<usize>)) {
         for (word_index, word) in self.mask_words(brick).iter().enumerate() {
             let mut bits = *word;
@@ -381,10 +292,6 @@ impl Grid {
         }
     }
 
-    /// 一个 AABB 里**所有非空细格**（回调：细格坐标 + 载荷区间）。
-    ///
-    /// ⚠ 逐**细格**走（每格 `brick_at` 是定长下行、一次掩码位测试），不是逐 brick
-    ///   扫块内那张 64 项的表 —— 后者在"细格比块小得多"时白扫（锥形查询一帧要几万次）。
     pub fn for_each_cell_in(
         &self,
         low: [f32; 3],
@@ -411,7 +318,6 @@ impl Grid {
         }
     }
 
-    /// 判据用：遍历所有非空细格（回调：细格坐标 + 载荷区间）。
     pub fn for_each_cell(&self, f: impl FnMut([i64; 3], Range<usize>)) {
         let low = self.meta.origin;
         let high = [
@@ -422,7 +328,6 @@ impl Grid {
         self.for_each_cell_in(low, high, f);
     }
 
-    /// 往返自检（构造口的自检，与 `TextureData::new` / `VolumeData::samples` 同一个口径）。
     pub fn validate(&self) -> Result<(), String> {
         self.meta.validate()?;
         let chunks = self.meta.chunks();
@@ -455,8 +360,6 @@ impl Grid {
                 self.brick_mask.len()
             ));
         }
-        // 子 CSR 的项数由**掩码**算出来（不是由它自己）：
-        // 每个 brick 占 `占用细格数 + 1` 项 ⇒ 期望项数 = Σ(置位数) + brick 数。
         let occupied: usize = self
             .brick_mask
             .iter()

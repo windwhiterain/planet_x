@@ -5,22 +5,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::art::Camera;
 
-/// 场景描述的形状版本。它变了 ⇒ 旧场景产物不该再被当作同一份东西。
-///
-/// v2：从「行星配方」（part.kind = planet / clouds / atmosphere）改成**通用渲染文档** ——
-/// 物体表（几何 + 材质 + 变换）、光源表、相机表、环境。格式本身与渲染器都不认识
-/// 「行星 / 云 / 大气」：那些语义住在烘图侧的场景编译器里。
-///
-/// v3：物体的**阴影密度**（`Object::shadow_density`）。影子从"每盏投影灯一张固定
-/// 1024² cube"改成**虚拟影图**：密度决定虚拟面分辨率与页的分配，因此 v2 的产物
-/// **不该**再被当成同一份东西 —— 它里面没有那个数，而旧渲染器与它的默认值也已经不在了。
-/// ⚠ 这一栏是 `skip_serializing_if` 的，所以**老形状**（`--no-frame-graph` 那条逃生门产出的
-/// 六份冻产物）的字节仍然逐字节可复现；但那些产物 `schema` 是 2，读回来会在这条判据上被拒
-/// —— 那是**有意的**：逃生门判的是"字节还能不能被重现"，不是"旧产物还能不能被新渲染器读"。
 pub const SCENE_SCHEMA: u32 = 3;
 
-/// CAS 里一个内容键的落盘规则。烘图侧与渲染侧共用这一份 ——
-/// 两边各写一遍「键 → 路径」就是又一个「同一个键、不同内容」的入口。
 pub fn cas_path(root: &Path, key: &str) -> Result<PathBuf, String> {
     if key.len() != 64 || !key.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(format!("内容键应当是 64 位十六进制，实际是 '{key}'"));
@@ -32,8 +18,6 @@ pub fn cas_path(root: &Path, key: &str) -> Result<PathBuf, String> {
         .join(format!("{lower}.pxart")))
 }
 
-/// 场景对某个成员的引用：**图名 + 节点名 + 当时的键**。
-/// 名字给人看与报错，键给渲染器取产物（键 = 内容）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Member {
@@ -82,9 +66,6 @@ impl std::fmt::Display for Member {
     }
 }
 
-/// 材质参数的一个值。JSON 里就是 `0.35` / `"rocky"` / `[0.44,0.64,0.98]` / `[x,y,z,w]` 四种写法。
-/// **类型由 shader 决定**：渲染器把 `Num` 按 WGSL 结构体里那一格的类型打包
-/// （`f32` / `u32` / `i32`），把 `Triple` 打成 `vec3`、`Quad` 打成 `vec4`。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum Value {
@@ -94,83 +75,22 @@ pub enum Value {
     Quad([f32; 4]),
 }
 
-/// **立方体六面的基**：`[right, up2, axis]`，一行一面（§本轮的用户裁决）。
-///
-/// 它是"哪一面 / 面上的哪一点"这件事的**唯一一处定义**。以前这条契约有三份转写
-/// （渲染器的 `CUBE_MAP_FACES` / 烘图侧的 `face_uv` / 着色器的面选择），而**它们漂开了**：
-///
-/// - 渲染器：`0:+X 1:−X 2:+Y 3:−Y 4:−Z 5:+Z`
-/// - 烘图侧当时：`4:+Z 5:−Z`（与渲染器反），且 v 轴在六个面上不自洽（2/3 面一个符号、
-///   0/1/4/5 面另一个符号）
-/// - 着色器当时：教科书 OpenGL 那套（`+Z` 在 4 号），UV 轴还与烘图侧**转置**
-///
-/// 症状：影贴到别的面上、或整颗行星被判成"全在影里"（后者是因为查到的页里恒有更近的深度）。
-///
-/// ⚠ 这三条向量就是 `px_render::camera::CUBE_MAP_FACES` 那六条 `(target, up)` 经
-/// Bevy 的 `looking_at` 展开的结果：`back = −target`、`right = normalize(up × back)`、
-/// `up2 = back × right`。`px_render` 侧有一条判据把两者钉在一起（谁改了都不会静默漂开）。
-///
-/// ⚠ 一个方向 `d`（**从灯指向片元**）投到面 `i` 上：
-///
-/// ```text
-///   denom = dot(axis, d)              // > 0 才在这一面
-///   u = dot(right, d) / denom         // ∈ [−1, 1]，向右为正
-///   v = dot(up2,   d) / denom         // ∈ [−1, 1]，**向上**为正（与 NDC y 同向）
-///   face_side = atlas 的边长（texel）
-///   x_texel = (u * 0.5 + 0.5) * face_side
-///   y_texel = (0.5 - v * 0.5) * face_side     // ← **唯一的 y 翻转**：
-///                                             //   NDC y 向上、atlas 行号向下
-/// ```
 pub const SHADOW_FACE_BASIS: [[[f32; 3]; 3]; 6] = [
-    // 0:+X
     [[0.0, 0.0, 1.0], [0.0, 1.0, 0.0], [1.0, 0.0, 0.0]],
-    // 1:−X
     [[0.0, 0.0, -1.0], [0.0, 1.0, 0.0], [-1.0, 0.0, 0.0]],
-    // 2:+Y
     [[1.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, 1.0, 0.0]],
-    // 3:−Y
     [[1.0, 0.0, 0.0], [0.0, 0.0, -1.0], [0.0, -1.0, 0.0]],
-    // 4:−Z
     [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, -1.0]],
-    // 5:+Z
     [[-1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
 ];
 
-/// **虚拟影图**那一份：页表 + 那几张 atlas 的形状（§本轮）。
-///
-/// 排法（`px-scene/src/vshadow.rs` 的模块头是**同一份契约的另一处转写**）：
-///
-/// ```text
-/// 每一盏灯一段，段内：
-///   [0] virtual_size（低 16 位）| pages_per_side（高 16 位）
-///   [1] words_per_row
-///   [2] 每一面那一段的字数
-///   [3..] 面 0 的行段（每行：基址 1 字 + 掩码 words_per_row 字），接着面 1 …… 面 5
-/// ```
-///
-/// ⚠ 段长固定（`table_words_per_light`），所以"第几盏灯的段从哪开始"是乘法 ——
-/// 采样侧因此不需要在文档里查偏移。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ShadowPlan {
-    /// 页表本体（`u32` 的小端字节；空 = 一盏投影的灯都没有）。
     pub table: Vec<u8>,
-    /// **每一盏灯那一段从第几个字开始**（前缀和）。
-    ///
-    /// ⚠ 必须是数组而不是"段长 × 灯号"：段长 = `3 + 6 · pages_per_side · (1 + ⌈pps/32⌉)`
-    /// 是**跟着 `pages_per_side` 变的**，而那是每一盏灯自己的数 —— 今天所有灯相同，
-    /// 但把"相同"写进契约就是留一颗雷（将来真出现两盏密度不同的灯，影子会整体错位，
-    /// 而画面上只表现为"影贴歪了"）。采样侧因此只做一次查表。
     pub light_offsets: Vec<u32>,
-    /// atlas 的边长（texel）。
     pub atlas_side: u32,
-    /// atlas 的层数（= 投影灯数 × 6）。
     pub layers: u32,
-    /// **六面的基**，`[right, up2, axis]` × 6（18 条 `vec3`）。
-    ///
-    /// ⚠ 它落盘是**用户裁决**：这条契约以前有三份转写而且漂开了（见
-    /// [`SHADOW_FACE_BASIS`] 那段）。现在采样侧**只读它**、自己一个朝向都不猜 ——
-    /// 一份数据，物理上不可能再漂。
     pub faces: Vec<[f32; 3]>,
 }
 
@@ -190,9 +110,6 @@ fn value_kind(value: &Value) -> &'static str {
     }
 }
 
-/// 物体在**世界系**里的位置 / 旋转（四元数 xyzw）/ 缩放。
-/// 没有父子层级：产物给的就是最终变换 —— 层级是渲染器的事，而"谁挂在谁下面"
-/// 是内容，烘图侧比渲染器更清楚。
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Transform {
@@ -248,20 +165,6 @@ impl Transform {
     }
 }
 
-/// 几何：CAS 里的网格产物，或者一个**内建图元**。
-///
-/// 图元不是"行星"：球/环这种形状是任何渲染器都有的东西（`Sphere`、`Ring`），
-/// 而消融档（`orbit-soft-shell` 用一个细分球壳）要的正是"同一个球壳"。
-///
-/// ⚠ `bounding_radius`（§本轮加）：这份几何**以自身原点为中心**的包围球半径
-/// （局部系，还没乘物体的 `transform.scale`）。烘图侧从**网格顶点**（或图元的半径参数）
-/// 算出来填进去，因为**只有它拿得到网格产物** —— 虚拟影图的页分配要这个数
-/// （物体在灯看来张开多大的角），而分配是**烘图时**做的（`.pxart` 里就是一份
-/// 展开好的 pass 表）。
-///
-/// ⚠ 缺省 `None` 且 `skip_serializing_if`：老产物（六份冻形状）里没有这一栏，
-/// 加上它之后那些字节**仍然逐字节可复现**。`None` 的语义是"没量过" ——
-/// 要影的物体必须有它（没有就当场拒，不是按 0 算）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "source", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Geometry {
@@ -295,7 +198,6 @@ impl Geometry {
         }
     }
 
-    /// 量过的那一份（烘图侧填）。见 [`Geometry`] 那段。
     pub fn with_bounding_radius(mut self, radius: f32) -> Self {
         let slot = match &mut self {
             Self::Mesh {
@@ -328,7 +230,6 @@ impl Geometry {
     }
 }
 
-/// 贴图采样的地址模式。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Address {
@@ -338,7 +239,6 @@ pub enum Address {
     MirrorRepeat,
 }
 
-/// 过滤方式。线性 = 今天是全部贴图的默认。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Filter {
@@ -347,8 +247,6 @@ pub enum Filter {
     Nearest,
 }
 
-/// 采样器：**住在产物里**（"这张图该怎么采"跟图一起走）。
-/// 渲染器按它建 `Image` 自带的采样器 —— 图与采样器都从文档来，渲染器不猜。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Sampler {
@@ -358,7 +256,6 @@ pub struct Sampler {
     pub address_v: Address,
     #[serde(default)]
     pub filter: Filter,
-    /// 各向异性上限。0 = 不设（线性 mip 过滤）。
     #[serde(default)]
     pub anisotropy: u32,
 }
@@ -398,11 +295,6 @@ impl Sampler {
     }
 }
 
-/// 材质里的一张贴图：绑到材质绑定组的哪一格，用哪份产物，怎么采。
-///
-/// **绑定下标就是契约**：shader 得在那一格声明贴图，`+1` 那一格声明采样器。
-/// 渲染器按反射出来的声明校验维度（2D / cube）与产物是不是同一回事 —— 对不上当场报错。
-/// 哪几格能放贴图**只有一份来源**：`crate::material::TEXTURE_SLOTS`（§74.3 的契约收口）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TextureRef {
@@ -426,7 +318,6 @@ impl TextureRef {
     }
 }
 
-/// 混合档。云是 `Premultiplied`、大气是 `Add`、环是 `Blend`、其余是 `Opaque`。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AlphaMode {
@@ -437,7 +328,6 @@ pub enum AlphaMode {
     Add,
 }
 
-/// 三角形朝向。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CullMode {
@@ -447,12 +337,9 @@ pub enum CullMode {
     None,
 }
 
-/// 材质 = **一份 WGSL 产物 + 一袋按名字给的参数 + 按绑定下标给的贴图 + 两条渲染状态**。
-/// 渲染器不认识参数是什么意思：它把参数按 shader 自己声明的结构体打包（反射，见 `px_render::reflect`）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Material {
-    /// WGSL 产物（`kind = Shader`）。绑定布局由它自己声明。
     pub shader: Member,
     #[serde(default)]
     pub params: BTreeMap<String, Value>,
@@ -462,7 +349,6 @@ pub struct Material {
     pub alpha: AlphaMode,
     #[serde(default)]
     pub cull: CullMode,
-    /// 深度偏置（Bevy `Material::depth_bias` 的语义：深度纹理单位）。云壳压 −1 让它压在行星之后画。
     #[serde(default)]
     pub depth_bias: f32,
 }
@@ -511,31 +397,16 @@ impl Material {
     }
 }
 
-/// 场景里的一个物体。**没有 kind**：几何 + 材质 + 变换就是全部。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Object {
-    /// 实体身份。重建场景时按它配对，所以同一份场景里不许重名。
     pub id: String,
     pub geometry: Geometry,
     pub material: Material,
     #[serde(default)]
     pub transform: Transform,
-    /// 投不投阴影。云壳**不投**（它是一整颗球，进 shadow map 就是一颗球形硬影）。
     #[serde(default = "cast_shadow_default")]
     pub cast_shadow: bool,
-    /// 这个物体要求的最小**阴影密度**：每单位世界长度至少分到多少个影图 texel
-    /// （texel / 世界单位）。**它是烘图侧对分配器的要求，不是一条着色参数** ——
-    /// 0 = 这个物体不参与虚拟影图的分配。
-    ///
-    /// ⚠ 为什么要它，而不是把影图分辨率写成一个全局常数：全局常数把"要多少 texel"
-    /// 与**物体有多大**解耦了，于是分辨率只能按最坏情形给；而一个半径 0.093 的卫星
-    /// 与一个半径 1.75 的环要的 texel 数差一个量级。密度是"每单位长度"的量，
-    /// 乘上物体半径才是"它需要多少 texel"（`2·R·ρ`），**与光源多远无关** ——
-    /// 这正是旧的全局 1024² cube 做不到的那件事（太阳拉远 ⇒ texel 的世界尺寸按比例变大）。
-    ///
-    /// ⚠ 缺省 **0**，而且 `skip_serializing_if` 一起给：六份冻产物（那几份已退休的冻产物（`docs/anchors.md`））
-    /// 里没有这一栏，加上它以后那些字节**仍然逐字节可复现**（逃生门那条判据）。
     #[serde(default, skip_serializing_if = "is_zero_f32")]
     pub shadow_density: f32,
 }
@@ -548,8 +419,6 @@ fn cast_shadow_default() -> bool {
     true
 }
 
-/// 光源种类。今天只有点光源在用（宇宙里没有平行光，§64.9），另外两种是通用渲染该有的：
-/// 用不用由产物说了算。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LightKind {
@@ -558,8 +427,6 @@ pub enum LightKind {
     Directional,
 }
 
-/// 一盏灯。位置 / 方向 / 颜色 / 强度 / 开不开影全部来自产物 —— 渲染器里没有
-/// `SUN_DIRECTION` 这种常量（§60）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Light {
@@ -567,21 +434,11 @@ pub struct Light {
     pub kind: LightKind,
     #[serde(default)]
     pub position: [f32; 3],
-    /// 聚光与平行光用。点光源忽略。
     #[serde(default = "forward")]
     pub direction: [f32; 3],
     #[serde(default = "white")]
     pub color: [f32; 3],
-    /// Bevy 的语义：点/聚光 = 流明（内部除以 4π），平行光 = 勒克斯。
     pub intensity: f32,
-    /// 点/聚光的射程（米）。`None` = 用**渲染器策略**里那一个缺省：oracle 是
-    /// `light.range.unwrap_or_else(|| PointLight::default().range)`（`px_render/src/scene.rs:233`）
-    /// = **20.0**（`bevy_light-0.19.1/src/point_light.rs:133`）。
-    ///
-    /// ⚠ 这里原来写的是"缺省 = 按强度反推（`range = √(intensity/最小照度)`）"—— **那是错的**：
-    /// oracle 从来没算过那个式子，照它实现出来的射程会与锚图差一大截（而画面上只表现为
-    /// "衰减快慢不对"）。口径以 oracle 的行为为准，分岔记在这里，免得下一个人照着旧注释
-    /// 自信地实现另一条规则。
     #[serde(default)]
     pub range: Option<f32>,
     #[serde(default)]
@@ -627,8 +484,6 @@ impl Light {
     }
 }
 
-/// 环境：环境光强度 + 天空盒（cube 贴图产物）。天空盒是**内容**：
-/// 有没有星空、星空长什么样由产物说了算，渲染器只负责把它挂到相机上。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Environment {
@@ -636,7 +491,6 @@ pub struct Environment {
     pub ambient: f32,
     #[serde(default)]
     pub skybox: Option<Member>,
-    /// 天空盒的亮度倍率（Bevy `Skybox.brightness`）。缺省 = 900（加这条之前的常量）。
     #[serde(default = "skybox_brightness_default")]
     pub skybox_brightness: f32,
 }
@@ -645,8 +499,6 @@ fn skybox_brightness_default() -> f32 {
     900.0
 }
 
-/// 手写而不是 derive：`skybox_brightness` 的缺省必须是 900 而不是 0
-/// —— 否则「JSON 里没写」与「Rust 里 Default::default()」会给出两个不同的环境。
 impl Default for Environment {
     fn default() -> Self {
         Self {
@@ -659,19 +511,12 @@ impl Default for Environment {
 
 pub const VIEW_BUILTIN: &str = "view";
 
-/// pass 表要读写的中间目标（`resources` 那一节）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PassResource {
     pub name: String,
     pub format: String,
     pub size: String,
-    /// **层数**（数组层 / cube 的面数）。缺省 = 1（普通的单层 2D 图）。
-    ///
-    /// ⚠ 文档里带的是**解出来的那个整数**，不是规则：规则（"每盏投影的点光一个 cube"）
-    /// 住在帧图配方里，由**烘图侧**按这一帧的场景解出来（§133 同一条口径：
-    /// 文档自描述、宿主不认识规则）。所以宿主只需要会数层，不需要会算层。
-    /// 缺省不落盘 ⇒ 没有分层资源的老文档逐字节不变。
     #[serde(default = "one_layer", skip_serializing_if = "is_one_layer")]
     pub layers: u32,
     #[serde(default)]
@@ -690,45 +535,20 @@ fn fragment_entry() -> String {
     "fs_main".to_string()
 }
 
-/// 一笔 draw：**按名字**说"用哪份几何、哪份材质"（§125 的帧图）。
-///
-/// 名字是内容（"planet" / "icosphere"），不是渲染器的概念：执行器（`px_pass`）不认识它们，
-/// 只把名字原样交给宿主去解析成 GPU 句柄。这里放名字、不放句柄 —— 句柄是运行期的东西，
-/// 而这一份文档是要烘进产物的。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DrawSpec {
     pub geometry: String,
-    /// 材质名。**空 = 没有材质**：这一笔只有顶点阶段（深度-only 的那一笔就是这样）。
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub material: String,
 }
 
-/// **帧自有**的材质（§135）：名字 + 内联 WGSL 全文 + 片元入口 + 参数。
-///
-/// 为什么它既不在 CAS 里、也不在 `objects` 里：内容材质是**产物**（`.pxart` 里指一个成员键，
-/// 可换、可热重载），而帧材质是**这颗渲染器自己的一部分** —— 天空盒那支 WGSL 必须与 oracle
-/// 逐位对齐，它不是可以换掉的内容。所以它**内联全文**进文档：读这份产物不需要再去 CAS 里找它，
-/// 也不会有人以为它能换（`art/frame/skybox.wgsl` 里那句"它不进 CAS"就是这条）。
-///
-/// ⚠ **改 `art/frame/**` 下任何一份 WGSL 都要重烘**：文档里存的是**当时的文本**，
-/// 不是指向文件的引用。⚠ 而且"图没变"**不等于**"改动没生效" —— 这一条付过代价：
-/// 一次交接写着"新加的 art 文件还没被任何东西读到 ⇒ 不影响产物键"，而那一份顶点 WGSL
-/// 正是被内联进文档的（§131.2）。产物键会动，图可能一个像素都不动。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FrameMaterial {
-    /// 名字：一条 draw 的 `material` 按它解析（今天只有 `skybox` 一个）。
     pub name: String,
-    /// 内联的 WGSL 全文（**组装前**的原文：`#import` 与 `#{MATERIAL_BIND_GROUP}` 由宿主组装）。
     pub shader: String,
-    /// 片元入口名（几何 pass 的顶点阶段是另一栏，属于 pass）。
     pub entry: String,
-    /// 参数：按名字给的**值**，烘图时按这份 WGSL 反射出来的结构体打包（与材质同一条路）。
-    ///
-    /// ⚠ 帧配方的 `[[materials]]` 里写的是参数的**来源**（`environment.skybox_brightness`），
-    /// 到这里已经变成值 —— 亮度这类**内容值只有一处真源**（`environment`），
-    /// 帧配方里写死一个数就是 §133 那颗雷（"六份场景今天恰好都是 900"）。
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub params: BTreeMap<String, Value>,
 }
@@ -737,10 +557,6 @@ pub struct FrameMaterial {
 #[serde(deny_unknown_fields)]
 pub struct PassSpec {
     pub kind: String,
-    /// 片元阶段的 shader 成员。**`None` = 这条 pass 没有 pass 级片元阶段**：
-    /// 几何 pass 的片元阶段**属于材质**（每个物体一支，§129），所以它这一栏必须是空的 ——
-    /// 编一个占位成员会在文档里留下一个假引用，还会污染成员表与闭包对账。
-    /// 全屏 pass 则**必须**有（那条 pass 就是它自己那支后处理）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shader: Option<Member>,
     #[serde(default)]
@@ -750,79 +566,29 @@ pub struct PassSpec {
     #[serde(default)]
     pub reads: Vec<String>,
     pub writes: Vec<String>,
-    /// 给这份 pass shader 的参数：**按名字**给，按它自己声明的结构体打包。
-    ///
-    /// 与材质走的是同一条路（`px_protocol::material::MaterialLayout::pack`），
-    /// 判据也一样是三档当场报错（缺参 / 多参 / 类型不符）。
-    /// 空表不落盘 ⇒ 没有参数的老文档逐字节不变。
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub params: BTreeMap<String, Value>,
-    // ---- 下面四栏是 §125（帧图写进产物）加的，**全是纯加法**：----------------
-    //
-    // 一条老形状的 pass 一个都不写，于是它的 JSON 一个字节都不变
-    // （判据在 `the_frozen_originals_round_trip_byte_for_byte`：六份冻结产物读→写逐字节相同）。
-    // ⚠ 顺序也在这条判据里：新字段一律**追加在末尾**，插在中间会改老文档的键序。
-    /// 这一笔 pass 画什么：几何名 + 材质名。空 = 全屏 pass（顶点由执行器自备）。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub draws: Vec<DrawSpec>,
-    /// 几何 pass 的**顶点阶段**：WGSL 全文 + 入口名。空 = 全屏 pass。
-    ///
-    /// 为什么是**全文**而不是 `Member`：内容 shader 是纯片元的（没有 `@vertex`），
-    /// 顶点变换是宿主与 Bevy 逐位对齐的那一段，由烘图侧**内联**进文档 ——
-    /// 它不是 CAS 里的一份资产，放不下 `Member` 那张"图/节点/内容键"的表。
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub vertex_shader: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub vertex_entry: String,
-    /// 附件与固定功能状态，**文本**：
-    /// `color=clear(0,0,0,0)|depth=none|depth_write=true|compare=greater_equal|winding=ccw`。
-    /// ⚠ **没有 `cull`**：剔除属于材质（§127），不在这一串里。
-    ///
-    /// ⚠ 这里**不解析、也不重写那套规则**：解析器只有一份，住在 `px_pass`
-    /// （`RenderState::parse` / `name`）。协议把它当**不透明文本**带过去 ——
-    /// 两处各写一份解析就是"同一份契约、两个数"，而那种漂移只在出图那一刻才露头。
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub render: String,
-    /// 深度附件用哪张图：`resources` 里的一个名字，或者宿主这一帧给的外部目标。
-    /// 与 `render` 文本里的 `depth=` 成对出现，配对规则同样由 `px_pass` 判。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub depth_target: Option<String>,
-    /// 这一条 pass 写**点光 cube 影子的哪一面**（§109：每面一条单层 pass）。
-    ///
-    /// ⚠ 三格**必须一起来**（`light` / `face` / `layer` 同在一个结构体里）：只给其中两格
-    /// 是一句说不清的话，而"两格凑一格"这种状态在类型上就不该存在。
-    /// ⚠ `layer` 是**说出来让人对账的**，不是唯一的真本：`light` 与 `face` 已经确定了它
-    /// （`layer = light × 6 + face`），而那条算式由**宿主**当场核对 —— 于是这个数是一条
-    /// **验证过的**事实。反过来说，只给 `layer` 会逼宿主自己发明一条"层号怎么排"的规则，
-    /// 而那正是 §109.2 那个 1 ulp 风险旁边的东西。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cube_face: Option<PassCubeFace>,
-    /// 这一条 pass 落在**它自己附件**里的哪一块：`[x, y, 宽, 高]`（texel）。
-    ///
-    /// 虚拟影图（§本轮）用它把**一页**画进 atlas 的一格：atlas 是每面一层、
-    /// 层里一格一格，而一页要用**它自己那一小块**的缩放投影 —— 执行器没有
-    /// per-draw 的 viewport，所以"一格一页"落在"一条 pass 一格 viewport"上。
-    ///
-    /// ⚠ 与"这一帧落在宿主目标里的哪一格"（`Frame::viewport`，多相机那一档）**是两件事**：
-    /// 这一栏说的是**附件内部**的落点，与多相机没有关系。
-    /// 缺省不落盘 ⇒ 老文档逐字节不变。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub viewport: Option<[f32; 4]>,
 }
 
-/// 一条 pass 的**点光 cube 面**：写第 `light` 个 cube 的第 `face` 面，落在第 `layer` 层。
-///
-/// `light` 是 **cube 的下标**（= 内容 shader 里那个 `light_id`，也是聚类缓冲里的下标）。
-/// 它等于"文档 `lights` 里第几盏**投影的点光**"（按文档次序）—— 因为宿主那一步排序
-/// （`lights_of`：开影子的在前、同档稳定）把投影的那些灯**原样**排在最前面，
-/// 所以第 m 盏投影点光的聚类下标恒为 m。⚠ 这一条不依赖那个**不可实测**的 entity 次序。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PassCubeFace {
     pub light: u32,
-    /// 0..5，次序与 `bevy_camera` 的 `CUBE_MAP_FACES` 一致（+X −X +Y −Y +Z −Z，§109.2）。
     pub face: u32,
-    /// 那份 cube array 里的层号：`light × 6 + face`。
     pub layer: u32,
 }
 
@@ -835,9 +601,6 @@ impl PassSpec {
         if !self.label.is_empty() {
             return self.label.clone();
         }
-        // 没给标签时的兜底名字：拿它自己那支 shader 的图/节点。
-        // ⚠ 几何 pass 没有 pass 级 shader（片元阶段属于材质）⇒ 退回 kind，
-        //    免得文档里出现一个空名字（那种"报错里认不出是哪条 pass"的坑）。
         match &self.shader {
             Some(shader) => format!("{index}:{}/{}", shader.graph, shader.node),
             None => format!("{index}:{}", self.kind),
@@ -845,8 +608,6 @@ impl PassSpec {
     }
 }
 
-/// 一般渲染文档：环境 + 相机表 + 灯表 + 物体表 + pass 表。
-/// 渲染器只吃这一份，不再从命令行接收内容。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SceneSpec {
@@ -854,63 +615,25 @@ pub struct SceneSpec {
     pub name: String,
     #[serde(default)]
     pub environment: Environment,
-    /// 评审相机表（`--sheet` 用）。空 = 走 `--cam`。
     #[serde(default)]
     pub cameras: Vec<Camera>,
-    /// 内容自己声明的**期望标签**。渲染器不认识这些字符串，只把它们逐字交给报告：
-    /// 出图判据里那条「这一档该看见云」（`ShotReport.declared_clouds`）就是问标签里有没有
-    /// `clouds`。这样"该看见什么"仍然由内容说，而不是渲染器猜 —— 猜的那一天它就又认识行星了。
     #[serde(default)]
     pub expects: Vec<String>,
-    /// pass 表要读写的中间目标。一个资源在这里声明一次，pass 按名字引用。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub resources: Vec<PassResource>,
-    /// pass 表：**数组顺序就是执行顺序**。空表 = 只有主 pass，与没有这一节时逐字节相同。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub passes: Vec<PassSpec>,
     #[serde(default)]
     pub lights: Vec<Light>,
-    /// **虚拟影图的页表**（§本轮）：页 → 物理槽位的映射，由**烘图侧**算出来落在这里。
-    ///
-    /// ⚠ 为什么在文档里而不是渲染器算：分页是"物体包围球 × `shadow_density` × 灯位"的函数
-    /// （`px-scene/src/vshadow.rs`），**只有烘图侧同时有这三样**。渲染器拿到的是结果 ——
-    /// 它不认识"密度"，只认识"这一页在第几格"。
-    ///
-    /// ⚠ 空表不落盘 ⇒ 没影子的场景（与六份冻产物）**逐字节不变**。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shadow: Option<ShadowPlan>,
     pub objects: Vec<Object>,
-    /// **帧自有**的材质（§135）：天空盒那种"属于这颗渲染器、不是可换内容"的材质。
-    /// 名字由 `draws[].material` 引用；全文内联，因为改它要重烘（见 [`FrameMaterial`]）。
-    ///
-    /// ⚠ 空表不落盘 ⇒ 六份冻产物与 `--no-frame-graph` 那条逃生门**逐字节不变**
-    /// （判据在 `the_frozen_originals_round_trip_byte_for_byte`）。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub frame_materials: Vec<FrameMaterial>,
-    /// **生成出来的材质实例**（§139 的用户裁决）：又一份材质，内容照 `base` 那一份，
-    /// 只是**另起一个名字**。
-    ///
-    /// 为什么需要它：一条 pass 引用一个材质名，而一条材质名在宿主那儿恰好解析出**一套组**
-    /// （组号 + 句柄 + 布局）。点光 cube 影子要六面，每面一套组（§148 之后是那一面的 `PassView`）⇒ 六面各要
-    /// **各自的名字**。名字由烘图侧**生成**（人写的那一层仍然只有一份意图 + "影子要六面"），
-    /// 而 `.pxart` 本来就是生成出来的指令流 —— "给一份不同的绑定状态起个名字"在指令流里
-    /// 不是范畴错误。
-    ///
-    /// ⚠ 为什么是**引用**（`base`）而不是把材质描述抄一遍：抄一遍会在文档里多出六份
-    /// 一模一样的 shader/参数/贴图表，而**抄不动的部分**（几何）还得跟着抄 ——
-    /// `objects[]` 一条就是"几何 + 材质"，宿主按物体装载网格，六份副本就是六次网格解码
-    /// 与六份上传。引用则一分不多：名字是新的，材质还是那一份。
-    ///
-    /// ⚠ 「这一面的 view 是哪一面」**不在这里**：它由**用到这个名字的那条 pass** 说
-    /// （`PassSpec::cube_face`）—— 同一个事实只有一处（§66.1），而宿主当场判
-    /// "一个名字只能被一条带 cube_face 的 pass 用"（两处用、面不同 ⇒ 歧义 ⇒ 拒）。
-    /// 空表不落盘 ⇒ 没有影子实例的文档逐字节不变。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub material_instances: Vec<MaterialInstance>,
 }
 
-/// 一份**生成的材质实例**：`name` 是它的名字（`draws[].material` 引它），
-/// `base` 是它的来源（某个物体的 id，或者一份帧自有材质的名字）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MaterialInstance {
@@ -923,7 +646,6 @@ impl SceneSpec {
         self.objects.iter().find(|object| object.id == id)
     }
 
-    /// 文档引用的全部成员（物体几何 / 材质 shader / 贴图 / 天空盒）。
     pub fn members(&self) -> Vec<&Member> {
         let mut out: Vec<&Member> = Vec::new();
         for object in &self.objects {
@@ -969,10 +691,6 @@ impl SceneSpec {
                 return Err(format!("物体 id 重了：'{}'", object.id));
             }
             seen.push(&object.id);
-            // 阴影密度：0 = 不参与虚拟影图的分配；正数 = 每单位世界长度要多少 texel。
-            // ⚠ 负数与 NaN 在这里拒，而不是留给分配器去"处理"：分配器拿它当页数算，
-            //   一个负密度会算出负的页数，而那种数在画面上表现为"这个物体没有影"——
-            //   一个说得通的画面配一条错的输入，正是这个工程最想避免的那种故障。
             if !object.shadow_density.is_finite() || object.shadow_density < 0.0 {
                 return Err(format!(
                     "物体 '{}' 的阴影密度是 {}：它要么是 0（不参与虚拟影图的分配），\
@@ -993,9 +711,6 @@ impl SceneSpec {
                 ));
             }
             for (role, texture) in &object.material.textures {
-                // 格号是不是合法的**只有一份**判据：契约表（`crate::material::TEXTURE_SLOTS`）。
-                // 这一段原来自己写「奇数格、≥1」——那是那张表的半份手抄（§67.4 第 4 处）：
-                // 表加宽之后（§74.4 裁决 (a)：4 格 → 12 格），半份抄本会开始拒合法的格。
                 if crate::material::texture_slot_of(texture.binding).is_none() {
                     return Err(format!(
                         "物体 '{}' 的贴图 '{role}' 绑在第 {} 格：材质只认 {} 这几格（采样器占下一格）",
@@ -1056,13 +771,6 @@ impl SceneSpec {
             let label = pass.label_or(index);
             let at = format!("第 {index} 条 pass '{label}'");
             match pass.kind.as_str() {
-                // ⚠ 这里只列**文档认得的类型名**；"这一档执行器会不会画"是另一件事，
-                // 由执行器自己判（`px_pass::Plan::check`：compute 它当场拒）。
-                //
-                // `copy` 是一条**搬运**（§131）：`reads[0]` → `writes[0]`，不建管线、不挂附件。
-                // 它为什么存在、形状上还要满足什么，由 `px_pass::Plan::check` 一条条判 ——
-                // 这里只负责让这个名字**是文档里写得出来的**（白名单少一个词，
-                // 批准的机制就根本不存在）。
                 "fullscreen" | "geometry" | "copy" | "compute" => {}
                 other => {
                     return Err(format!(
@@ -1070,8 +778,6 @@ impl SceneSpec {
                     ));
                 }
             }
-            // 片元阶段归谁：**全屏在 pass 上，几何在材质上**（§129）。
-            // 这条是文档级的形状判据；执行器那侧 `px_pass::Plan::check` 说的是同一件事。
             match (&pass.shader, pass.kind.as_str()) {
                 (None, "fullscreen") => {
                     return Err(format!(
@@ -1095,18 +801,8 @@ impl SceneSpec {
                 return Err(format!("{at} 没给入口点名字（@fragment 那个函数叫什么）"));
             }
             if pass.writes.is_empty() {
-                // ⚠ 几何那一档**允许空**：深度-only 的那条 pass 不写颜色
-                // （`render` 文本里 `color=none`）。它成不成立由执行器判 ——
-                // "挂了颜色却没写目标"那条判据住在 `px_pass`，因为只有它会去解析那串文本。
-                // ⚠ copy 那一档**必须写一个**：一次搬运没有目标就是空转
-                //（它连"画"都不是，没有"没人看得见"这回事，是**没搬**）。
                 match pass.kind.as_str() {
                     "geometry" => {}
-                    // ⚠⚠ **fullscreen 也允许空**（用户裁决「全屏 pass 也要支持 import」的后续）：
-                    //    金字塔降采样那条全屏 pass 写的是 `@builtin(frag_depth)`
-                    //    （`render` 里 `frag_depth=true`），没有颜色目标 ⇒ `writes` 天然空。
-                    //    它成不成立仍由执行器判 ——「挂了颜色却没写目标」那条判据住在
-                    //    `px_pass`（只有它会去解析那串 `render` 文本）。
                     "fullscreen" => {}
                     "copy" => {
                         return Err(format!(
@@ -1133,12 +829,6 @@ impl SceneSpec {
                 return Err(format!("pass 标签重了：'{label}'"));
             }
             labelled.push(label);
-            // 点光 cube 的那一面（§109：六面各一条单层 pass）。
-            //
-            // ⚠ 三处各管一件事，一件都不许抄成两处（§66.1）：
-            //    · **这里**判"文档自己说得通"：面号在 0..5 里、而且它得有个去处；
-            //    · **宿主**判那条算式 `layer = light × 6 + face`（只有它知道 cube 怎么排）；
-            //    · **`px_pass::Plan::check`** 判"那一层在不在那份资源里"。
             if let Some(cube) = &pass.cube_face {
                 if cube.face >= 6 {
                     return Err(format!(
@@ -1185,12 +875,6 @@ impl SceneSpec {
             ));
         }
 
-        // ---- 帧自有材质（§135）--------------------------------------------------
-        //
-        // ⚠ 一条 draw 的 `material` 只有两个可能的出处：**物体 id**（内容材质 ——
-        //    `px_scene::frame::draws_of` 就是拿物体 id 当材质名的）与**帧自有材质**。
-        //    两边撞名 ⇒ 宿主解析时"同一个名字在两张表里"，而它只能猜一个：画面错、没人报错。
-        //    所以撞名在这里就拒，并把**两处**都列出来。
         let mut frame_names: Vec<&str> = Vec::new();
         for (index, material) in self.frame_materials.iter().enumerate() {
             if material.name.trim().is_empty() {
@@ -1228,11 +912,6 @@ impl SceneSpec {
             }
             frame_names.push(&material.name);
         }
-        // ---- 生成的材质实例（§139）--------------------------------------------
-        //
-        // ⚠ 这一节是**生成物**：不要手写它，也不要为它做去重（"六份名字其实一套组，
-        //    合成一份吧"）—— 那会把形状打回"一个名字两套组"，也就是需要给执行器
-        //    加优先级规则的那种形状（而那条路已经被用户裁决否掉了）。
         let mut instance_names: Vec<&str> = Vec::new();
         for (index, instance) in self.material_instances.iter().enumerate() {
             let at = format!("第 {index} 份材质实例");
@@ -1241,8 +920,6 @@ impl SceneSpec {
                     "{at} 没给名字：`draws[].material` 是按名字引用它的"
                 ));
             }
-            // 三张表共用一个名字空间：宿主那边材质是**按名字**查的一张平表，
-            // 同一个名字在两处有真本就是歧义（它只能猜一个：画面错、没人报错）。
             if self.objects.iter().any(|object| object.id == instance.name)
                 || frame_names.contains(&instance.name.as_str())
                 || instance_names.contains(&instance.name.as_str())
@@ -1264,8 +941,6 @@ impl SceneSpec {
             }
             instance_names.push(&instance.name);
         }
-        // 一笔 draw 的材质名必须落在**那两张表**之一。⚠ 几何名这里查不了：
-        // 文档里没有几何表（图元与网格由宿主按名字解析），所以这条只管材质。
         for (index, pass) in self.passes.iter().enumerate() {
             let label = pass.label_or(index);
             for draw in &pass.draws {
@@ -1306,9 +981,6 @@ impl SceneSpec {
                 ));
             }
         }
-        // 声明了却没人用：与 `params` / `slots` / `reads` / `shader` 同一条规则
-        // （§129 拿它拒"几何 pass 带片元阶段"）。一个没人引用的帧材质在文档里就是个假引用：
-        // 它多半意味着名字写错了 —— 而那种错在画面上表现为"天空盒不画了"，不像是个拼写问题。
         let used: Vec<&str> = self
             .passes
             .iter()
@@ -1320,7 +992,6 @@ impl SceneSpec {
             .copied()
             .filter(|name| !used.contains(name))
             .collect();
-        // 生成出来的材质实例同理：没人引用它 = 生成多了（或者名字写错了）。
         let unused_instances: Vec<&str> = instance_names
             .iter()
             .copied()
@@ -1391,8 +1062,6 @@ impl SceneSpec {
                 ));
             }
         }
-        // 帧自有材质（§135）：**内联文本的长度要打出来** —— "改 art/frame 要不要重烘"
-        // 这个问题，答案就在这一行里（文档里存的是当时的文本，不是文件引用）。
         for material in &self.frame_materials {
             lines.push(format!(
                 "  帧材质 '{}'｜片元入口 {}｜内联 WGSL {} 字节｜参数 {}",
@@ -1460,8 +1129,6 @@ pub fn read_scene(path: &Path) -> Result<SceneSpec, String> {
         .ok_or_else(|| format!("{} 里没有场景帧（Scene）", path.display()))
 }
 
-/// 写一份场景产物：清单帧（`kind = Scene`，带指纹与相机表）+ 场景帧。
-/// 指纹由调用方算（协议 crate 不引哈希库，只承诺形状）。
 pub fn write_scene(path: &Path, spec: &SceneSpec, fingerprint: u64) -> Result<u64, String> {
     let bytes = scene_bytes(spec, fingerprint)?;
     if let Some(parent) = path.parent() {
@@ -1471,9 +1138,6 @@ pub fn write_scene(path: &Path, spec: &SceneSpec, fingerprint: u64) -> Result<u6
     Ok(bytes.len() as u64)
 }
 
-/// 一份场景产物的**字节**（清单帧 + 场景帧）。`write_scene` 就是它加一次落盘。
-///
-/// 分开是为了判据：往返要**逐字节**比，就不该为了比一次往磁盘上写一份。
 pub fn scene_bytes(spec: &SceneSpec, fingerprint: u64) -> Result<Vec<u8>, String> {
     spec.check()?;
     let bundle = crate::art::ArtBundle {
@@ -1501,11 +1165,6 @@ pub fn scene_bytes(spec: &SceneSpec, fingerprint: u64) -> Result<Vec<u8>, String
 mod tests {
     use super::*;
 
-    /// 一份最小的合法文档：一个物体、一份材质、一盏灯。
-    ///
-    /// ⚠ `schema` 那一格**不写死数字**：它跟着 [`SCENE_SCHEMA`] 走。写死的话，
-    /// 每次升版本都会在这里多出一处"忘了改的夹具"，而症状是四条判据一起红
-    /// —— 归因不到"是夹具旧了"还是"是文档形状真的坏了"。
     fn doc() -> String {
         DOC.replace("\"schema\": 0", &format!("\"schema\": {SCENE_SCHEMA}"))
     }
@@ -1534,8 +1193,6 @@ mod tests {
         spec.check().expect("这份夹具是合法的");
     }
 
-    /// **未知字段不许静默忽略**（§73 用户裁决）：旧渲染器读到新文档时，
-    /// 静默忽略一个新字段就等于「少画了东西还报成功」—— 那正是 §34 禁止的那种绿灯。
     #[test]
     fn an_unknown_field_is_refused_not_ignored() {
         let object = DOC.replace(
@@ -1546,8 +1203,6 @@ mod tests {
         assert!(err.to_string().contains("cast_shadow_typo"), "{err}");
 
         let material = DOC.replace(r#""gain": 1.0"#, r#""gain": 1.0, "roughness": 0.4"#);
-        // 材质参数表是**按名字自由**的（那正是「加参数」要走的路），所以这里**不该**报错 ——
-        // 名字对不对由 shader 的 descriptor 说了算，不是协议说了算。
         let spec: SceneSpec = serde_json::from_str(&material).expect("材质参数表按名字自由");
         assert_eq!(spec.objects[0].material.params.len(), 2);
 
@@ -1575,7 +1230,6 @@ mod tests {
             serde_json::from_str::<SceneSpec>(&geometry).expect_err("几何上的未知字段必须报错");
         assert!(err.to_string().contains("subdivisons"), "{err}");
 
-        // 新加的那几栏同样不许被静默忽略（与上面同一条裁决）。
         let pass = old_pass_doc().replace(
             r#""writes": ["view"]"#,
             r#""writes": ["view"], "render_typo": "x""#,
@@ -1591,10 +1245,6 @@ mod tests {
         assert!(err.to_string().contains("matrial"), "{err}");
     }
 
-    /// 一份**老形状**的文档：**没有** `passes` 这一节（只有 `lights`）。
-    ///
-    /// 它是"新字段缺省时逐字节不变"那一侧的靶子 —— 老文档读进来、再写回去，
-    /// 不该因为多了可选的一节而多出任何字节（`skip_serializing_if` 那几栏就是为它加的）。
     fn old_pass_doc() -> String {
         doc().replace(
             r#""lights": ["#,
@@ -1602,14 +1252,6 @@ mod tests {
         )
     }
 
-    /// 一份**新形状**的文档：一条几何 pass，四栏新字段全用上。
-    ///
-    /// ⚠ 第二笔的材质名写的是**物体 id**（`planet`），不是那支 shader 的节点名
-    /// （`surface`）：`draws[].material` 只有两个出处 —— 物体 id 与帧自有材质
-    /// （`px_scene::frame::draws_of` 就是拿 id 当材质名的），而 `check` 从 §135 起
-    /// 会拒"两边都不是"的名字。原来那个 `"surface"` 是**从来就解析不到**的写法，
-    /// 只是当时没有门去问它。这条判据判的是"几何 pass 表达得出来、往返得回去"，
-    /// 与那个名字是什么无关。
     fn geometry_doc() -> String {
         doc().replace(
             r#""lights": ["#,
@@ -1628,10 +1270,6 @@ mod tests {
         )
     }
 
-    /// 新字段是**纯加法**：老形状的 pass 落盘时一个都不许出现。
-    ///
-    /// ⚠ 这条不是锦上添花：`skip_serializing_if` 少写一个，老文档就会多出一串
-    /// `"draws":[]`，产物键跟着变 —— 而那正是五个锚会碎掉的方式。
     #[test]
     fn the_new_pass_fields_stay_out_of_old_documents() {
         let spec: SceneSpec =
@@ -1654,11 +1292,9 @@ mod tests {
                 "老形状的 pass 落盘时不该出现 {key}：{text}"
             );
         }
-        // 而且它逐字往返（键序、缺省值都不许变）。
         assert_eq!(serde_json::to_string(&spec).expect("再序列化"), text);
     }
 
-    /// 新形状（几何 pass）要能表达、也要能往返。
     #[test]
     fn a_geometry_pass_is_expressible_and_round_trips() {
         let spec: SceneSpec =
@@ -1675,13 +1311,9 @@ mod tests {
         assert_eq!(pass.vertex_entry, "vertex");
         assert!(pass.render.starts_with("color=none|depth=clear(0)"));
         assert_eq!(pass.depth_target.as_deref(), Some("depth"));
-        // ⚠ 几何 pass 的片元阶段属于**材质**（§129）⇒ 这一栏必须是 `None`，
-        //    落盘时**一个 `shader` 键都不该有**（`skip_serializing_if` 那一条）。
         assert!(pass.shader.is_none(), "几何 pass 不该有 pass 级 shader");
 
         let text = serde_json::to_string(&spec).expect("序列化");
-        // ⚠ 只对**这条 pass** 断言：物体的材质那一栏**应当**有 `shader`（材质就是那支
-        //    shader，§129）—— 拿整份文档去 grep 会把材质那一栏也算进来。
         let pass_text = serde_json::to_string(&spec.passes[0]).expect("序列化这条 pass");
         assert!(
             !pass_text.contains("\"shader\""),
@@ -1689,13 +1321,11 @@ mod tests {
         );
         let back: SceneSpec = serde_json::from_str(&text).expect("再解析");
         assert_eq!(back, spec, "带新字段的文档必须逐字往返");
-        // 新字段**真的落盘了**（不是"解析进默认值"那种假通过）。
         for key in ["draws", "vertex_shader", "render", "depth_target"] {
             assert!(text.contains(key), "{key} 没落盘：{text}");
         }
     }
 
-    /// 一份带**帧自有材质**的文档：一条几何 pass 画 `skybox`，材质内联在 `frame_materials` 里。
     fn frame_material_doc() -> String {
         doc().replace(
             r#""lights": ["#,
@@ -1718,10 +1348,6 @@ mod tests {
         )
     }
 
-    /// 帧自有材质这一栏是**纯加法**：老文档落盘时一个键都不许多出来。
-    ///
-    /// ⚠ 与 `the_new_pass_fields_stay_out_of_old_documents` 同一条理由：`skip_serializing_if`
-    /// 少写一个，六份冻产物就会多出一串 `"frame_materials":[]`，产物键跟着变。
     #[test]
     fn the_frame_material_field_stays_out_of_old_documents() {
         let spec: SceneSpec = serde_json::from_str(&old_pass_doc()).expect("老形状要能解析");
@@ -1733,7 +1359,6 @@ mod tests {
         );
     }
 
-    /// 帧自有材质表达得出来、往返得回去，而且**全文真的落盘了**。
     #[test]
     fn a_frame_material_is_expressible_and_round_trips() {
         let spec: SceneSpec = serde_json::from_str(&frame_material_doc()).expect("要能解析");
@@ -1749,17 +1374,14 @@ mod tests {
         let text = serde_json::to_string(&spec).expect("序列化");
         let back: SceneSpec = serde_json::from_str(&text).expect("再解析");
         assert_eq!(back, spec, "带帧自有材质的文档必须逐字往返");
-        // 内联的是**全文**：读这份产物不需要再回 CAS 找它。
         assert!(
             text.contains("@fragment fn fs_main"),
             "WGSL 全文必须真的在文档里：{text}"
         );
     }
 
-    /// 帧自有材质的四条拒法：都当场说清楚**是谁**、**跟谁**冲突。
     #[test]
     fn a_broken_frame_material_is_refused_by_name() {
-        // ① 与物体 id 撞名 ⇒ 拒，而且两处都要列出来。
         let clash = frame_material_doc()
             .replace(r#""name": "skybox""#, r#""name": "planet""#)
             .replace(r#""material": "skybox""#, r#""material": "planet""#);
@@ -1768,7 +1390,6 @@ mod tests {
         assert!(err.contains("planet"), "要说清是哪个名字：{err}");
         assert!(err.contains("撞名"), "{err}");
 
-        // ② 名字重了 ⇒ 拒（同名两张材质，宿主只能猜一个）。
         let two = frame_material_doc().replace(
             r#""frame_materials": [{"#,
             r#""frame_materials": [{"name": "skybox", "shader": "x", "entry": "fs_main"}, {"#,
@@ -1777,7 +1398,6 @@ mod tests {
         let err = spec.check().expect_err("帧材质名字重了 ⇒ 拒");
         assert!(err.contains("重了"), "{err}");
 
-        // ③ 声明了却没人用 ⇒ 拒，并把 draws 里真正的名字列出来。
         let unused =
             frame_material_doc().replace(r#""material": "skybox""#, r#""material": "planet""#);
         let spec: SceneSpec = serde_json::from_str(&unused).expect("解析");
@@ -1785,7 +1405,6 @@ mod tests {
         assert!(err.contains("skybox"), "要说清是哪一份没用上：{err}");
         assert!(err.contains("planet"), "要列出 draws 真正引用的名字：{err}");
 
-        // ④ 一笔 draw 要了个两边都没有的材质 ⇒ 拒，并列出两张表。
         let dangling =
             frame_material_doc().replace(r#""material": "skybox""#, r#""material": "skyboox""#);
         let spec: SceneSpec = serde_json::from_str(&dangling).expect("解析");
@@ -1793,8 +1412,6 @@ mod tests {
         assert!(err.contains("skyboox"), "{err}");
         assert!(err.contains("planet"), "要列出物体 id 那张表：{err}");
 
-        // 空文本与空入口名同样是"说了没做"（`skip_serializing_if` 会把空串整个藏起来，
-        // 于是文档里看起来"没这一栏"，而 draws 仍然指着它）。
         let shader_text =
             "@fragment fn fs_main() -> @location(0) vec4<f32> { return vec4<f32>(1.0); }";
         for (field, original, fragment) in [
@@ -1814,30 +1431,6 @@ mod tests {
         }
     }
 
-    /// **写出来的字节读回来再写一遍，必须逐字节相同**（"读→写幂等"）。
-    ///
-    /// 这是"给 `PassSpec` / `SceneSpec` 加字段是纯加法"这条性质**今天**的判据：
-    /// 追加一栏若被写成**默认值落盘**、或者读回来丢掉了一栏，第二次写出的字节就不再相同。
-    /// 靶子就是本模块自己的最小夹具 [`doc`]，所以这条判据**几毫秒**，也不需要 GPU 或实例库。
-    ///
-    /// ## ⚠ 它的前身，与为什么换成现在这样（2026-09-28）
-    ///
-    /// 这条判据原来叫 `the_frozen_originals_round_trip_byte_for_byte`，读的是
-    /// `art/anchor/frozen/*.pxart` 六份**冻结的**老形状产物。两件事一起塌了：
-    ///
-    /// 1. **它是场景格式 v2，而今天读写 v3** ⇒ `scene_bytes` 直接拒
-    ///    （`场景描述是 v2，这份渲染器认 v3`）—— 那条判据**永久不可满足**；
-    /// 2. **它一直在静默跳过**：它读的路径是 `target/oracle/pxart-frozen`，而那个目录在
-    ///    2026-09-18 那场清理里就没了（`target/` 不入 git）。六份的永久家早已搬进 git
-    ///    （`art/anchor/frozen/`），**但没人改这里的路径** ⇒ 靶子救活了，判据瞎了一整轮。
-    ///
-    /// 详见 `docs/anchors.md` 第三节。
-    ///
-    /// ## ⚠ 这条判据**证不了**什么（别把它读强了）
-    ///
-    /// 它证的是**幂等**，不是**与某个历史字节序列相同**。原来那六份冻产物能证的
-    /// "跨版本加字段没动老字节"这一条**已经没有了**（那正是冻结靶子的全部意义，
-    /// 而它的靶子过期了）。⇒ 今天"加字段是纯加法"只在**加字段时的人眼**那一层拦。
     #[test]
     fn what_the_writer_produces_reads_back_and_writes_again_byte_for_byte() {
         let spec: SceneSpec = serde_json::from_str(&doc()).expect("夹具必须解析得动");
@@ -1851,7 +1444,6 @@ mod tests {
                 _ => None,
             })
             .expect("写出去的字节里应当有场景帧");
-        // 结构相等先说清：读回来的必须与写出去的那一份是同一个东西。
         assert_eq!(
             read_back, spec,
             "写出去的字节读回来与原来那份不是同一个场景（有栏丢了或被默认值顶掉了）"

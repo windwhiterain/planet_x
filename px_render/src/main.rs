@@ -1,24 +1,4 @@
-//! px_render：**不依赖 bevy** 的渲染宿主（`art/docs/archive/render-wgpu.md`）。
-//!
-//! ⚠ **本 crate 在 §157（2026-09-19）之前叫 `px_render_wgpu`**，那之后它接管了 `px_render`
-//! 这个名字（旧的 `px_render` 是 Bevy 宿主，§154 已删）。⇒ 本 crate 源码里凡是
-//! **`px_render::…` / `px_render/src/…:行` 形态的引用**，都是**已删的 Bevy 宿主**的出处指针
-//! （取法 `git show f121ee3^:…`；§156.2 立的规矩：这类指针**不许删**），**不是**本 crate ——
-//! 只有 `px_render::shader` / `::stubs` / `::art` 这种**本 crate 真有的模块**才指本 crate。
-//! ⚠ 而 `art/shaders/**` 里的 `#import bevy_pbr::…` 是另一类出处指针（§155.4），那类**在产物里**。
-//!
-//! 几条路，一条比一条走得远：
-//!
-//! - `--device [--shot PNG]`：S0。设备 → 自己的 `Rgba8UnormSrgb` → 回读 → PNG 这条路径
-//!   通，而且哈希稳定（§105）。
-//! - `--shaders`：离线门。四份内容 shader 按**本宿主的桩表**组装 + naga 校验，不要 GPU。
-//! - `--scene <文档> --out PNG`：**按文档里的帧表画一帧**（切片 1：背景 + 行星）。
-//!   判据取的是**像素**，不是"跑完了"：出图之后拿 `--diff` 对着 oracle 量差异。
-//! - `--serve`：常驻服务（租约 + `ProtocolId` 握手 + 批量请求），协议逐字照搬 bevy 宿主。
-//!   没有 `--scene` 的调用是**客户端**：把一条请求交给在跑的服务，并把回话打出来。
-//!
-//! ⚠ 每一步都**不许多画一样东西**：切片 1 故意不画天空盒与大气，好让差异的归因只有一种
-//! 解释（§107：「一次改两个变量」在这张图上会让读数无法归因）。
+//! See docs/renderer.md
 
 mod art;
 mod camera;
@@ -125,7 +105,6 @@ fn usage() -> String {
     .join("\n")
 }
 
-/// 一次请求里的一步：`--scene` 起一步，`--out` / `--cam` 配到**它前面那一步**。
 struct ShotArgs {
     scene: PathBuf,
     out: Option<PathBuf>,
@@ -133,120 +112,39 @@ struct ShotArgs {
 }
 
 struct Options {
-    // ---- 离线那几条路（S0/S1/S3/S5 的仪器）----
     device: bool,
     shaders: bool,
     shot: Option<PathBuf>,
     diff: Option<(PathBuf, PathBuf)>,
-    /// `--offline`：`--scene --out` 由**本进程**画，不走服务、不走协议。
-    ///
-    /// ⚠ 缺省是"客户端"（交给在跑的服务），与 bevy 宿主那条语义一致 —— `tools/harness.ps1`
-    /// 与 `tools/frame-probe.ps1` 就是把本 exe 当**客户端**调的（`Invoke-Client`）。
-    /// 两套语义共用 `--scene --out` 这个写法的话，"这张图是谁画的"就要靠猜。
     offline: bool,
-    /// `--stats`：把回读到的 RGBA 的**逐通道最小/最大值**与"整幅是不是纯色"打出来。
-    ///
-    /// 为什么它是宿主的一个开关、而不是一个读 PNG 的脚本：读数要的是**回读出来的那些字节**，
-    /// 而"PNG 解码器"是这条判据链上一个新的、会自己出错的环节（本仓已经为"仪器验错了产物"
-    /// 付过学费，§122）。宿主手里本来就有那些字节 —— 顺手报一下，就不必再写第二个解码器。
-    ///
-    /// 判据 §86.4 用的正是它：`grade_half` 的 `strength = 0.5` 在纯反相上是**数学上的平场**
-    /// （`mix(x, 1−x, 0.5) ≡ 0.5`）⇒ `min = max = 188 = sRGB(0.5)`，于是"uniform 里到的
-    /// 到底是不是 0.5"从一个推断变成一个读数。
     stats: bool,
-    /// `--time N`：**保留态的读数** —— 准备一次、连画 N 帧，逐帧报墙钟。
-    ///
-    /// ⚠ 它量的是"准备"与"每帧"的**分界**，而那正是保留态这个单元要回答的问题：
-    /// 从前一条 `render::run` = 从读文档到建管线重来一遍，量到的只有"重新准备一帧"的代价。
-    /// 0 = 不开（缺省）；缺省不是"画一帧" —— 那是 `--offline` 那条路本来的行为。
     time: u32,
-    /// `--spans 预热,测量`：**逐条 pass 的 GPU 编码器级时间戳**（J4 的仪器）。
-    ///
-    /// ⚠ 两个数都**必须显式写**，一个缺省都不给：预热多少帧、量多少帧是**仪器的一部分**
-    /// （§147.4 记过"参照图自己在一次会话里漂了 4.5×"），给它一个我挑的缺省，
-    /// 就等于把"这个读数是在什么条件下取的"藏起来。与 `--time`/`--image-hash` 同一条规矩。
-    ///
-    /// ⚠ 它与 `--sheet` 互斥：时间戳槽是按**单张**排的（见 `render::Session::draw_stamps`）。
     spans: Option<(u32, u32, u32)>,
-    /// `--image-hash`：**窗口**每帧把回读出来那张图的 sha16 与墙钟时刻打进日志。
-    ///
-    /// ⚠ 它服务的是 S7 第二条判据（改一个 `.wgsl` ⇒ 约 1 秒内**画面**变）：
-    /// "文件变了 + 日志多了一行"都不是画面，判据要的尺子是**图**。
-    /// 默认关：算一次 sha256 要读 2.4 MB，开着会把"每帧多少钱"这个数改掉。
     image_hash: bool,
-    // ---- 服务 ----
     serve: bool,
     port: u16,
     pcg_root: PathBuf,
     pcg_root_given: bool,
-    /// `--fps` / `--novsync`：**服务这条路上收下但不生效**（服务没有帧循环、也不碰交换链）。
-    ///
-    /// ⚠ 为什么是"收下 + 说明"而不是"不认识的参数"：这两个开关是
-    /// `tools/harness.ps1::Start-RenderServer` 给**性能那两路**传的（`-Extra @('--fps')`），
-    /// 而它等的就绪信号是日志里那行"渲染管线全部就绪"。当场拒 ⇒ 进程立刻退出，可 harness
-    /// 的等待循环**看不见**"它死了"，要空等到超时才报一句"服务没在 180 s 内就绪" ——
-    /// 那句话指向**错的原因**（§146.3 ③：拦住了不等于说对了）。
-    /// 收下之后，真正的拒词由**服务端**在收到性能请求时说出来（"要的是计时用的帧循环"）。
-    ///
-    /// ⚠ 预览窗口（`--view`）那条路上它们的含义不一样：`--novsync` **真的生效**
-    /// （交换链的 present mode，见 `viewer::Viewer::open`），`--fps` 仍然收下不用
-    /// （窗口是按需渲染的，没有逐帧的帧率可报）。
     fps: bool,
     novsync: bool,
-    // ---- 请求 ----
-    /// 一次请求要出的那一串图。**空 = 经济世界那条路**（本宿主没有它，服务端当场拒）。
     shots: Vec<ShotArgs>,
-    /// 没有 `--scene` 时这一张存哪儿。
     out: Option<PathBuf>,
-    /// 没跟在哪一步后面的 `--cam`：整批通用。
     cam: Option<[f32; 3]>,
     width: u32,
     height: u32,
-    /// 报告 JSON 写哪儿（空 = 只回给调用方，不落盘）。
     report: String,
-    /// 用产物自带的相机表出一张多视角对照图（J2：12 格 × 960×640 ⇒ 3840×1920）。
-    ///
-    /// ⚠ 它**不是"另一台相机"**：相机表住在产物里（`.pxart` 的 `cameras`），
-    /// 格子的排布（4 列、行优先、目标尺寸）是**渲染器的事**（Bevy 的 `SheetCell` 就是这句话）。
-    /// 所以 `--cam` 与它互斥：两个来源就是两处会漂开的真相（`Options::parse` 当场拒）。
     sheet: bool,
-    /// 对照图的列数（`sheet` 为真时有效）。缺省 4 —— 与 Bevy 宿主同一条（那是**策略**，
-    /// 不是内容：产物里只有相机表，没有"排几列"）。
     columns: u32,
-    /// `--perf`：这一路请求要收帧（默认是 `--shots`）。
     perf: bool,
-    // ---- 预览窗口（S7 前半）----
-    /// `--view`：起那个**常驻**窗口（这条进程会一直占着事件循环，直到窗口关掉）。
     view: bool,
-    /// `--show`：把一份场景**推给**在跑的窗口（自己不渲染）。
     show: bool,
-    /// `--where`：问常驻窗口"相机现在在哪儿"（**只读**，不动画面、不换场景）。
     ask_where: bool,
-    /// `--place yaw,pitch,distance`：把常驻窗口的相机摆到某个方位（复现某个视角用）。
-    ///
-    /// ⚠ 这三个数与 `--cam` 是**同一套数**（都进 `camera::probe_camera`），
-    /// 不是 Bevy 窗口那一套（那边的 pitch 正方向与它自己的 `--cam` 相反）。
     place: Option<[f32; 3]>,
-    /// `--edit <场景配方名>`：窗口里那块**调参面板**编辑的是哪份场景配方引用到的图（S9）。    ///
-    /// ⚠ 它**只对 `--view` 有效**（面板住在窗口里）：`--show` 那一路连设备都不建。
-    ///   与 `--view` 一起给是正常的组合；单独给会在 `check_viewer` 那里当场拒
-    ///   （那条拒词说的是"这条路不适用"，不是"不认识的参数"）。
-    /// ⚠ **不给也能用**：面板按窗口正在显示的那份产物名推配方名（今天 41 份配方逐份核过：
-    ///   文件名与产物名一致）。推不出来时面板给一句话说清该给什么，**不猜**。
     edit: Option<String>,
-    /// `--ui-shot PNG`：把**屏幕上那一张**（画面 + 面板）读回来存成 PNG。
-    ///
-    /// ⚠ 与 `--shot` 是两件事，两个都要有：`--shot` 写的是**判据那张图**
-    ///   （回读出来的那批字节，**不含面板**，S7 的"与离线逐字节相同"靠它）；
-    ///   这一格写的是**人眼看到的东西**（交换链上那一张，含面板）——
-    ///   它服务的是"面板长什么样"这件事（窗口里按 `u` 也能再存一次）。
     ui_shot: Option<PathBuf>,
-    /// 性能那一路要收的**干净**窗口数（老路）。
     windows: u32,
-    /// 调用方**显式**给了 `--windows`（决定走老路还是新主路径）。
     windows_given: bool,
     drop_windows: u32,
-    /// 新主路径要采的帧数。
     frames: u32,
     stream: PathBuf,
     round: Option<u32>,
@@ -267,9 +165,6 @@ impl Default for Options {
             image_hash: false,
             serve: false,
             port: 0,
-            // ⚠ 缺省 CAS 根**不是** `PathBuf::from("target/pcg")`：那是**当前目录**，
-            // 而 cargo 的当前目录是包目录（`px_render/`）。`art::default_pcg_root()`
-            // 从可执行文件的位置反推工作区。这里只在"服务端"生效。
             pcg_root: art::default_pcg_root(),
             pcg_root_given: false,
             fps: false,
@@ -300,10 +195,6 @@ impl Default for Options {
     }
 }
 
-/// `--cam` / `--place` 的取值：三个数。
-///
-/// ⚠ 拒词里带上**是哪一个开关**：`--place 1,2` 报"--cam 要三个数"会把人指向另一个开关，
-/// 而这两个开关住在**同一条命令行**上、含义也确实是同一套数（§146.3 ③）。
 fn parse_cam(flag: &str, text: &str) -> Result<[f32; 3], String> {
     let parts: Vec<f32> = text
         .split(',')
@@ -316,12 +207,6 @@ fn parse_cam(flag: &str, text: &str) -> Result<[f32; 3], String> {
     Ok([parts[0], parts[1], parts[2]])
 }
 
-/// `--spans 预热,测量,轮数`：三个数**都**要显式写。
-///
-/// ⚠ 不给缺省是**判据的一部分**（不是风格）：预热几帧、量几帧、交错几轮决定了
-/// "时钟被拉起来没有 / 有没有外来负载混进来"，也就是这个读数在什么条件下取的。
-/// 给它一个我挑的缺省，就等于把那个条件藏起来 —— 而 §147.4 记过的正是"同一份参照图
-/// 在一次会话里漂了 4.5×"。轮数还是**代价**的一部分（整批 draw 次数 = 轮 × 档 × (预热+测量)）。
 fn parse_spans(text: &str) -> Result<(u32, u32, u32), String> {
     let parts: Vec<&str> = text.split(',').map(str::trim).collect();
     let [warm, measured, rounds] = parts.as_slice() else {
@@ -372,7 +257,6 @@ impl Options {
                 "--spans" => options.spans = Some(parse_spans(&next("--spans")?)?),
                 "--serve" => options.serve = true,
                 "--autostart" => options.autostart = true,
-                // 收下但不生效：见 `Options::fps` 那段（harness 起性能那两路时会传它）。
                 "--fps" => options.fps = true,
                 "--novsync" => options.novsync = true,
                 "--sheet" => options.sheet = true,
@@ -426,7 +310,6 @@ impl Options {
                         .parse()
                         .map_err(|_| "--columns 需要一个整数".to_string())?
                 }
-                // ---- 两路活：语义照搬 bevy 宿主（`--shots` 是缺省，`--windows` 显式给了走老路）----
                 "--shots" => options.perf = false,
                 "--perf" => options.perf = true,
                 "--windows" => {
@@ -453,12 +336,10 @@ impl Options {
                             .map_err(|_| "--round 需要一个整数".to_string())?,
                     )
                 }
-                // ---- 预览窗口那三路（S7 前半）：起窗口 / 推场景 / 一问一答 ----
                 "--view" => options.view = true,
                 "--show" => options.show = true,
                 "--where" => options.ask_where = true,
                 "--place" => options.place = Some(parse_cam("--place", &next("--place")?)?),
-                // ---- 调参面板（S9）：窗口里那块 GUI ----
                 "--edit" => {
                     let recipe = next("--edit")?;
                     if recipe.is_empty() {
@@ -477,7 +358,6 @@ impl Options {
         if options.width == 0 || options.height == 0 {
             return Err("尺寸里有 0".to_string());
         }
-        // 与 bevy 宿主同一条：对照图用的是产物自带的相机表，两处都给就是两处会漂开的真相。
         if options.sheet && (options.cam.is_some() || options.shots.iter().any(|s| s.cam.is_some()))
         {
             return Err("--sheet 用的是产物自带的相机表，不要再给 --cam".to_string());
@@ -486,12 +366,6 @@ impl Options {
         Ok(options)
     }
 
-    /// 预览窗口那几路的**表面冲突**：当场拒，而且拒词说的是"这条路不适用"，
-    /// 不是"不认识的参数"（§146.3 ③：拦住了不等于说对了）。
-    ///
-    /// ⚠ 每一条都在拒绝**静默忽略**：`--view --place` 这种写法如果收下，
-    /// 人以为"窗口起始就摆在那儿了"，而实际发生的是"那一句被丢了"（Bevy 那边正是如此：
-    /// 派发次序是 view → where/place，`place` 到不了窗口）。
     fn check_viewer(&self) -> Result<(), String> {
         let asked = [self.view, self.show, self.ask_where, self.place.is_some()]
             .iter()
@@ -537,10 +411,6 @@ impl Options {
                     .to_string(),
             );
         }
-        // ⚠ `--edit` 是**面板**（`px_render/src/panel.rs`）：面板住在窗口里，所以只有
-        //   `--view` 那条路有它。收下不给会被当成"我给了它却不生效" —— 那正是本条
-        //   要拒的那种静默（它的用处还多了两样：`--show` 连设备都不建，`--where`/`--place`
-        //   只是跟相机说话）。
         if self.edit.is_some() && !self.view {
             return Err("--edit（调参面板）住在预览窗口里，得与 --view 一起给：\
                  px_render --view --edit <场景配方名>"
@@ -549,7 +419,6 @@ impl Options {
         Ok(())
     }
 
-    /// 单张时的相机：`--scene A --cam …` 是「这一步的相机」，单张请求里它就是 `View.cam`。
     fn view_cam(&self) -> Option<[f32; 3]> {
         match self.shots.as_slice() {
             [shot] => shot.cam.or(self.cam),
@@ -557,7 +426,6 @@ impl Options {
         }
     }
 
-    /// 这一次请求的 `out`：单张就是它，批量时是**最后一张**。
     fn out_path(&self) -> PathBuf {
         self.shots
             .last()
@@ -566,7 +434,6 @@ impl Options {
             .unwrap_or_else(|| PathBuf::from("target/shot.png"))
     }
 
-    /// 这一次请求是哪一路活。**默认截图**；`--windows` 显式给了才是老性能路。
     fn job(&self) -> Job {
         if !self.perf {
             return Job::Shots;
@@ -596,8 +463,6 @@ impl Options {
             });
         }
         let mut shots = Vec::with_capacity(self.shots.len());
-        // ⚠ 新主路径**不出图**（那一路只采样），所以它不要求每一步给 `--out`；
-        //    截图与老性能路要落图，少一个 `--out` 就是少一张图，必须报错（照搬 bevy 宿主）。
         let outs_needed = !matches!(self.job(), Job::Stable { .. });
         for (index, shot) in self.shots.iter().enumerate() {
             let out = match (&shot.out, outs_needed) {
@@ -637,10 +502,6 @@ impl Options {
     }
 }
 
-/// 四份内容 shader 组装 + 校验（S1 判据 ③）。**不要 GPU** —— 它是离线门，不是探针。
-///
-/// 顺带把每份的 `(group, binding)` **反射**出来：那是 group 0 契约的唯一真本，
-/// 也是下一步建 bind group layout 的依据（在 Rust 侧再抄一份就是两个数字开始漂）。
 fn check_content_shaders() -> i32 {
     let modules = shader::modules();
     let mut failed = 0;
@@ -674,17 +535,6 @@ fn check_content_shaders() -> i32 {
     0
 }
 
-/// `--scene`（离线）：按文档画一帧、回读、落 PNG。**失败就大声说**（返回非 0）。
-///
-/// ⚠ 落盘的尺寸用 `rendered.width/height`，不是命令行的 `--width/--height`：
-/// 对照图那一档命令行给的是**一格**的尺寸（960×640），而落盘那张是 3840×1920。
-/// "执行了" 那一栏怎么打：**默认只列前几条 + 总数**。
-///
-/// ⚠⚠ 这一栏列的是**展开后**的每一条 pass —— 而虚拟影图之后，一条帧配方会展开成
-/// **几千条**（影子每页一条：`probe-ringsun1` 实测 4369 条），逐条打出来会刷掉
-/// **十几万字节**（实测 122 KB），把同一段里真正有用的那几行读数淹掉。
-/// 日志里有用的是"跑了哪些、共多少条"；要看全表就 `PX_PASS_LIST=1`（诊断闸门照旧，
-/// 与本仓库其它几处同一条口径：**默认给人看的短，要细节的显式开口**）。
 fn executed_summary(executed: &[String]) -> String {
     const HEAD: usize = 8;
     let total = executed.len();
@@ -707,7 +557,6 @@ fn run_scene(
     views: render::Views,
 ) -> i32 {
     let gpu = gpu::connect();
-    // `--time N`：准备一次、连画 N 帧（**保留态**那条路）；不给就是原来的"一条 `run`"。
     let rendered = if time == 0 {
         render::run(&gpu, scene, &art::default_pcg_root(), views, width, height)
     } else {
@@ -725,7 +574,6 @@ fn run_scene(
     }
     let width = rendered.width;
     let height = rendered.height;
-    // 首像素要在把 pixels 交出去之前抄下来：写 PNG 会把它移走。
     let first = [
         rendered.pixels[0],
         rendered.pixels[1],
@@ -768,10 +616,6 @@ fn run_scene(
     0
 }
 
-/// 回读到的 RGBA 的逐通道读数：最小 / 最大 / 不同颜色数 / 出现最多的那种颜色。
-///
-/// ⚠ 它读的是**回读出来的字节**，不是 PNG 解码的结果 —— 见 [`Options::stats`]。
-/// 用 `BTreeMap` 计颜色数：平场那种判据下颜色只有一两种，而它是稳定的（读数可复现）。
 fn describe(pixels: &[u8]) -> String {
     let mut low = [255_u8; 4];
     let mut high = [0_u8; 4];
@@ -815,10 +659,6 @@ fn describe(pixels: &[u8]) -> String {
     )
 }
 
-/// `--diff`：两张 PNG 的实测差异。**不要 GPU**（它是读数，不是渲染）。
-///
-/// ⚠ 参数是**位置**，不是角色（`(左, 右)`）。报告开头会把这一点与两条路径一起打出来 ——
-/// 这个工具不知道哪一张是 oracle，而"它替使用者猜角色"正是 §136 那次读反的根因。
 fn run_diff(left: &Path, right: &Path) -> i32 {
     match diff::compare(left, right) {
         Ok(report) => {
@@ -833,10 +673,6 @@ fn run_diff(left: &Path, right: &Path) -> i32 {
     }
 }
 
-/// 没有 `--scene` 时那条经济世界路（本宿主没有它）：说清是哪一条路没有。
-///
-/// ⚠ 它是**一份**真本、**两处**引用（客户端在本地就拒，服务端对协议客户端也拒）：
-/// 抄成两份措辞就会漂开，而漂开的那一天读的人会被指向错的原因。
 pub use serve::WORLD_REFUSAL;
 
 fn main() {
@@ -848,21 +684,14 @@ fn main() {
         }
     };
 
-    // 组装那一路在建设备**之前**返回：它是离线的，不该为它付一次 Vulkan 初始化。
     if options.shaders {
         std::process::exit(check_content_shaders());
     }
 
-    // 比对那一档同理：它是**读数**，一张 PNG 都不想重画。
     if let Some((left, right)) = &options.diff {
         std::process::exit(run_diff(left, right));
     }
 
-    // ---- 预览窗口那三路（S7 前半）----
-    //
-    // ⚠ 位置在这里是有讲究的：它们在 `--serve` **之前**，因为窗口与服务是两条常驻路
-    //    （`check_viewer` 已经拒了同时给）；而在 `--device`/`--offline` 之前是因为
-    //    `--view --shot PNG` 里那个 `--shot` 属于**窗口的第一帧**，不是 S0 那张纯色图。
     if options.view {
         if let Err(message) = viewer::view(&options) {
             eprintln!("{message}");
@@ -870,9 +699,6 @@ fn main() {
         }
         return;
     }
-    // ⚠ `--image-hash` 是**窗口**那一帧的读数（每帧把回读字节的 sha16 与时刻打出来）。
-    //    别的路上收下不说就是"说了没做"：`--offline` 有自己的 `--stats`，
-    //    服务那条路一条请求只画一帧 —— 那里根本没有"每帧"这回事。
     if options.image_hash {
         eprintln!(
             "--image-hash 是预览窗口（--view）的读数：它每帧把回读出来那批字节的 sha16 与墙钟打出来，\
@@ -881,7 +707,6 @@ fn main() {
         std::process::exit(64);
     }
     if options.show {
-        // `check_viewer` 已经保证至少给了一份 `--scene`。
         let scene = options.shots[0].scene.clone();
         if let Err(message) = viewer::show(&scene, options.shot.clone()) {
             eprintln!("{message}");
@@ -897,9 +722,7 @@ fn main() {
         return;
     }
 
-    // 服务那一路：它自己建设备、写租约、等请求。
     if options.serve {
-        // `--fps` / `--novsync` 收下但不生效：说一声，别让它变成一个谁也不看的旗标。
         if options.fps || options.novsync {
             println!(
                 "（--fps/--novsync 在**服务**这条路上收下但不生效：服务按需渲染，没有帧循环、也不碰交换链。\
@@ -918,15 +741,12 @@ fn main() {
         return;
     }
 
-    // ⚠ `--pcg-root` 只在**渲染进程**（`--serve` / `--view`）生效：解析成员的是那个进程，
-    //    它有自己的 CAS 根。客户端这一份只报一声，不能装作生效（照搬 bevy 宿主那句）。
     if options.pcg_root_given {
         eprintln!(
             "⚠ --pcg-root 只在渲染进程（--serve）生效：这次请求的内容由服务进程按它自己的 CAS 根解析"
         );
     }
 
-    // `--device` / `--shot`：S0 那条路（不要文档、不要服务）。它天然是离线的。
     if options.device || options.shot.is_some() {
         std::process::exit(run_device(&options));
     }
@@ -935,16 +755,11 @@ fn main() {
         std::process::exit(run_offline(&options));
     }
 
-    // ⚠ `--stats` 是**离线**那条路的读数（它读的是本进程回读出来的字节）：
-    //    服务那条路的同类读数住在报告里（服务端算的 sha256 / 网格差分 / 兜底像素数）。
-    //    两处混用会让"这个数是哪台机器算的"变成一条要靠猜的事。
     if options.stats {
         eprintln!("--stats 是离线那条路（--offline）的读数；走服务那条路的同类读数在 --report 里");
         std::process::exit(64);
     }
 
-    // ⚠ `--time` 与 `--stats` 同一族：它读的是**本进程**准备一次、连画 N 帧的墙钟。
-    //    服务那条路一条请求只画一帧，那里没有"后续帧"可量 —— 收下不说就是"说了没做"。
     if options.time > 0 {
         eprintln!(
             "--time 是离线那条路（--offline）的读数：它量的是「准备一次、连画 N 帧」，而服务那条路一条请求只画一帧"
@@ -952,9 +767,6 @@ fn main() {
         std::process::exit(64);
     }
 
-    // ⚠ `--spans` 与 `--time` 同一族，而且更强：它量的是**本进程**那些编码器上的
-    //    GPU 时间戳。服务那条路一条请求画一帧、按需渲染，`--perf` 那条路要的是
-    //    "逐帧采样的帧循环"（§147.2 的 R 判据靠的正是服务里没有这个循环）。
     if options.spans.is_some() {
         eprintln!(
             "--spans 是离线那条路（--offline）的仪器：它量的是本进程那些编码器上的 GPU 时间戳，而服务那条路一条请求只画一帧"
@@ -977,10 +789,6 @@ fn main() {
     std::process::exit(client::request(request, options.autostart));
 }
 
-/// `--offline --scene 文档 --out PNG`：本进程画一帧、回读、落 PNG。
-///
-/// 三条"不适用"当场拒 —— 它们要的都是**服务端**的东西，而这条路没有服务端：
-/// `--report`（报告是服务算的）、`--perf`/`--windows`/`--frames`（要帧循环）、多份 `--scene`（批量是请求的概念）。
 fn run_offline(options: &Options) -> i32 {
     if !options.report.is_empty() {
         eprintln!(
@@ -994,8 +802,6 @@ fn run_offline(options: &Options) -> i32 {
         );
         return 64;
     }
-    // ⚠ `--spans` 与 `--sheet` 互斥：时间戳槽是按**单张**排的（见 `Session::draw_stamps`），
-    //    12 格会往同一批格上写 12 遍 —— wgpu 不会拦，而读到的是最后一格那个数。
     if options.spans.is_some() && options.sheet {
         eprintln!(
             "--spans 与 --sheet 不能同时用：时间戳槽是按**单张**排的（每条 pass 四格 + 帧级两格），\
@@ -1004,9 +810,6 @@ fn run_offline(options: &Options) -> i32 {
         );
         return 64;
     }
-    // ---- `--spans`：**多份文档、每份只准备一次、按轮交错**（见 `run_spans`）----
-    // ⚠ 它排在"只画一份"那条检查**之前**：那条规矩挡的是"批量请求"（服务那条路的活），
-    //    而这台仪器**要**几份文档 —— 交错取样（§147.4）与"每份只 open 一次"是它的一部分。
     if let Some((warm, measured, rounds)) = options.spans {
         return run_spans(options, warm, measured, rounds, views_of(options));
     }
@@ -1029,20 +832,9 @@ fn run_offline(options: &Options) -> i32 {
         options.height,
         options.stats,
         options.time,
-        // ⚠ 离线这条路**也要走 `--sheet`**：判据那一张对照图就是它出的（J2）。
-        //    两处各写一份"怎么看"的翻译就是两处会漂开的真相（服务那条路在 `serve::views_of`）。
         views_of(options),
     )
 }
-///
-/// ⚠ 三件事必须一起报，否则这个读数会被读错（本工程为"量错了什么"付过学费）：
-/// ① **准备**花了多久（它只发生一次，含文档 / CAS 成员 / 句柄 / 那一层）；
-/// ② **第 1 帧**（它含着执行器**第一次建管线** —— 管线缓存是空的）；
-/// ③ 第 2..N 帧的中位/最小/最大（**保留态真正的每帧代价**）。
-///
-/// ⚠ 每一帧的相机都是一样的（同一次请求的 `views`）：这里量的是**帧循环**的成本，
-/// 不是"换一个视角"的成本 —— 后者与前者只差一次 64 字节的 `write_buffer`（见
-/// `render::Cell::set_view`）。
 fn run_frames(
     gpu: &gpu::Gpu,
     scene: &Path,
@@ -1088,25 +880,6 @@ fn run_frames(
     last.ok_or_else(|| "--time 至少要 1 帧".to_string())
 }
 
-/// `--spans 预热,测量,轮数`：**多份文档、每份只准备一次、按轮交错**的逐条 pass GPU 时间戳读数
-/// —— J4 的仪器。
-///
-/// ## 仪器的全部内容（少一条这个读数就会被读错）
-///
-/// ① **每份文档只 `Session::open` 一次**，然后所有轮次都在那一条保留态上 `draw`。
-///    ⚠ 这一条不是优化，是**仪器的正确性**：`open` 是重 CPU 的那一半（装载 574–802 ms，
-///    其中 `planet` 一份网格解码 + 审计 529 ms，§151 实测）。一轮一次 `open` 会把这段
-///    准备噪声混进"漂移"里 —— 报出来的漂移有一部分是仪器自己造的；而且它会把整台机器
-///    按住 N 倍（"任何会长期按住整台机器的东西，都得是显式、说得出代价的"）。
-/// ② **按轮交错**几份文档：`for 轮 { for 档 { 预热 + 测量 } }`。§147.4 记过"参照图自己
-///    在一次会话里漂了 4.5×（重场景先测会把时钟拉上去）"—— 交错 + 每轮自带预热帧是压它的办法。
-/// ③ 每档落盘的是**最后一帧**那张图 ⇒ 它必须与不带 `--spans` 的那一次**逐字节相同**
-///    —— 这是"这台仪器没改画面"唯一能被单独验的机会。
-/// ④ 读数按 `[span-map]` / `[span]` / `[span-sum]` 打出来（`spans::Reading::report`），
-///    每个字段名就是它的定义；**这个数不叫 `gpu_ms`**（那个名字在 Bevy 那边的含义是
-///    `render/**/elapsed_gpu` 七段之和，见 `spans.rs` 顶上那张表）。
-/// ⑤ **代价是读数的一部分**：整批的墙钟与"开了几次文档"都打出来。预热帧 + 测量帧 × 轮数 ×
-///    档数是可预期的，写在 `[spans-plan]` 那一行里。
 fn run_spans(
     options: &Options,
     warm: u32,
@@ -1116,9 +889,6 @@ fn run_spans(
 ) -> i32 {
     use std::time::Instant;
     let gpu = gpu::connect();
-    // ⚠ 三个 feature 都要（少一个就没有与 Bevy 同一套边界那个数）⇒ **当场拒**，
-    //    不退化成一个语义不同的读数（§104 第 12 条那条"降级成 null"说的是产品路径，
-    //    而这里是一个**判据**：量不了就说量不了）。
     let missing = spans::missing_features(&gpu.adapter);
     if !missing.is_empty() {
         eprintln!(
@@ -1131,7 +901,6 @@ fn run_spans(
     }
     let width = options.width;
     let height = options.height;
-    // 每一份文档都要有自己的落盘路径（图是判据的一部分：仪器不许改画面）。
     let mut shots: Vec<(PathBuf, PathBuf)> = Vec::with_capacity(options.shots.len());
     for shot in &options.shots {
         match shot.out.as_ref().or(options.out.as_ref()) {
@@ -1158,7 +927,6 @@ fn run_spans(
         rounds as usize * shots.len() * (warm + measured) as usize
     );
     let started = Instant::now();
-    // ---- 每份文档**只开一次**（`Session::open` 是重 CPU 的那一半）----
     let mut sessions: Vec<(
         String,
         render::Session,
@@ -1206,12 +974,10 @@ fn run_spans(
         shots.len()
     );
 
-    // ---- 交错取样：一轮里把每档各画一遍 ----
     let draws_started = Instant::now();
     for round in 0..rounds {
         for (slot, (name, session, recorder, last)) in sessions.iter_mut().enumerate() {
             for index in 0..(warm + measured) {
-                // ⚠ 槽的帧号是**全局**的（这一份文档第几帧），轮与轮之间不重复。
                 let frame = round * (warm + measured) + index;
                 let stamps = recorder.stamps(frame);
                 match session.draw_stamps(&gpu, views, width, height, &stamps) {
@@ -1235,7 +1001,6 @@ fn run_spans(
         started.elapsed().as_secs_f64() * 1e3
     );
 
-    // ---- 读数 + 落盘 ----
     let mut failed = 0;
     for (slot, (name, _session, recorder, last)) in sessions.into_iter().enumerate() {
         let readings = match recorder.finish(&gpu.device, &gpu.queue) {
@@ -1285,151 +1050,6 @@ fn run_spans(
     if failed > 0 { 1 } else { 0 }
 }
 
-/// 命令行那一档「怎么看」→ `render::Views`（**离线**那条路的翻译；服务那条路在
-/// `serve::views_of`，因为那里拿的是请求而不是命令行）。
-/// ⚠⚠ **未解 bug：画面正中有一条通高台阶**（离屏渲染，实测 2026-xx）。
-///
-/// 现象与已经二分到哪一步（三个数字都是实测，别再重推）：
-/// * 台阶在**图宽正中**：800/960/1280 宽 ⇒ 400/480/640；**与相机方位无关**
-///   （45/135/225 三个方位都在正中）；
-/// * **左右两半亮度差 3.3x**（0.0660 对 0.0193 @960 宽）；
-/// * 480 宽单图也照样在正中裂开（0.275/0.131），与 960 图两半的亮度分布一致，
-///   但逐像素差 0.1437 ⇒ **是两幅各自完整的视图**，不是同一幅被拉伸；
-/// * **纯色清屏图完全均匀**（`px_render --device --shot`：唯一色、台阶值 0.000000）
-///   ⇒ **出图/回读/PNG 那条路是干净的**，问题在**场景渲染**这一侧。
-///
-/// * **相机是好的**：三个 `--cam`（45/135/225）渲出来互不相同（哈希不同、相关 0.26~0.83），
-///   但**左右亮度图案三个机位完全一致**（左 0.25~0.29 / 右 0.13~0.15）⇒ 屏幕锁定的亮度分裂。
-///
-/// ⇒ 已排除：
-///   * 出图/回读/PNG（纯色清屏图完全均匀）；
-///   * `Views::Single` 的拼装（它只有**一项 placement、整幅视口** ⇒ 只画一幅，
-///     没有"两幅各占半幅"那回事 —— 我先前那条猜测作废）。
-/// ⇒ 已排除的还有：**天空盒那一 pass 的方向重建**（`art/frame/skybox.wgsl`
-///   `coords_to_ray_direction`：`(position - viewport.xy) / viewport.zw` 是 Bevy 那一套，
-///   没有与 width 成比例的分母；立方图只做了整体 z 取反）。
-///
-/// ⇒ **剩下的最窄一处**：三个全屏后处理 pass（`px_grade` / `px_vignette` / `blit`）
-///   的片元都吃 `@location(0) uv`，而 `art/frame/` 下的顶点着色器只有
-///   `vertex_sky.wgsl`（**只输出 `@builtin(position)`、没有 uv**）与
-///   `vertex_mesh.wgsl`（要顶点缓冲）⇒ **那个 uv 的生产者还没找到**，它就是下一个要看的地方。
-///   判法：把生产 uv 的那几句找出来，看分母是不是 `width`（或 `width/2`）。
-///
-/// ⚠ 在这条修好之前，**质量线的一切全图统计**（亮/暗/四分位/缝比）都带这条台阶，
-///   不能拿来对参考图。
-/// ---- 续（第 60 轮）----
-///
-/// 全屏 pass 的 uv 生产者**找到了并排除**：`px_pass/src/lib.rs:57` 的 `FULLSCREEN_VERTEX`
-/// （`corner = ((i<<1)&2, i&2)`、`uv = (corner.x, 1 - corner.y)`、`position = corner*2 - 1`）
-/// —— 可见区正好拿到 `uv ∈ [0,1]`，写法正确。
-///
-/// ⇒ **新的最强线索**：影子走的是**屏幕空间的页**（`px-scene/src/vshadow.rs`；片元里
-///   `sun_light(point, in.position.xy)`）。页是屏幕空间网格 ⇒ **页边界天然屏幕锁定**；
-///   而"左半亮 / 右半暗、差 3.3x"正是"有影子 / 无影子"的量级 —— 与实测四条
-///   （屏幕锁定、与相机无关、与图宽成比例、纯色清屏图干净）全对得上。
-///   下一步查页的排布与"取哪一页"那几句（半幅/页宽算错、或页索引用了 `width/2`）。
-/// ---- 续（第 61 轮）----
-///
-/// * **影子页线索死了**：`scene nebula` 里**没有灯**（`px_graphs/src/bin/scene.rs`
-///   只有 `cameras: Vec::new()`，没有任何 light）⇒ 没有可投影的东西。
-/// * 台阶只沿**宽度**方向、且**恒在 `width/2`**：960x320 / 960x640 / 960x1280 三档
-///   最大列差都在 x≈480，而行方向没有对应的分裂 ⇒ 它按**宽**的一半切，不按缓冲的一半切。
-/// * 剩下的最可疑处：**立方图的存储布局约定**。`px_render/src/art.rs` 提到"立方图竖码"、
-///   `px_protocol::art` 有 `cube_atlas_uv` —— "6 层"与"2x3 图集"这类分歧，边界正好
-///   落在 `width/2`，且每面内容单看仍然像天空（与实测"内容随相机变、边界不变"一致）。
-///   下一步：读 `cube_atlas_uv` 与渲染器绑立方图那一段，核对两者说的是不是同一种排布。
-/// ---- 续（第 62 轮）----
-///
-/// 帧链（`art/frame/default.toml`）已经列清：`prepass` / `point_shadow` /
-/// `shadow_down_l1..l3` / `copy_depth` / `opaque` / `sky` / `transparent` / `blit`
-/// —— **没有 vignette、也没有 grade**，所以那两个 shader 与这条台阶无关。
-/// `sky` 是 `kind = "geometry"` + `vertex_sky.wgsl`（全屏三角），与 `opaque` 写到**同一张**
-/// `scene_color_a`。
-///
-/// ⇒ **下一轮别再靠读码猜**：用渲染器已有的**中间目标抓取**能力（`render::Session::draw_stamps`
-///   与 CLI 的 `--diff`）把每一步的输出各存一张，看**台阶是从哪一步开始出现的**：
-///   `opaque` 之后有 ⇒ 病在几何/材质那条路；只有 `sky` 之后才出现 ⇒ 病在天空那一步；
-///   `blit` 之后才有 ⇒ 病在最后搬运。这一步能把候选从"整个场景渲染"缩到**一个 pass**。
-/// ---- 续（第 63 轮）----
-///
-/// * `px_protocol::art` 里有**两种**立方图布局：`cube_map_extent` 是"竖码"
-///   （`face x face*6`，6 面竖着排）与 `cube_atlas_uv` 是**图集**
-///   （`CUBE_COLUMNS = 3` 列 x 2 行 + `CUBE_GUTTER = 2`）。图集的边界在 1/3，
-///   与实测的 **1/2 不符** ⇒ 台阶不是图集边界。
-/// * 装载那条路（`px_render/src/art.rs:745`）自己写着"立方图把 6 个面**竖着码**
-///   （`height * layers`）"，并在这一带做"半精度 -> f32 -> **8 位**"的转换。
-///   ⇒ **下一轮读 `px_render/src/art.rs:745-800` 这个转换**：它是逐行处理一张
-///   `width x (height*layers)` 的图，行步长/目标宽度算错正好表现为"按宽的一半"分裂，
-///   而且它只在**有内容**时生效（这解释了为什么纯色清屏图完全均匀）。
-/// ---- 续（第 64 轮）----
-///
-/// `px_render/src/art.rs:745` 那条"半精度 -> f32 -> 8 位"**是预览专用的有损路径**
-/// （注释自己写着"只服务预览"，上传走 `LoadedTexture::bytes`）⇒ 与离屏渲染无关，排除。
-///
-/// ⇒ **最可能的一处（下一个我直接看这里）**：天空 pass 用的 `view.viewport`。
-///   若写进 `ViewStub` 的 viewport 是 `(0, 0, width/2, height)`，那么
-///   `coords_to_viewport_uv` 算出的 uv 在左半幅就扫满 `[0,1]`、右半幅继续外推
-///   ⇒ 两半各是一幅完整视图、边界**恰在 width/2**、且随内容变化 —— 与全部五条实测吻合：
-///   屏幕锁定 ✓、与相机无关（相机变、边界不变）✓、按宽的一半 ✓、与高无关 ✓、
-///   纯色清屏图干净（不走这个 pass）✓。
-///   要核对的地方：`placement.uniform_viewport((width, height))` 的结果**是否真的**
-///   写进了天空 pass 用的那份 `ViewStub`（`Cell::set_view` / 组 0 的 view 缓冲），
-///   而不是在某处被换成格子尺寸或 `width/2`。
-/// ---- 结案（第 65 轮）----
-///
-/// **那条"画面正中通高台阶"是 `--cam` 覆盖机制的 bug，不是渲染器、也不是烘焙。**
-/// 判据只有一条命令：**不给 `--cam`** 渲同一份场景 ⇒ 最大列差从 x=480（正中）跑到
-/// x=225（内容边缘），台阶**消失**。用户当场指出症结：相机在那次重构后**只是 pass script
-/// 里的寻常参数（数据）**，`--cam` 是后来加的"特殊参数覆盖"那一层，bug 就在那一层。
-///
-/// 顺带纠正一个我一直弄错的场景事实：`scene nebula` **不是只有天空** ——
-/// 干净渲染里有一颗**行星**（`opaque` 那条 geometry pass 画的球），默认探针相机正对着它。
-/// 这也解释了 `--cam` 出图为什么"没有行星、却有两块天空"：相机被摆错了。
-///
-/// ⇒ 结论：**下面这些逐轮推断全部作废**（它们都在分析覆盖 bug 造成的画面）：
-/// 屏幕锁定、与相机无关、按宽的一半、立方图布局、影子页、全屏 uv、预览 8 位转换……
-/// 保留下来仍然成立的只有烘焙侧那几条（采样/步进/分级/贴图十字：都干净）。
-///
-/// ⇒ 下一步：查 `options.cam` -> pass script 参数覆盖那条路（`main.rs` 的 `view_cam()` /
-///   `Options::parse` 里 `--cam` 那一支），修掉覆盖 bug；在修好之前，出图**一律不给 `--cam`**。
-/// ---- 结案（第 66 轮，更正第 65 轮）----
-///
-/// **那条"画面正中通高台阶"既不是渲染器的 bug，也不是 `--cam` 覆盖的 bug ——
-/// 是我的机位错了。** `--cam yaw,pitch,distance` 的**第三个数是距离**，而我一直沿用的
-/// `135,-10,0.05` 里距离是 **0.05**：`scene nebula` 里有一颗半径约 1 的行星
-/// （`opaque` 那条 geometry pass 画的球）⇒ **相机在行星内部**，画出来就是"两块内表面"，
-/// 于是有了那条看似"屏幕锁定"的台阶。
-///
-/// 判据（两条，都很便宜）：
-/// * **不给 `--cam`** ⇒ 走 `probe_camera(None, aspect)`（默认距离约 3.15，在球外）
-///   ⇒ 画面正常、能看见行星；最大列差跑到内容边缘而**不在正中**。
-/// * 给球外机位 `--cam 135,-10,6.0` ⇒ 亮>0.02 **44.9%**（参考 45.2%）、
-///   暗<0.005 20.5%、p10/50/85/99 = **0.0042/0.0156/0.0821/0.2492**
-///   （参考 0.0051/0.0171/0.0746/0.2489）—— 亮度与四分位都贴住参考。
-///
-/// ⚠ 教训（比这个 bug 值钱）：**先确认自己在看什么**。这颗行星在场景里一直都在，
-///   而我把"两块内表面"读成了"立方体接缝"，随后十几轮的推断都建立在那个误读上 ——
-///   期间烘焙侧的判据反复说"干净"，那才是对的信号。**出图先给一张不给 `--cam` 的对照**，
-///   一眼就能看见行星、也就不会有后面那一串。
-///
-/// ⚠ 另：`scene nebula` **没有自带相机**（`px_graphs/src/bin/scene.rs` 里 `cameras: Vec::new()`），
-///   离屏的相机一律来自 `probe_camera`（`--cam` 或默认）。
-/// ---- 结案（第 68 轮，覆盖第 65/66 轮的归因）----
-///
-/// **正确距离下没有"屏幕锁定"的台阶。** 五个方位（0/45/135/225/315，距离 6.0）扫描：
-/// 最大列差**从不在正中**（x = 349/610/676/609/518）；对准正中那一列单独量：
-/// 0.0061 / 0.0071 / 0.0094 / 0.0069 / 0.0106，是邻列的 **1.17~2.16x**。
-///
-/// ⇒ 两点结论：
-/// * 那条线**随方位出现/消失**（0°/315° 几乎没有）⇒ 它是**天空立方体面的棱**，
-///   不是屏幕空间的东西（第 65/66 轮"屏幕锁定 / `--cam` 覆盖 bug"的归因都作废）。
-/// * 它只有 1.2~2.2x，**低于质量线允许的 5.2x**（参考图自身的同类指标就是 5.2x）
-///   ⇒ 按目标的判据它**合格**。
-///
-/// ⚠⚠ 盲区记一笔（比这条线值钱）：它是 **C¹ 折痕**（值连续、**斜率**跳变）——
-///   立方体各面各有自己的三线性格架，跨棱时格架朝向换了 ⇒ 插值导数跳变 ⇒ 一条细折痕。
-///   我那些连续性判据量的都是**值**（跨棱差 vs 面内差），所以它们全绿而折痕仍在。
-///   **量连续性之外还要量平滑性**：跨棱的二阶差（或梯度方向差）才抓得到它。
 fn views_of(options: &Options) -> render::Views {
     if options.sheet {
         render::Views::Sheet {
@@ -1440,7 +1060,6 @@ fn views_of(options: &Options) -> render::Views {
     }
 }
 
-/// `--device [--shot PNG]`：报设备就绪读数，给了 `--shot` 就再清一张纯色图。
 fn run_device(options: &Options) -> i32 {
     let gpu = gpu::connect();
     let limits = gpu.adapter.limits();
@@ -1455,7 +1074,6 @@ fn run_device(options: &Options) -> i32 {
     {
         println!("时间戳周期：{} ns", gpu.queue.get_timestamp_period());
     } else {
-        // §104 第 12 条：不可用就降级（gpu_ms 报 null），**不许 panic**。
         println!("时间戳周期：（这一台不可用 ⇒ gpu_ms 将报 null，不做替代读数）");
     }
 
@@ -1463,8 +1081,6 @@ fn run_device(options: &Options) -> i32 {
         return 0;
     };
 
-    // 纯色是 S0 唯一能单独验这条路径的机会：清一个**非平凡**的值（三个通道都不一样，
-    // 这样通道序错了、sRGB 编码错了都看得出来），再原样走到 PNG 上。
     let color = wgpu::Color {
         r: 0.25,
         g: 0.5,
@@ -1481,7 +1097,6 @@ fn run_device(options: &Options) -> i32 {
             return 1;
         }
     };
-    // 首像素要在把 pixels 交出去之前抄下来：写 PNG 会把它移走。
     let first = [pixels[0], pixels[1], pixels[2], pixels[3]];
     let bytes = match shot::write_png(path, options.width, options.height, pixels) {
         Ok(bytes) => bytes,
@@ -1505,8 +1120,6 @@ fn run_device(options: &Options) -> i32 {
         first[0], first[1], first[2], first[3]
     );
 
-    // 离线那条路不需要 surface（§104 第 13 条），所以这里显式说明一声：
-    // 少了这一句，下一次有人会以为"没开窗口所以没画"。
     println!("（离线：不碰交换链，渲染目标是本进程自己的 Rgba8UnormSrgb）");
     let _ = &gpu.instance;
     0

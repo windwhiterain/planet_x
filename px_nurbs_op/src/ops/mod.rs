@@ -1,6 +1,3 @@
-//! NURBS 的算子：**一个文件一条声明**（`px_body!` 在模块里只定义一次 `__px_body`，
-//! 所以两条实现不能住同一个模块 —— 这是契约层的形状，不是这里的偏好）。
-
 pub mod circle;
 pub mod curve_at;
 pub mod curve_elevate;

@@ -1,6 +1,3 @@
-//! 两个网格算子的参数：立方球网格（`mesh.cubesphere`）与等值面代理（`mesh.proxy`）。
-//! （算子 id 与接口形状住在同目录的 `ops.rs` 里 —— 一处定义。）
-
 pub mod cubesphere {
     use serde::{Deserialize, Serialize};
 
@@ -33,24 +30,13 @@ pub mod proxy {
     #[derive(Debug, Clone, Serialize, Deserialize, px_derive::PxParams)]
     #[serde(default, deny_unknown_fields)]
     pub struct Params {
-        /// 等值面高度。体积里存的是归一化后的场 `(粗场 - τ) / L`，所以默认 0.0。
         pub level: f32,
-        /// 每个面的分辨率：每轴 `2^depth + 1` 个采样点。代理要粗，6~7 就够。
         pub depth: u32,
-        /// 焊缝焊接容差（世界单位）。远小于一个格子，只吃掉两块之间 1 ULP 级的偏差。
         pub weld: f32,
-        /// 几何外扩：每个顶点沿外法线往外推这么远（世界单位）。
-        ///
-        /// 为什么只能靠几何补：稠密 MC 的等值面比解析等值面**浅**（实测外边界余量 −0.0017），
-        /// 云的轮廓上因此丢一圈；而体积里存的是 `(场−τ)/L`，`level` 往外偏的下限就是壁上那层
-        /// `−τ/L`（再低提取器直接报"体积里没有这个等值面"）⇒ 偏 `level` 补不回来。
-        ///
-        /// 0 不进键（`skip_serializing_if`）：不写这个字段的老档输出逐位不变，键也不该变。
         #[serde(skip_serializing_if = "is_zero")]
         pub offset: f32,
     }
 
-    /// `skip_serializing_if` 要的那条：0 等价于"没写这个字段"。
     fn is_zero(value: &f32) -> bool {
         *value == 0.0
     }

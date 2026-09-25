@@ -1,112 +1,163 @@
-# 不变式
+# Invariants
 
-> **改任何东西之前先读这一页。** 下面每一条都**付过代价** —— 或者是踩过一次坑换来的，
-> 或者是用实测数字裁决过的。这里只写"必须怎样"与"为什么"；细节去 `system/` / `render/` /
-> `art/` 里找，历史与那些已经过期的推演去 `rounds/` 与 `archive/` 里找。
+Every rule here is load-bearing. Most were paid for with a bug that took a while to find.
+Read this before changing anything.
 
-## 一、判据与仪器
+## Identity and keys
 
-- **判据要在正确的仪器上取。** `cargo check` 过了 ≠ 探针跑过了；低分辨率量到的是「地板」
-  不是 shader；算子计数只能用来找嫌疑人，不能当成绩；看日志要看全，`-Last 12` 会把关键错误
-  挤出视野。
-- **任何「跳过」都是判据的敌人**，尤其是当它守着**唯一**判据的时候。探针拿不到设备就 `exit(2)`，
-  不许静默变绿。
-- **审计不能因为走缓存而哑掉**：缓存可以省重算，不能省仪器。
-- **梯度对错的唯一判据是 arbiter**（`px_probe --bin field_dual`）。差商这条腿已退场。
-- **证据分级**：A 级（实测 / 官方来源）可直接引用；B 级（未核实）**用前必须复核**。
-- **「改尺寸再改回来必须逐字节回到原样」**是一条免费的强断言。
-- **夹具 / 桩不能替被测物挡枪**（§144）。探针编到设备上的文本必须与**真正会渲染它的那个宿主**
-  是同一份 —— 否则探针量的是一份谁也不会执行的文本。同族：**烘图与出图必须在同一个 GPU 后端上**
-  （2026-09-28 修：`px_gpu` 的缺省后端曾是 DX12 而宿主编译期锁死 Vulkan）。
+**A key is content plus identity.** Drop one axis and you get "same key, different content".
+Cache hits are then silently wrong, which is the worst failure mode this repository has.
 
-## 二、身份与键
+**Editing a comment changes the key.** `px_fingerprint` hashes the full text of every `.rs` and
+`.wgsl` in a crate's `src/`, plus every reachable path dependency's. The crates whose fingerprints
+reach a key include `px_fingerprint`, `px_graph_schema`, `px_elem`, `px_graphs`, the `px_*_schema`
+crates, the `px_*_alg` crates and the `px_*_op` crates.
 
-- **键 = 内容。** 缓存键少一个维度就是「同一个键、不同内容」。
-- **shader 的「内容」包含它的 include 闭包。** 入口文本一个字没动、被 `#import` 到的模块换了一版，
-  也是另一个键（`px_shader`，§17.1 / §52.3）；装载时还拿产物记的闭包指纹跟盘上现在的比，
-  对不上**当场拒**并给重烘配方。
-- **⚠ 改任何参与指纹的源码都会换键。** `px_fingerprint` 把每个 `.rs` / `.wgsl` 的**全文**进
-  blake3，而那份指纹就是 `PxOp::decl_hash` ⇒ **改一行注释也是换键**。参与指纹的 crate 是
-  `px_fingerprint`、`px_graph_schema`、`px_*_schema`、`px_*_alg`、`px_*_op`；工具 / 编排 / 表
-  （`px_cook`、`px_decls`、`px_graphs`、`art/inst`）在圈外 ⇒ 它们的清理是免费的。
-  ⇒ 一次全仓改注释（比如改文档路径）必然连带一次 key 重登记与 CAS 失效，**先算清楚再动手**。
-- **参数的「名字 ↔ 字节」只能有一个来源。** 今天那份来源是 shader 文本（naga 反射）；
-  要把它挪进 protocol，就必须同时**生成** WGSL 或补一道跨层门，否则就是两份会漂开的真相（§66）。
-  表与类型住 `px_protocol::material`、反射与组装住叶子 crate `px_shader`，
-  `Value ↔ ParamKind` 的合法映射只活在 `MaterialLayout::pack` 里；**加宽只许往后追加**
-  （老格一个都不许挪 —— 挪了就是把既有 shader 的贴图悄悄换到别的格上）。
-- **「配方里能写什么参数」由 shader 的契约说了算，不由 Rust 的白名单说了算**（§81）：
-  结构键（半径 / 色板 / 灯 / 形状档……）是**编译器逻辑**，其余按名字透传；
-  ⇒ **加一个参数 = 改 WGSL + 改配方，0 编译、0 重启**。
-- **烘图时就红，别等到装载**：写错名字 / 少给参数 / 值形状不对，三种都在烘图那一层报，
-  而不是等服务端拒绝（§81.4）。
-- **schema descriptor 随产物烘、装载时对账**：改反射规则（表 / `ParamKind` / 偏移规则）而键没变，
-  盘上就会出现「同一个键、两份契约」⇒ `scene::schema_check` 当场拒；**改规则还要同时升
-  `SHADER_VERSION`**（§80.2）。
-- **性能对比必须配对**：单发 A→B 量到过 10.43 / 5.49 ms，而同一支 exe 自己前后就能差一倍
-  （别的负载插进来）。A/B/A/B 逐轮换序才算数（§80.3）。
-- **指纹为 0 的旧产物不缓存**：键里少了「内容」这一维时，命中就等于认错了东西。
-- **图里的节点名不许随手改**：`diff` 按节点名配对，改了只会看到「一个新增一个移除」。
-- **协议形状一变 ⇒ `protocol_hash` 变 ⇒ 在跑的旧服务立刻被握手拒掉** —— 这是设计，不是坏了。
-- **快照 JSON 的键是排序的**，手改必错：一律 `PX_UPDATE_SNAPSHOT=1 cargo test -p px_protocol`。
-- **⚠ 空跳的占用掩码：三处布局必须同源**（`px_volume_gpu_op/src/occupancy.rs` 的 `from_emission`
-  写 / `at_cell` 按内部布局读 / WGSL 的 `occupancy_class` 按上传布局读）。这一轮**三次**栽在
-  "其中一处与另两处不一致"上，症状都是"掩码看着是对的、skip 侧整片错"。
-  ⚠ `WORDS_PER_BLOCK = 4³/32 = 2`：L2 正好占满两个 `u32`，**L1 必须独占一段**。
-  ⚠ CAS 的键**不含环境变量**：量 `PX_SKIP_OFF` 那一档必须让参数（比如 `steps`）变一下，
-  否则第二次直接命中缓存、量到的是读盘时间。
+Two of these are easy to get wrong:
 
-## 三、进程与流程
+- **`px_graphs` does participate**, through `px_graphs/build.rs`: its own fingerprint is the identity
+  of `px_local_op!` nodes.
+- **`px_elem` does participate**, through its `build.rs` declaration hash, which enters instance
+  keys.
 
-- **先冻源码，再量 anchor**；量 R1 前先连跑到 `Compiling=0`（跑过 `cargo test` 后第一次
-  `cargo build` 会因特性合并重链 exe ⇒ 假红）。
-- **撤回探针要按字节精确**：untracked 文件 git 救不了，用 key 当 oracle 确认逐位回原值；
-  改 untracked 源前**先记字节数**。
-- **一份能被删掉的判据，不是判据。** `target/` 是 git 忽略的、随时可能被清掉的目录 ——
-  把**靶子**放在那里，等于让"这个工程能不能被验证"取决于一次 `rm -rf`。
-  所以靶子进仓库；**仪器**（脚本、探针、读数）可以重写，靶子不能。
-  ⚠ **这条规矩在 2026-09-28 咬到了它自己**：锚 README 当年正是照这条把六份冻产物从
-  `target/oracle/` 搬进了 `art/anchor/frozen/`，**但没人改那条读它们的测试里的路径**
-  ⇒ 靶子救活了，判据瞎了一整轮（详见 `docs/anchors.md` 第三节）。
-  ⇒ **搬靶子的时候，连读它的那行路径一起改**，并且**实跑一次确认它没有在静默跳过**。
-  ⚠ 判据的"跳过"必须吵：`⚠ 跳过…不是通过，是没测` 这种话要真被人看见，
-  而不是淹没在一串 `ok` 里。
-- **禁止全量测试**，只跑受影响的；不写冗余测试；大计算量的判据转 probe。判据矩阵的写法见
-  `docs/rounds/2026-09-20-art-pipelines.md` §四。
-- **按改动落点选判据**：只看观感（场景 / 材质参数、实例常数）⇒ 只跑"同机位出图 + 那一栏的读数"；
-  只碰一份 shader ⇒ 重烘对键 + 出图；碰共享代码 ⇒ 先**重链全部 bin**，再对内容哈希（只对受影响的图）。
-- **交接清单里的每条命令，都要回到它自己那一节读用法。**
-- **做完一个功能必须把窗口调出来给用户 review**，且**起窗口必须脱离**（`Start-Process` 不带 `-Wait`）。
+⚠ **`px_cook` and `px_decls` are inside `px_graphs`' roster**, because that roster is taken over
+`[build-dependencies]` and therefore pulls in both crates' sources. They currently reach no key only
+because nothing under `px_graphs/src` uses `px_local_op!` — the only uses are in
+`px_graphs/tests/local_op.rs`, and tests are excluded from a roster. **The first local operator added
+to a shipped graph makes editing a byte of `px_cook` or `px_decls` rotate that node's key.** Do not
+treat them as free.
 
-## 四、渲染器与环境
+Consequence: **a repository-wide comment edit is never free** — count the files first.
 
-- **不要用固定帧数预热**；就绪门必须 `total > 0 && pending == 0`。
-- **`#import` 只内联点名的符号** ⇒ 测试侧严格宽松于运行时；shader 运行时正确性唯一的仪器是
-  viewer 的 stderr。
-- **`looking_at` 的 up 与视线共线会退化** ⇒ 两极视角停在 82°，别顺手改成 90°。
-- **平台已经定义了标准格式时，不要手搓等价物。**
-- **参数名集合是「产物 ⇄ shader」逐项相等的硬约束**（`reflect.rs::pack`：缺参与多参都拒）
-  ⇒ 「加一个参数」不是**一个**动作，是**三个**：shader 声明、产物给值、两边名字对上。
-- **能动态的就动态，减少类型检查与单态化的时间。** 渲染侧的编译成本几乎全在 **LLVM 为泛型产码**
-  ⇒ 新写的渲染侧代码**枚举 + `match` 优先于泛型 trait、`Box<dyn Trait>` / 函数指针优先于泛型参数、
-  数据表 + 循环优先于每类一份代码**（§92.3、§96）。
-- **后端不是可选项**（§104 第 9 条）：`wgpu` 一律 `default-features = false` 并显式点名
-  `std` + `vulkan` + `wgsl`。缺省特性会把 `dx12` / `metal` / `gles` / `webgpu` 一并拉回来。
-  ⚠⚠ **`std` 必须点名，不能省**（2026-09-28 实测）：省掉它 wgpu-core 会走 no-std 那套同步实现，
-  症状是**多线程下的错误域栈会串**（`Mismatched pop_error_scope call: error scopes must be
-  popped in reverse order`），而且**同一份二进制每次失败的条数都不一样** —— 看起来像竞态，
-  实际是 cfg 差异。⚠ 本仓 `px_render` / `px_pass` 两处的 `std` 从前一直是靠 `egui-wgpu`
-  顺带合并进来的（偶然，不是声明）⇒ 改特性表时别以为"它们一直是对的"。
-- **特性表是产品语义的一部分，不是构建细节**：`default-features = false` 之后**逐项点名**，
-  并且**声明的东西要能自己站住**（别依赖别的 crate 碰巧把缺的那一项合并进来）。
-- **只有 `.wgsl` 改动不要重启**（约 1 秒热重载）。**uniform 结构也不用**：装载时现反射，
-  加一格 / 换布局都在同一个 pid 里出图；**要改 Rust 的是「让产物给得出那个新值」**。
+**A shader's content includes its `#import` closure.** An entry file whose text did not change is
+still a different key if a module it imports changed. On load the renderer recomputes the closure
+from the artifact's WGSL against the modules on disk and compares it with the fingerprint recorded
+in the artifact; a mismatch is refused outright, with instructions for re-cooking.
 
-## 五、仓库习惯
+**A key change is not a content change.** Identity (source bytes) is one half of the key, so a
+comment edit changes every key while every output stays identical. Do not use "the key changed" as
+evidence that output changed, and do not use "the cache hit" as evidence that it did not — that
+only holds when the dependencies were not rebuilt.
 
-- **CRLF/LF 在本仓是混的**：批量改文件前先 `grep -qU $'\r'`；perl 多行正则写 `\r?\n`。
-  批量改写的脚本**必须保留原行尾** —— 换行会进源码指纹。
-- **长命令会被截断**：大文件分块写，写完立刻 `wc -l` + `grep 关键符号` 校验。
-- **文件名与 `§` 号都是冻住的锚点**，理由见 `docs/README.md` 的「命名与引用约定」。
-- 历史（已删或已被吸收的推演）在 git 历史里，不在文档里：
-  这里原来是一份 3300+ 行的实验笔记，选型过程、里程碑流水账、被推翻的中间方案都已删掉。
+**Nothing that participates in a key may be edited casually.** If it must change, expect a
+repository-wide key rotation: rebuild every operator dylib, and re-cook. A warning sign of a
+half-done rotation: at load time, `…dll is not from the same build as the contract`.
+
+## Verdicts and instruments
+
+**A verdict must be taken on the right instrument.** `cargo check` passing is not a probe passing.
+A low-resolution render measures the floor, not the shader. Operator counts find suspects, they
+are not a score. Read logs in full; tailing the last twelve lines hides the error that matters.
+
+**A skipped check is not a passing check.** A probe that cannot get a device exits non-zero. A
+test that cannot find its target must say so loudly — a `skip` line printed among a column of
+`ok`s has already hidden a dead verdict for a full round.
+
+⚠ **A GPU-dependent test that prints "no device, skipping" and returns is a policy violation, not a
+convenience.** `px_volume_gpu_op` and `px_nurbs_gpu_op` are default members, so on a machine without
+a GPU the fast chain reports green while the GPU comparisons never executed. Either require the
+device (fail, do not return) or take the check out of the default chain. Inconsistency inside one
+crate — one test deliberately panicking while its neighbours skip — is how this rule gets lost.
+
+**A diagnostic is not a verdict.** Some binaries under `px_probe` are called probes and exit 0
+without asserting anything; they print measurements for a human. Do not cite their exit code as
+evidence.
+
+**One target, one reader.** When a verdict's fixture moves, change the path that reads it in the
+same commit, and run it once to confirm it is not skipping. Moving the fixture and leaving the
+reader behind is how a verdict dies silently.
+
+**A verdict that can be deleted is not a verdict.** Anything under `target/` can vanish to a
+`rm -rf`, so fixtures live in git and instruments do not. A fixture nobody reads is not a verdict
+either, and should be deleted rather than kept for comfort.
+
+**Fixtures and stubs must not shield the thing under test.** Text compiled for a probe must be the
+same text the real host compiles. Two GPU backends is worse than one: bake and render must run on
+the same backend.
+
+**Performance comparisons must be paired.** A single A→B measurement has shown 10.43 ms and 5.49 ms
+for the same executable with a different load in between. Alternate A/B/A/B.
+
+**Evidence is graded.** A measured number or an official source can be cited directly. Anything
+unverified must be re-checked before it is used.
+
+## Protocol and compatibility
+
+**One source for the mapping between parameter names and bytes.** Today that source is the shader
+text (reflected with naga). Moving it elsewhere requires generating the WGSL or adding a gate, or
+you end up with two truths that drift.
+
+**Widen by appending only.** Never move an existing binding slot. Moving one silently points an
+existing shader's texture at a different slot.
+
+**What a recipe may specify is decided by the shader contract, not by a Rust whitelist.** So adding
+a parameter is: declare it in WGSL, give it a value in the artifact, make the names match. Names
+must match exactly in both directions — a missing or extra parameter is refused at load.
+
+**Fail at cook time, not at load time.** A misspelled name, a missing value, a wrongly shaped
+value — all three are reported while cooking, not when the client connects.
+
+**A schema descriptor is baked with the artifact and checked on load.** Changing reflection rules
+without changing the key leaves two contracts under one key; the loader refuses. Reflection rule
+changes must also bump `SHADER_VERSION`, which `px_graph` owns (`px_graph::SHADER_VERSION`) and
+`px_cook` re-exports.
+
+**The snapshot JSON is sorted and machine-written.** Hand-editing it is always wrong; regenerate it
+with `PX_UPDATE_SNAPSHOT=1 cargo test -p px_protocol`. A change to the snapshot changes
+`protocol_hash`, which is the point: a running peer with the old shape is refused at handshake.
+
+**Node names in a graph are not free to rename.** Diffing pairs nodes by name; a rename reads as
+one removal and one addition.
+
+## GPU
+
+**The backend is not optional.** Every `wgpu` dependency is `default-features = false` with
+explicit features. The defaults pull in `dx12`, `metal`, `gles` and `webgpu`, all of which this
+project has rejected.
+
+**`std` must be named explicitly.** With `default-features = false`, omitting `std` makes wgpu-core
+use its no-std synchronisation path. The symptom looks like a race — `Mismatched pop_error_scope
+call: error scopes must be popped in reverse order`, with a different number of failures each run —
+but it is a configuration difference, not a race.
+
+**Feature lists are part of the product contract.** After `default-features = false`, name every
+feature, and make sure what you declared stands on its own rather than depending on another crate
+happening to unify the missing piece in.
+
+## Volume rendering
+
+**GPU is the single implementation.** Marching lives in `px_volume_gpu_op` and `src/sampler.wgsl`.
+Rendering, probes, and readings go through it. `px_volume_alg` holds a CPU copy that exists only as
+a draft and as a test oracle; no operator and no graph may take the CPU path, and no feature may be
+added that exists only on the CPU.
+
+**The occupancy mask has one source and three readers.** `from_emission` writes it, `at_cell` reads
+the internal layout, and the WGSL `occupancy_class` reads the upload layout. The internal storage
+(one word per cell in `sidecar`, `WORDS_PER_BLOCK` words per block in `words`) is not the same as
+the upload layout (`[L1 bits][L2 mask]`). Change one and you must change all three.
+
+`WORDS_PER_BLOCK = 4³/32 = 2`: the L2 mask exactly fills two `u32`s, so the L1 bits **must** occupy
+their own section. They cannot be folded into "word 0 of each block".
+
+**Crossing a coarse-block boundary must actually cross it.** `layer_radius` is a `pow`, and
+`layer_index` differing by one ulp at a boundary sends the cursor back to the previous block — the
+cursor spins in place and every ray near a block seam goes black.
+
+**The CAS key does not include environment variables.** To measure a feature toggled by an
+environment variable, vary a *parameter* too, or the second run is a cache hit and you measure disk
+read time instead.
+
+## Repository conventions
+
+**Line endings are mixed.** Some files are CRLF on disk and some are LF, and the bytes on disk are
+an input to every key. Before a bulk edit, check per file. Any bulk rewrite must preserve each
+file's line endings exactly.
+
+**`git status` cannot see line-ending changes.** CRLF and LF clean to the same blob. "Git says I am
+clean" and "the bytes did not change" are different statements.
+
+**Do not run the full test suite out of habit.** Run what the change affects. Do not write
+redundant tests. A check that costs real computation belongs in a probe, not in `cargo test`.
+
+**Format before committing.** `./format.sh`. If it touches files beyond your edit, commit those
+too.

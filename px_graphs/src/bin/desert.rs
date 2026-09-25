@@ -1,19 +1,11 @@
-//! 沙漠：**普通 Rust** —— 同 `planet.rs`，每一步走 `px_cook::cached` 那个缓存函数。
-//!
-//! ⚠ 这里原来是老写法（字符串 id + `&[&Artifact]`）。见 `planet.rs` 顶上那条注释。
-
 use px_cook::{
     Domain, GraphSpec, artifact_path_of, begin, cached, field, field_params, mesh, node_params,
 };
-// ⚠ element 那一档（`elem::Constant` / `elem::Mix` / `elem::Remap`）**不从 `px_cook` 那一扇门
-//   出去**：那一档的算子类型由图侧的生成物给（`px_graphs/build.rs` 写 `OUT_DIR/elem_gen.rs`），
-//   而 `px_cook` 是"各域算子表 + 缓存路径"那一扇门，两者不是一回事。
 use px_graphs::elem;
 
 type Fault = Box<dyn std::error::Error>;
 
 fn main() -> Result<(), Fault> {
-    // ⚠ **第一行**：`--store <目录>` 要在任何 `begin` / `node_params` 之前落成 `PX_ART`。
     px_cook::apply_store_args()?;
     let graph = begin(GraphSpec {
         name: "desert".to_string(),

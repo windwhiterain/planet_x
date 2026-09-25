@@ -1,23 +1,11 @@
-//! 星球：**普通 Rust** —— 一张场接一张场地算下去，每一步走 `px_cook::cached` 那个缓存函数。
-//!
-//! ⚠ 参数是**普通 Rust 值**：`node_params` 从 `art/planet/<节点>.toml` 读一份打底，
-//!   想改哪个字段就在 Rust 里改哪个（`Params { frequency: x, ..node_params(..)? }`）。
-//! ⚠ 这里原来是老写法（`node(params::FBM, "continents", &[])`：字符串 id + 一个
-//! `&[&Artifact]` 字节边界，类型全擦除）。现在接错一个输入、少给一个上游都是**编译错**。
-
 use px_cook::{
     Domain, GraphSpec, artifact_path_of, begin, cached, field, field_params, mesh, node_params,
 };
-// ⚠ element 那一档（`elem::Constant` / `elem::Mix` / `elem::Remap`）**不从 `px_cook` 那一扇门
-//   出去**：那一档的算子类型由图侧的生成物给（`px_graphs/build.rs` 写 `OUT_DIR/elem_gen.rs`），
-//   而 `px_cook` 是"各域算子表 + 缓存路径"那一扇门，两者不是一回事。
 use px_graphs::elem;
 
 type Fault = Box<dyn std::error::Error>;
 
 fn main() -> Result<(), Fault> {
-    // ⚠ **第一行**：`--store <目录>` 要在任何 `begin` / `node_params` 之前落成 `PX_ART`
-    //   （参数目录不是节点键的一部分，见 `px_graph::driver` 的模块文档）。
     px_cook::apply_store_args()?;
     let graph = begin(GraphSpec {
         name: "planet".to_string(),
@@ -28,9 +16,6 @@ fn main() -> Result<(), Fault> {
         height: 520,
         projection: Domain::Cube,
     };
-
-    // 这张图的**形状参数**：产出场的节点都拿它当自己的参数 —— 尺寸在脚本里是**一个值**，
-    // 不再有藏在驱动里的第二份真相（用户 2026-09-27 的裁定：不允许"画布"这个概念）。
 
     let continents = cached(
         &graph,
