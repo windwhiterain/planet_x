@@ -33,7 +33,7 @@ strip removed, and live code drifted too (the `direction_at` panic now sits near
 | 11 | `game`'s sources sat in every operator key through one `[dev-dependencies]` edge | the dependency walk skips `[dev-dependencies]`, so a crate the product never compiles is out of identity; `px_fingerprint/tests/dev_dependency.rs` pins it |
 | 12 | `collect_tree` skipped paths by name, so a declared module or shader could be compiled and invisible | the collector follows `mod` / `#[path]` / `include!` and takes every `.rs` a declaration reaches plus every `.wgsl` under `src/`; the same gate covers the reverse direction |
 | 14 | 13 comment pointers in 12 `build.rs` files named `docs/system/*.md`, retired pages, and carried `§` numbers | rewritten to name the live pages; every crate's `build.rs` is inside its own roster, so this rode the same window |
-| 7 | `art/frame/default.toml`'s comments narrated removals and cited deleted resources | comments now state the current rules only; four dangling citations name the live files (`px-scene/src/vshadow.rs`, `px_scene::vshadow`, `px_render/src/render.rs`, `px_render::material::FRAGMENT_ENTRY`, `px-scene/src/frame.rs`). The "key cost" that deferred it was not real for a comment-only edit: measured, one changed comment character moves neither the scene content key nor the artefact bytes |
+| 7 | `art/frame/default.toml`'s comments narrated removals, cited deleted files, and carried seventeen `§` pointers | comments state the current rules only; four dangling file references name the live ones, the `§` pointers are deleted rather than remapped, and a comment edit here is zero-key and zero-rebake (the parsed values are what the scene key and artefact see) |
 | 15 | the instance sidecar was not strict JSON (a trailing comma on every field), so a strict reader silently saw nothing | the comma sits between fields; `px list` parses it strictly again and separates "no sidecar" from "will not parse"; measured zero key cost |
 | — | backslash-newline continuations spanning blank lines in `px_shader/src/host_stubs.rs` warned on every build | the two blank lines are deleted; the assembled WGSL is byte-identical (the pinned byte test is green) and the build is warning-free |
 
@@ -446,19 +446,20 @@ grepping each stem across the `.rs` and `.ps1` files.
 
 ### 7. ✅ `art/frame/default.toml` contained history in its comments
 
-Resolved: the comments now state the current rules only. The narrations of what was removed (the
+Resolved. The comments state the current rules only: per-level shadow atlases and why they cannot
+share one texture, the 1×1 dummy binding that lets the page pass write and sample the same atlas, the
+downsample chain and its ordering, the clear colour's linear values, and that the skybox material's
+entry is `fragment`. What was removed is the narration wrapped around them (the
 `point_shadow_atlas_sample` resource, the `copy_shadow_atlas` pass, the `point_shadow_textures`
-atlas, the `fs_main` entry mistake, the 400 MB/24 MB bandwidth figures) are gone, and the rules they
-were wrapped around are kept: per-level shadow atlases and why they cannot share one texture, the
-1×1 dummy binding that lets the page pass write and sample the same atlas, the downsample chain and
-its ordering, and that the skybox material's entry is `fragment`. Four citations that pointed at
-files or paths that no longer exist now name the live ones. The rules live in the file; the history
-is in git.
+atlas, the `fs_main` entry mistake, the 400 MB/24 MB bandwidth figures) and every citation that
+pointed at nothing: four file or path references now name the live ones, and the seventeen `§`
+pointers are gone — the repository carries no numbered pages for them to resolve to, and
+`docs/README.md` gives references as a file path plus a symbol name.
 
-The cost this edit was deferred for is not a cost a comment edit pays: what the scene key and the
-scene artefact see is the file's parsed values — a scene product is written under a content key that
-is stable across comment-only edits, and its bytes are byte-identical with and without one. Editing
-what the file *says about the frame* re-cooks; editing how it is explained does not.
+A comment edit to this file is zero-key and zero-rebake. What the scene key and the scene artefact
+see is the file's parsed values: with one comment character changed, the scene content key stays
+`f601002f018a` and the artefact under that key is byte-identical. Editing what the file says about
+the frame re-cooks; editing how it is explained does not.
 
 ## Documentation defects found in the old set
 

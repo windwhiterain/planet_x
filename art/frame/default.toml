@@ -1,17 +1,17 @@
-# 帧图 `default`（§128）：**这颗渲染器怎么把一帧画出来**。
+# 帧图 `default`：**这颗渲染器怎么把一帧画出来**。
 #
 # ⚠ 这是**六个场景共用**的一份：帧图不是内容，是渲染器的形状。抄进每个场景，
 # 只会让"它们共用一套帧图"这件事变得看不见，而漂移是必然的。
 # 场景配方写 `frame = "default"` 指过来（不写也是它）。
 #
-# 顺序（与 oracle 实测的结构一致，§110.1）：
+# 顺序（与 oracle 实测的结构一致）：
 #   prepass（**它清的深度**）→ 不透明 → 天空盒 → 透明 → [内容 pass 插在这里] → blit
 #
 # 清屏色 = `Color::srgb(0.004, 0.005, 0.010)` 的**线性**值：wgpu 的 clear 值不做
 # sRGB 变换，硬件按目标格式自己编码 —— 把 sRGB 数值填进来就是"清屏色偏亮一档"。
 # （0.004/12.92、0.005/12.92、0.010/12.92：三个数都在 0.04045 以下，走线性那一段。）
 
-# 内容链的**乒乓对**（§128 裁决 D）：插进来的 pass 按它轮流读写，
+# 内容链的**乒乓对**：插进来的 pass 按它轮流读写，
 # 最后 blit 读链尾那一个。恰好两个。
 chain_color = ["scene_color_a", "scene_color_b"]
 
@@ -35,8 +35,8 @@ usage = ["render_attachment", "texture_binding", "copy_src"]
 
 # ---- 点光**虚拟影图**的物理 atlas：**一盏投影灯一个 cube，每面一层** ----
 #
-# `layers` 写的是**来源**不是数：烘图侧按这一帧的灯表解出来（§133 同一条口径 ——
-# 配方里一个内容值都不写死），文档里落的是解出来的整数。一盏投影的灯都没有时，
+# `layers` 写的是**来源**不是数：烘图侧按这一帧的灯表解出来（配方里一个内容值都不写死），
+# 文档里落的是解出来的整数。一盏投影的灯都没有时，
 # **这份资源与写它的那些 pass 都不烘**。
 #
 # ⚠ 每个物体的分辨率按它的 `shadow_density`（texel / 世界单位）分配，
@@ -90,7 +90,7 @@ usage = ["render_attachment", "texture_binding", "copy_src"]
 #    pass 里绑定它"冲突，采样侧**直接读 `point_shadow_atlas` 自己**。
 # ⚠ 那条资源的 `usage` 本来就带着 `texture_binding`，所以它一直就能被绑 —— 不需要另立资源。
 
-# ---- 预通道深度的**快照**（§131）：给"既要拿它做深度测试、又要采样它"的那几方各一份 ----
+# ---- 预通道深度的**快照**：给"既要拿它做深度测试、又要采样它"的那几方各一份 ----
 [[resources]]
 name = "scene_depth_sample"
 format = "depth32float"
@@ -110,7 +110,7 @@ writes = []
 depth_target = "scene_depth"
 render = "color=none|depth=clear(0)|depth_write=true|compare=greater_equal|winding=ccw"
 
-# ---- 点光虚拟影图的**页栅格化**：**六面各一条 pass**（§109.1 的形状不变）----
+# ---- 点光虚拟影图的**页栅格化**：**六面各一条 pass** ----
 #
 # `shadow_faces = 6` ⇒ 这一条**展开成**（投影的灯数 × 6）条：每面一条，各自 `cube_face =
 # { light, face, layer }`（层号 = light×6+face，算式只在烘图侧）。
@@ -120,13 +120,13 @@ render = "color=none|depth=clear(0)|depth_write=true|compare=greater_equal|windi
 # （`px_scene::vshadow`），一页一笔 draw 靠 `MaterialInstance` + 动态偏移落在**同一条 pass**
 # 上（见 `EntryFile::shadow_faces` 那段注释）。六面仍然是六条 pass，一条不多。
 #
-# ⚠ **不许**用 multiview 把它"优化"成一条：那是行为差异，不是等价实现（§109.1）。
+# ⚠ **不许**用 multiview 把它"优化"成一条：那是行为差异，不是等价实现。
 # ⚠ `multiview_mask: None`、每面一个单层视图、`LoadOp::Clear(0.0)`、`depth_compare =
 # GreaterEqual`、每面 `world_from_view = 平移(灯位) × looking_at(CUBE_MAP_FACES[i])`、
-# 投影 `perspective_infinite_reverse_rh(π/2, 1.0, 0.1)` —— 这几样一条都不能少（§109.2）。
+# 投影 `perspective_infinite_reverse_rh(π/2, 1.0, 0.1)` —— 这几样一条都不能少。
 # ⚠ 它画的是**投影的那些物体**（`cast_shadow`），**不是**"不透明的那些"：大气与云
 # 都是透明的，而它们不投影（Bevy 的 `NotShadowCaster`）。
-# ⚠ 剔除仍然来自**材质**（§127）：这条 pass 没有颜色附件 ⇒ 执行器不建片元阶段，
+# ⚠ 剔除仍然来自**材质**：这条 pass 没有颜色附件 ⇒ 执行器不建片元阶段，
 # 而材质的 cull 照旧生效（材质带着片元 shader，它在 `color=none` 上不会输出颜色）。
 [[before]]
 label = "point_shadow"
@@ -194,7 +194,7 @@ params = { level = 3, light = 0, face = 0, page_size = 128, origin_x = 0, origin
 render = "color=none|depth=clear(0)|frag_depth=true|depth_write=true|compare=greater_equal|winding=ccw"
 
 
-# ---- 拷贝：把预通道的深度**搬**一份快照出来（§131）----
+# ---- 拷贝：把预通道的深度**搬**一份快照出来 ----
 #
 # 为什么必须有这一步：wgpu 不许同一条 pass 里把一张图既当（写的）深度附件、又当资源
 # 绑进绑定组（`DEPTH_STENCIL_WRITE` 是独占用法）。而主 pass 要的是**两件事一起**：
@@ -241,7 +241,7 @@ depth_target = "scene_depth"
 render = "color=load|depth=load|depth_write=false|compare=greater_equal|winding=ccw"
 
 # ---- 透明：大气（Add）/ 云（Premultiplied）/ 环（Blend）都在这一条里 ----
-# ⚠ 它们的片元 shader 各不相同，而片元阶段属于**材质**（§129）—— 这正是那条裁决要保的东西。
+# ⚠ 它们的片元 shader 各不相同，而片元阶段属于**材质** —— 这正是这条约束要保的东西。
 # 混合档、剔除、片元都按**材质**走（执行器按每一笔的材质建管线）。
 [[before]]
 label = "transparent"
@@ -254,7 +254,7 @@ depth_target = "scene_depth"
 render = "color=load|depth=load|depth_write=false|compare=greater_equal|winding=ccw"
 
 # ---- blit：把中间目标搬到最终目标（内建名 `view`）----
-# oracle 的结构就是这样：主纹理画完，最后一个 upscaling 节点搬到输出（§110.1）。
+# oracle 的结构就是这样：主纹理画完，最后一个 upscaling 节点搬到输出。
 # ⚠ 它用的是 `blit`（`art/shaders/blit.wgsl`）**自己那支** shader，不是借 `px_grade`
 # 加个 `strength = 0`：借来的话，配方描述的就是"一道调色"，而这一条 pass 的职责是**搬**。
 # 谁在查一个错的像素，应该读六行就能回答"是不是 blit 的问题"。
@@ -268,7 +268,7 @@ writes = ["view"]
 render = "color=load|depth=none|depth_write=true|compare=greater_equal|winding=ccw"
 params = { gain = 1.0 }
 
-# ---- 帧自有材质（§135）：**这颗渲染器自己的一部分**，不是可换的内容 ----
+# ---- 帧自有材质：**这颗渲染器自己的一部分**，不是可换的内容 ----
 #
 # 为什么它不写成 CAS 成员、也不由 `--bin shaders` 烘：天空盒那支 WGSL 必须与 oracle
 # 逐位对齐（方向重建走的是 `view_from_clip` / `world_from_view` 两条逆矩阵），它不是
@@ -284,7 +284,7 @@ shader = "art/frame/skybox.wgsl"
 # 烘图时就会拒（`px-scene/src/frame.rs` 里 `bake_material` 的第 ⑤ 条守卫）。
 entry = "fragment"
 # ⚠ 参数写的是**来源**，不是值：帧图是六个场景共用的一份，写死一个数就等于把内容
-# 焊进帧策略（§133：六份场景的亮度今天恰好都是 900.0，而内容可以不是 —— 第一份设了
+# 焊进帧策略（六份场景的亮度今天恰好都是 900.0，而内容可以不是 —— 第一份设了
 # 别的亮度的场景会得到整幅背景错的图，且不会有人报错）。
 # 认得的来源只有 `environment.ambient` 与 `environment.skybox_brightness`;
 # 名称/类型对不上在**烘图时**当场拒（`px-scene/src/frame.rs` 里 `bake_material`）。

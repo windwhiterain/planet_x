@@ -244,6 +244,16 @@ once staged. Any bulk rewrite must preserve each file's line endings exactly.
 **`git status` cannot see line-ending changes.** CRLF and LF clean to the same blob. "Git says I am
 clean" and "the bytes did not change" are different statements.
 
+**A shared checkout is shared territory down to the index.** Three ad-hoc agents work one tree; the
+staging index belongs to whoever staged, and a spilled `git status` shows everyone's half-finished
+work side by side. So: add **by path**, never `-a`/`-A`; before any commit, `git diff --cached
+--stat` must contain only your own files (if it does not, `git reset` the foreign entries instead
+of committing or reverting them); never run git *write* operations against a colleague's uncommitted
+work (`checkout`/`restore`/`stash`, and per-path adds are not a shield against one file holding two
+authors' edits); and confirm with the other author before touching anything you did not write.
+`./format.sh` counts as a source edit: run it **before** any bake/final-build step of a window, not
+after, or it rotates every key you just baked.
+
 **Do not run the full test suite out of habit.** Run what the change affects. Do not write
 redundant tests. A check that costs real computation belongs in a probe, not in `cargo test`.
 
