@@ -39,7 +39,6 @@ const PX_D3D_SAMPLE_POINT_COEFFS: array<f32, 8> = array<f32, 8>(\n\
 const PX_PAGE_SIZE: u32 = 128u;\n\
 const PX_PAGE_BITS: u32 = 7u;
 const PX_CUBE_FACES: u32 = 6u;\n\
-
 \n\
 @group(0) @binding(6) var<storage, read> px_shadow_faces: array<vec4<f32>>;\n\
 \n\
@@ -199,7 +198,6 @@ fn px_sample_shadow_at_offset(\n\
 \x20   let dir = light_local + position.x * x_basis + position.y * y_basis;\n\
 \x20   return px_sample_shadow_page(light_id, level, dir, depth) * coeff;\n\
 }\n\
-
 fn fetch_point_shadow(\n\
 \x20   light_id: u32,\n\
 \x20   frag_position: vec4<f32>,\n\
