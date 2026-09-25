@@ -8,10 +8,12 @@ Read this before changing anything.
 **A key is content plus identity.** Drop one axis and you get "same key, different content".
 Cache hits are then silently wrong, which is the worst failure mode this repository has.
 
-**Editing a comment changes the key.** `px_fingerprint` hashes the full text of every `.rs` and
-`.wgsl` in a crate's `src/`, plus every reachable path dependency's. The crates whose fingerprints
-reach a key include `px_fingerprint`, `px_graph_schema`, `px_elem`, `px_graphs`, the `px_*_schema`
-crates, the `px_*_alg` crates and the `px_*_op` crates.
+**Editing a comment changes the key.** `px_fingerprint` hashes the full text of the Rust files a
+crate's module tree declares, every `.wgsl` under its `src/`, its `build.rs`, and the same for every
+reachable path dependency taken over a runtime or build edge (`[dev-dependencies]` is not compiled
+into the artifact, so it is not followed). The crates whose fingerprints reach a key include
+`px_fingerprint`, `px_graph_schema`, `px_elem`, `px_graphs`, the `px_*_schema` crates, the `px_*_alg`
+crates and the `px_*_op` crates.
 
 Two of these are easy to get wrong:
 

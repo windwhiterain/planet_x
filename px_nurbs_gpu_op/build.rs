@@ -5,5 +5,5 @@
 //! —— ⚠ WGSL 也在 `src/` 里，所以**改一行着色器**同样会换掉身份与键。
 
 fn main() {
-    px_fingerprint::cargo_fingerprint_for_crate(&[]);
+    px_fingerprint::cargo_fingerprint_for_crate();
 }

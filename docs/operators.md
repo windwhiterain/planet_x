@@ -147,13 +147,20 @@ Consequences that are easy to get wrong:
 
 * A **roster** maps `label → path`; label = `<crate directory name>/<path relative to the crate>`.
   It is a `BTreeMap`, so hashing order is deterministic.
-* Per crate it collects every `.rs` **and `.wgsl`** under `src/` recursively, plus the crate's
-  `build.rs`. Shaders count because they are `include_str!`-ed into the binary, not resources.
+* Per crate it collects the Rust files the **module tree** actually declares — `mod`, `#[path = "…"]`
+  and literal `include!("…")`, walked from `src/lib.rs`, `src/main.rs`, `src/mod.rs` and every
+  `src/bin/*.rs` — plus **every `.wgsl` under `src/`** and the crate's `build.rs`. Shaders are data
+  rather than modules: they are `include_str!`-ed into the binary, so each one is collected whether
+  or not a declaration names it.
+* A `.rs` file under `src/` that no declaration reaches is not compiled, so it is not collected;
+  `px_fingerprint/tests/roster.rs::no_compiled_rust_file_escapes_the_fingerprint` fails if such a
+  file exists without a test-shaped name, because that is how a dead file hides.
 * It then recurses into every **reachable path dependency** (transitive closure) named in
-  `Cargo.toml`. The scan accepts any section header containing `dependencies`, so path dependencies
-  declared under `[build-dependencies]` or `[dev-dependencies]` are folded in as well.
-* Skipped: directories named `tests`, any directory starting with `.`, and files matching
-  `*_test.rs` / `test_*.rs`. `Cargo.toml` itself is not hashed; it only declares edges.
+  `Cargo.toml` under a section header containing `dependencies`, **except `[dev-dependencies]`**:
+  a dev-dependency is not compiled into the artifact, so its sources cannot change what this crate
+  produces. `px_fingerprint/tests/dev_dependency.rs` pins that direction.
+* Skipped: directories starting with `.`, and the targets of `include!(concat!(env!("OUT_DIR"), …))`
+  (generated rather than checked in).
 * The hash is blake3 over, per file, the label bytes, a `0` byte, the file length as `u64`, and the
   raw bytes. The label participates, so two identical files with different names do not collide.
 * Because the dependency walk is a closure, a proc-macro that generates key-contributing code (for

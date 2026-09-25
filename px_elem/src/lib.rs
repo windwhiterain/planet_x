@@ -58,9 +58,13 @@ pub struct ElemSpec {
 
 pub const DECL_HASH: &str = env!("PX_SOURCE_HASH");
 
+/// An element function: one cell-wise arithmetic over a field.
+///
+/// `Params` and `Inputs` are `Sync` because the only loop in this family bands rows across threads
+/// ([`fill`]); the bodies read their inputs and never mutate them.
 pub trait ElementFn: 'static {
-    type Params: Serialize + DeserializeOwned + Default + PxKeyed;
-    type Inputs: PxInputs;
+    type Params: Serialize + DeserializeOwned + Default + PxKeyed + Sync;
+    type Inputs: PxInputs + Sync;
     const NAME: &'static str;
     const SOURCE: &'static str;
     const ROOTS: &'static [&'static str];
@@ -83,28 +87,49 @@ pub fn facts_of<F: ElementFn>() -> ElemFacts {
     }
 }
 
+/// The one loop of this operator family. Rows are banded across threads
+/// (`px_field_schema::parallel::rows`), and each thread writes a disjoint slice, so the result is
+/// bit-for-bit the serial one (the gate for that is `row_bands.rs`).
+///
+/// Two things must hold before this runs, and neither can be checked here: every element body
+/// ignores the direction argument (so one probe for the whole field is the same as asking per cell),
+/// and the body is a pure function of its inputs (a payload may not read a source its key cannot
+/// see).
 pub fn fill<F: ElementFn>(
     params: &F::Params,
     inputs: &F::Inputs,
-    cell: impl Fn(u32, u32, [f32; 2], [f32; 3]) -> f32,
+    cell: impl Fn(u32, u32, [f32; 2], [f32; 3]) -> f32 + Sync,
 ) -> Field {
-    let mut out = F::shape(params, inputs).filled(0.0);
-    // 方向逐格是常量映射的输入，但它对 `Domain::Volume` 无定义（体网格没有「一个方向」），
-    // 而逐格去问会在那儿 panic —— 那个 panic 穿过算子 dylib 边界是不可捕获的，整个进程会死。
-    // 所以先探一次：探不出来就交给闭包一个哨兵，由闭包自己决定它要不要方向。
-    let probe = if out.width > 0 && out.height > 0 {
-        out.direction_probe()
+    let shape = F::shape(params, inputs);
+    // The direction is a constant map of the cell, but it is undefined for `Domain::Volume` (a
+    // volume grid has no single direction), and asking per cell panics there — a panic crossing the
+    // operator dylib boundary is uncatchable and aborts the process. So probe once: if the
+    // projection has no direction, the closure gets a sentinel and decides for itself.
+    let probe = if shape.width > 0 && shape.height > 0 {
+        Field::filled_with(shape.width, shape.height, 0.0, shape.projection).direction_probe()
     } else {
         None
     };
     let direction = probe.unwrap_or([0.0; 3]);
-    for y in 0..out.height {
-        for x in 0..out.width {
-            let uv = out.uv(x, y);
-            out.set(x, y, cell(x, y, [uv.0, uv.1], direction));
-        }
-    }
-    out
+    let cell = &cell;
+    let data = px_field_schema::parallel::rows(
+        shape.width as usize,
+        shape.height as usize,
+        |first: usize, count: usize, out: &mut [f32]| {
+            for row in 0..count {
+                let y = (first + row) as u32;
+                let base = row * shape.width as usize;
+                for x in 0..shape.width {
+                    let uv = (
+                        (x as f32 + 0.5) / shape.width.max(1) as f32,
+                        (y as f32 + 0.5) / shape.height.max(1) as f32,
+                    );
+                    out[base + x as usize] = cell(x, y, [uv.0, uv.1], direction);
+                }
+            }
+        },
+    );
+    Field::with_projection(shape.width, shape.height, data, shape.projection)
 }
 
 #[macro_export]

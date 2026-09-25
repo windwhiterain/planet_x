@@ -1,17 +1,17 @@
-//! **stage 1 的「计划」段** —— 图程序这一侧**代码生成**（`docs/system/codegen-types.md`）。
+//! **stage 1 的「计划」段** —— 图程序这一侧**代码生成**（见 `docs/programs.md`）。
 //!
 //! 这个 build script 干两件事，**都不调 cargo、都不编任何东西**（硬边界）：
 //!
-//! 1. 算**本图程序**这一份源码的指纹（`PX_SOURCE_HASH`）—— 从前就有的那一件；
+//! 1. 算**本图程序**这一份源码的指纹（`PX_SOURCE_HASH`）；
 //! 2. **执行 stage 1 的计划段**：读 `src/inst_recipe.rs`（一张数据表）→ 校验 → 用
 //!    `px_decls`（声明表）拿类型级事实 → 算 key → 写 `OUT_DIR/insts_gen.rs`：
 //!    **每条实例一个「生成出来的类型」**（`PxOp` / `InstNode` impl，事实为 const）。
 //!
-//! ⚠ **stage 2 用的类型 = 这一段生成出来的**（§目标）：`src/insts.rs` 把生成物并进本模块，
+//! ⚠ **stage 2 用的类型 = 这一段生成出来的**：`src/insts.rs` 把生成物并进本模块，
 //!   于是"图侧类型"不再手写、不再有宏。
 //! ⚠ **内容不变就不重写那个文件**（保 mtime）：改 `art/inst/*.rs` 时生成物必须**一个字节不变**
-//!   —— 不然 cargo 会重编图程序、七个图 exe 全换 ⇒ R1 破。
-//! ⚠ **绝不调 cargo**：编译实例只能由 `px build` / `px run --build` 触发（`20` §182）。
+//!   —— 不然 cargo 会重编图程序、七个图 exe 全换。
+//! ⚠ **绝不调 cargo**：编译实例只能由 `px build` / `px run --build` 触发（见 `docs/programs.md`）。
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -27,8 +27,8 @@ use px_cook::inst::{self, RECIPE};
 const ELEM_SPECS: &str = "px_elem/src/specs.rs";
 
 fn main() {
-    // ① 图程序自己的源码指纹（从前就有；`px_local_op!` 那一档的身份用它）。
-    px_fingerprint::cargo_fingerprint_for_crate(&[]);
+    // ① 图程序自己的源码指纹（`px_local_op!` 那一档的身份用它）。
+    px_fingerprint::cargo_fingerprint_for_crate();
     // ② 重跑条件：recipe 与声明表（`px_decls`）都要显式声明 —— cargo 只自动盯本 package
     //    自己的 `src/`，`[build-dependencies]` 的 path 依赖会重跑本脚本，但 recipe 不会自己盯。
     let root = workspace_root();
@@ -276,7 +276,7 @@ fn strip_comments(text: &str) -> String {
 
 /// **`OUT_DIR/insts_gen.rs`**：每条实例一个**生成出来的类型**（`PxOp` / `InstNode` impl）。
 ///
-/// ⚠ 形状照 `px_cook` 里 `px_inst!` 从前展开出来的那一份（`19` §179.1 的说明）：
+/// ⚠ 形状照 `px_cook` 里 `px_inst!` 展开出来的那一份：
 ///   `LIB` / `SYMBOL` 是字面量、三个关联类型是**全路径**、`decl_hash()` 是 const、
 ///   `source_hash()` = 实例 key（它要读源文件字节 ⇒ 只有运行期算得出）。
 /// ⚠ `SYMBOL` 与 `inst::symbol` 必须同口径 —— 生成器用 `inst::symbol` **算出来**再写进去，
@@ -287,7 +287,7 @@ fn insts_gen_text(plan: &[Planned]) -> Result<String, String> {
          //\n\
          // 每条实例一个「生成出来的类型」：它复用某个**声明**的接口，体来自 recipe，\n\
          // 身份（`source_hash`）= 实例 key。stage 2 用的类型就是这里这一份\n\
-         // （`docs/system/codegen-types.md`）。\n\
+         // （见 `docs/programs.md`）。\n\
          //\n\
          // ⚠ key 与源文件字节有关 ⇒ 它只能在**运行期**算；生成物里只有不随源码字节变的\n\
          // 那几样是 const（op id / 声明指纹 / 三个类型 / 根 / 源路径 / 体）。\n\
@@ -354,7 +354,7 @@ fn insts_gen_text(plan: &[Planned]) -> Result<String, String> {
              \n\
              \x20   /// 身份 = **实例 key**（图程序不重编也能看出泛型参数/alg/契约/工具链变了）。\n\
              \x20   /// ⚠ 算一次就记住（`OnceLock`）：key 要读盘数名册，别每次调都重算\n\
-             \x20   ///   —— 这正是从前那份宏展开出来的形状。\n\
+             \x20   ///   —— 与 `px_inst!` 当年展开的那一份同形（那份宏已经不在了）。\n\
              \x20   fn source_hash() -> ::core::result::Result<&'static str, ::std::string::String> {{\n\
              \x20       static KEY: ::std::sync::OnceLock<\n\
              \x20           ::core::result::Result<::std::string::String, ::std::string::String>,\n\

@@ -72,10 +72,11 @@ px_inst/v1  ‖  toolchain hash  ‖  decl_hash  ‖  each root's roster hash  �
 - **no graph-program source fingerprint** — the body and its dependencies are inside the dylib, and
   the other axes already cover them. Editing a graph program must not rotate an instance key.
 
-`px_fingerprint` computes a source fingerprint by hashing the **full text** of every `.rs` and
-`.wgsl` in a crate's `src/` (plus its `build.rs`) and in every reachable path dependency. That has
-a consequence worth internalizing: **editing a comment changes the key.** The key is an identity,
-not a summary of behaviour.
+`px_fingerprint` computes a source fingerprint by hashing the **full text** of the Rust files a
+crate's module tree declares, every `.wgsl` under its `src/`, its `build.rs`, and the same for every
+reachable runtime or build path dependency (a dev-dependency is not compiled into the artifact, so
+it is not folded in). That has a consequence worth internalizing: **editing a comment changes the
+key.** The key is an identity, not a summary of behaviour.
 
 Because the source fingerprint is read from the *loaded library* rather than baked into the graph
 program, an implementation that changed is visible without recompiling the graph — which is what

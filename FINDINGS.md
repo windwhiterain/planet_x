@@ -24,6 +24,11 @@ numbers as approximate. Re-derive a location with `git grep` before acting on on
 | 4b | the source-fingerprint gate omitted 4 of 15 crates | roster is now every crate that calls the fingerprint entry point |
 | 4c | the operator-loading gate covered 20 of 32 declarations | 31 loaded + 1 counted exclusion, asserted to equal the table |
 | 8 | a cache hit re-encoded its artifact and rewrote it (`Graph::store` ran unconditionally) | `store` now skips the write on a hit and reads the on-disk length; doc + `a_hit_leaves_the_artifact_untouched` pin it |
+| 9 | the manifest recorded 32 bits of a 64-bit interface hash, and the run line printed the other half | `ManifestEntry.op_version` is `u64` and `interface_tag` prints all 16 hex digits, so the tag is findable in the manifest |
+| 10 | `px_protocol/src/rows.rs` was compiled by nothing and fingerprinted by everything | deleted; the collector now walks the module tree, so an undeclared file is not collected and `no_compiled_rust_file_escapes_the_fingerprint` fails on one |
+| 11 | `game`'s sources sat in every operator key through one `[dev-dependencies]` edge | the dependency walk skips `[dev-dependencies]`, so a crate the product never compiles is out of identity; `px_fingerprint/tests/dev_dependency.rs` pins it |
+| 12 | `collect_tree` skipped paths by name, so a declared module or shader could be compiled and invisible | the collector follows `mod` / `#[path]` / `include!` and takes every `.rs` a declaration reaches plus every `.wgsl` under `src/`; the same gate covers the reverse direction |
+| 14 | 13 comment pointers in 12 `build.rs` files named `docs/system/*.md`, retired pages, and carried `§` numbers | rewritten to name the live pages; every crate's `build.rs` is inside its own roster, so this rode the same window |
 
 ⚠ **Two content consequences; both are settled, and the next bake recomputes from source.**
 
@@ -91,109 +96,6 @@ drops from 0.94–0.96 s to **0.47–0.50 s** wall, and a post-run mtime probe s
 touched. Pinned by `px_graphs/tests/local_op.rs::a_hit_leaves_the_artifact_untouched`
 (artifact mtime and size must not change across a hit).
 
-### 9. ⬜ The manifest records a 32-bit `op_version` against a 64-bit interface hash
-
-`px_graph/src/driver.rs::interface_version` writes `(interface & 0xffff_ffff) as u32` into the
-manifest entry, while `px_graph_schema/src/keys.rs` folds the **full 64-bit** interface
-(`op.interface.to_le_bytes()`) into the key. Two operators whose interface hashes collide in the low
-32 bits show the same `op_version` while having different keys. Worse: the two surfaces read
-**disjoint halves** of the same number. `interface_tag` prints the first 8 characters of the padded
-hex, which is the **high** 32 bits, so the `@tag` on the run line and the manifest's `op_version` are
-each the other's missing half — a tag copied from stdout cannot be found in the manifest even for an
-operator that ran correctly, so searching the log reading into `manifest.json` fails by construction
-rather than by collision. Verified numerically: interface `0xDEADBEEF12345678` prints tag `deadbeef`
-and records `op_version` `12345678`.
-
-Not yet reproduced live (needs two ops whose full hashes collide in the low 32 bits), therefore left
-open; the fix, if taken, is to widen `ManifestEntry.op_version` to `u64` in
-`px_graph_schema/src/protocol.rs` ⚠ which rotates every node key (it is inside the fingerprint
-roster), so it must be done together with a deliberate full re-bake, not casually.
-
-### 11. ⬜ `game`'s sources are inside every operator key, through one dev-dependency
-
-`px_protocol/Cargo.toml` carries `game = { path = "../game" }` under `[dev-dependencies]`, so its
-snapshot tests can build fixtures from the real types. `path_dependencies` treats any manifest
-section whose header contains "dependencies" alike (`px_fingerprint/src/lib.rs:176`), so that dev edge
-is followed as if it were a runtime one, and `collect_crate` recurses through it into all 19 of
-`game/src`. Because `px_protocol` is the near-universal dependency, those 19 files land in every
-roster downstream. Measured on this checkout with `px_fingerprint::roster`:
-
-| crate | roster entries | from `game` |
-|---|---|---|
-| `px_field_schema` | 54 | 19 |
-| `px_elem` | 61 | 19 |
-| `px_mesh_op` | 70 | 19 |
-| `px_field_op` | 73 | 19 |
-| `px_nurbs_op` | 72 | 19 |
-| `px_volume_op` | 91 | 19 |
-| `px_graphs` | 137 | 19 |
-
-Consequences: an unrelated edit to the market simulation rotates every node key and forces a full
-re-bake; `game` is roughly **a quarter to a third of what identity is computed from**; and a fingerprint
-now depends on code that never executes in the product (dev-only) — the same "identity should mean
-what actually runs" reasoning behind §10.
-
-The fix has two shapes with very different costs, which is why it needs a decision rather than a
-sweep. Narrowing `path_dependencies` to skip `[dev-dependencies]` fixes it for every crate at once but
-changes fingerprints ⇒ full rotation, so it belongs in the scheduled batch. Alternatively moving the
-fixture elsewhere avoids the semantics change but still touches `px_protocol/src` ⇒ also a rotation.
-Either way this is currently the largest single lever on how much a small edit invalidates, including
-larger than P5's spec/data split, because it removes 19 files from *every* roster instead of moving one
-axis.
-
-### 10. ⬜ `px_protocol/src/rows.rs` is compiled by nothing and fingerprinted by everything
-
-The file defines `fill_rows` plus two tests (`a_parallel_field_is_bit_identical_to_a_serial_one`,
-`no_group_is_lost`), but `px_protocol/src/lib.rs` has no `pub mod rows;` and no `#[path]` anywhere in
-the tree names it. It is therefore never parsed: neither test has ever been built or run, which
-`cargo test -p px_protocol` confirms — those names appear in no test list. Per
-[invariants.md](docs/invariants.md) that makes them text rather than a gate, so a claim of the form
-"`fill_rows` carries a bit-exact gate" is false today. The live row-band helper is
-`px_field_schema::parallel::rows`, gated by `px_field_schema/tests/row_bands.rs`.
-
-It still costs keys. `collect_tree` walks every `.rs` under `src/` without consulting module
-declarations, and `px_protocol/src` reaches rosters recursively through `px_graph_schema`. Measured on
-this checkout via `px_fingerprint::roster`: `px_field_op` (73 entries) and `px_volume_op` (91) both
-carry `px_protocol/src/rows.rs`. Deleting the dead file rotates every operator key and forces a full
-re-bake, so this cleanup belongs in a scheduled rotation window rather than a zero-cost sweep.
-
-### 12. ⬜ `collect_tree` skips paths by name, so a declared module or shader can be compiled and invisible to identity (gated, rule unchanged)
-
-`px_fingerprint/src/lib.rs::collect_tree` walks the **filesystem**, not the module tree, and applies two
-independent skip rules: a directory named `tests` or starting with `.`, and any file whose name contains
-`_test` or starts with `test_`.
-
-The second rule is not an exemption, it is a hole. A file placed at `src/<something>_test.rs` and declared
-with `mod something_test;` is compiled into the artifact while being absent from every fingerprint — so
-editing it changes behaviour without changing any key. That is precisely the failure mode
-[invariants.md](docs/invariants.md) exists to prevent ("same key, different content").
-
-Latent, not current: no such path exists in the tree today. Measured read-only via
-`px_fingerprint::roster`, all four shapes leave `px_field_schema`'s roster at 54 entries before and
-after, i.e. each is invisible to identity while remaining compilable:
-
-| shape | why it escapes |
-|---|---|
-| `src/x_test.rs` | filename rule (`contains "_test"`) |
-| `src/test_x.rs` | filename rule (`starts_with "test_"`) |
-| `src/x_test.wgsl` | filename rule applies after the extension match, which covers `.rs` **and** `.wgsl` |
-| `src/tests/mod.rs` | directory rule skips the whole subtree, and `mod tests;` resolves there |
-
-The `.wgsl` row is not hypothetical: shaders enter a roster precisely because they are `include_str!`d
-into the binary (stated in [operators.md](docs/operators.md)), and several live under `src/`. A shader
-escaping identity is the same "same key, different content" as a Rust file escaping it.
-
-Gated rather than fixed. Hardening `collect_tree` to consult the module tree would edit
-`px_fingerprint/src/lib.rs`, which sits in every roster — another full-family rotation, so it belongs in
-the scheduled batch (§11) or is declined. The cheaper insurance shipped instead:
-`px_fingerprint/tests/roster.rs::no_compilable_source_escapes_the_fingerprint_by_name` walks every
-crate's `src/**` (including `src/bin/`) and fails on any path matching either skip rule, naming the
-offending directory or file. It copies `collect_tree`'s predicates deliberately rather than inventing a
-stricter list, and because `tests/` is itself outside every roster it costs no keys. Verified in both
-directions: injecting each of the four shapes fails the gate with that exact path listed; removing them
-returns it to green. Convention for anyone adding a check: gates go in a crate-root `tests/` directory —
-inside `src/`, the names `tests/`, `*_test.*`, `test_*.*` mean "compiled but invisible", not "safe".
-
 ### 13. ⬜ `-Level opt` shares instance keys with `-Level dev`, while `-Level release` does not
 
 The toolchain fingerprint is `blake3(rustc -vV, TARGET, RUSTFLAGS, PROFILE)`
@@ -232,27 +134,6 @@ configuration per measurement session, plus recording which level built each ins
 The convention that costs nothing today and prevents the misreading: **within a batch window or a timing
 session, fix `--release` vs debug and never mix**; treat `-Level opt` as numerically distinct evidence
 even though it shares keys.
-
-### 14. ⬜ Thirteen `build.rs` files still cite a deleted `docs/system/` tree
-
-The documentation rewrite removed `docs/system/` entirely, and the comment strip walked `src/**`
-only, so the per-crate pointer comments inside `build.rs` survived to point at files that no longer
-exist — with bare `§` numbers the comment convention forbids. Hit list (13 sites, 12 crates):
-
-`px_field_alg`, `px_graph_schema`, `px_volume_schema`, `px_mesh_schema`, `px_mesh_op`,
-`px_graphs` (three more: `§182`, `§179.1`, a "`§` 目标"), `px_field_schema`, `px_volume_op`,
-`px_nurbs_schema`, `px_cook`, `px_field_op`, `px_volume_alg`.
-
-Each cites `docs/system/generic-instances.md` (`§177` / `§179.3`), `docs/system/codegen-types.md`
-or `docs/system/build-graph.md` (`§187`). The same vintage pointers also sat in ten `Cargo.toml`
-comment blocks; those were cleaned separately because `.toml` is not fingerprinted, and `px list`'s
-key columns did not move after that edit.
-
-The `build.rs` files themselves are different: `collect_sources` walks `crate/build.rs` into every
-roster, so any byte of one of those files is a full-family rotation for every family whose
-`decl_hash` or `roots` reach that crate, and every graph re-bakes. The cleanup therefore belongs
-in the scheduled batch window, folded into the same rotation as the other debt (§10, §11, §12, and
-routing `px_elem::fill` through `rows` — see `docs/backlog.md`, "Known costs").
 
 ### 1. ✅ Any `elem::*` node on a `Domain::Volume` field aborts the process
 

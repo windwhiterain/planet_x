@@ -196,11 +196,10 @@ WGSL is source code of the crate, not an asset:
 declares every binding at module scope, reusing numbers so that no two types collide. That is why
 the dispatch helper needs explicit slot numbers.
 
-Because the `.wgsl` files live in `src/`, they are part of the crate's source fingerprint: the
-fingerprint walks `.rs` and `.wgsl` under `src/` (`px_fingerprint/src/lib.rs:248`, `:358`), the
-implementation libraries compute it in `build.rs`, and it is one of the inputs of an operator's
-identity. Editing a line of WGSL changes the operator's key (`px_nurbs_gpu_op/build.rs:1-8`,
-`px_nurbs_gpu_op/src/lib.rs:422-426`).
+Because the `.wgsl` files live in `src/`, they are part of the crate's source fingerprint: every
+`.wgsl` under `src/` is collected whether or not a Rust declaration names it, the implementation
+libraries compute that fingerprint in `build.rs`, and it is one of the inputs of an operator's
+identity. Editing a line of WGSL changes the operator's key.
 
 ## What the helpers add
 

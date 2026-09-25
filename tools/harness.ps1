@@ -6,60 +6,38 @@
   它只做两件事：
 
     1) **按图名 + 节点名**解析产物路径。渲染器吃的是内容，内容由产物决定
-       （`docs/invariants.md` §18：「产物格式 = ArtBundle，与渲染器之间唯一的接口」）。
+       （见 `docs/invariants.md`：产物格式是 ArtBundle，也是与渲染器之间唯一的接口）。
        命令行里出现手拼的哈希路径，就是把「同一张图的成员」这件事交给人手维护：
        哈希一改路径就静默过期，成员配错而宽高恰好相同则形状校验照样通过。
        这里改成从 `target/pcg/<图>/manifest.json` 按节点名取 `key`，再拼 CAS 路径。
 
     2) 起/停渲染服务，并把**被拒绝**与**管线编译失败**当硬失败。
        客户端退出码非 0、日志里出现 Refused / `后端断言失败`，立刻抛错。
-       ⚠ 这条曾是 bevy 宿主那两句（`failed to process shader` / DXGI 的 `设备实例已经暂停`），
-       随 S8-a 一起退休：新宿主**没有队列可等**（`create_render_pipeline` 是同步的，
-       §104 第 5 条），坏管线在**收到请求那一刻**就回 `Refused` ⇒ 客户端退出码非 0，
-       走的是这条闸的第一句。那两句留着也不会再匹配 —— 写在 `$HarnessFailPattern` 的注释里。
+       宿主同步建管线，所以坏管线**在收到请求那一刻**就回 `Refused` ⇒ 走的就是这条闸。
 
   3) **断言整批场景钉的是同一份 shader**（`Assert-ShaderMembersAgree`）。
-        场景把 WGSL 钉在内容键上（`docs/render/renderer.md` §52.3）。只要有一档钉的是**旧** WGSL，
-     换到那一档就会往槽里装新 shader ⇒ `asset_server.reload` ⇒ 靠它的管线全打回重编
-     ⇒ 出图/计时的头几个窗口里云壳根本没管线（图里没云、帧时间还偏高）。
-     协议的前提是「整轮扫描只起一个服务、档间不重启」，所以这条必须在开跑前被断言，
-     不一致就退出 —— 而不是先跑出一批被协议 artifact 污染的数、再靠"丢窗口"补救。
+      场景把 WGSL 钉在内容键上（见 `docs/renderer.md`）。只要有一档钉的是**旧** WGSL，
+      换到那一档就会往槽里装新 shader ⇒ 那条管线打回重编
+      ⇒ 出图/计时的头几个窗口里云壳根本没管线（图里没云、帧时间还偏高）。
+      协议的前提是「整轮扫描只起一个服务、档间不重启」，所以这条必须在开跑前被断言，
+      不一致就退出 —— 而不是先跑出一批被污染的读数、再靠"丢窗口"补救。
 
-  缺图、缺节点、产物不在、请求被拒、shader 不一致 —— 一律抛错，绝不静默跳过。
   「跳过」是判据的敌人：仪器拿不到数据时必须响，否则绿灯是假的。
 
-  4) **后端只管子进程**：以前这里无条件 `$env:WGPU_BACKEND='dx12'`，任何 dot-source 过
-     它的 shell 里起的 viewer 都继承了 dx12 —— 同一 exe/场景/shader 下 dx12 40.1 ms、
-     vulkan 17.5 ms（2.3×），"云变慢"就是这么来的。现在改成起子进程时**现设现还原**。
+  4) **后端只管子进程**：无条件写 `$env:WGPU_BACKEND` 会让任何 dot-source 过它的 shell
+      里起的 viewer 都继承那个后端 —— 同一 exe/场景/shader 下 dx12 40.1 ms、
+      vulkan 17.5 ms（2.3×），"云变慢"就是这么来的。现在起子进程时**现设现还原**。
 
-  ⚠⚠ **S8-a：驱动的那支 exe 从 `px_render.exe`（bevy 锚宿主）换成 `px_render_wgpu.exe`。**
-     `px_render` 这个 crate 连同 `assets/` 一起删掉了（shader 库搬去 `art/shaders/lib/`），
-     所以**任何指向它的默认值都是死指针**，这里三处（`$Exe` / `$HarnessExe` / 单一实例闸的
-     进程名前缀）一并对齐。就绪信号**不用改**：新宿主打的是同一行
-     「渲染管线全部就绪…」（`px_render/src/serve.rs:101`，§147 逐字搬过来的）。
-     ⚠⚠ **§157（2026-09-19）取代：wgpu 宿主改名叫 `px_render`** ⇒ 那三处默认值**又回到
-     `px_render.exe`**，而这次它是**本宿主**（不是 bevy 锚）。⚠ 名字有两个所指，按日期切：
-     本段开头那句里的 `px_render`（"从 `px_render.exe`（bevy 锚宿主）"）是**旧义**；
-     下面 `px_render/src/serve.rs:101` 与 `px_render --spans` 是**新义**（= 本宿主）。
-     ⚠ 顺带一条与单例闸有关的：那个路径上原本躺着一支**还能跑的 Bevy 宿主**（§157 实测），
-     改名之后它是本宿主的 exe —— 正是这条对齐要的结果（否则闸会驱动到一支 bevy exe）。
+  缺图、缺节点、产物不在、请求被拒、shader 不一致 —— 一律抛错，绝不静默跳过。
 
-  ⚠ **随锚退休的两条路（不要在这里再补）**：`frame-probe.ps1` 的 **Perf** 与 **Stable**
-     两路要的是「计时用的帧循环」（逐帧采样 / 丢窗 / 等 K 帧 + 每条 pass 的编码器级
-     GPU 时间戳），而新宿主**按需渲染**（一条请求画一帧就回话）⇒ 服务端**当场拒**，
-     拒词自己写着理由（`px_render/src/serve.rs`）。**能读出可比计时数的那支宿主
-     已经不在了**（锚 exe 不可重建，见 `docs/anchors.md`）⇒ 这两路**不再修**，
-     ⚠ **§157 修正（2026-09-19）：上面那句话在写下时（S8-c）不成立** —— 实测
-     `target/debug/px_render.exe` 是一支**还能跑的 Bevy 宿主**（六份冻产物出图与
-     那六张已删除的判据图 **逐字节全中**，仪器 `target/pre-rename/bevy-six.ps1`）。
-     而**裁决是不留**，改名又覆盖那个路径 ⇒ **从 §157 那一笔起这句话成立**。
-     被钉住的那支锚（`D7ED54FDB8323EDD…`）确实找不回来 —— 这两件事不矛盾，全文见
-     `docs/anchors.md` 与 `docs/archive/render-wgpu.md` §157。要拿回这条路：源码在 `f121ee3^`，命令见 §157。
-     它们的量法留在 git 历史与 `docs/archive/render-wgpu.md` §147/§153 里。
-     本宿主**有的**那件计时仪器是 `px_render --spans 预热,测量`（§153 的 J4 仪器，
-     量的是**逐条 pass** 的编码器级时间戳），它不是 `--perf` 的替代品 —— 名字与口径都不同。
+  起服务前还有一道**单例硬闸**（`Assert-NoOtherRenderServer`）：本机还有 `px_render*` 在跑、
+  或 `target/render-server.json` 还在，就报错退出并打印占用者 —— 两个并列的测量循环会让
+  双方的数据都作废，这条闸把它变成会失败的门，而不是靠人记得。
+
+  计时仪器是宿主自己的 `px_render --spans <预热>,<测量>`（逐条 pass 的编码器级时间戳）。
+  它**不是**帧循环采样：宿主按需渲染（一条请求画一帧就回话），要求"逐帧采样 / 丢窗 /
+  等 K 帧"的请求会被服务端当场拒，拒词自己写着理由（`px_render/src/serve.rs`）。
 #>
-
 $ErrorActionPreference = 'Stop'
 # 后端钉 vulkan，且**只作用于子进程**：写进当前 shell 会顺着 dot-source 污染整个会话。
 $HarnessBackend = 'vulkan'
@@ -79,12 +57,11 @@ $HarnessExe = 'target\debug\px_render.exe'
 # 硬失败模式。⚠ 逐条说清哪几个还活着：
 #   Refused              活着 —— 新宿主对能力之外的请求回的就是 `Frame::Refused`（`serve.rs`）
 #   后端断言失败          活着 —— `px_render/src/gpu.rs:14` 的 `BACKEND_ASSERT`
-#   管线编译失败          退休 —— bevy 宿主排队建管线那一路的词，新宿主是同步建的（§104 第 5 条）
 #   failed to process shader / 设备实例已经暂停 / 0x887A0005
-#                        退休 —— bevy 的资产与 DXGI 设备丢失那两句；新宿主锁死 Vulkan，
-#                        也没有"资产异步装载"这一层。留着无害（匹配不到），但**不许**把它们
-#                        当成"门还在"的证据：真正拦住坏管线的是客户端退出码那一条。
-$HarnessFailPattern = 'Refused|后端断言失败|管线编译失败|failed to process shader|设备实例已经暂停|0x887A0005'
+#                        退休 —— 那两句属于旧的资产装载与 DXGI 那一档；今天锁死 Vulkan，也没有
+#                        那一层。留着匹配不到，但**不许**把它们当成"门还在"的证据：真正拦住
+#                        坏管线的是客户端退出码那一条。
+$HarnessFailPattern = 'Refused|后端断言失败|管线编译失败'
 
 function Get-GraphManifest {
     param([string]$Graph)
@@ -172,7 +149,7 @@ function Get-FramePayloads {
 
 # 这份场景产物里每个「物体/角色」钉的 shader 成员（角色一般是 shader，键 = 那一份 WGSL 的内容键）。
 #
-# ⚠ 读的是**通用渲染文档**（`px_protocol::scene` v2，`docs/render/renderer.md` §65）：
+# ⚠ 读的是**通用渲染文档**（`px_protocol::scene` v2，`docs/render/renderer.md` 65）：
 # 每个物体的 `material.shader` 是它自己那一份 WGSL。v1 的 `parts[]` 已经没有这个形状了 ——
 # 按老形状读会得到一张**空表**，而空表在这里等于"没有不一致"⇒ 闸门静默失效（比报错更坏）。
 # 所以下面这种"什么都没读到"要当场抛错，不能返回空表。

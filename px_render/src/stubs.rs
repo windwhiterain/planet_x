@@ -115,8 +115,8 @@ mod tests {
         );
         assert!(
             !POINT_SHADOW_STUB.contains("px_shadow_face_uv("),
-            "六面的朝向**不许**在着色器里再写一遍（用户裁决）：它从文档的 \
-             `px_shadow_faces` 读 —— 这条契约从前有三份转写而且漂开过（4/5 面朝向反了）"
+            "六面的朝向**不许**在着色器里再写一遍：它从文档的 \
+             `px_shadow_faces` 读（多头转写会漂开，实测有过 4/5 面朝向反了）"
         );
         assert!(
             POINT_SHADOW_STUB.contains("px_shadow_faces["),

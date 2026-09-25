@@ -27,8 +27,8 @@ pub fn value(
     let mapped = scale.map(scale.normalize(inputs.a.value().at(x, y)));
     // ⚠ `gamma` 那一步与 `elem::Remap` 的体文件是**同一句话**（同一个
     //   `px_field_schema::params::bend`）：非正数不弯、负底数回 0、`gamma ≈ 1` 当恒等。
-    //   ⚠ 2026-09-27 修：这里从前也自己写 `if gamma > 0.0 && gamma != 1.0 { powf }`，
-    //   于是 `out_min < 0` + `gamma > 1` 会算出 `NaN`（与 `remap` 那个文件同一个坑）。
+    //   ⚠ 自己写 `if gamma > 0.0 && gamma != 1.0 { powf }` 是错的：`out_min < 0` + `gamma > 1`
+    //   会算出 `NaN`（`bend` 就是为这一条存在的）。
     let mapped = px_field_schema::params::bend(mapped, params.gamma);
     let weight = (inputs.mask.value().at(x, y) + params.bias).clamp(0.0, 1.0);
     mapped * (1.0 - weight) + inputs.b.value().at(x, y) * weight

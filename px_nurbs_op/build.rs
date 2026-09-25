@@ -4,5 +4,5 @@
 //! 编译进去的全部源码"（自己 `src/` + 所有 path 依赖的 `src/` + 本文件）。
 
 fn main() {
-    px_fingerprint::cargo_fingerprint_for_crate(&[]);
+    px_fingerprint::cargo_fingerprint_for_crate();
 }

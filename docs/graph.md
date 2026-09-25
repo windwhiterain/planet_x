@@ -234,7 +234,7 @@ Per graph, under `target/pcg/<graph>/`:
 |---|---|
 | `node` | the node name passed to `cached` / `node_params` |
 | `op` | `PxOp::ID` |
-| `op_version` | the low 32 bits of the interface hash, for display and cross-checking only |
+| `op_version` | the full interface hash, for display and cross-checking only |
 | `key` | the node key, 64 hex characters |
 | `hit` | whether this run read it from the CAS |
 | `millis` | the operator's own time; 0 on a hit |

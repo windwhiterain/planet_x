@@ -36,9 +36,6 @@ are separate formats with separate encoders and no shared code.
 | `fnv` | `FNV_OFFSET`, `FNV_PRIME`, `fnv1a`, `fnv1a_bytes` |
 | `render`, `frame`, `client` | request / response / report / lease shapes, the host envelope, the client half (lease → connect → handshake → request) |
 
-`src/rows.rs` sits in the crate directory but is **not a module of the crate**: `lib.rs` leaves the
-`pub mod rows;` line out, so nothing in that file is compiled.
-
 ## The blob encoding
 
 Everything binary travels as a `Blob`: one JSON header line, a `\n`, then the raw payload.

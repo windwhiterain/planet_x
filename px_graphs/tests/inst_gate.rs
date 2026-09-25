@@ -78,7 +78,7 @@ fn the_symbol_name_is_the_same_string_on_both_sides() {
     );
     assert!(
         <Band as PxOp>::LIB.is_empty() && <Waves as PxOp>::LIB.is_empty(),
-        "实例库是运行期按 key 装载的 ⇒ `LIB` 必须是空串（见 `19` §179.1）"
+        "实例库是运行期按 key 装载的 ⇒ `LIB` 必须是空串"
     );
 }
 

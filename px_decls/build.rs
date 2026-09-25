@@ -7,5 +7,5 @@
 //!   `[build-dependencies]`）—— 不是这个哈希。
 
 fn main() {
-    px_fingerprint::cargo_fingerprint_for_crate(&[]);
+    px_fingerprint::cargo_fingerprint_for_crate();
 }

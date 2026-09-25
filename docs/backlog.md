@@ -71,20 +71,6 @@ the per-instance `.json` sidecar (`px_cook::inst::sidecar_text`) describes compi
 cooked output, and nothing reads it back. A cost model needs a store that outlives a run and is keyed
 by node key without feeding it.
 
-**The hot element path does not use the parallel machinery.** `px_field_schema::parallel::rows` bands a
-field over scoped threads with each thread writing a disjoint slice; it is used by two operators
-(`field.fbm3`, `field.ridged3`), while every element operator goes through the serial nested loop in
-`px_elem::fill`. So the path an editing loop touches most uses neither. A bit-exact gate for that
-banding now lives in `px_field_schema/tests/row_bands.rs` (`tests` dirs are outside every fingerprint
-roster, so adding it rotated no key). Routing `fill` through `rows` is the remaining step, and it is
-not free: `px_elem/build.rs` fingerprints all of `src/`, so that edit rotates the whole element
-instance-key family. The cost has been counted (read-only, on this checkout): the edit lands on one
-axis, the `decl_hash`; the four live element instances recompile, while the three non-element
-instances (`cloud.coarse/band`, `field.remap/waves`, `field.remap/latbands`) and the
-`px_field_schema` / `px_volume_schema` families do not — `px_elem` is in neither's path
-dependencies. 56 stale `px_elem` libraries from earlier parameter generations remain on disk under
-`target/pcg/inst/` (a rebuildable cache, not tracked in git).
-
 **A scene document cannot point a material at content.** `ParamKind` covers `F32`, `I32`, `U32`,
 `Vec3`, `Vec4`, and the matching `Value` covers a number, a string, a triple and a quad. There is no
 texture slot, matrix or fixed-length array, so changing which texture a material samples means
@@ -155,8 +141,8 @@ value-to-output trace, not a call site; today's `px_mesh_op` HashMaps only feed 
 values), and **reads of files outside the key** (a path's contents are not a call site either).
 
 **An `include_str!`/`include_bytes!` target must be inside a roster or on a named exception list.**
-`collect_sources` walks only `src/` and `build.rs`, and `collect_tree` accepts only `.rs`/`.wgsl`, so
-embedded data reaches the binary without reaching identity. The check is
+The collector accepts `.rs` files by declaration and `.wgsl` by extension, so any other file type
+reaches the binary without reaching identity. The check is
 `px_fingerprint/tests/roster.rs::every_embedded_file_is_in_a_roster_or_on_the_exception_list`. One
 case is exempt: `px_protocol/src/lib.rs` embeds `../snapshots/protocol.snapshot.json`. Its coverage
 is what exempts it — the only consumer is `protocol_hash()`, which enters `ProtocolId` and is
@@ -167,10 +153,12 @@ carries its own expiry as a check: **if the snapshot gains a second consumer —
 payloads, artifacts or keys from it — the gate fails and the file belongs in a roster.** The gate
 also refuses an embed whose path does not exist, and refuses a `.rs` file it cannot read.
 
-**The element parallel banding has no bit-exact gate for the helper production uses.** Shipped as
-`px_field_schema/tests/row_bands.rs`; still open is routing `px_elem::fill` through it, which needs a
-key count first (see Known costs above). Recorded here so the remaining half is not mistaken for
-done.
+**The element parallel banding has a bit-exact gate at the junction, not only at the helper.**
+`px_elem::fill` is the one loop in the element family and it bands rows through
+`px_field_schema::parallel::rows`; `px_elem/tests/fill_bands.rs` drives it against the serial loop it
+replaced and compares **bits**, including a `Volume` field, whose direction probe must happen once
+rather than per cell. `px_field_schema/tests/row_bands.rs` still pins the helper itself and
+`px_graphs/tests/elem.rs` the operator path. All three live in `tests/` and rotate no key.
 
 ## Unconsumed inputs
 

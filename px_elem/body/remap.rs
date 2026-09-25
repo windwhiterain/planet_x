@@ -25,11 +25,9 @@ pub fn value(
     let mapped = scale.map(scale.normalize(inputs.field.value().at(x, y)));
     // ⚠ `gamma` 那一步走**共享的那一个函数**（`px_field_schema::params::bend`）：
     //   "非正数不弯 + 负底数回 0 + `gamma ≈ 1` 当恒等"这三条口径只写在一处。
-    //   ⚠ 2026-09-27 修：本文件从前自己写 `if gamma > 0.0 && gamma != 1.0 { powf }` ——
-    //   那个判断只管**指数**、不管**底数**，于是 `out_min < 0` 而 `gamma > 1` 时
-    //   `(-1.0).powf(2.5) = NaN` 顺着管线传下去（实测：`elem::Remap` 那张 8×4 的场
-    //   值域变成 `inf..-inf`、均值 `NaN`）。被删掉的预置 `Remap` 走的是 `map_grid` 里
-    //   那同一个 `bend` ⇒ **不弯**、照直给负值；今天两档又是同一句话了。
+    //   ⚠ 自己写 `if gamma > 0.0 && gamma != 1.0 { powf }` 是错的：那个判断只管**指数**、
+    //   不管**底数**，于是 `out_min < 0` 而 `gamma > 1` 时 `(-1.0).powf(2.5) = NaN`
+    //   顺着管线传下去（值域变成 `inf..-inf`、均值 `NaN`）。`bend` 就是为这一条存在的。
     px_field_schema::params::bend(mapped, params.gamma)
 }
 

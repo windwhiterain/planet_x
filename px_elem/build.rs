@@ -5,5 +5,5 @@
 //!   ⚠ **体文件不在 `src/` 下**（`px_elem/body/*.rs`）：它们不进这一份指纹（改一行算法
 //!   只该换**那一条**实例的键、只重编那一份库，不该连带所有 element 实例 —— R1）。
 fn main() {
-    px_fingerprint::cargo_fingerprint_for_crate(&[]);
+    px_fingerprint::cargo_fingerprint_for_crate();
 }
