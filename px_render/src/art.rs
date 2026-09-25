@@ -461,10 +461,7 @@ fn load_texture(member: &Member, pcg_root: &Path, what: &str) -> Result<LoadedTe
     let slots = parse_texture_slots(&bytes, what)
         .map_err(|err| format!("{what} {member}（{}）：{err}", path.display()))?;
     let Some(first) = slots.into_iter().next() else {
-        return Err(format!(
-            "{what} {member}（{}）里没有清单帧",
-            path.display()
-        ));
+        return Err(format!("{what} {member}（{}）里没有清单帧", path.display()));
     };
     let image = decode_base_level(&first.shape, &first.bytes)?;
     Ok(LoadedTexture {
@@ -1104,7 +1101,11 @@ mod tests {
         }
         let fingerprints: std::collections::BTreeSet<u64> =
             slots.iter().map(|slot| slot.fingerprint).collect();
-        assert_eq!(fingerprints.len(), 6, "每个槽的 fingerprint 都要能单独读出来");
+        assert_eq!(
+            fingerprints.len(),
+            6,
+            "每个槽的 fingerprint 都要能单独读出来"
+        );
     }
 
     #[test]
