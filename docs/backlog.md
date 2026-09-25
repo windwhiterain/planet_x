@@ -16,16 +16,22 @@ operator-library table's lock refuses (`ops::lock_error`) rather than unwrapping
 still exists on purpose — `From<Fault> for String` gives the stable line, so the cook-side
 `Result<_, String>` APIs and the exported operator `Body` signature are unchanged.
 
-What is left is the rest of the tree: in the `src/` of the shipped crates, about 440 sites return
-`Err(format!(…))`/`Err("…")` prose and about 540 more are `panic!`/`expect`/`unwrap`. Migrating them
-is **per crate**: each crate's edit rotates its own key family (any crate whose bytes are in a roster
-rotates that roster's keys), so the work is paid for crate by crate as each crate is touched anyway,
-and it does not need a batch window of its own once the contract type exists. The trigger to pick a
-crate up: a failure of that crate's is being branched on by kind somewhere, or the crate is being
-changed for another reason and its error surface can come along.
+The work splits by what a crate's bytes reach, because that is what decides the price:
 
-The loader half is done because it is the half every entrance's first failure passes through: a plan
-that cannot load a library reports `library`/`symbol` without a hand-written prefix at the call site.
+**M2a — the crates outside every roster.** `px_cook`, `px_graph` and `px_graphs` reach no instance key
+(an instance crate depends on `px_graph_schema`, `px_elem`, `px_field_schema`, `px_field_alg` and
+`px_fingerprint`), no shader key (`px_graph::driver::shader_key` takes the shader text and its include
+closure, nothing else), and no node key today (their contribution to a node's identity is
+`px_graphs`' self-fingerprint, which is the identity of `px_local_op!` nodes and the shipped graphs
+declare none). Their raise points — about a hundred between them — migrate without a window, provided
+the edit changes no behaviour that feeds `shader_key`. That is `px_cook`'s 14 returned errors plus 1
+raising call, `px_graph`'s 16 plus 5, and `px_graphs`' 1 plus 63.
+
+**M2b — the crates inside a roster.** `px_graph_schema`, `px_field_schema`, `px_elem`, `px_volume_alg`,
+`px_field_alg`, `px_volume_gpu_op` and the other fingerprinted crates each rotate the key family whose
+closure holds them; that is a batch window per family, and several crates sharing a family can be paid
+for together. The trigger to pick one up: a failure of that crate is being branched on by kind
+somewhere, or the crate is being changed for another reason and its error surface can come along.
 
 ## Batch window discipline
 

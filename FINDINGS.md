@@ -33,6 +33,7 @@ strip removed, and live code drifted too (the `direction_at` panic now sits near
 | 11 | `game`'s sources sat in every operator key through one `[dev-dependencies]` edge | the dependency walk skips `[dev-dependencies]`, so a crate the product never compiles is out of identity; `px_fingerprint/tests/dev_dependency.rs` pins it |
 | 12 | `collect_tree` skipped paths by name, so a declared module or shader could be compiled and invisible | the collector follows `mod` / `#[path]` / `include!` and takes every `.rs` a declaration reaches plus every `.wgsl` under `src/`; the same gate covers the reverse direction |
 | 14 | 13 comment pointers in 12 `build.rs` files named `docs/system/*.md`, retired pages, and carried `§` numbers | rewritten to name the live pages; every crate's `build.rs` is inside its own roster, so this rode the same window |
+| 16 | `§` pointers in the art shaders (`.wgsl`) pointed at pages the repository does not carry | deleted without inventing replacements; the file's text is inside the shader contract fingerprint, so this rotated the nine shader keys and the one scene document that inlines the frame shaders, and rode that window's re-cook |
 | 7 | `art/frame/default.toml`'s comments narrated removals, cited deleted files, and carried seventeen `§` pointers | comments state the current rules only; four dangling file references name the live ones, the `§` pointers are deleted rather than remapped, and a comment edit here is zero-key and zero-rebake (the parsed values are what the scene key and artefact see) |
 | 15 | the instance sidecar was not strict JSON (a trailing comma on every field), so a strict reader silently saw nothing | the comma sits between fields; `px list` parses it strictly again and separates "no sidecar" from "will not parse"; measured zero key cost |
 | — | backslash-newline continuations spanning blank lines in `px_shader/src/host_stubs.rs` warned on every build | the two blank lines are deleted; the assembled WGSL is byte-identical (the pinned byte test is green) and the build is warning-free |
@@ -467,14 +468,19 @@ measured zero-key by the same probe: one changed comment character in `art/scene
 `art/passes/invert.toml` leaves the five scene content keys unchanged, and neither loader hashes the
 recipe text (`px_pass` hashes shader *names*, and the recipes are parsed into values).
 
-### 16. ⬜ `§` pointers remain in the art shaders (`.wgsl`)
+### 16. ✅ `§` pointers in the art shaders (`.wgsl`)
 
-Forty-two numbered `§` pointers plus four `§本轮` sit in twelve shader files (`art/frame/*.wgsl`,
-`art/shaders/*.wgsl`, `art/shaders/lib/*.wgsl`), and the repository carries no page for any of them.
-Unlike the recipes, a `.wgsl` file's **whole text is inside the shader contract fingerprint** — the
-comments are part of the source string the shader key covers, the same way an `#import` closure is —
-so clearing them rotates shader keys and needs a re-cook, not a zero-key commit. Count them per file
-with `grep -c '§[0-9]'`; the pass that edits them is a shader-contract window.
+Cleared: forty-two numbered pointers and four `§本轮` across twelve shader files are gone, deleted
+rather than remapped (`docs/README.md` gives references as a file path plus a symbol name, and the
+repository carries no page for any `§` number). The rules they were attached to are untouched; one
+history line became a rule (`art/shaders/lib/common.wgsl`: the deleted `const SUN_DIRECTION`).
+
+The key face is why this needed a window, and it splits in two: a changed comment character in a
+shader under `art/shaders/` rotates that shader's contract key (and, through the `#import` closure,
+every shader that reaches the changed module — `gasgiant` and `ring` rotate although their own files
+were not edited), while a changed character in `art/frame/*.wgsl` rotates the scene document that
+inlines the frame shaders. Instance keys never move. Re-cooking `shaders` turned all nine shader keys
+and re-baking `scene` turned the one scene that follows them.
 
 ## Documentation defects found in the old set
 
