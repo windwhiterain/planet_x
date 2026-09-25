@@ -24,14 +24,21 @@ numbers as approximate. Re-derive a location with `git grep` before acting on on
 | 4b | the source-fingerprint gate omitted 4 of 15 crates | roster is now every crate that calls the fingerprint entry point |
 | 4c | the operator-loading gate covered 20 of 32 declarations | 31 loaded + 1 counted exclusion, asserted to equal the table |
 
-⚠ **Two content consequences, neither re-baked yet:**
+⚠ **Two content consequences. The affected graphs were re-baked; the delta was not measured.**
 
-- `tangent_frame` changes the values `east`/`north` produce. `field.gradient` is frame-covariant and
-  measured identical to 1.9e-7, but **`field.warp` and the cloud-density bake change** in the
-  affected region (a probe offset that used to reverse). Baked content for `clouds`, `gasgiant` and
-  `desert` is therefore stale.
+- `tangent_frame` changes the values `east`/`north` produce, so **`field.warp` output changes** in the
+  polar band. The subagent measured the old frame's worst row-to-row rotation at 162° (face 256)
+  against 0.13° for the new one, and measured `field.gradient` as unchanged to 1.9e-7 (it is
+  frame-covariant, so the basis flip cancels). The size of the change in `warp` output — and hence in
+  the cloud density and the `clouds` / `gasgiant` / `desert` bakes — **was not measured.**
 - `sky.jitter` now does something. Its default is 1.0, so **the nebula sky bake changes** unless the
-  parameter is set to 0.0.
+  parameter is set to 0.0, which reproduces the previous bytes exactly.
+
+⚠ Neither consequence needs a decision: every node key has rotated anyway, so the next bake
+recomputes from source regardless. What is open is only whether anyone wants to *verify* the new
+content rather than let it land — and the honest way to do that is a `field.warp` test that sweeps the
+polar band, not a one-off reference implementation. The band is `|direction[1]| > 0.99`, i.e. latitudes
+above 81.89°, about 8° from each pole.
 
 ## Code defects
 
