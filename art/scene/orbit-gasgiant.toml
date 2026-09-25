@@ -12,7 +12,7 @@
 #   ④ 边缘散射：切向那一圈穿过的气体最厚 ⇒ 边缘自己发亮。
 #
 # 参数里的数就是那个模型的旋钮（`absorption` / `wrap` / `thickness` / `limb` / `band_*`）
-# —— 它们由这份 shader 的结构体声明，改这份 TOML 不改 Rust、不重编（§81 的透传）。
+# —— 它们由这份 shader 的结构体声明，改这份 TOML 不改 Rust、不重编。
 #
 # 烘：px run gasgiant --build   （先出条带场）
 #     px run scene orbit-gasgiant

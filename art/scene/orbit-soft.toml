@@ -13,7 +13,7 @@
 # 软档的三个云旋钮：gradient（档位）、surface_level（等值面高度，与硬表面同一个 cloud surface）、
 # shadow（自阴影强度：N·L 的指数）、extinction（不透明度）。
 #
-# 性能（§63）：这个档现在带**代理几何**（`proxy` 成员，把空区域在光栅阶段剔掉）与
+# 性能：这个档现在带**代理几何**（`proxy` 成员，把空区域在光栅阶段剔掉）与
 # **上界早退**（`bound = 1`，软档循环里上界够不着等值面的步整段跳过 ⇒ 逐字节不变）。
 # 两条合起来把云的净成本从 13.83 ms 压到 6.66 ms（Vulkan / GPU p50 / 2240×1400）。
 #
@@ -39,7 +39,7 @@ graph = "clouds"
 members = { shader = "shaders::clouds", field = "mixed", slope_x = "slope_x", slope_y = "slope_y", slope_z = "slope_z", proxy = "clouds::proxy" }
 # gradient = 2：软云档。surface_level = 等值面高度（硬表面那条路的同一个阈值）。
 # shadow = 自阴影强度（软档里 1 = 全量、0 = 关）。extinction = 不透明度。
-# bound = 1：软档循环里的保守上界早退（§63.6，可证明逐字节不变）。
+# bound = 1：软档循环里的保守上界早退（可证明逐字节不变）。
 params = { gradient = 2, surface_level = 0.20, bound = 1, inner = 1.01, outer = 1.06, extinction = 1400.0, coverage = 0.35, base = 0.06, top = 0.62, detail_scale = 16.0, detail_strength = 0.55, erode = 0.0, phase = 0.62, shadow = 1.0, steps = 56, bump = 0.85, seed = 7, slope_scale = 0.12, taper = 0.45, coverage_gain = 2.6 }
 
 [[parts]]

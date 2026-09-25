@@ -15,7 +15,7 @@ cameras = "review"
 [[parts]]
 id = "planet"
 kind = "planet"
-# shader 槽 = 用哪套材质绑定。行星表面自 §39.6 阶段 3 起也是自写材质（云影要压的只有直接光，
+# shader 槽 = 用哪套材质绑定。行星表面也是自写材质（云影要压的只有直接光，
 # Bevy 的内建 PBR 没有那个位置）⇒ 真本必须由场景带进来，和云、大气同一个规矩。
 shader = "surface"
 graph = "planet"

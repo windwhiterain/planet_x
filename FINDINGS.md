@@ -461,6 +461,21 @@ see is the file's parsed values: with one comment character changed, the scene c
 `f601002f018a` and the artefact under that key is byte-identical. Editing what the file says about
 the frame re-cooks; editing how it is explained does not.
 
+The same class was swept across the recipes beside it: every `§` pointer in `art/**/*.toml` is gone
+(twelve files, nineteen occurrences — eight pass recipes and four content scenes). Both halves were
+measured zero-key by the same probe: one changed comment character in `art/scene/orbit.toml` and in
+`art/passes/invert.toml` leaves the five scene content keys unchanged, and neither loader hashes the
+recipe text (`px_pass` hashes shader *names*, and the recipes are parsed into values).
+
+### 16. ⬜ `§` pointers remain in the art shaders (`.wgsl`)
+
+Forty-two numbered `§` pointers plus four `§本轮` sit in twelve shader files (`art/frame/*.wgsl`,
+`art/shaders/*.wgsl`, `art/shaders/lib/*.wgsl`), and the repository carries no page for any of them.
+Unlike the recipes, a `.wgsl` file's **whole text is inside the shader contract fingerprint** — the
+comments are part of the source string the shader key covers, the same way an `#import` closure is —
+so clearing them rotates shader keys and needs a re-cook, not a zero-key commit. Count them per file
+with `grep -c '§[0-9]'`; the pass that edits them is a shader-contract window.
+
 ## Documentation defects found in the old set
 
 Recorded as subagents report them.
