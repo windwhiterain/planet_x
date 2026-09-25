@@ -74,6 +74,38 @@ swallowed. Nothing under `target/` is in any roster, so recording a measurement 
 it measured. What is missing is the consumer: no command reads the ledger yet, so a cost model is
 still a manual exercise over the JSONL.
 
+**A resident cook service is not worth building today; the reading and the reason are below.** The
+idea was a long-lived process holding the operator libraries and the `Graph`, so repeated cooks stop
+paying per-process costs. Measured on one machine (RTX 3060 Laptop / Vulkan, `planet`, warm page
+cache):
+
+| reading | value |
+|---|---|
+| `planet`, first bake in a fresh process (cold page cache) | 5592 ms wall |
+| `planet`, next three bakes | 673 / 683 / 685 ms wall |
+| `planet` re-cooking every node (`PX_PCG_FRESH=1`, libraries invoked) | 3641 ms wall, of which **2943 ms is the nodes' own `cook_millis`** |
+| all-hit run: process floor that a resident service could remove at best | ~680 ms |
+| `px_probe cook_boundary`: 5 operator libraries, first open vs resident | 2638.7 ms vs **0.017 ms** |
+| the same 5 libraries in a fresh child process | **4.9 ms** |
+| `cook_boundary`: device cold / warm, spawn overhead | 4082 ms / ~0.000 ms / 47–54 ms |
+
+Three things follow, and they point the same way. **The 2.6 s is page-cache cold, not a per-run
+cost**: in a child process with the images already cached, the same five libraries load in 4.9 ms, so
+consecutive bakes never paid it — the second `planet` bake is 673 ms, and the ledger shows every node
+a hit with `cook_millis: 0`. **The floor a resident service could actually remove is ~680 ms of
+process start**, and of that the part a service could hold warm is the device (~310–360 ms measured
+per run, not the idle 4082 ms outlier), which only helps if execution also moves into the service.
+**And execution cannot move**: `px_graph_schema::ops::Body<O>` is
+`fn(&O::Params, &O::Inputs) -> Result<O::Payload, String>` and `px_body!` pins those three types, so a
+server that runs operators must statically link every schema crate — the dependency direction the
+library-loading design exists to avoid. The alternative is a typed-shim-per-declaration layer, i.e.
+type erasure for the whole operator surface.
+
+For the loop this was meant to serve, the shell is not the cost: one panel-like cycle (scene + five
+shots through `frame-probe -Phase shot`) is **128.5 s**, while the cook-side shell is 0.68 s and cook
+itself is ~2.9 s — the render side dominates by an order of magnitude. Writing the ledger (§cost
+telemetry, above) is the half that was worth having; the service is the half that is not, until
+someone wants type erasure for its own sake.
 
 **A scene document cannot point a material at content.** `ParamKind` covers `F32`, `I32`, `U32`,
 `Vec3`, `Vec4`, and the matching `Value` covers a number, a string, a triple and a quad. There is no
